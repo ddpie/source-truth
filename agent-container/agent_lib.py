@@ -15,6 +15,8 @@ Design notes:
 
 from __future__ import annotations
 
+import os
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
@@ -77,10 +79,51 @@ def build_options_dict(
 
 
 def build_options(**kwargs: Any) -> Any:
-    """Adapt :func:`build_options_dict` into a real ``ClaudeAgentOptions``.
+    """Adapt :func:`build_options_dict` into a real ``ClaudeAgentOptions`` when
+    the SDK is installed; otherwise return the plain options dict.
 
-    Imports the SDK lazily so this module stays importable without it.
+    Returning the dict as a fallback keeps the agent loop runnable/testable
+    without ``claude_agent_sdk`` present (local dev / CI).
     """
-    from claude_agent_sdk import ClaudeAgentOptions  # lazy: SDK only needed at runtime
+    opts = build_options_dict(**kwargs)
+    try:
+        from claude_agent_sdk import ClaudeAgentOptions  # lazy import
+    except ImportError:
+        return opts
+    return ClaudeAgentOptions(**opts)
 
-    return ClaudeAgentOptions(**build_options_dict(**kwargs))
+
+def _default_query_fn() -> Any:
+    """Resolve the real ``claude_agent_sdk.query`` lazily (runtime only)."""
+    from claude_agent_sdk import query  # noqa: PLC0415
+
+    return query
+
+
+async def run_agent(
+    payload: dict[str, Any],
+    *,
+    query_fn: Any | None = None,
+    model: str | None = None,
+) -> AsyncIterator[Any]:
+    """Testable core of the @app.entrypoint handler.
+
+    Parse the payload, assemble read-only options (CodeGraph endpoint from env),
+    drive ``query_fn`` (defaults to the real SDK ``query``), and yield each
+    message through to the caller. ``session`` is treated as opaque context.
+
+    Raises ValueError when ``prompt`` is missing/empty.
+    """
+    prompt = payload.get("prompt")
+    if not isinstance(prompt, str) or not prompt.strip():
+        raise ValueError("payload.prompt is required and must be a non-empty string")
+
+    options = build_options(
+        system_prompt=load_system_prompt(),
+        codegraph_url=os.environ.get("CODEGRAPH_MCP_URL"),
+        model=model or os.environ.get("ANTHROPIC_MODEL"),
+    )
+
+    qfn = query_fn if query_fn is not None else _default_query_fn()
+    async for message in qfn(prompt=prompt, options=options):
+        yield message
