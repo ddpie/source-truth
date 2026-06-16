@@ -35,7 +35,7 @@ usage() {
 EOF
 }
 
-# 发现 unit 测试：scripts/tests/test_*.sh，排除自递归的 test_test_sh.sh。
+# 发现 shell unit 测试：scripts/tests/test_*.sh，排除自递归的 test_test_sh.sh。
 discover_units() {
   local f
   for f in "$ROOT"/scripts/tests/test_*.sh; do
@@ -45,21 +45,44 @@ discover_units() {
   done
 }
 
+# 发现 Python 测试目录：<component>/tests/ 含 test_*.py 的组件目录。
+discover_py_units() {
+  local d
+  for d in agent-container index-service; do
+    if compgen -G "$ROOT/$d/tests/test_*.py" >/dev/null 2>&1; then
+      printf '%s\n' "$ROOT/$d/tests"
+    fi
+  done
+}
+
 run_lint() {
   say step "lint：结构自检 check-invariants"
   bash "$ROOT/scripts/check-invariants.sh"
 }
 
 run_unit() {
+  local rc=0 ran=0 f
+  # 1) shell 单元测试
   say step "unit：shell 单元测试"
-  local f rc=0 ran=0
   while IFS= read -r f; do
     [[ -z "$f" ]] && continue
     ran=$((ran + 1))
     bash "$f" || rc=1
   done < <(discover_units)
+  # 2) Python 单元测试（pytest）；缺 pytest 则 skip。
+  local py_dirs=()
+  while IFS= read -r f; do [[ -n "$f" ]] && py_dirs+=("$f"); done < <(discover_py_units)
+  if [[ "${#py_dirs[@]}" -gt 0 ]]; then
+    say step "unit：Python 单元测试（pytest）"
+    if have_cmd pytest; then
+      ran=$((ran + ${#py_dirs[@]}))
+      pytest -q "${py_dirs[@]}" || rc=1
+    else
+      say warn "skip pytest（未安装）"
+    fi
+  fi
   if [[ "$ran" -eq 0 ]]; then
-    say warn "未发现 unit 测试（scripts/tests/test_*.sh）"
+    say warn "未发现 unit 测试（scripts/tests/test_*.sh / <component>/tests/test_*.py）"
   fi
   return "$rc"
 }
@@ -114,6 +137,7 @@ main() {
     --lint)    mode="lint" ;;
     --unit)    mode="unit" ;;
     --list)    mode="list" ;;
+    --list-py) mode="list-py" ;;
     --full)    mode="full" ;;
     -h|--help) usage; return 0 ;;
     *)         say err "未知参数：$1"; usage >&2; return 2 ;;
@@ -121,6 +145,7 @@ main() {
 
   case "$mode" in
     list)    discover_units; return 0 ;;
+    list-py) discover_py_units; return 0 ;;
     lint)    run_lint ;;
     unit)    run_unit ;;
     full)    run_full ;;

@@ -1,0 +1,13 @@
+# agent-container runtime dependencies.
+#
+# HARD CONSTRAINT (AGENTS.md): every dependency must be EXACT-pinned (==<version>)
+# and guarded by scripts/check-versions.sh. Versions are intentionally left
+# unpinned below until resolved against the real ARM64 base image during POC —
+# pinning fabricated versions now would violate "no unverified assumptions".
+# TODO(poc): replace each line with ==<resolved-version> and wire check-versions.sh.
+
+claude-agent-sdk          # agent reasoning loop (query / ClaudeAgentOptions)
+bedrock-agentcore         # microVM HTTP/streaming host (BedrockAgentCoreApp)
+boto3                     # AWS control plane
+httpx                     # CodeGraph MCP-over-HTTP evidence channel
+aws-opentelemetry-distro  # observability (toolkit default)
