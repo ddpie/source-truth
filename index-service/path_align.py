@@ -5,6 +5,14 @@ index-service host (writable EFS mount). Session containers read the *same* file
 at a read-only mount (default ``/mnt/repo``). Paths returned by CodeGraph tools
 must be rewritten into the container's mount space before the agent reads them.
 
+Real path formats from codegraph-server 0.18.5 (empirically verified — the
+``file`` field mirrors the ``--workspace`` arg the server was started with):
+  - workspace "."          -> "./index-service/path_align.py"   (./-prefixed)
+  - workspace "/mnt/efs/repo" -> "/mnt/efs/repo/index-service/path_align.py"
+Both forms (plus bare relative) are normalized and re-rooted at ``mount_root``.
+``format_location`` consumes the full ``symbol.location`` dict
+(``{file, line, column, end_line, end_column}``) into a ``path:line`` reference.
+
 Security: any path that resolves outside the repo root is rejected, so a stray
 CodeGraph path can never point the agent at files outside ``/mnt/repo``.
 """
@@ -12,6 +20,7 @@ CodeGraph path can never point the agent at files outside ``/mnt/repo``.
 from __future__ import annotations
 
 import posixpath
+from typing import Any
 
 DEFAULT_MOUNT_ROOT = "/mnt/repo"
 
@@ -52,6 +61,28 @@ def to_container_path(
     if rel == ".." or rel.startswith("../"):
         raise ValueError(f"relative path escapes repo root: {raw!r}")
     return _join_mount(mount_root, rel)
+
+
+def format_location(
+    location: dict[str, Any],
+    *,
+    index_root: str,
+    mount_root: str = DEFAULT_MOUNT_ROOT,
+) -> str:
+    """Turn a CodeGraph ``symbol.location`` dict into an agent-readable reference.
+
+    Real shape (codegraph-server 0.18.5): ``{file, line, column, end_line,
+    end_column}``. Returns ``<container-path>:<line>`` (e.g.
+    ``/mnt/repo/agent-container/agent.py:21``), or just the path when no line.
+
+    Raises ValueError if ``file`` is absent (or via to_container_path on escape).
+    """
+    raw_file = location.get("file")
+    if not raw_file:
+        raise ValueError("location is missing required 'file' field")
+    path = to_container_path(raw_file, index_root=index_root, mount_root=mount_root)
+    line = location.get("line")
+    return f"{path}:{line}" if line is not None else path
 
 
 def _relative_to(norm_path: str, root: str) -> str | None:

@@ -65,7 +65,23 @@ def test_build_options_dict_codegraph_endpoint_adds_mcp_tools():
     # CodeGraph MCP tools must be allow-listed with the mcp__ prefix.
     assert any(t.startswith("mcp__codegraph__") for t in opts["allowed_tools"])
     assert "codegraph" in opts["mcp_servers"]
-    assert opts["mcp_servers"]["codegraph"]["url"] == "https://idx.internal/mcp"
+    cg = opts["mcp_servers"]["codegraph"]
+    assert cg["url"] == "https://idx.internal/mcp"
+    # Real McpHttpServerConfig (claude-agent-sdk 0.2.103) REQUIRES type="http".
+    assert cg["type"] == "http"
+
+
+def test_build_options_dict_matches_real_sdk_options():
+    # The assembled dict must be accepted by the real ClaudeAgentOptions.
+    sdk = pytest.importorskip("claude_agent_sdk")
+    opts = agent_lib.build_options_dict(
+        system_prompt="x",
+        codegraph_url="https://idx.internal/mcp",
+        codegraph_headers={"Authorization": "Bearer t"},
+    )
+    real = sdk.ClaudeAgentOptions(**opts)
+    assert real.mcp_servers["codegraph"]["type"] == "http"
+    assert "Read" in real.allowed_tools
 
 
 def test_build_options_dict_no_codegraph_when_url_absent():
