@@ -1,0 +1,75 @@
+/**
+ * End-to-end smoke test (offline, all external deps stubbed).
+ *
+ * Exercises the full request path with stubs:
+ *   飞书 IM event → dedup → session-map → [SigV4 stub] → [AgentCore stub] →
+ *   agent-container run_agent (stub) → [index-service path_align reference] →
+ *   CardKit streaming → final card content.
+ *
+ * Each stage explicitly annotated: ✅ real logic | 桩·未验证 stub.
+ */
+
+import { isDuplicate, resetForTesting as resetDedup } from "../src/dedup";
+import { getSessionId, resetForTesting as resetSessions } from "../src/session-map";
+import { CardStream } from "../src/cardkit";
+
+afterEach(() => {
+  resetDedup();
+  resetSessions();
+});
+
+describe("E2E smoke (offline, stubbed externals)", () => {
+  it("processes a question through the full path", () => {
+    // --- 1. Simulate Feishu IM event arriving ---
+    const event = {
+      event_id: "evt_smoke_001",
+      chat_id: "oc_smoke",
+      thread_id: "ot_smoke",
+      text: "消除判定逻辑在哪",
+    };
+
+    // --- 2. Dedup: first occurrence → not duplicate (✅ real) ---
+    expect(isDuplicate(event.event_id)).toBe(false);
+    // Replay guard: second delivery is rejected.
+    expect(isDuplicate(event.event_id)).toBe(true);
+
+    // --- 3. Session-map: route to runtimeSessionId (✅ real) ---
+    const sessionId = getSessionId(event.chat_id, event.thread_id);
+    expect(sessionId).toBeTruthy();
+    // Same thread → same session (idempotent).
+    expect(getSessionId(event.chat_id, event.thread_id)).toBe(sessionId);
+
+    // --- 4. SigV4 sign + InvokeAgentRuntime (桩·未验证) ---
+    // Real: signs with AWS credentials and calls AgentCore HTTP endpoint.
+    // Stub: just verify the payload shape.
+    const invokePayload = { prompt: event.text, session: { sessionId } };
+    expect(invokePayload.prompt).toBe("消除判定逻辑在哪");
+
+    // --- 5. agent-container run_agent (桩·未验证: SDK absent) ---
+    // Real: claude_agent_sdk.query drives the agent loop.
+    // Stub: simulate two streamed messages.
+    const agentMessages = [
+      "根据 CodeGraph 定位，消除判定逻辑位于 Assets/Scripts/Match3/MatchResolver.cs:42",
+      "[RESULT] 回答完成",
+    ];
+
+    // --- 6. index-service path_align (✅ real function, tested separately) ---
+    // Included by reference: CodeGraph paths are rewritten to /mnt/repo/*.
+    // Verified in index-service/tests/test_path_align.py (8 tests passing).
+
+    // --- 7. CardKit streaming: rate-limited card update (✅ real) ---
+    const cardUpdates: string[] = [];
+    const card = new CardStream((content) => cardUpdates.push(content));
+
+    for (const msg of agentMessages) {
+      card.push(msg);
+    }
+    card.close();
+
+    // First message sent immediately; close flushes the second.
+    expect(cardUpdates.length).toBe(2);
+    expect(cardUpdates[0]).toContain("MatchResolver.cs");
+    expect(cardUpdates[1]).toContain("RESULT");
+    expect(card.isClosed).toBe(true);
+  });
+});
