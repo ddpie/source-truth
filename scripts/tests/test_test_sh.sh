@@ -37,6 +37,11 @@ lint_out="$("$TEST_SH" --lint 2>&1)"; lint_rc=$?
 check "--lint 退出码 0" "$lint_rc"
 [[ "$lint_out" == *"check-invariants: OK"* ]]; check "--lint 跑了结构自检" $?
 
+# --list-py 列出发现的 Python 测试目录，应含 agent-container
+listpy_out="$("$TEST_SH" --list-py 2>&1)"; listpy_rc=$?
+check "--list-py 退出码 0" "$listpy_rc"
+[[ "$listpy_out" == *"agent-container"* ]]; check "--list-py 发现 agent-container/tests" $?
+
 # 未知参数应报错退出非零
 "$TEST_SH" --bogus-flag >/dev/null 2>&1; bogus_rc=$?
 [[ "$bogus_rc" -ne 0 ]]; check "未知参数退出非零" $?
