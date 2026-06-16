@@ -1,0 +1,47 @@
+# agent-container
+
+会话 microVM 内运行的 **Claude Code Agent**（Python）——source-truth 的推理与编排核心。
+
+## 职责
+
+在 AgentCore Runtime 的 Firecracker microVM 内，用 **Claude Code Agent SDK**（`claude_agent_sdk`）+
+**bedrock-agentcore** runtime（`@app.entrypoint` 异步流式 handler）跑一个 agent 循环：理解策划的问题 →
+调远程 CodeGraph MCP 定位代码 → 读 EFS 上的最新主分支源码与配置表 → 生成结构化答案并逐步 `yield`。
+
+模型走 Bedrock 计费（`CLAUDE_CODE_USE_BEDROCK=1`）。MVP 单引擎 Claude Code（Codex 第二引擎后置）。
+
+## 对外契约
+
+| 项 | 约定 |
+|----|------|
+| 入参 payload | `{ "prompt": <问题文本>, "session": <会话上下文> }`（由 bot-gateway 注入） |
+| CodeGraph | 远程 MCP-over-HTTP 端点（由 index-service 暴露），通过 env / option 注入 |
+| 代码与配置 | EFS 只读挂载在 `/mnt/repo`（最新主分支） |
+| 临时文件 | Session Storage 可写挂载在 `/mnt/workspace`（per-session 隔离） |
+| 出参 | 流式 `yield` AssistantMessage / ResultMessage，由网关渲染回 CardKit |
+
+## 取证原则（代码为唯一依据）
+
+- 答案必须基于 `/mnt/repo` 的真实代码 + CodeGraph 取证；
+- 代码与文档 / 记忆冲突时**以代码为准**，并标注差异与文档时间；
+- 低置信度时建议「转研发」。
+
+## 约束
+
+- **ARM64-only** 容器；基础镜像与 Claude Agent SDK / lark-cli 版本钉死（pin）。
+- **只读边界**：MVP 仅问答，不跑引擎、不写回、不提交。
+
+## 参考惯例
+
+本地样例：`amazon-bedrock-agentcore-samples/03-integrations/agentic-frameworks/claude-agent/claude-sdk/`
+（`agent.py` + `requirements.txt`，用 `agentcore configure` / `agentcore launch` 部署）。
+
+## 设计文档
+
+实现前必读 [`../docs/design/agent-container_zh.md`](../docs/design/agent-container_zh.md)——组件级实现契约
+（运行时形态、取证通道、鉴权、挂载契约、部署、待验证点），每条 API 论断锚定本地 SDK / 样例真实符号。
+
+## 状态
+
+p0：占位 + 实现契约（见上）。p1 落地：`Dockerfile`（ARM64 + pin）、`agent.py`（流式 entrypoint）、
+`agent_lib.py`（纯函数，可单测）、`prompts/system.md`（系统 prompt + 高频问题清单 + 问答规范）。
