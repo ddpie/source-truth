@@ -81,6 +81,14 @@ run_unit() {
       say warn "skip pytest（未安装）"
     fi
   fi
+  # 3) TypeScript 单元测试（jest）；有 jest.config + node_modules 才跑。
+  for d in bot-gateway; do
+    if [[ -f "$ROOT/$d/jest.config.cjs" && -x "$ROOT/$d/node_modules/.bin/jest" ]]; then
+      say step "unit：TypeScript 单元测试（jest $d）"
+      ran=$((ran + 1))
+      ( cd "$ROOT/$d" && npx jest -c jest.config.cjs --no-coverage --passWithNoTests ) || rc=1
+    fi
+  done
   if [[ "$ran" -eq 0 ]]; then
     say warn "未发现 unit 测试（scripts/tests/test_*.sh / <component>/tests/test_*.py）"
   fi

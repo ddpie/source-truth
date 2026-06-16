@@ -1,0 +1,21 @@
+{
+  "name": "source-truth-bot-gateway",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "build": "tsc --noEmit",
+    "lint": "eslint src/ tests/",
+    "test": "jest -c jest.config.cjs --passWithNoTests"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9",
+    "@types/jest": "^29",
+    "@types/node": "^20",
+    "eslint": "^9",
+    "jest": "^29",
+    "ts-jest": "^29",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.5",
+    "typescript-eslint": "^8"
+  }
+}
