@@ -63,7 +63,10 @@ def build_options_dict(
 
     if codegraph_url:
         allowed_tools.extend(CODEGRAPH_TOOLS)
-        server: dict[str, Any] = {"url": codegraph_url}
+        # McpHttpServerConfig (claude-agent-sdk 0.2.103) requires type + url;
+        # headers optional. Verified against the real SDK TypedDict. This is
+        # design-doc §4.1 "方案 A" — native HTTP MCP, no streamablehttp bridge.
+        server: dict[str, Any] = {"type": "http", "url": codegraph_url}
         if codegraph_headers:
             server["headers"] = dict(codegraph_headers)
         mcp_servers[CODEGRAPH_SERVER_KEY] = server
