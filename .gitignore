@@ -1,0 +1,45 @@
+# AI dev tools
+.claude/
+.cursor/
+.windsurf/
+.aider/
+.copilot/
+
+# Node
+node_modules/
+dist/
+cdk.out/
+coverage/
+.stryker-tmp/
+reports/
+*.tsbuildinfo
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+
+# Secrets & credentials
+.env
+.env.*
+*.pem
+*.key
+cdk.context.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Local deploy state (account-specific, not committed)
+.local/

@@ -1,0 +1,202 @@
+# 游戏研发智能助手 POC 方案
+
+> 架构真相源。导入自飞书文档《游戏研发智能助手 POC 方案》。
+> 来源：https://amzn-chn.feishu.cn/wiki/RqLxwMQfaikpUKko1JkcMpPKnkh
+> MVP 边界与验收基准见 [`requirements_zh.md`](requirements_zh.md)；面向 AI 的实现心智模型见
+> [`../agent/architecture.md`](../agent/architecture.md)。
+
+策划日常有大量咨询性需求（理解代码逻辑、确认数值配置、评估修改影响），这些需求不复杂但受限于研发
+排期。本方案在飞书中部署 AI 编程助手（Claude Code / Codex），让业务人员直接获得代码级别的问答和数值
+模拟结果。
+
+## 1. 它长什么样
+
+策划直接在飞书里问，不需要等研发排期、不需要理解代码，拿到关联分析（响应时间取决于问题复杂度，简单
+查询数秒、复杂分析数十秒）。
+
+### 1.1 支持的场景
+
+| 场景 | 典型问题 | 可行度 |
+|-|-|-|
+| 代码逻辑问答 | "消除判定逻辑在哪""这个道具效果怎么实现的" | 可行 |
+| 影响分析 | "改这个会影响哪些模块" | 可行 |
+| 数值查询 | "50级体力上限配了多少""这个掉率表的期望值" | 可行 |
+| 数值模拟 | "如果通关奖励翻倍，经济系统几天会膨胀" | 可行 |
+| 配置/文案生成 | "按这个规则批量生成50关的配置表" | 可行 |
+| 原型验证 | "写一版4连消的逻辑我看看效果" | 待探索 |
+
+### 1.2 边界
+
+- AI 产出供策划决策和研发参考，不自动上线、不碰线上系统
+- 前期不做引擎内可玩 demo
+
+## 2. 系统架构
+
+```mermaid
+graph TB
+    U[策划/运营] -->|"@助手"| LARK[飞书]
+    LARK -->|"长连接事件"| BOT["飞书Bot（网关）"]
+    BOT -->|"InvokeRuntime"| RT["AgentCore（会话容器）"]
+    RT --- AI["Claude Code / Codex"]
+    AI -->|"MCP查询"| CG["CodeGraph（索引服务）"]
+    AI -->|"读文件"| REPO["代码仓库（Git）"]
+    AI -->|"lark-cli"| FDOC["飞书文档（知识库）"]
+    REPO -->|"push webhook"| CG
+    BOT -.->|"CardKit流式卡片"| LARK
+```
+
+核心链路：用户在飞书提问 → Bot 转给会话容器 → 容器内的 AI（Claude Code / Codex）通过 CodeGraph 定位
+代码、读取配置、查阅飞书文档 → 结果流式返回飞书卡片。
+
+下文「会话容器」均指 AgentCore Runtime 按会话拉起的 Firecracker microVM。
+
+### 2.1 完整请求流
+
+```mermaid
+sequenceDiagram
+    participant U as 策划
+    participant B as 飞书Bot
+    participant AI as 会话容器
+    participant CG as CodeGraph
+    participant R as 代码/配置/文档
+    U->>B: @助手 提问
+    B-->>U: 流式卡片（开始输出）
+    B->>AI: 转发问题
+    AI->>CG: 查影响分析/调用链
+    CG-->>AI: 相关文件列表
+    AI->>R: 读代码 + 配置 + 飞书文档
+    R-->>AI: 文件内容
+    AI-->>B: 综合回答（流式）
+    B-->>U: 卡片逐步更新完成
+```
+
+### 2.2 关键设计决策
+
+| 决策 | 选择 | 理由 |
+|-|-|-|
+| AI 引擎 | Claude Code + Codex 双引擎 | 共享同一套索引和知识层。默认使用 Claude Code；Codex 作为备选，按管理员配置或任务特征路由 |
+| 运行环境 | AWS AgentCore Runtime | Firecracker microVM 隔离，托管扩缩容和生命周期，不自建 |
+| 代码索引 | 独立索引服务（非容器内） | 索引服务常驻持有 clone，本地 inotify 实现秒级增量更新；用户容器通过远程 MCP 查询，不占用户资源 |
+| 多分支 | git worktree | 共享对象库，每分支独立 worktree + 独立索引实例（CodeGraph 官方推荐的多分支模式），存储开销仅为工作区文件 |
+| 配置表 | AI 直接读文件 | 配置在代码仓库内（Excel/JSON/CSV），不引入中间数据库 |
+| 设计文档 | lark-cli 按需读取 | 容器内预装 lark-cli，需要时直接调飞书 API 读文档，不做预同步 |
+| 飞书交互 | 基于官方 SDK 自研 | CardKit 流式卡片 + markdown 组件渲染 + 动态按钮 |
+
+> 实现备注：MVP 单引擎 Claude Code（Codex 第二引擎后置）；MVP 不纳入设计文档（lark-cli 读文档后置）；
+> MVP 仅主分支（多分支 worktree 后置）。详见 [`requirements_zh.md`](requirements_zh.md) 的 MVP 边界。
+
+## 3. 几个关键点展开
+
+### 3.1 CodeGraph：为什么需要、怎么工作
+
+大型代码库中，AI 仅靠 grep 逐文件搜索无法高效回答"改了影响什么""从触发到生效经过哪些模块"这类结构性
+问题。CodeGraph 预构建代码调用关系图（基于 Tree-sitter，支持 C#、C++、TypeScript、Python、Lua、Go、
+Java、Kotlin、Swift、Ruby 等主流语言），AI 通过 `codegraph_impact`（影响分析）/ `codegraph_callers`
+（调用链）/ `codegraph_search`（符号定位）等工具一次查询获取结果。
+
+索引服务架构：
+
+```mermaid
+graph LR
+    PUSH[git push] -->|"webhook"| SVC["索引服务（常驻）"]
+    SVC --> PULL["git pull ~1s"]
+    PULL --> WT["EFS worktree: main/dev/release"]
+    WT -->|"inotify"| IDX["CodeGraph增量 ~3s"]
+    IDX -->|"MCP over HTTP"| VM["会话容器"]
+    VM -->|"只读挂载·读最新代码"| WT
+```
+
+- 会话容器与索引服务共享同一份代码：EFS 卷只读挂载到会话容器，索引服务可写挂载同一卷、监听变更构建
+  索引——一份代码，无副本同步问题；索引查询由索引服务侧代理以 HTTP 形式暴露给会话容器
+- AI 通过索引定位文件后，读取的是代码最新版本（非索引快照）
+- 夜间 CI 做全量重建兜底
+
+### 3.2 飞书交互：流式卡片 + 动态组件
+
+AI 输出格式不固定（有时纯文字、有时带代码块、有时有表格）。设计上用一个 markdown 组件适配所有格式，
+平台自动渲染。流式完成后按 AI 实际输出内容动态追加交互组件（按钮/图表/下拉）：
+
+- AI 给出多个方案 → 自动生成选项按钮，用户点选后继续对话
+- AI 输出数值结果 → 追加图表组件可视化
+- 回答置信度低 → 显示"转研发"按钮一键转人工
+
+对话采用飞书话题模式，同一问答链在话题内展开，群内不会被刷屏。
+
+### 3.3 隔离：什么共享、什么隔离
+
+- **共享只读**：项目代码（各分支 worktree）、索引——所有会话看同一组，不可写
+- **per-session 独占**：Agent 产生的临时文件——microVM 级隔离，用户间互不可见
+
+**为什么这么设计**：代码和索引是项目级资源，所有人查的是同一个项目，复制 N 份既浪费存储也导致更新
+不同步。对话和临时文件是个人工作状态，必须隔离。落地方式：共享代码与索引放在 EFS 卷，只读挂载到每个
+会话容器；Session Storage 由 AgentCore 按 session 自动分配独占空间，两者通过不同挂载点区分（如
+/mnt/repo vs /mnt/workspace），无需额外开发。
+
+|  | 共享存储 | 会话存储 |
+|-|-|-|
+| 内容 | 代码、索引、配置表 | Agent 产生的临时文件 |
+| 数量 | 一组分支 worktree（全员共用） | 每 Agent 一份 |
+| 权限 | 只读 | 可读写 |
+| 可见性 | 所有 Agent | 仅本 Agent |
+| 生命周期 | 持久（push 实时增量 + 夜间兜底） | per-session 持久（14天空闲过期） |
+
+### 3.4 文档与代码冲突
+
+设计文档和代码实现可能不一致。处理原则：
+
+- **代码为准**：矛盾时 AI 以代码实际实现为 ground truth
+- **标注差异**：回答中明确指出"设计文档描述为 X，代码实现为 Y，以代码为准"
+- **标注时间**：引用文档时注明最后修改时间
+
+## 4. 安全
+
+- **隔离**：Firecracker microVM per session，进程内存会话结束擦除；Session Storage per-session 最长 14 天回收
+- **审计**：全量 prompt/response 记录（谁/何时/问什么/答什么）
+- **设计文档权限**：机器人作为文件夹只读协作者，未授权文档不可见
+
+> 实现备注：MVP 安全仅做 prompt/response 日志防滥用；完整审计护栏与文档可见性管控后置。
+
+## 5. 需客户配合确认
+
+| 类别 | 问题 |
+|-|-|
+| 项目技术 | 客户端引擎 / 编程语言组成 / 版本管理工具 / 配置表形态与位置 |
+| 用户与规模 | 预计使用人数与角色 / 使用频率 / 日常活跃的代码分支数量 |
+| 场景边界 | 数值模拟是否需跑引擎逻辑 / 是否有写回配置/提交代码的诉求 |
+| 知识库 | 策划文档是否为飞书文档 / 策划设计文档大致数量级 |
+
+> 多数项已在 [`requirements_zh.md`](requirements_zh.md) 的「客户环境」中澄清。
+
+## 6. 待验证技术点
+
+**索引与存储**
+
+| 验证项 | 关注点 | 关联 |
+|-|-|-|
+| CodeGraph 对项目语言栈的索引召回 | 用项目真实模块实测调用图召回率：Unity 风格 C#（事件/委托、partial、MonoBehaviour 消息函数）与 Lua 元表继承等动态模式属静态分析盲区，实际召回可能显著低于官方基准 | §3.1 |
+| push→索引可用端到端时延 | webhook → git pull → 增量索引完成的端到端耗时，按项目真实仓库规模实测；同时实测首次全量索引耗时（社区在 13 万文件仓库上约 1 小时量级） | §3.1 |
+| MCP stdio→HTTP 桥 | CodeGraph 原生仅支持 stdio 通信；索引服务侧需加一层 stdio 转 streamable HTTP 的代理（mcp-proxy 类组件），验证桥接稳定性、并发能力，及工具返回的文件路径与容器挂载路径的对齐 | §3.1 |
+| EFS 同卷并发挂载 | 索引服务可写、会话容器只读挂载同一 EFS 卷；写入后容器侧能否秒级读到；inotify 在 NFS 文件系统上能否可靠触发增量索引 | §3.1 / §3.3 |
+| EFS 读取性能 | EFS 每文件操作有毫秒级网络往返：按项目真实仓库规模实测「索引定位 + 点名读取」主路径与全仓搜索兜底两种模式的实际延迟，确认是否需要优化 | §3.1 / §3.3 |
+| 多分支 worktree + 多索引实例 | 每分支独立 worktree + 常驻 CodeGraph 实例的资源占用；分支增删时索引实例的生命周期管理 | §2.2 / §3.1 |
+
+**飞书交互**
+
+| 验证项 | 关注点 | 关联 |
+|-|-|-|
+| 流式卡片更新频控 | 飞书对卡片 update 有频率限制，需验证逐字流式更新的实际顺滑度与 10 分钟更新窗口边界 | §3.2 |
+| 图表组件可表达边界 | CardKit 图表组件（VChart）跑通实际 spec，确认临界线标注、动态数据绑定等具体能力边界 | §3.2 |
+| 动态组件追加 | 按 AI 自由输出动态决定按钮数量与回调，需要卡片模板 + 回调路由设计并做原型 | §3.2 |
+
+## 附录：技术依赖
+
+| 依赖 | 状态 | 备注 |
+|-|-|-|
+| AgentCore Runtime | GA | Firecracker 隔离，EFS 挂载 |
+| AgentCore Session Storage | Preview | 会话级独占存储，14 天空闲过期；Preview 阶段，正式商用前需复核可用性 |
+| Claude Code Agent SDK | GA | 官方容器化方案 |
+| Codex CLI | GA | headless 模式 |
+| CodeGraph | 开源 | MCP server（stdio），经索引服务侧代理暴露 HTTP；文件监听增量 |
+| lark-cli | GA | 飞书文档读取 |
+| 飞书 CardKit 流式卡片 | GA | 客户端 7.20+ |
+| 飞书 CardKit 图表组件 | GA | VChart 规范，支持柱状/折线/饼图等，依赖较新客户端版本 |
