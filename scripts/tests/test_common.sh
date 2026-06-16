@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# test_common.sh — scripts/lib/common.sh 的单元测试（纯 bash，无外部依赖）。
+# 约定：scripts/tests/test_*.sh 可独立 `bash` 运行；退出码 0 = 全绿。
+# 由 scripts/test.sh 的 unit 层自动发现并运行。
+set -uo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+
+# shellcheck source-path=SCRIPTDIR source=../lib/common.sh
+source "$ROOT/scripts/lib/common.sh"
+
+_run=0
+_fail=0
+
+# assert_rc <expected_rc> <cmd...> — 断言命令退出码
+assert_rc() {
+  local want="$1" name="$2"; shift 2
+  _run=$((_run + 1))
+  local got=0
+  "$@" >/dev/null 2>&1 || got=$?
+  if [[ "$got" -eq "$want" ]]; then
+    printf '  ok   %s\n' "$name"
+  else
+    printf '  FAIL %s (want rc=%s, got rc=%s)\n' "$name" "$want" "$got"
+    _fail=$((_fail + 1))
+  fi
+}
+
+# assert_contains <substr> <name> <text> — 断言文本含子串
+assert_contains() {
+  local needle="$1" name="$2" hay="$3"
+  _run=$((_run + 1))
+  if [[ "$hay" == *"$needle"* ]]; then
+    printf '  ok   %s\n' "$name"
+  else
+    printf '  FAIL %s (missing %q in %q)\n' "$name" "$needle" "$hay"
+    _fail=$((_fail + 1))
+  fi
+}
+
+# assert_not_contains <substr> <name> <text>
+assert_not_contains() {
+  local needle="$1" name="$2" hay="$3"
+  _run=$((_run + 1))
+  if [[ "$hay" != *"$needle"* ]]; then
+    printf '  ok   %s\n' "$name"
+  else
+    printf '  FAIL %s (unexpected %q in %q)\n' "$name" "$needle" "$hay"
+    _fail=$((_fail + 1))
+  fi
+}
+
+echo "test_common:"
+
+# have_cmd: 真命令返回 0，假命令返回 1
+assert_rc 0 "have_cmd 识别存在的命令" have_cmd bash
+assert_rc 1 "have_cmd 拒绝不存在的命令" have_cmd __no_such_cmd_xyz__
+
+# require_cmd: 缺失命令返回 1 且报错文本含命令名
+assert_rc 1 "require_cmd 缺失命令返回非零" require_cmd __no_such_cmd_xyz__
+require_out="$(require_cmd __no_such_cmd_xyz__ 2>&1 || true)"
+assert_contains "__no_such_cmd_xyz__" "require_cmd 报错含命令名" "$require_out"
+assert_rc 0 "require_cmd 存在命令返回 0" require_cmd bash
+
+# say: 输出含消息体；NO_COLOR 下无 ANSI 转义
+say_out="$(NO_COLOR=1 say ok "hello-world" 2>&1)"
+assert_contains "hello-world" "say 输出含消息体" "$say_out"
+assert_not_contains $'\e[' "say 在 NO_COLOR 下无 ANSI 转义" "$say_out"
+
+echo "  ran=$_run failed=$_fail"
+[[ "$_fail" -eq 0 ]]
