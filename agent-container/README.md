@@ -28,8 +28,11 @@
 
 ## 约束
 
-- **ARM64-only** 容器；基础镜像与 Claude Agent SDK / lark-cli 版本钉死（pin）。
+- **ARM64-only** 容器；基础镜像与 Claude Agent SDK / lark-cli 版本钉死（pin，`claude-agent-sdk==0.2.103`）。
 - **只读边界**：MVP 仅问答，不跑引擎、不写回、不提交。
+- **模型 ID 按区域**：东京 ap-northeast-1 **不认 `us.anthropic.*`**（US cross-region），用
+  `global.anthropic.claude-sonnet-4-6`（全球路由，资源最足）；`apac.*`/`jp.*` 亦可。
+- **VPC 出站**：挂 EFS 须 `networkMode=VPC`，而 VPC 内的 microVM 无公网 IP，出站（Bedrock/CLI）**须经 NAT Gateway**。
 
 ## 参考惯例
 
@@ -43,5 +46,11 @@
 
 ## 状态
 
-p0：占位 + 实现契约（见上）。p1 落地：`Dockerfile`（ARM64 + pin）、`agent.py`（流式 entrypoint）、
-`agent_lib.py`（纯函数，可单测）、`prompts/system.md`（系统 prompt + 高频问题清单 + 问答规范）。
+p1 已落地并真实部署到 AWS（东京 ap-northeast-1）：`Dockerfile`（ARM64）、`agent.py`（流式 entrypoint 薄壳）、
+`agent_lib.py`（纯函数 `build_options`/`run_agent`，可单测）、`prompts/system.md`、`requirements.txt`
+（`claude-agent-sdk==0.2.103` 钉死）。
+
+**已验证（真实）：** ① CodeGraph MCP 接入定型为 **方案 A**——`ClaudeAgentOptions.mcp_servers` 原生支持
+`McpHttpServerConfig`（`{type:"http", url, headers?}`，对照真实 SDK 0.2.103 核实），不需 streamablehttp 桥；
+② Runtime 经 `InvokeAgentRuntime` 真实跑通（`CLAUDE_CODE_USE_BEDROCK=1`，模型 `global.anthropic.claude-sonnet-4-6`）；
+③ EFS 真实挂载 `/mnt/repo`，agent 真读到源码并解释。部署细节见 `scripts/deploy.sh` + `.local/deploy-config`。
