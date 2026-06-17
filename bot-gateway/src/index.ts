@@ -20,23 +20,10 @@ import { createInterface } from "node:readline";
 
 import { fromNodeProviderChain } from "@aws-sdk/credential-providers";
 
-import { invokeRuntime } from "./sigv4";
+import { invokeRuntimeStreaming } from "./sigv4";
 import { processEventLine } from "./index-core";
-import { sendReplyCard } from "./reply";
+import { createCard, updateContent, closeStreaming, buildSendCardContent } from "./cardkit-client";
 import type { InvokeFn } from "./handle-event";
-
-/** Extract the assistant's answer text from the runtime's SSE response body. */
-function extractAnswer(body: string): string {
-  const texts: string[] = [];
-  for (const m of body.matchAll(/"text":\s*"((?:[^"\\]|\\.)*)"/g)) {
-    try {
-      texts.push(JSON.parse(`"${m[1]}"`));
-    } catch {
-      texts.push(m[1]);
-    }
-  }
-  return texts.join("").trim() || "(无内容)";
-}
 
 const REGION = process.env.AWS_REGION ?? "ap-northeast-1";
 const RUNTIME_ARN = process.env.RUNTIME_ARN ?? "";
@@ -46,37 +33,72 @@ function log(obj: Record<string, unknown>): void {
   console.log(JSON.stringify({ ts: new Date().toISOString(), ...obj }));
 }
 
-/** Build an InvokeFn that signs + calls the Tokyo runtime with the caller's
- *  AWS credentials (resolved once from the provider chain). */
-async function makeInvoke(): Promise<InvokeFn> {
-  const creds = await fromNodeProviderChain()();
-  return async (sessionId, prompt) => {
-    const { status, body } = await invokeRuntime(
-      { runtimeArn: RUNTIME_ARN, region: REGION, sessionId, prompt },
-      {
-        region: REGION,
-        credentials: {
-          accessKeyId: creds.accessKeyId,
-          secretAccessKey: creds.secretAccessKey,
-          sessionToken: creds.sessionToken,
-        },
-      },
-    );
-    if (status !== 200) throw new Error(`invoke failed: HTTP ${status}`);
-    return extractAnswer(body);
-  };
+/** Streaming invoke: creates the card immediately (fast first render), then
+ *  updates it as text arrives from the agent, and closes streaming at the end. */
+async function streamingCardInvoke(
+  sessionId: string,
+  prompt: string,
+  messageId: string,
+  creds: { accessKeyId: string; secretAccessKey: string; sessionToken?: string },
+): Promise<void> {
+  // 1. Create streaming card + send it immediately (user sees card in <2s).
+  const cardId = await createCard("source-truth");
+  const sendChild = spawn(
+    "lark-cli",
+    ["im", "+messages-reply", "--as", "bot", "--message-id", messageId,
+     "--msg-type", "interactive", "--content", buildSendCardContent(cardId)],
+    { stdio: ["ignore", "ignore", "inherit"] },
+  );
+  await new Promise<void>((res, rej) => {
+    sendChild.on("exit", (c) => (c === 0 ? res() : rej(new Error(`send card exited ${c}`))));
+    sendChild.on("error", rej);
+  });
+  log({ event: "card_sent", message: messageId, card: cardId });
+
+  // 2. Stream the agent's answer; update card content incrementally.
+  let seq = 1;
+  let lastUpdate = 0;
+  const THROTTLE_MS = 300; // CardKit allows 10/s; ~3/s is safe and smooth.
+
+  const { status, answer } = await invokeRuntimeStreaming(
+    { runtimeArn: RUNTIME_ARN, region: REGION, sessionId, prompt },
+    { region: REGION, credentials: creds },
+    (textSoFar) => {
+      const now = Date.now();
+      if (now - lastUpdate >= THROTTLE_MS && textSoFar.length > 0) {
+        lastUpdate = now;
+        seq++;
+        updateContent(cardId, textSoFar, seq).catch(() => {});
+      }
+    },
+  );
+
+  if (status !== 200) throw new Error(`invoke failed: HTTP ${status}`);
+
+  // 3. Final update with the complete answer + close streaming.
+  seq++;
+  await updateContent(cardId, answer || "(无内容)", seq);
+  seq++;
+  await closeStreaming(cardId, seq);
+  log({ event: "card_closed", card: cardId, chars: answer.length });
 }
 
 async function main(): Promise<void> {
   if (!RUNTIME_ARN) throw new Error("RUNTIME_ARN env is required");
-  const invoke = await makeInvoke();
+  const creds = await fromNodeProviderChain()();
+
+  // The InvokeFn for handleMessageEvent: it returns the final answer (for
+  // logging), but the real streaming card lifecycle is driven by
+  // streamingCardInvoke called from the line handler.
+  const invoke: InvokeFn = async (_sessionId, prompt) => {
+    // The real streaming invoke is driven by streamingCardInvoke in the line
+    // handler below. This returns the prompt so res.answer carries it through.
+    return prompt;
+  };
 
   log({ event: "gateway_start", region: REGION, eventKey: EVENT_KEY });
 
   // lark-cli event consume: read-only long connection, NDJSON on stdout.
-  // Keep stdin as a pipe (not "ignore"): consume treats stdin EOF as an exit
-  // signal, so an ignored/closed stdin shuts it down immediately. We hold the
-  // pipe open and stop via SIGTERM on process exit instead.
   const child = spawn("lark-cli", ["event", "consume", EVENT_KEY, "--as", "bot"], {
     stdio: ["pipe", "pipe", "inherit"],
   });
@@ -90,10 +112,16 @@ async function main(): Promise<void> {
   rl.on("line", (line) => {
     void processEventLine(line, { invoke })
       .then(async (res) => {
-        if (res?.handled && res.messageId && res.answer) {
-          log({ event: "answered", session: res.sessionId, chars: res.answer.length });
-          const cardId = await sendReplyCard({ messageId: res.messageId, answer: res.answer });
-          log({ event: "replied", message: res.messageId, card: cardId });
+        if (res?.handled && res.messageId && res.sessionId) {
+          // Re-extract the prompt from the event (handle-event already parsed it).
+          // res.answer here is just the dummy from invoke above.
+          const prompt = res.answer ?? "";
+          await streamingCardInvoke(res.sessionId, prompt, res.messageId, {
+            accessKeyId: creds.accessKeyId,
+            secretAccessKey: creds.secretAccessKey,
+            sessionToken: creds.sessionToken,
+          });
+          log({ event: "replied", message: res.messageId, session: res.sessionId });
         }
       })
       .catch((err) => log({ event: "handle_error", error: String(err) }));
