@@ -71,9 +71,9 @@ async function streamingCardInvoke(
   // 2. Stream the agent's answer; update card content incrementally.
   let seq = 1;
   let lastUpdate = 0;
-  const THROTTLE_MS = 300; // CardKit allows 10/s; ~3/s is safe and smooth.
+  const THROTTLE_MS = 150; // CardKit allows 10/s; ~6/s for smoother typewriter.
 
-  const { status, answer } = await invokeRuntimeStreaming(
+  const { status, answer, reasoning } = await invokeRuntimeStreaming(
     { runtimeArn: RUNTIME_ARN, region: REGION, sessionId, prompt },
     { region: REGION, credentials: creds },
     (textSoFar) => {
@@ -96,7 +96,7 @@ async function streamingCardInvoke(
 
   // 4. Finalize: header → green "回答完成" + reasoning collapsed + append buttons.
   seq++;
-  try { await finalizeCard(cardId, answer || "(无内容)", "", seq); } catch { /* best-effort: PUT format might still fail on some edge cases */ }
+  try { await finalizeCard(cardId, answer || "(无内容)", reasoning, seq); } catch { /* best-effort */ }
   seq++;
   try { await appendButtons(cardId, seq); } catch { /* best-effort */ }
   log({ event: "card_closed", card: cardId, chars: answer.length });

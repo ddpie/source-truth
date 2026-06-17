@@ -101,13 +101,13 @@ export async function invokeRuntime(
 }
 
 /** Streaming invoke: calls onChunk with each extracted text fragment as the SSE
- *  arrives, so the caller can update the card incrementally. Returns the full
- *  concatenated answer when the stream ends. */
+ *  arrives, so the caller can update the card incrementally. Also extracts tool
+ *  calls (agent reasoning steps) for the collapsible panel. */
 export async function invokeRuntimeStreaming(
   p: InvokeParams,
   opts: SignOptions,
   onChunk: (textSoFar: string) => void,
-): Promise<{ status: number; answer: string }> {
+): Promise<{ status: number; answer: string; reasoning: string }> {
   const signed = await signInvoke(buildInvokeRequest(p), opts);
   const res = await fetch(`https://${signed.hostname}${signed.path}`, {
     method: signed.method,
@@ -115,19 +115,23 @@ export async function invokeRuntimeStreaming(
     body: signed.body,
   });
   if (res.status !== 200 || !res.body) {
-    return { status: res.status, answer: await res.text() };
+    return { status: res.status, answer: await res.text(), reasoning: "" };
   }
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buf = "";
   let answer = "";
+  const toolSteps: string[] = [];
   const textRe = /"text":\s*"((?:[^"\\]|\\.)*)"/g;
+  // Tool use: {"name": "Read", "input": {"file_path": "..."}}
+  const toolRe = /"name":\s*"([^"]+)",\s*"input":\s*(\{[^}]*\})/g;
 
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
     buf += decoder.decode(value, { stream: true });
-    // Parse SSE lines as they arrive; extract "text" fields.
+
+    // Extract text blocks (the agent's answer).
     let match: RegExpExecArray | null;
     while ((match = textRe.exec(buf)) !== null) {
       try {
@@ -136,13 +140,35 @@ export async function invokeRuntimeStreaming(
         answer += match[1];
       }
     }
+
+    // Extract tool calls (reasoning steps — what the agent looked at).
+    let toolMatch: RegExpExecArray | null;
+    while ((toolMatch = toolRe.exec(buf)) !== null) {
+      const name = toolMatch[1];
+      try {
+        const input = JSON.parse(toolMatch[2]);
+        const desc = name === "Read" ? `读取 ${input.file_path ?? ""}`
+          : name === "Glob" ? `搜索 ${input.pattern ?? ""}`
+          : name === "Grep" ? `查找 ${input.pattern ?? ""}`
+          : `${name}(${JSON.stringify(input).slice(0, 60)})`;
+        if (!toolSteps.includes(desc)) toolSteps.push(desc);
+      } catch {
+        if (!toolSteps.includes(name)) toolSteps.push(name);
+      }
+    }
+
     // Keep only the unparsed tail (last incomplete line).
     const lastNl = buf.lastIndexOf("\n");
     if (lastNl >= 0) {
       buf = buf.slice(lastNl + 1);
       textRe.lastIndex = 0;
+      toolRe.lastIndex = 0;
     }
     onChunk(answer);
   }
-  return { status: res.status, answer };
+
+  const reasoning = toolSteps.length > 0
+    ? "**取证步骤：**\n" + toolSteps.map((s) => `- ${s}`).join("\n")
+    : "";
+  return { status: res.status, answer, reasoning };
 }
