@@ -1,0 +1,6 @@
+# index-service dependencies (CodeGraph MCP bridge).
+#
+# Pinned to versions verified locally against codegraph-server 0.18.5.
+# The codegraph-server binary itself is provisioned outside pip (see README).
+
+mcp==1.23.3  # drives codegraph-server MCP over stdio (codegraph_client.py)
