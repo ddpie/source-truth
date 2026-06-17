@@ -12,6 +12,7 @@
 
 import { isDuplicate } from "./dedup";
 import { getSessionId } from "./session-map";
+import { ackWithReaction } from "./reaction";
 
 /** Normalized im.message.receive_v1 (subset we use). Matches lark-cli output. */
 export interface ImEvent {
@@ -60,7 +61,10 @@ export async function handleMessageEvent(
     return { handled: false, reason: "empty" };
   }
 
-  // 3. Route to a stable session (same chat+thread reuses one warm microVM).
+  // 3. Immediately react so the user knows we're on it (fire-and-forget).
+  if (event.message_id) ackWithReaction(event.message_id);
+
+  // 4. Route to a stable session (same chat+thread reuses one warm microVM).
   const sessionId = getSessionId(event.chat_id, event.thread_id);
 
   // 4. Invoke the agent.
