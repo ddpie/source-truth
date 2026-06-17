@@ -22,7 +22,7 @@ import { fromNodeProviderChain } from "@aws-sdk/credential-providers";
 
 import { invokeRuntimeStreaming } from "./sigv4";
 import { processEventLine } from "./index-core";
-import { createCard, updateContent, closeStreaming, finalizeHeader, appendButtons, buildSendCardContent } from "./cardkit-client";
+import { createCard, updateContent, closeStreaming, finalizeCard, appendButtons, buildSendCardContent } from "./cardkit-client";
 import { removeReaction } from "./reaction";
 import type { InvokeFn } from "./handle-event";
 
@@ -94,8 +94,9 @@ async function streamingCardInvoke(
   seq++;
   await closeStreaming(cardId, seq);
 
-  // 4. Append follow-up buttons (POST elements works after close streaming).
-  //    Header color change (PUT full card) deferred — format needs investigation.
+  // 4. Finalize: header → green "回答完成" + reasoning collapsed + append buttons.
+  seq++;
+  try { await finalizeCard(cardId, answer || "(无内容)", "", seq); } catch { /* best-effort: PUT format might still fail on some edge cases */ }
   seq++;
   try { await appendButtons(cardId, seq); } catch { /* best-effort */ }
   log({ event: "card_closed", card: cardId, chars: answer.length });

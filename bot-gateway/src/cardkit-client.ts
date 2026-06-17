@@ -109,21 +109,39 @@ export async function closeStreaming(cardId: string, sequence: number): Promise<
 }
 
 /** After close streaming: update header to "完成" (green) via full card PUT.
- *  Spike confirmed: full PUT replaces the entire body, so we must carry the
- *  final conclusion content along with the new header. */
-export async function finalizeHeader(cardId: string, conclusion: string): Promise<void> {
+ *  PUT body = { card: { type, data }, sequence } — full replace, must carry body. */
+export async function finalizeCard(
+  cardId: string,
+  conclusion: string,
+  reasoning: string,
+  sequence: number,
+): Promise<void> {
   const card = {
     schema: "2.0",
-    config: { update_multi: true, streaming_mode: false },
+    config: { update_multi: true },
     header: {
       title: { tag: "plain_text", content: "回答完成" },
       template: "green",
       ud_icon: { tag: "standard_icon", token: "ai-lib_outlined" },
     },
-    body: { elements: [{ tag: "markdown", content: conclusion, element_id: "conclusion" }] },
+    body: {
+      elements: [
+        { tag: "markdown", content: conclusion, element_id: "conclusion" },
+        // Reasoning / evidence collapsed by default (user can expand to see).
+        ...(reasoning
+          ? [{
+              tag: "collapsible_panel",
+              expanded: false,
+              header: { title: { tag: "plain_text", content: "推理过程" } },
+              vertical_spacing: "8px",
+              elements: [{ tag: "markdown", content: reasoning }],
+            }]
+          : []),
+      ],
+    },
   };
-  const data = JSON.stringify({ type: "card_json", data: JSON.stringify(card) });
-  await larkApi("PUT", `/open-apis/cardkit/v1/cards/${cardId}`, data);
+  const body = JSON.stringify({ card: { type: "card_json", data: JSON.stringify(card) }, sequence });
+  await larkApi("PUT", `/open-apis/cardkit/v1/cards/${cardId}`, body);
 }
 
 /** After close streaming: append follow-up buttons (追问 / 转研发). */
