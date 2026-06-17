@@ -31,7 +31,7 @@ export function buildCreateCardBody(opts: { title: string }): string {
       },
     },
     header: { title: { tag: "plain_text", content: opts.title }, template: "blue" },
-    body: { elements: [{ tag: "markdown", content: "", element_id: "conclusion" }] },
+    body: { elements: [{ tag: "markdown", content: "正在分析…", element_id: "conclusion" }] },
   };
   return JSON.stringify({ type: "card_json", data: JSON.stringify(card) });
 }

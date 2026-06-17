@@ -23,6 +23,7 @@ import { fromNodeProviderChain } from "@aws-sdk/credential-providers";
 import { invokeRuntimeStreaming } from "./sigv4";
 import { processEventLine } from "./index-core";
 import { createCard, updateContent, closeStreaming, buildSendCardContent } from "./cardkit-client";
+import { removeReaction } from "./reaction";
 import type { InvokeFn } from "./handle-event";
 
 const REGION = process.env.AWS_REGION ?? "ap-northeast-1";
@@ -33,6 +34,10 @@ function log(obj: Record<string, unknown>): void {
   console.log(JSON.stringify({ ts: new Date().toISOString(), ...obj }));
 }
 
+// Message-level dedup: prevents double-processing on Feishu re-delivery after
+// a gateway restart (event_id dedup map is in-memory and gets cleared).
+const processedMessages = new Set<string>();
+
 /** Streaming invoke: creates the card immediately (fast first render), then
  *  updates it as text arrives from the agent, and closes streaming at the end. */
 async function streamingCardInvoke(
@@ -41,7 +46,12 @@ async function streamingCardInvoke(
   messageId: string,
   creds: { accessKeyId: string; secretAccessKey: string; sessionToken?: string },
 ): Promise<void> {
+  // Guard: don't process the same message_id twice (covers re-delivery after restart).
+  if (processedMessages.has(messageId)) return;
+  processedMessages.add(messageId);
+
   // 1. Create streaming card + send it immediately (user sees card in <2s).
+  //    Card starts with "正在分析…" + streaming_mode=true → Feishu shows "生成中" badge.
   const cardId = await createCard("source-truth");
   const sendChild = spawn(
     "lark-cli",
@@ -54,6 +64,9 @@ async function streamingCardInvoke(
     sendChild.on("error", rej);
   });
   log({ event: "card_sent", message: messageId, card: cardId });
+
+  // Remove the "processing" reaction now that the card is visible.
+  removeReaction(messageId);
 
   // 2. Stream the agent's answer; update card content incrementally.
   let seq = 1;
