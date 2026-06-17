@@ -114,15 +114,23 @@ export async function invokeRuntimeStreaming(
   p: InvokeParams,
   opts: SignOptions,
   onChunk: (conclusionSoFar: string, narrations: string[]) => void,
-): Promise<{ status: number; answer: string; steps: string[] }> {
+  signal?: AbortSignal,
+): Promise<{ status: number; answer: string; steps: string[]; aborted: boolean }> {
   const signed = await signInvoke(buildInvokeRequest(p), opts);
-  const res = await fetch(`https://${signed.hostname}${signed.path}`, {
-    method: signed.method,
-    headers: signed.headers,
-    body: signed.body,
-  });
+  let res: Response;
+  try {
+    res = await fetch(`https://${signed.hostname}${signed.path}`, {
+      method: signed.method,
+      headers: signed.headers,
+      body: signed.body,
+      signal,
+    });
+  } catch (e) {
+    if (signal?.aborted) return { status: 200, answer: "", steps: [], aborted: true };
+    throw e;
+  }
   if (res.status !== 200 || !res.body) {
-    return { status: res.status, answer: await res.text(), steps: [] };
+    return { status: res.status, answer: await res.text(), steps: [], aborted: false };
   }
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
@@ -153,23 +161,30 @@ export async function invokeRuntimeStreaming(
     // thinking / tool_result: ignored.
   };
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buf += decoder.decode(value, { stream: true });
-    let nl: number;
-    while ((nl = buf.indexOf("\n")) >= 0) {
-      const line = buf.slice(0, nl).trim();
-      buf = buf.slice(nl + 1);
-      if (line.startsWith("data:")) {
-        const jsonStr = line.slice(5).trim();
-        if (jsonStr.startsWith("{")) processEvent(jsonStr);
+  let aborted = false;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let nl: number;
+      while ((nl = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, nl).trim();
+        buf = buf.slice(nl + 1);
+        if (line.startsWith("data:")) {
+          const jsonStr = line.slice(5).trim();
+          if (jsonStr.startsWith("{")) processEvent(jsonStr);
+        }
       }
+      // Mid-stream: newest text block is the provisional conclusion, the rest
+      // (before it) are narrations.
+      const conclusionSoFar = texts.length > 0 ? texts[texts.length - 1] : "";
+      onChunk(conclusionSoFar, texts.slice(0, -1));
     }
-    // Mid-stream: newest text block is the provisional conclusion, the rest
-    // (before it) are narrations.
-    const conclusionSoFar = texts.length > 0 ? texts[texts.length - 1] : "";
-    onChunk(conclusionSoFar, texts.slice(0, -1));
+  } catch (e) {
+    // User pressed 停止 → fetch/read aborted. Keep whatever we have so far.
+    if (signal?.aborted) aborted = true;
+    else throw e;
   }
   // Flush any trailing buffered line.
   if (buf.trim().startsWith("data:")) {
@@ -179,5 +194,5 @@ export async function invokeRuntimeStreaming(
 
   const answer = texts.length > 0 ? texts[texts.length - 1] : "";
   const steps = texts.slice(0, -1);
-  return { status: res.status, answer, steps };
+  return { status: res.status, answer, steps, aborted };
 }
