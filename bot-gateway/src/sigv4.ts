@@ -168,7 +168,7 @@ export async function invokeRuntimeStreaming(
   }
 
   const reasoning = toolSteps.length > 0
-    ? "**取证步骤：**\n" + toolSteps.map((s) => `- ${s}`).join("\n")
+    ? "**分析步骤：**\n" + toolSteps.map((s) => `- ${s}`).join("\n")
     : "";
   return { status: res.status, answer, reasoning };
 }

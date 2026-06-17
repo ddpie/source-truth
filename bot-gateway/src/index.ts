@@ -25,7 +25,7 @@ import { spawn } from "node:child_process";
 import { fromNodeProviderChain } from "@aws-sdk/credential-providers";
 
 import { invokeRuntimeStreaming } from "./sigv4";
-import { createCard, updateContent, closeStreaming, finalizeCard, appendFooter, buildSendCardContent, buildFollowUpToast, disableFollowUpButton } from "./cardkit-client";
+import { createCard, updateContent, closeStreaming, finalizeCard, appendFooter, buildSendCardContent, disableFollowUpButton } from "./cardkit-client";
 import { rememberCard, lookupCard } from "./card-registry";
 import { removeReaction } from "./reaction";
 import { redactSensitive } from "./redact";
@@ -114,7 +114,7 @@ async function streamingCardInvoke(
       const display = textSoFar.length > 0
         ? redactSensitive(textSoFar)
         : latestTool
-          ? `*正在取证：${latestTool}*`
+          ? `*正在分析：${latestTool}*`
           : "正在分析…";
       seq++;
       updateContent(cardId, display, seq).catch(() => {});
@@ -218,9 +218,7 @@ async function main(): Promise<void> {
             void disableFollowUpButton(cardId, value.eid, value.text, seq)
               .catch((e) => log({ event: "disable_button_error", error: String(e) }));
           }
-          // Immediate visual feedback: toast tells the user which button they
-          // clicked (must return within 3s; the answer card follows async).
-          return buildFollowUpToast(value.text);
+          // No toast — the in-place button disable (✓ + greyed) is feedback enough.
         }
       } catch { /* best-effort */ }
       return {};

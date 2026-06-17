@@ -39,7 +39,6 @@ export function buildCreateCardBody(opts?: { summary?: string; followUp?: boolea
     header: {
       title: { tag: "plain_text", content: title },
       template: "blue",
-      icon: { tag: "standard_icon", token: "ai-lib_outlined" },
     },
     body: { elements: [{ tag: "markdown", content: "正在分析…", element_id: "conclusion" }] },
   };
@@ -67,13 +66,6 @@ export function buildCloseStreamingBody(sequence: number): string {
 
 export function buildSendCardContent(cardId: string): string {
   return JSON.stringify({ type: "card", data: { card_id: cardId } });
-}
-
-/** card.action.trigger response toast — immediate feedback naming the clicked
- *  follow-up question (returned synchronously within Feishu's 3s window). */
-export function buildFollowUpToast(question: string): { toast: { type: string; content: string } } {
-  const q = question.length > 50 ? `${question.slice(0, 50)}…` : question;
-  return { toast: { type: "info", content: `正在追问：${q}` } };
 }
 
 // ── lark-cli runners (integration) ───────────────────────────────────────────
@@ -142,7 +134,6 @@ export async function finalizeCard(
     header: {
       title: { tag: "plain_text", content: finalizeTitle(followUp) },
       template: "green",
-      icon: { tag: "standard_icon", token: "ai-lib_outlined" },
     },
     body: {
       elements: [
@@ -157,7 +148,7 @@ export async function finalizeCard(
               border: { color: "grey", corner_radius: "5px" },
               vertical_spacing: "8px",
               header: {
-                title: { tag: "markdown", content: "**🔍 取证过程**" },
+                title: { tag: "markdown", content: "**🔍 分析过程**" },
                 vertical_align: "center",
                 padding: "4px 0px 4px 8px",
                 width: "auto_when_fold",
