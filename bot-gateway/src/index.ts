@@ -26,8 +26,9 @@ import { createCard, updateContent, closeStreaming, finalizeCard, appendFooter, 
 import { removeReaction } from "./reaction";
 import { redactSensitive } from "./redact";
 import { extractFollowUps } from "./extract-followups";
-import { startCardCallbackListener } from "./card-callback";
-import { getSessionId } from "./session-map";
+// Card callback via SDK WSClient deferred (connection issue to root-cause).
+// import { startCardCallbackListener } from "./card-callback";
+import { getSessionId as _getSessionId } from "./session-map";
 import type { InvokeFn } from "./handle-event";
 
 const REGION = process.env.AWS_REGION ?? "ap-northeast-1";
@@ -135,43 +136,12 @@ async function main(): Promise<void> {
 
   log({ event: "gateway_start", region: REGION, eventKey: EVENT_KEY });
 
-  // Card action callback listener: when user clicks a follow-up button,
-  // treat it as a new question (triggers a new streaming card reply).
-  const APP_ID = process.env.FEISHU_APP_ID ?? "";
-  const APP_SECRET = process.env.FEISHU_APP_SECRET ?? "";
-  if (APP_ID && APP_SECRET) {
-    startCardCallbackListener(APP_ID, APP_SECRET, {
-      onFollowUp: (chatId, question, _messageId) => {
-        log({ event: "follow_up_clicked", chatId, question });
-        // Synthesize a fake message_id (the reply will go to the chat, not a specific message).
-        // Use lark-cli to send the follow-up question as a bot message, then the event
-        // loop will pick it up naturally. Simplest approach: just call streamingCardInvoke
-        // directly with a synthetic session.
-        const sessionId = getSessionId(chatId);
-        // We need a message_id to reply to; use the chat_id to send a new message instead.
-        // For now, spawn a new message in the chat as the bot, which will appear as a fresh card.
-        void streamingCardInvoke(sessionId, question, { chatId }, {
-          accessKeyId: creds.accessKeyId,
-          secretAccessKey: creds.secretAccessKey,
-          sessionToken: creds.sessionToken,
-        }).catch((e) => log({ event: "follow_up_error", error: String(e) }));
-      },
-    });
-    log({ event: "card_callback_listener_started" });
-  }
+  // Event source: prefer Feishu SDK WSClient (handles IM events + card callbacks
+  // in one connection). Falls back to lark-cli event consume if no credentials.
+  // const APP_ID = process.env.FEISHU_APP_ID ?? "";
+  // const APP_SECRET = process.env.FEISHU_APP_SECRET ?? "";
 
-  // lark-cli event consume: read-only long connection, NDJSON on stdout.
-  const child = spawn("lark-cli", ["event", "consume", EVENT_KEY, "--as", "bot"], {
-    stdio: ["pipe", "pipe", "inherit"],
-  });
-  const stopChild = () => {
-    if (!child.killed) child.kill("SIGTERM");
-  };
-  process.on("SIGINT", stopChild);
-  process.on("SIGTERM", stopChild);
-
-  const rl = createInterface({ input: child.stdout });
-  rl.on("line", (line) => {
+  const handleEvent = (line: string) => {
     void processEventLine(line, { invoke })
       .then(async (res) => {
         if (res?.handled && res.messageId && res.sessionId) {
@@ -183,9 +153,6 @@ async function main(): Promise<void> {
               sessionToken: creds.sessionToken,
             });
           } catch (cardErr) {
-            // Fallback: if CardKit fails (API 400, rate limit, etc.), reply
-            // with plain markdown so the user always gets an answer. Learned
-            // from OpenClaw issue #43322 (card failure → 13h session lock).
             log({ event: "card_fallback", error: String(cardErr) });
             const { sendReply } = await import("./reply.js");
             await sendReply({ messageId: res.messageId, answer: `⚠️ 卡片渲染失败，纯文本回复：\n\n${prompt}` }).catch(() => {});
@@ -194,12 +161,19 @@ async function main(): Promise<void> {
         }
       })
       .catch((err) => log({ event: "handle_error", error: String(err) }));
-  });
+  };
 
-  child.on("exit", (code) => {
-    log({ event: "consume_exit", code });
-    process.exit(code ?? 0);
+  // Use lark-cli event consume (reliable, proven). Card action callbacks via
+  // SDK WSClient didn't connect reliably — deferred until root-caused.
+  const child = spawn("lark-cli", ["event", "consume", EVENT_KEY, "--as", "bot"], {
+    stdio: ["pipe", "pipe", "inherit"],
   });
+  const stopChild = () => { if (!child.killed) child.kill("SIGTERM"); };
+  process.on("SIGINT", stopChild);
+  process.on("SIGTERM", stopChild);
+  const rl = createInterface({ input: child.stdout });
+  rl.on("line", handleEvent);
+  child.on("exit", (code) => { log({ event: "consume_exit", code }); process.exit(code ?? 0); });
 }
 
 if (require.main === module) {
