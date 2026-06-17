@@ -16,7 +16,6 @@
  */
 
 import { spawn } from "node:child_process";
-import { createInterface } from "node:readline";
 
 import { fromNodeProviderChain } from "@aws-sdk/credential-providers";
 
@@ -26,9 +25,6 @@ import { createCard, updateContent, closeStreaming, finalizeCard, appendFooter, 
 import { removeReaction } from "./reaction";
 import { redactSensitive } from "./redact";
 import { extractFollowUps } from "./extract-followups";
-// Card callback via SDK WSClient deferred (connection issue to root-cause).
-// import { startCardCallbackListener } from "./card-callback";
-import { getSessionId as _getSessionId } from "./session-map";
 import type { InvokeFn } from "./handle-event";
 
 const REGION = process.env.AWS_REGION ?? "ap-northeast-1";
@@ -138,8 +134,6 @@ async function main(): Promise<void> {
 
   // Event source: prefer Feishu SDK WSClient (handles IM events + card callbacks
   // in one connection). Falls back to lark-cli event consume if no credentials.
-  // const APP_ID = process.env.FEISHU_APP_ID ?? "";
-  // const APP_SECRET = process.env.FEISHU_APP_SECRET ?? "";
 
   const handleEvent = (line: string) => {
     void processEventLine(line, { invoke })
@@ -163,14 +157,16 @@ async function main(): Promise<void> {
       .catch((err) => log({ event: "handle_error", error: String(err) }));
   };
 
-  // Use lark-cli event consume (reliable, proven). Card action callbacks via
-  // SDK WSClient didn't connect reliably — deferred until root-caused.
+  // lark-cli event consume: reliable with this app. SDK WSClient connects
+  // (ws client ready) but never delivers events — same known issue as OpenClaw
+  // #53431. Card action callbacks deferred until SDK issue is resolved.
   const child = spawn("lark-cli", ["event", "consume", EVENT_KEY, "--as", "bot"], {
     stdio: ["pipe", "pipe", "inherit"],
   });
   const stopChild = () => { if (!child.killed) child.kill("SIGTERM"); };
   process.on("SIGINT", stopChild);
   process.on("SIGTERM", stopChild);
+  const { createInterface } = await import("node:readline");
   const rl = createInterface({ input: child.stdout });
   rl.on("line", handleEvent);
   child.on("exit", (code) => { log({ event: "consume_exit", code }); process.exit(code ?? 0); });
