@@ -25,6 +25,9 @@ import { processEventLine } from "./index-core";
 import { createCard, updateContent, closeStreaming, finalizeCard, appendFooter, buildSendCardContent } from "./cardkit-client";
 import { removeReaction } from "./reaction";
 import { redactSensitive } from "./redact";
+import { extractFollowUps } from "./extract-followups";
+import { startCardCallbackListener } from "./card-callback";
+import { getSessionId } from "./session-map";
 import type { InvokeFn } from "./handle-event";
 
 const REGION = process.env.AWS_REGION ?? "ap-northeast-1";
@@ -44,30 +47,29 @@ const processedMessages = new Set<string>();
 async function streamingCardInvoke(
   sessionId: string,
   prompt: string,
-  messageId: string,
+  target: { messageId: string } | { chatId: string },
   creds: { accessKeyId: string; secretAccessKey: string; sessionToken?: string },
 ): Promise<void> {
-  // Guard: don't process the same message_id twice (covers re-delivery after restart).
-  if (processedMessages.has(messageId)) return;
-  processedMessages.add(messageId);
+  const targetKey = "messageId" in target ? target.messageId : target.chatId;
+  if (processedMessages.has(targetKey)) return;
+  processedMessages.add(targetKey);
 
-  // 1. Create streaming card + send it immediately (user sees card in <2s).
-  //    Card starts with "正在分析…" + streaming_mode=true → Feishu shows "生成中" badge.
-  const cardId = await createCard(prompt); // prompt → chat-list preview summary
-  const sendChild = spawn(
-    "lark-cli",
-    ["im", "+messages-reply", "--as", "bot", "--message-id", messageId,
-     "--msg-type", "interactive", "--content", buildSendCardContent(cardId)],
-    { stdio: ["ignore", "ignore", "inherit"] },
-  );
+  // 1. Create streaming card + send it immediately.
+  const cardId = await createCard(prompt);
+  const sendArgs = "messageId" in target
+    ? ["im", "+messages-reply", "--as", "bot", "--message-id", target.messageId,
+       "--msg-type", "interactive", "--content", buildSendCardContent(cardId)]
+    : ["im", "+messages-send", "--as", "bot", "--chat-id", target.chatId,
+       "--msg-type", "interactive", "--content", buildSendCardContent(cardId)];
+  const sendChild = spawn("lark-cli", sendArgs, { stdio: ["ignore", "ignore", "inherit"] });
   await new Promise<void>((res, rej) => {
     sendChild.on("exit", (c) => (c === 0 ? res() : rej(new Error(`send card exited ${c}`))));
     sendChild.on("error", rej);
   });
-  log({ event: "card_sent", message: messageId, card: cardId });
+  log({ event: "card_sent", target: targetKey, card: cardId });
 
   // Remove the "processing" reaction now that the card is visible.
-  removeReaction(messageId);
+  if ("messageId" in target) removeReaction(target.messageId);
 
   // 2. Stream the agent's answer; update card content incrementally.
   //    9-minute safety timeout: close streaming gracefully before Feishu's
@@ -113,7 +115,8 @@ async function streamingCardInvoke(
   seq++;
   try { await finalizeCard(cardId, finalText, reasoning, seq); } catch { /* best-effort */ }
   seq++;
-  try { await appendFooter(cardId, seq); } catch { /* best-effort */ }
+  const followUps = extractFollowUps(finalText);
+  try { await appendFooter(cardId, seq, followUps); } catch { /* best-effort */ }
   log({ event: "card_closed", card: cardId, chars: answer.length, timedOut });
 }
 
@@ -132,6 +135,31 @@ async function main(): Promise<void> {
 
   log({ event: "gateway_start", region: REGION, eventKey: EVENT_KEY });
 
+  // Card action callback listener: when user clicks a follow-up button,
+  // treat it as a new question (triggers a new streaming card reply).
+  const APP_ID = process.env.FEISHU_APP_ID ?? "";
+  const APP_SECRET = process.env.FEISHU_APP_SECRET ?? "";
+  if (APP_ID && APP_SECRET) {
+    startCardCallbackListener(APP_ID, APP_SECRET, {
+      onFollowUp: (chatId, question, _messageId) => {
+        log({ event: "follow_up_clicked", chatId, question });
+        // Synthesize a fake message_id (the reply will go to the chat, not a specific message).
+        // Use lark-cli to send the follow-up question as a bot message, then the event
+        // loop will pick it up naturally. Simplest approach: just call streamingCardInvoke
+        // directly with a synthetic session.
+        const sessionId = getSessionId(chatId);
+        // We need a message_id to reply to; use the chat_id to send a new message instead.
+        // For now, spawn a new message in the chat as the bot, which will appear as a fresh card.
+        void streamingCardInvoke(sessionId, question, { chatId }, {
+          accessKeyId: creds.accessKeyId,
+          secretAccessKey: creds.secretAccessKey,
+          sessionToken: creds.sessionToken,
+        }).catch((e) => log({ event: "follow_up_error", error: String(e) }));
+      },
+    });
+    log({ event: "card_callback_listener_started" });
+  }
+
   // lark-cli event consume: read-only long connection, NDJSON on stdout.
   const child = spawn("lark-cli", ["event", "consume", EVENT_KEY, "--as", "bot"], {
     stdio: ["pipe", "pipe", "inherit"],
@@ -149,7 +177,7 @@ async function main(): Promise<void> {
         if (res?.handled && res.messageId && res.sessionId) {
           const prompt = res.answer ?? "";
           try {
-            await streamingCardInvoke(res.sessionId, prompt, res.messageId, {
+            await streamingCardInvoke(res.sessionId, prompt, { messageId: res.messageId }, {
               accessKeyId: creds.accessKeyId,
               secretAccessKey: creds.secretAccessKey,
               sessionToken: creds.sessionToken,

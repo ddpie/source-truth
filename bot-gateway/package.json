@@ -22,6 +22,7 @@
     "@aws-crypto/sha256-js": "^5.2.0",
     "@aws-sdk/credential-providers": "^3.1070.0",
     "@aws-sdk/signature-v4": "^3.370.0",
+    "@larksuiteoapi/node-sdk": "^1.67.0",
     "@smithy/protocol-http": "^5.5.0"
   }
 }
