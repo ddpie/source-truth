@@ -1,18 +1,23 @@
 /**
  * bot-gateway entrypoint — long-connection Feishu subscriber.
  *
- * Spawns `lark-cli event consume im.message.receive_v1` (a read-only long
- * connection; its websocket was verified reachable), reads the NDJSON event
- * stream line by line, and dispatches each line through processEventLine →
- * handleMessageEvent → the agent (SigV4 invoke of the Tokyo AgentCore runtime).
+ * Runs a single Feishu SDK WSClient long-connection that receives both IM
+ * message events (im.message.receive_v1) and card action callbacks
+ * (card.action.trigger), dispatching each through handleMessageEvent → the
+ * agent (SigV4 invoke of the Tokyo AgentCore runtime) → a streaming CardKit
+ * reply. Card follow-up buttons feed back through card.action.trigger.
  *
- * Thin shell: all logic is in index-core / handle-event / sigv4 (unit-tested).
- * The CardKit reply back to Feishu is the remaining wire-up (src/cardkit.ts
- * builds the card; sending it uses the bot identity).
+ * Must be the ONLY long-connection consumer for this app: Feishu long-connection
+ * is cluster mode and delivers each event to one random client, so a stray
+ * lark-cli event-bus daemon would steal events.
+ *
+ * Thin shell: logic lives in handle-event / sdk-event / sigv4 (unit-tested).
  *
  * Env:
- *   RUNTIME_ARN   AgentCore runtime ARN (Tokyo)
- *   AWS_REGION    default ap-northeast-1
+ *   RUNTIME_ARN         AgentCore runtime ARN (Tokyo)
+ *   AWS_REGION          default ap-northeast-1
+ *   FEISHU_APP_ID       app id (for the SDK long-connection)
+ *   FEISHU_APP_SECRET   app secret
  */
 
 import { spawn } from "node:child_process";
@@ -20,16 +25,18 @@ import { spawn } from "node:child_process";
 import { fromNodeProviderChain } from "@aws-sdk/credential-providers";
 
 import { invokeRuntimeStreaming } from "./sigv4";
-import { processEventLine } from "./index-core";
-import { createCard, updateContent, closeStreaming, finalizeCard, appendFooter, buildSendCardContent } from "./cardkit-client";
+import { createCard, updateContent, closeStreaming, finalizeCard, appendFooter, buildSendCardContent, buildFollowUpToast } from "./cardkit-client";
 import { removeReaction } from "./reaction";
 import { redactSensitive } from "./redact";
 import { extractFollowUps } from "./extract-followups";
-import type { InvokeFn } from "./handle-event";
+import { handleMessageEvent, type InvokeFn } from "./handle-event";
+import { sdkEventToImEvent } from "./sdk-event";
+import { getSessionId } from "./session-map";
 
 const REGION = process.env.AWS_REGION ?? "ap-northeast-1";
 const RUNTIME_ARN = process.env.RUNTIME_ARN ?? "";
-const EVENT_KEY = "im.message.receive_v1";
+const APP_ID = process.env.FEISHU_APP_ID ?? "";
+const APP_SECRET = process.env.FEISHU_APP_SECRET ?? "";
 
 function log(obj: Record<string, unknown>): void {
   console.log(JSON.stringify({ ts: new Date().toISOString(), ...obj }));
@@ -48,11 +55,19 @@ async function streamingCardInvoke(
   creds: { accessKeyId: string; secretAccessKey: string; sessionToken?: string },
 ): Promise<void> {
   const targetKey = "messageId" in target ? target.messageId : target.chatId;
-  if (processedMessages.has(targetKey)) return;
-  processedMessages.add(targetKey);
+  // Dedup only IM messages (Feishu re-delivers them on restart). Follow-up
+  // clicks (chatId target) are deliberate user actions — never dedup them,
+  // or a second follow-up in the same chat would be silently dropped.
+  if ("messageId" in target) {
+    if (processedMessages.has(target.messageId)) return;
+    processedMessages.add(target.messageId);
+  }
 
-  // 1. Create streaming card + send it immediately.
-  const cardId = await createCard(prompt);
+  // 1. Create streaming card + send it immediately. Follow-up cards carry a
+  //    "↳ 追问" summary marker so the chat history shows where they came from.
+  const isFollowUp = "chatId" in target;
+  const summary = isFollowUp ? `↳ 追问：${prompt}` : prompt;
+  const cardId = await createCard(summary, isFollowUp);
   const sendArgs = "messageId" in target
     ? ["im", "+messages-reply", "--as", "bot", "--message-id", target.messageId,
        "--msg-type", "interactive", "--content", buildSendCardContent(cardId)]
@@ -110,7 +125,7 @@ async function streamingCardInvoke(
 
   // 4. Finalize: header → green "回答完成" + reasoning collapsed + footer.
   seq++;
-  try { await finalizeCard(cardId, finalText, reasoning, seq); } catch { /* best-effort */ }
+  try { await finalizeCard(cardId, finalText, reasoning, seq, isFollowUp); } catch { /* best-effort */ }
   seq++;
   const followUps = extractFollowUps(finalText);
   try { await appendFooter(cardId, seq, followUps); } catch { /* best-effort */ }
@@ -130,46 +145,66 @@ async function main(): Promise<void> {
     return prompt;
   };
 
-  log({ event: "gateway_start", region: REGION, eventKey: EVENT_KEY });
+  log({ event: "gateway_start", region: REGION });
 
-  // Event source: prefer Feishu SDK WSClient (handles IM events + card callbacks
-  // in one connection). Falls back to lark-cli event consume if no credentials.
-
-  const handleEvent = (line: string) => {
-    void processEventLine(line, { invoke })
-      .then(async (res) => {
-        if (res?.handled && res.messageId && res.sessionId) {
-          const prompt = res.answer ?? "";
-          try {
-            await streamingCardInvoke(res.sessionId, prompt, { messageId: res.messageId }, {
-              accessKeyId: creds.accessKeyId,
-              secretAccessKey: creds.secretAccessKey,
-              sessionToken: creds.sessionToken,
-            });
-          } catch (cardErr) {
-            log({ event: "card_fallback", error: String(cardErr) });
-            const { sendReply } = await import("./reply.js");
-            await sendReply({ messageId: res.messageId, answer: `⚠️ 卡片渲染失败，纯文本回复：\n\n${prompt}` }).catch(() => {});
-          }
-          log({ event: "replied", message: res.messageId, session: res.sessionId });
-        }
-      })
-      .catch((err) => log({ event: "handle_error", error: String(err) }));
+  // After handleMessageEvent decides to answer, drive the streaming card.
+  const replyWithCard = async (res: Awaited<ReturnType<typeof handleMessageEvent>>) => {
+    if (!res?.handled || !res.messageId || !res.sessionId) return;
+    const prompt = res.answer ?? "";
+    try {
+      await streamingCardInvoke(res.sessionId, prompt, { messageId: res.messageId }, {
+        accessKeyId: creds.accessKeyId,
+        secretAccessKey: creds.secretAccessKey,
+        sessionToken: creds.sessionToken,
+      });
+    } catch (cardErr) {
+      log({ event: "card_fallback", error: String(cardErr) });
+      const { sendReply } = await import("./reply.js");
+      await sendReply({ messageId: res.messageId, answer: `⚠️ 卡片渲染失败，纯文本回复：\n\n${prompt}` }).catch(() => {});
+    }
+    log({ event: "replied", message: res.messageId, session: res.sessionId });
   };
 
-  // lark-cli event consume: reliable with this app. SDK WSClient connects
-  // (ws client ready) but never delivers events — same known issue as OpenClaw
-  // #53431. Card action callbacks deferred until SDK issue is resolved.
-  const child = spawn("lark-cli", ["event", "consume", EVENT_KEY, "--as", "bot"], {
-    stdio: ["pipe", "pipe", "inherit"],
+  // Single Feishu SDK WSClient long-connection: IM events + card action
+  // callbacks. (Must be the ONLY consumer for this app — Feishu long-connection
+  // is cluster mode and delivers each event to just one random client, so a
+  // stray lark-cli event-bus daemon would steal events. Verified live.)
+  if (!APP_ID || !APP_SECRET) throw new Error("FEISHU_APP_ID and FEISHU_APP_SECRET required");
+  const lark = await import("@larksuiteoapi/node-sdk");
+  const dispatcher = new lark.EventDispatcher({}).register({
+    "im.message.receive_v1": (data: unknown) => {
+      const event = sdkEventToImEvent(data);
+      if (event) {
+        void handleMessageEvent(event, { invoke })
+          .then(replyWithCard)
+          .catch((err) => log({ event: "handle_error", error: String(err) }));
+      }
+      return {};
+    },
+    "card.action.trigger": (data: unknown) => {
+      try {
+        const d = data as { action?: { value?: { action?: string; text?: string } }; context?: { open_chat_id?: string } };
+        const value = d?.action?.value;
+        const chatId = d?.context?.open_chat_id ?? "";
+        if (value?.action === "follow_up" && value.text && chatId) {
+          log({ event: "follow_up_clicked", chatId, question: value.text });
+          const sessionId = getSessionId(chatId);
+          void streamingCardInvoke(sessionId, value.text, { chatId }, {
+            accessKeyId: creds.accessKeyId,
+            secretAccessKey: creds.secretAccessKey,
+            sessionToken: creds.sessionToken,
+          }).catch((e) => log({ event: "follow_up_error", error: String(e) }));
+          // Immediate visual feedback: toast tells the user which button they
+          // clicked (must return within 3s; the answer card follows async).
+          return buildFollowUpToast(value.text);
+        }
+      } catch { /* best-effort */ }
+      return {};
+    },
   });
-  const stopChild = () => { if (!child.killed) child.kill("SIGTERM"); };
-  process.on("SIGINT", stopChild);
-  process.on("SIGTERM", stopChild);
-  const { createInterface } = await import("node:readline");
-  const rl = createInterface({ input: child.stdout });
-  rl.on("line", handleEvent);
-  child.on("exit", (code) => { log({ event: "consume_exit", code }); process.exit(code ?? 0); });
+  const ws = new lark.WSClient({ appId: APP_ID, appSecret: APP_SECRET, loggerLevel: lark.LoggerLevel.warn });
+  ws.start({ eventDispatcher: dispatcher });
+  log({ event: "sdk_wsclient_started" });
 }
 
 if (require.main === module) {

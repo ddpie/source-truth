@@ -18,9 +18,12 @@ import { spawn } from "node:child_process";
 
 // ── pure request builders (unit-tested) ──────────────────────────────────────
 
-export function buildCreateCardBody(opts?: { summary?: string }): string {
+export function buildCreateCardBody(opts?: { summary?: string; followUp?: boolean }): string {
   // summary.content customizes the chat-list preview (default would be "[生成中...]").
   const summary = opts?.summary ? `💬 ${opts.summary.slice(0, 40)}` : "source-truth 正在回答…";
+  // Follow-up cards (from a clicked button) get a distinct header so the chat
+  // history clearly shows "this card answers a follow-up question".
+  const title = opts?.followUp ? "↳ 正在追问…" : "正在思考…";
   const card = {
     schema: "2.0",
     config: {
@@ -34,7 +37,7 @@ export function buildCreateCardBody(opts?: { summary?: string }): string {
       },
     },
     header: {
-      title: { tag: "plain_text", content: "正在思考…" },
+      title: { tag: "plain_text", content: title },
       template: "blue",
       icon: { tag: "standard_icon", token: "ai-lib_outlined" },
     },
@@ -66,6 +69,13 @@ export function buildSendCardContent(cardId: string): string {
   return JSON.stringify({ type: "card", data: { card_id: cardId } });
 }
 
+/** card.action.trigger response toast — immediate feedback naming the clicked
+ *  follow-up question (returned synchronously within Feishu's 3s window). */
+export function buildFollowUpToast(question: string): { toast: { type: string; content: string } } {
+  const q = question.length > 50 ? `${question.slice(0, 50)}…` : question;
+  return { toast: { type: "info", content: `正在追问：${q}` } };
+}
+
 // ── lark-cli runners (integration) ───────────────────────────────────────────
 
 function larkApi(method: string, path: string, data: string): Promise<unknown> {
@@ -94,8 +104,8 @@ function larkApi(method: string, path: string, data: string): Promise<unknown> {
 }
 
 /** Create a streaming card; returns its card_id. summary = chat-list preview. */
-export async function createCard(summary?: string): Promise<string> {
-  const resp = (await larkApi("POST", "/open-apis/cardkit/v1/cards", buildCreateCardBody({ summary }))) as {
+export async function createCard(summary?: string, followUp?: boolean): Promise<string> {
+  const resp = (await larkApi("POST", "/open-apis/cardkit/v1/cards", buildCreateCardBody({ summary, followUp }))) as {
     data: { card_id: string };
   };
   return resp.data.card_id;
@@ -111,6 +121,12 @@ export async function closeStreaming(cardId: string, sequence: number): Promise<
   await larkApi("PATCH", settingsPath(cardId), buildCloseStreamingBody(sequence));
 }
 
+/** Completed-card header title — keeps the follow-up marker so the chat
+ *  history still shows a finished follow-up card as a follow-up. */
+export function finalizeTitle(followUp?: boolean): string {
+  return followUp ? "↳ 追问 · 已回答" : "回答完成";
+}
+
 /** After close streaming: update header to "完成" (green) via full card PUT.
  *  PUT body = { card: { type, data }, sequence } — full replace, must carry body. */
 export async function finalizeCard(
@@ -118,12 +134,13 @@ export async function finalizeCard(
   conclusion: string,
   reasoning: string,
   sequence: number,
+  followUp?: boolean,
 ): Promise<void> {
   const card = {
     schema: "2.0",
     config: { update_multi: true },
     header: {
-      title: { tag: "plain_text", content: "回答完成" },
+      title: { tag: "plain_text", content: finalizeTitle(followUp) },
       template: "green",
       icon: { tag: "standard_icon", token: "ai-lib_outlined" },
     },
