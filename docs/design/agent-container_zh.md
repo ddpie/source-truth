@@ -69,8 +69,8 @@ MVP 用 `agentcore` toolkit（`configure --disable-memory` → `deploy --env CLA
    `agent_lib.build_options_dict` 已据此实现并与真 SDK 一致性测试通过。
 2. **路径对齐**：codegraph-server 0.18.5 真实返回 `./`-前缀相对路径（workspace 用 `.` 时）或 workspace 绝对路径；
    `index-service/path_align.py`（`to_container_path` + `format_location`）已据真实输出实现并测试通过。
-3. **EFS 挂载**：真实挂载 `/mnt/repo` 成功，agent 真读到源码。**仅东京支持**（us-east-1 服务端返回
-   `SDK_UNKNOWN_MEMBER`）；须 botocore≥1.43、`networkMode=VPC` + NAT 出站；模型用 `global.anthropic.*`。
+3. **EFS 挂载**：东京（ap-northeast-1）真实挂载 `/mnt/repo` 成功，agent 真读到源码。须 botocore≥1.43
+   （含 `efsAccessPoint` 模型）、`networkMode=VPC` + NAT 出站；模型用 `global.anthropic.*`。
 4. **真实 invoke**：`InvokeAgentRuntime`（`CLAUDE_CODE_USE_BEDROCK=1`）跑通，返回真实流式响应。
 
 **剩余待验证：** EFS 读性能 / 冷启动延迟 / CodeGraph 召回率 / 流式卡片频控对接 / index-service 桥的 HTTP 半边常驻部署。
