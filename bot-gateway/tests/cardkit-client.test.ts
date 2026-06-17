@@ -11,6 +11,8 @@ import {
   settingsPath,
   buildCloseStreamingBody,
   buildSendCardContent,
+  buildFollowUpToast,
+  finalizeTitle,
 } from "../src/cardkit-client";
 
 describe("buildCreateCardBody", () => {
@@ -57,5 +59,40 @@ describe("send card as IM content", () => {
     const content = JSON.parse(buildSendCardContent("7652206316581309633"));
     expect(content.type).toBe("card");
     expect(content.data.card_id).toBe("7652206316581309633");
+  });
+});
+
+describe("follow-up card header", () => {
+  it("marks the header so a follow-up card is distinguishable in chat history", () => {
+    const body = JSON.parse(buildCreateCardBody({ summary: "Q", followUp: true }));
+    const card = JSON.parse(body.data);
+    expect(card.header.title.content).toContain("追问");
+  });
+
+  it("uses the normal header for a fresh question", () => {
+    const body = JSON.parse(buildCreateCardBody({ summary: "Q" }));
+    const card = JSON.parse(body.data);
+    expect(card.header.title.content).toBe("正在思考…");
+  });
+
+  it("finalizeTitle keeps the follow-up marker on the completed card", () => {
+    expect(finalizeTitle(false)).toBe("回答完成");
+    expect(finalizeTitle(true)).toContain("追问");
+  });
+});
+
+describe("buildFollowUpToast", () => {
+  it("returns an info toast naming the clicked question", () => {
+    const toast = buildFollowUpToast("战斗伤害怎么算？");
+    expect(toast.toast.type).toBe("info");
+    expect(toast.toast.content).toContain("战斗伤害怎么算？");
+  });
+
+  it("truncates a very long question so the toast stays readable", () => {
+    const long = "这是一个非常非常非常长的追问问题".repeat(10);
+    const toast = buildFollowUpToast(long);
+    // Toast content should not blow up; cap around 50 chars + prefix/ellipsis.
+    expect(toast.toast.content.length).toBeLessThan(70);
+    expect(toast.toast.content).toContain("…");
   });
 });
