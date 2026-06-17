@@ -34,23 +34,46 @@ def find_existing(client, name: str) -> str | None:
 
 
 def deploy(
-    *, region: str, role_arn: str, image: str, name: str, model: str
+    *,
+    region: str,
+    role_arn: str,
+    image: str,
+    name: str,
+    model: str,
+    subnets: list[str] | None = None,
+    security_groups: list[str] | None = None,
+    efs_access_point_arn: str | None = None,
+    efs_mount_path: str = "/mnt/repo",
 ) -> tuple[str, str]:
     client = boto3.client("bedrock-agentcore-control", region_name=region)
     artifact = {"containerConfiguration": {"containerUri": image}}
-    net = {"networkMode": "PUBLIC"}
     env = {"CLAUDE_CODE_USE_BEDROCK": "1", "ANTHROPIC_MODEL": model}
+
+    # Network: VPC mode if subnets provided, else PUBLIC.
+    if subnets and security_groups:
+        net = {"networkMode": "VPC", "networkModeConfig": {
+            "securityGroups": security_groups, "subnets": subnets,
+        }}
+    else:
+        net = {"networkMode": "PUBLIC"}
+
+    # Filesystem: session storage + optional EFS.
+    fs: list[dict] = [{"sessionStorage": {"mountPath": "/mnt/workspace"}}]
+    if efs_access_point_arn:
+        fs.append({"efsAccessPoint": {"accessPointArn": efs_access_point_arn, "mountPath": efs_mount_path}})
+
+    common = dict(
+        roleArn=role_arn,
+        networkConfiguration=net,
+        agentRuntimeArtifact=artifact,
+        filesystemConfigurations=fs,
+        environmentVariables=env,
+    )
 
     existing = find_existing(client, name)
     if existing:
         print(f"  updating existing runtime {existing}", file=sys.stderr)
-        client.update_agent_runtime(
-            agentRuntimeId=existing,
-            roleArn=role_arn,
-            networkConfiguration=net,
-            agentRuntimeArtifact=artifact,
-            environmentVariables=env,
-        )
+        client.update_agent_runtime(agentRuntimeId=existing, **common)
         rid = existing
     else:
         print("  creating new runtime", file=sys.stderr)
@@ -60,10 +83,7 @@ def deploy(
                 resp = client.create_agent_runtime(
                     agentRuntimeName=name,
                     description="source-truth code-QA agent (MVP)",
-                    roleArn=role_arn,
-                    networkConfiguration=net,
-                    agentRuntimeArtifact=artifact,
-                    environmentVariables=env,
+                    **common,
                 )
                 rid = resp["agentRuntimeId"]
                 break
@@ -97,6 +117,10 @@ def main() -> int:
     p.add_argument("--image", required=True)
     p.add_argument("--name", default="source_truth_agent")
     p.add_argument("--model", default="global.anthropic.claude-sonnet-4-6")
+    # VPC mode (for EFS): all three must be provided together.
+    p.add_argument("--subnets", help="comma-separated subnet ids (VPC mode)")
+    p.add_argument("--security-groups", help="comma-separated security group ids")
+    p.add_argument("--efs-access-point-arn", help="EFS access point ARN to mount at /mnt/repo")
     args = p.parse_args()
 
     rid, arn = deploy(
@@ -105,6 +129,9 @@ def main() -> int:
         image=args.image,
         name=args.name,
         model=args.model,
+        subnets=args.subnets.split(",") if args.subnets else None,
+        security_groups=args.security_groups.split(",") if args.security_groups else None,
+        efs_access_point_arn=args.efs_access_point_arn,
     )
     print(f"AGENT_RUNTIME_ID={rid}")
     print(f"AGENT_RUNTIME_ARN={arn}")
