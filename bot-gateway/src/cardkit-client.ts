@@ -175,31 +175,71 @@ export async function finalizeCard(
   await larkApi("PUT", `/open-apis/cardkit/v1/cards/${cardId}`, body);
 }
 
-/** After close streaming: append follow-up question buttons (clickable!).
- *  Each button carries the question in its value; when clicked, the card
- *  callback handler feeds it back as a new user message. */
-export async function appendFooter(cardId: string, sequence: number, followUps: string[]): Promise<void> {
+/** Build the footer elements: a divider + clickable follow-up buttons. Each
+ *  button gets a stable element_id (followup_N) echoed in its value so the
+ *  click callback can disable exactly the button that was pressed. */
+export function buildFollowUpElements(followUps: string[]): unknown[] {
   const elements: unknown[] = [{ tag: "hr" }];
-
   if (followUps.length > 0) {
     elements.push({ tag: "markdown", content: "💡 **继续追问：**" });
-    for (const q of followUps.slice(0, 3)) {
+    followUps.slice(0, 3).forEach((q, i) => {
+      const eid = `followup_${i}`;
       elements.push({
         tag: "button",
+        element_id: eid,
         text: { tag: "plain_text", content: q },
         type: "default",
         size: "small",
         width: "fill",
-        value: { action: "follow_up", text: q },
+        value: { action: "follow_up", text: q, eid },
       });
-    }
+    });
   } else {
     elements.push({ tag: "markdown", content: "💡 直接在会话里继续追问即可，上下文会延续。" });
   }
+  return elements;
+}
+
+/** A disabled button marked as already-clicked (✓ prefix). Used to update the
+ *  pressed follow-up button in place after a click. Returns a JSON string
+ *  (the update-element API takes `element` as a serialized string). */
+export function buildClickedButtonElement(elementId: string, question: string): string {
+  return JSON.stringify({
+    tag: "button",
+    element_id: elementId,
+    text: { tag: "plain_text", content: `✓ ${question}` },
+    type: "primary_text",
+    size: "small",
+    width: "fill",
+    disabled: true,
+    value: { action: "follow_up_done", text: question, eid: elementId },
+  });
+}
+
+/** After close streaming: append follow-up question buttons (clickable!).
+ *  Each button carries the question in its value; when clicked, the card
+ *  callback handler feeds it back as a new user message. */
+export async function appendFooter(cardId: string, sequence: number, followUps: string[]): Promise<void> {
+  const elements = buildFollowUpElements(followUps);
 
   await larkApi("POST", `/open-apis/cardkit/v1/cards/${cardId}/elements`, JSON.stringify({
     type: "append",
     sequence,
     elements: JSON.stringify(elements),
+  }));
+}
+
+/** Update a single follow-up button in place → disabled + ✓ (clicked) state.
+ *  PUT /cards/{card_id}/elements/{element_id} with element as a JSON string +
+ *  a strictly-increasing sequence. Best-effort (visual nicety). */
+export async function disableFollowUpButton(
+  cardId: string,
+  elementId: string,
+  question: string,
+  sequence: number,
+): Promise<void> {
+  await larkApi("PUT", `/open-apis/cardkit/v1/cards/${cardId}/elements/${elementId}`, JSON.stringify({
+    element: buildClickedButtonElement(elementId, question),
+    sequence,
   }));
 }

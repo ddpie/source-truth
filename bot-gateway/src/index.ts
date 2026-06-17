@@ -25,7 +25,8 @@ import { spawn } from "node:child_process";
 import { fromNodeProviderChain } from "@aws-sdk/credential-providers";
 
 import { invokeRuntimeStreaming } from "./sigv4";
-import { createCard, updateContent, closeStreaming, finalizeCard, appendFooter, buildSendCardContent, buildFollowUpToast } from "./cardkit-client";
+import { createCard, updateContent, closeStreaming, finalizeCard, appendFooter, buildSendCardContent, buildFollowUpToast, disableFollowUpButton } from "./cardkit-client";
+import { rememberCard, lookupCard } from "./card-registry";
 import { removeReaction } from "./reaction";
 import { redactSensitive } from "./redact";
 import { extractFollowUps } from "./extract-followups";
@@ -73,11 +74,19 @@ async function streamingCardInvoke(
        "--msg-type", "interactive", "--content", buildSendCardContent(cardId)]
     : ["im", "+messages-send", "--as", "bot", "--chat-id", target.chatId,
        "--msg-type", "interactive", "--content", buildSendCardContent(cardId)];
-  const sendChild = spawn("lark-cli", sendArgs, { stdio: ["ignore", "ignore", "inherit"] });
+  const sendChild = spawn("lark-cli", sendArgs, { stdio: ["ignore", "pipe", "inherit"] });
+  let sendOut = "";
+  sendChild.stdout.on("data", (d) => (sendOut += d));
   await new Promise<void>((res, rej) => {
     sendChild.on("exit", (c) => (c === 0 ? res() : rej(new Error(`send card exited ${c}`))));
     sendChild.on("error", rej);
   });
+  // Record message_id → card_id so a follow-up click (which only carries
+  // open_message_id) can find this card and disable the clicked button.
+  try {
+    const sentMessageId = (JSON.parse(sendOut) as { data?: { message_id?: string } })?.data?.message_id;
+    if (sentMessageId) rememberCard(sentMessageId, cardId);
+  } catch { /* best-effort: button-disable is a visual nicety */ }
   log({ event: "card_sent", target: targetKey, card: cardId });
 
   // Remove the "processing" reaction now that the card is visible.
@@ -183,9 +192,13 @@ async function main(): Promise<void> {
     },
     "card.action.trigger": (data: unknown) => {
       try {
-        const d = data as { action?: { value?: { action?: string; text?: string } }; context?: { open_chat_id?: string } };
+        const d = data as {
+          action?: { value?: { action?: string; text?: string; eid?: string } };
+          context?: { open_chat_id?: string; open_message_id?: string };
+        };
         const value = d?.action?.value;
         const chatId = d?.context?.open_chat_id ?? "";
+        const messageId = d?.context?.open_message_id ?? "";
         if (value?.action === "follow_up" && value.text && chatId) {
           log({ event: "follow_up_clicked", chatId, question: value.text });
           const sessionId = getSessionId(chatId);
@@ -194,6 +207,17 @@ async function main(): Promise<void> {
             secretAccessKey: creds.secretAccessKey,
             sessionToken: creds.sessionToken,
           }).catch((e) => log({ event: "follow_up_error", error: String(e) }));
+          // Mark the clicked button: disable it + ✓ on the original card, so the
+          // user sees which one they picked (best-effort, async).
+          const cardId = lookupCard(messageId);
+          if (cardId && value.eid) {
+            // sequence must be int32 (≤2147483647) AND > the card's streaming
+            // seqs (which top out in the low hundreds). Unix seconds since a
+            // 2025 epoch fits int32 for ~60y and is monotonic across clicks.
+            const seq = Math.floor(Date.now() / 1000) - 1_700_000_000;
+            void disableFollowUpButton(cardId, value.eid, value.text, seq)
+              .catch((e) => log({ event: "disable_button_error", error: String(e) }));
+          }
           // Immediate visual feedback: toast tells the user which button they
           // clicked (must return within 3s; the answer card follows async).
           return buildFollowUpToast(value.text);
