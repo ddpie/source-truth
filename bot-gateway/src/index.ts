@@ -52,7 +52,7 @@ async function streamingCardInvoke(
 
   // 1. Create streaming card + send it immediately (user sees card in <2s).
   //    Card starts with "正在分析…" + streaming_mode=true → Feishu shows "生成中" badge.
-  const cardId = await createCard("source-truth");
+  const cardId = await createCard(prompt); // prompt → chat-list preview summary
   const sendChild = spawn(
     "lark-cli",
     ["im", "+messages-reply", "--as", "bot", "--message-id", messageId,
