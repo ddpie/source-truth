@@ -30,7 +30,12 @@ def _server_params(workspace: str, *, graph_only: bool) -> StdioServerParameters
     return StdioServerParameters(command="codegraph-server", args=args)
 
 
-async def _alist_tools(workspace: str, graph_only: bool) -> list[str]:
+async def alist_tools(*, workspace: str, graph_only: bool = True) -> list[str]:
+    """Async: names of MCP tools codegraph-server exposes for ``workspace``.
+
+    Use this from inside a running event loop (e.g. the HTTP bridge); the sync
+    ``list_tools`` wrapper cannot be called there (nested asyncio.run).
+    """
     async with stdio_client(_server_params(workspace, graph_only=graph_only)) as (r, w):
         async with ClientSession(r, w) as session:
             await session.initialize()
@@ -38,9 +43,17 @@ async def _alist_tools(workspace: str, graph_only: bool) -> list[str]:
             return [t.name for t in resp.tools]
 
 
-async def _acall_tool(
-    name: str, arguments: dict[str, Any], workspace: str, graph_only: bool
+async def acall_tool(
+    name: str,
+    arguments: dict[str, Any],
+    *,
+    workspace: str,
+    graph_only: bool = True,
 ) -> str:
+    """Async: call one codegraph MCP tool, return its text result (JSON string).
+
+    Event-loop safe — the HTTP bridge awaits this directly.
+    """
     async with stdio_client(_server_params(workspace, graph_only=graph_only)) as (r, w):
         async with ClientSession(r, w) as session:
             await session.initialize()
@@ -53,8 +66,8 @@ async def _acall_tool(
 
 
 def list_tools(*, workspace: str, graph_only: bool = True) -> list[str]:
-    """Return the names of MCP tools codegraph-server exposes for ``workspace``."""
-    return asyncio.run(_alist_tools(workspace, graph_only))
+    """Sync wrapper over :func:`alist_tools` (not for use inside an event loop)."""
+    return asyncio.run(alist_tools(workspace=workspace, graph_only=graph_only))
 
 
 def call_tool(
@@ -64,5 +77,7 @@ def call_tool(
     workspace: str,
     graph_only: bool = True,
 ) -> str:
-    """Call one codegraph MCP tool and return its text result (JSON string)."""
-    return asyncio.run(_acall_tool(name, arguments, workspace, graph_only))
+    """Sync wrapper over :func:`acall_tool` (not for use inside an event loop)."""
+    return asyncio.run(
+        acall_tool(name, arguments, workspace=workspace, graph_only=graph_only)
+    )
