@@ -1,0 +1,61 @@
+/**
+ * Event-stream core for the long-connection subscriber (src/index.ts).
+ *
+ * `lark-cli event consume im.message.receive_v1` emits one JSON object per line
+ * (NDJSON) on stdout, plus `[event] ...` log lines on stderr. processEventLine
+ * parses a single stdout line and, if it carries a usable IM event, dispatches
+ * it to handleMessageEvent. Pure + injected — no child process here (that lives
+ * in src/index.ts, which pipes consume's stdout through this).
+ */
+
+import { handleMessageEvent, type ImEvent, type InvokeFn, type HandleResult } from "./handle-event";
+
+function asImEvent(data: unknown): ImEvent | null {
+  if (typeof data !== "object" || data === null) return null;
+  const d = data as Record<string, unknown>;
+  // Minimum fields we need to act on a message event.
+  if (
+    typeof d.event_id === "string" &&
+    typeof d.chat_id === "string" &&
+    typeof d.content === "string" &&
+    typeof d.message_type === "string"
+  ) {
+    return {
+      event_id: d.event_id,
+      chat_id: d.chat_id,
+      chat_type: (d.chat_type as ImEvent["chat_type"]) ?? "group",
+      content: d.content,
+      message_id: typeof d.message_id === "string" ? d.message_id : "",
+      sender_id: typeof d.sender_id === "string" ? d.sender_id : "",
+      message_type: d.message_type,
+      thread_id: typeof d.thread_id === "string" ? d.thread_id : undefined,
+    };
+  }
+  return null;
+}
+
+/**
+ * Parse one NDJSON line and dispatch it. Returns the handler result, or null
+ * for blank lines / non-JSON noise / lines without a usable IM event.
+ */
+export async function processEventLine(
+  rawLine: string,
+  deps: { invoke: InvokeFn },
+): Promise<HandleResult | null> {
+  const trimmed = rawLine.trim();
+  if (!trimmed || trimmed[0] !== "{") return null;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    return null;
+  }
+
+  // lark-cli wraps the IM payload under `.data` (fall back to the root object).
+  const container = parsed as Record<string, unknown>;
+  const event = asImEvent(container.data) ?? asImEvent(container);
+  if (!event) return null;
+
+  return handleMessageEvent(event, deps);
+}

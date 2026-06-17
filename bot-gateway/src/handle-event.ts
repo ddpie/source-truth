@@ -32,6 +32,7 @@ export interface HandleResult {
   handled: boolean;
   answer?: string;
   sessionId?: string;
+  messageId?: string;
   reason?: "duplicate" | "unsupported_type" | "empty";
 }
 
@@ -64,5 +65,5 @@ export async function handleMessageEvent(
 
   // 4. Invoke the agent.
   const answer = await deps.invoke(sessionId, prompt);
-  return { handled: true, answer, sessionId };
+  return { handled: true, answer, sessionId, messageId: event.message_id };
 }
