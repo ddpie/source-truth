@@ -68,6 +68,39 @@ export function buildSendCardContent(cardId: string): string {
   return JSON.stringify({ type: "card", data: { card_id: cardId } });
 }
 
+/** Full-card PUT body that swaps the header (title + color) mid-stream while
+ *  keeping streaming_mode on and re-carrying the current conclusion text — a
+ *  full PUT replaces the whole body, so the in-progress text must be included
+ *  or it would be wiped. Verified: streaming text survives a full PUT. */
+export function buildStageBody(title: string, template: string, conclusion: string, sequence: number): string {
+  const card = {
+    schema: "2.0",
+    config: {
+      update_multi: true,
+      streaming_mode: true,
+      streaming_config: {
+        print_frequency_ms: { default: 70 },
+        print_step: { default: 1 },
+        print_strategy: "fast",
+      },
+    },
+    header: { title: { tag: "plain_text", content: title }, template },
+    body: { elements: [{ tag: "markdown", content: conclusion, element_id: "conclusion" }] },
+  };
+  return JSON.stringify({ card: { type: "card_json", data: JSON.stringify(card) }, sequence });
+}
+
+/** Change the card's stage (header title + color) mid-stream via full PUT. */
+export async function updateStage(
+  cardId: string,
+  title: string,
+  template: string,
+  conclusion: string,
+  sequence: number,
+): Promise<void> {
+  await larkApi("PUT", `/open-apis/cardkit/v1/cards/${cardId}`, buildStageBody(title, template, conclusion, sequence));
+}
+
 // ── lark-cli runners (integration) ───────────────────────────────────────────
 
 function larkApi(method: string, path: string, data: string): Promise<unknown> {
