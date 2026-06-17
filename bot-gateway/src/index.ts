@@ -22,7 +22,7 @@ import { fromNodeProviderChain } from "@aws-sdk/credential-providers";
 
 import { invokeRuntime } from "./sigv4";
 import { processEventLine } from "./index-core";
-import { sendReply } from "./reply";
+import { sendReplyCard } from "./reply";
 import type { InvokeFn } from "./handle-event";
 
 /** Extract the assistant's answer text from the runtime's SSE response body. */
@@ -92,8 +92,8 @@ async function main(): Promise<void> {
       .then(async (res) => {
         if (res?.handled && res.messageId && res.answer) {
           log({ event: "answered", session: res.sessionId, chars: res.answer.length });
-          await sendReply({ messageId: res.messageId, answer: res.answer });
-          log({ event: "replied", message: res.messageId });
+          const cardId = await sendReplyCard({ messageId: res.messageId, answer: res.answer });
+          log({ event: "replied", message: res.messageId, card: cardId });
         }
       })
       .catch((err) => log({ event: "handle_error", error: String(err) }));

@@ -1,0 +1,105 @@
+/**
+ * CardKit v1 client — the "growing answer card".
+ *
+ * Lifecycle (verified live, see docs/agent/cardkit-streaming-spike.md):
+ *   1. createCard      POST /open-apis/cardkit/v1/cards            -> card_id
+ *   2. updateContent   PUT  .../cards/{id}/elements/conclusion/content  (full text + ++sequence, typewriter)
+ *   3. closeStreaming  PATCH .../cards/{id}/settings  (streaming_mode=false)
+ *   4. send as IM interactive message content {type:card, data:{card_id}}
+ *
+ * Hard constraints baked in: streaming_config.print_frequency_ms + print_step
+ * must be paired (else code 11311); content updates carry an increasing
+ * sequence; after closeStreaming content can't change (but components can be
+ * appended). API calls go through lark-cli (`api <METHOD> <path> --as bot`),
+ * the same /open-apis/cardkit/v1 endpoints the node-sdk hits.
+ */
+
+import { spawn } from "node:child_process";
+
+// ── pure request builders (unit-tested) ──────────────────────────────────────
+
+export function buildCreateCardBody(opts: { title: string }): string {
+  const card = {
+    schema: "2.0",
+    config: {
+      update_multi: true,
+      streaming_mode: true,
+      streaming_config: {
+        print_frequency_ms: { default: 30 },
+        print_step: { default: 1 },
+        print_strategy: "fast",
+      },
+    },
+    header: { title: { tag: "plain_text", content: opts.title }, template: "blue" },
+    body: { elements: [{ tag: "markdown", content: "", element_id: "conclusion" }] },
+  };
+  return JSON.stringify({ type: "card_json", data: JSON.stringify(card) });
+}
+
+export function contentUpdatePath(cardId: string): string {
+  return `/open-apis/cardkit/v1/cards/${cardId}/elements/conclusion/content`;
+}
+
+export function buildContentUpdateBody(content: string, sequence: number): string {
+  return JSON.stringify({ content, sequence });
+}
+
+export function settingsPath(cardId: string): string {
+  return `/open-apis/cardkit/v1/cards/${cardId}/settings`;
+}
+
+export function buildCloseStreamingBody(sequence: number): string {
+  return JSON.stringify({
+    settings: JSON.stringify({ config: { streaming_mode: false } }),
+    sequence,
+  });
+}
+
+export function buildSendCardContent(cardId: string): string {
+  return JSON.stringify({ type: "card", data: { card_id: cardId } });
+}
+
+// ── lark-cli runners (integration) ───────────────────────────────────────────
+
+function larkApi(method: string, path: string, data: string): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    const child = spawn("lark-cli", ["api", method, path, "--as", "bot", "--data", data], {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let out = "";
+    let err = "";
+    child.stdout.on("data", (d) => (out += d));
+    child.stderr.on("data", (d) => (err += d));
+    child.on("exit", (code) => {
+      if (code !== 0) return reject(new Error(`lark-cli api ${method} ${path} exited ${code}: ${err}`));
+      try {
+        const json = JSON.parse(out) as { code?: number; msg?: string };
+        if (json.code !== undefined && json.code !== 0) {
+          return reject(new Error(`CardKit ${path} code ${json.code}: ${json.msg}`));
+        }
+        resolve(json);
+      } catch (e) {
+        reject(new Error(`bad CardKit response: ${out.slice(0, 200)} (${String(e)})`));
+      }
+    });
+    child.on("error", reject);
+  });
+}
+
+/** Create a streaming card; returns its card_id. */
+export async function createCard(title: string): Promise<string> {
+  const resp = (await larkApi("POST", "/open-apis/cardkit/v1/cards", buildCreateCardBody({ title }))) as {
+    data: { card_id: string };
+  };
+  return resp.data.card_id;
+}
+
+/** Stream the conclusion text (full content + sequence; typewriter续写). */
+export async function updateContent(cardId: string, content: string, sequence: number): Promise<void> {
+  await larkApi("PUT", contentUpdatePath(cardId), buildContentUpdateBody(content, sequence));
+}
+
+/** Turn streaming off once the answer is final. */
+export async function closeStreaming(cardId: string, sequence: number): Promise<void> {
+  await larkApi("PATCH", settingsPath(cardId), buildCloseStreamingBody(sequence));
+}
