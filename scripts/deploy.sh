@@ -154,12 +154,35 @@ fi
 # ============================================================
 if [[ "$ONLY_INDEX" == false && "$ONLY_GATEWAY" == false ]]; then
   say step "Phase 2: AgentCore Runtime (agent-container)"
-  # TODO(p1): boto3 create/update_agent_runtime
-  #   - Build ARM64 image → push ECR
-  #   - create_agent_runtime or update_agent_runtime (idempotent by RUNTIME_ID in deploy-config)
-  #   - Wait READY
-  #   - Persist RUNTIME_ID + RUNTIME_ARN to deploy-config
-  say warn "AgentCore Runtime deploy: not yet implemented (桩·未验证)"
+
+  ECR_REPO="source-truth/agent"
+  ECR_URI="${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com/${ECR_REPO}:latest"
+  ROLE_ARN="${AGENT_RUNTIME_ROLE:-arn:aws:iam::${ACCOUNT_ID}:role/SourceTruthAgentRuntimeRole}"
+
+  # 1) ECR repo (idempotent)
+  aws ecr describe-repositories --repository-names "$ECR_REPO" --region "$REGION" >/dev/null 2>&1 \
+    || aws ecr create-repository --repository-name "$ECR_REPO" --region "$REGION" >/dev/null
+  say info "ECR repo: $ECR_REPO"
+
+  # 2) Build ARM64 image + push
+  say info "building ARM64 image"
+  aws ecr get-login-password --region "$REGION" \
+    | docker login --username AWS --password-stdin "${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com" >/dev/null 2>&1
+  docker build --platform linux/arm64 -t "$ECR_URI" "$ROOT/agent-container"
+  docker push "$ECR_URI"
+
+  # 3) Create-or-update runtime (idempotent), wait READY, persist IDs
+  say info "deploying runtime (create-or-update)"
+  RUNTIME_OUT="$(python3 "$SCRIPT_DIR/lib/deploy_runtime.py" \
+    --region "$REGION" --account "$ACCOUNT_ID" \
+    --role-arn "$ROLE_ARN" --image "$ECR_URI")"
+  echo "$RUNTIME_OUT"
+  _rid="$(printf '%s\n' "$RUNTIME_OUT" | sed -n 's/^AGENT_RUNTIME_ID=//p')"
+  _arn="$(printf '%s\n' "$RUNTIME_OUT" | sed -n 's/^AGENT_RUNTIME_ARN=//p')"
+  [[ -n "$_rid" ]] && update_env "$CONFIG_FILE" "AGENT_RUNTIME_ID" "$_rid"
+  [[ -n "$_arn" ]] && update_env "$CONFIG_FILE" "AGENT_RUNTIME_ARN" "$_arn"
+  update_env "$CONFIG_FILE" "AGENT_RUNTIME_ROLE" "$ROLE_ARN"
+  say ok "AgentCore Runtime deployed: ${_rid:-?}"
   echo ""
 fi
 
