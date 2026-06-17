@@ -25,7 +25,7 @@ import { spawn } from "node:child_process";
 import { fromNodeProviderChain } from "@aws-sdk/credential-providers";
 
 import { invokeRuntimeStreaming } from "./sigv4";
-import { createCard, updateContent, closeStreaming, finalizeCard, appendFooter, buildSendCardContent, disableFollowUpButton } from "./cardkit-client";
+import { createCard, updateContent, closeStreaming, finalizeCard, appendFooter, buildSendCardContent, disableFollowUpButton, updateStage } from "./cardkit-client";
 import { rememberCard, lookupCard } from "./card-registry";
 import { removeReaction } from "./reaction";
 import { redactSensitive } from "./redact";
@@ -98,6 +98,8 @@ async function streamingCardInvoke(
   let seq = 1;
   let lastUpdate = 0;
   let timedOut = false;
+  let stage: "thinking" | "analyzing" = "thinking";
+  let lastDisplay = "正在分析…";
   const THROTTLE_MS = 100; // CardKit allows 10/s; push to max for smoothest typewriter.
   const STREAM_TIMEOUT_MS = 9 * 60 * 1000; // 9 min (Feishu closes at 10)
   const deadline = Date.now() + STREAM_TIMEOUT_MS;
@@ -108,6 +110,16 @@ async function streamingCardInvoke(
     (textSoFar, latestTool) => {
       if (timedOut) return;
       if (Date.now() > deadline) { timedOut = true; return; }
+      // Stage 2 (思考→分析): on the first tool call, flip the header to an
+      // orange "正在分析…" via a one-time full PUT (carries current text so the
+      // streaming body isn't wiped). Only once — repeated full PUTs would
+      // stutter the typewriter.
+      if (stage === "thinking" && latestTool) {
+        stage = "analyzing";
+        seq++;
+        updateStage(cardId, "🔍 正在分析…", "orange", lastDisplay, seq).catch(() => {});
+        return;
+      }
       const now = Date.now();
       if (now - lastUpdate < THROTTLE_MS) return;
       lastUpdate = now;
@@ -116,6 +128,7 @@ async function streamingCardInvoke(
         : latestTool
           ? `*正在分析：${latestTool}*`
           : "正在分析…";
+      lastDisplay = display;
       seq++;
       updateContent(cardId, display, seq).catch(() => {});
     },

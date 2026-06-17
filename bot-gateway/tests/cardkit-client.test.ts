@@ -11,6 +11,7 @@ import {
   settingsPath,
   buildCloseStreamingBody,
   buildSendCardContent,
+  buildStageBody,
   finalizeTitle,
   buildFollowUpElements,
   buildClickedButtonElement,
@@ -60,6 +61,23 @@ describe("send card as IM content", () => {
     const content = JSON.parse(buildSendCardContent("7652206316581309633"));
     expect(content.type).toBe("card");
     expect(content.data.card_id).toBe("7652206316581309633");
+  });
+});
+
+describe("buildStageBody (mid-stream header status change)", () => {
+  it("builds a full-card PUT body that changes header but keeps streaming + conclusion", () => {
+    const raw = buildStageBody("正在分析…", "orange", "已分析到一半的文本", 5);
+    const outer = JSON.parse(raw);
+    expect(outer.sequence).toBe(5);
+    const card = JSON.parse(outer.card.data);
+    // Header reflects the new stage.
+    expect(card.header.title.content).toBe("正在分析…");
+    expect(card.header.template).toBe("orange");
+    // Streaming must stay on (we're still mid-answer) so the typewriter survives.
+    expect(card.config.streaming_mode).toBe(true);
+    // Body carries the current conclusion text (else a full PUT would wipe it).
+    const conclusion = card.body.elements.find((e: { element_id?: string }) => e.element_id === "conclusion");
+    expect(conclusion.content).toBe("已分析到一半的文本");
   });
 });
 
