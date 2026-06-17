@@ -21,7 +21,7 @@ export function extractFollowUps(answer: string): string[] {
   const questions: string[] = [];
   for (const line of lines) {
     const trimmed = line.replace(/^[\s\-·•*\d.]+/, "").trim();
-    if (trimmed.length > 4 && trimmed.length < 80 && !trimmed.startsWith("💡")) {
+    if (trimmed.length > 4 && trimmed.length < 80 && !trimmed.startsWith("💡") && !trimmed.includes("你可能还想问") && !trimmed.includes("继续追问")) {
       questions.push(trimmed);
     }
     if (questions.length >= 3) break;
