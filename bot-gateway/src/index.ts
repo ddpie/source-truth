@@ -25,7 +25,8 @@ import { spawn } from "node:child_process";
 import { fromNodeProviderChain } from "@aws-sdk/credential-providers";
 
 import { invokeRuntimeStreaming } from "./sigv4";
-import { createCard, updateContent, closeStreaming, finalizeCard, appendFooter, buildSendCardContent, disableFollowUpButton, updateStage, appendReasoningPanel, updateReasoningPanel } from "./cardkit-client";
+import { createCard, updateContent, closeStreaming, finalizeCard, appendFooter, buildSendCardContent, disableFollowUpButton, updateStage, appendReasoningPanel, updateReasoningPanel, appendCharts } from "./cardkit-client";
+import { extractCharts } from "./extract-charts";
 import { rememberCard, lookupCard } from "./card-registry";
 import { removeReaction } from "./reaction";
 import { redactSensitive } from "./redact";
@@ -152,23 +153,30 @@ async function streamingCardInvoke(
 
   if (status !== 200) throw new Error(`invoke failed: HTTP ${status}`);
 
-  // 3. Final update + close streaming.
-  const finalText = timedOut && !answer
+  // 3. Final update + close streaming. Pull any ```chart blocks out of the
+  //    answer first so the conclusion text is clean (charts render separately).
+  const rawFinal = timedOut && !answer
     ? "⏱ 分析超时，请缩小问题范围后重试。"
-    : redactSensitive(answer || "(无内容)");
+    : (answer || "(无内容)");
+  const { text: textNoCharts, charts } = extractCharts(rawFinal);
+  const finalText = redactSensitive(textNoCharts);
   seq++;
   await updateContent(cardId, finalText, seq);
   seq++;
   await closeStreaming(cardId, seq);
 
-  // 4. Finalize: header → green "回答完成" + reasoning panel collapsed (archived)
-  //    + footer. The full PUT re-renders the panel as expanded:false.
+  // 4. Finalize: header → green "回答完成" + reasoning panel collapsed (archived).
   seq++;
   try { await finalizeCard(cardId, finalText, steps, seq, isFollowUp); } catch { /* best-effort */ }
+  // 5. Data charts (if the agent emitted any), then the follow-up footer.
+  if (charts.length > 0) {
+    seq++;
+    try { await appendCharts(cardId, charts, seq); } catch (e) { log({ event: "chart_error", error: String(e) }); }
+  }
   seq++;
   const followUps = extractFollowUps(finalText);
   try { await appendFooter(cardId, seq, followUps); } catch { /* best-effort */ }
-  log({ event: "card_closed", card: cardId, chars: answer.length, timedOut });
+  log({ event: "card_closed", card: cardId, chars: answer.length, charts: charts.length, timedOut });
 }
 
 async function main(): Promise<void> {

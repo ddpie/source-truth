@@ -203,6 +203,32 @@ export async function updateReasoningPanel(cardId: string, steps: string[], sequ
   }));
 }
 
+/** Wrap VChart specs (extracted from the agent's ```chart blocks) as CardKit
+ *  chart components. The agent builds specs from real config-table numbers it
+ *  read; the gateway only transports them. */
+export function buildChartElements(specs: Array<{ type: string; [k: string]: unknown }>): unknown[] {
+  return specs.map((spec, i) => ({
+    tag: "chart",
+    element_id: `chart_${i}`,
+    chart_spec: spec,
+  }));
+}
+
+/** Append data charts to the card (after the conclusion, before the footer). */
+export async function appendCharts(
+  cardId: string,
+  specs: Array<{ type: string; [k: string]: unknown }>,
+  sequence: number,
+): Promise<void> {
+  const elements = buildChartElements(specs);
+  if (elements.length === 0) return;
+  await larkApi("POST", `/open-apis/cardkit/v1/cards/${cardId}/elements`, JSON.stringify({
+    type: "append",
+    sequence,
+    elements: JSON.stringify(elements),
+  }));
+}
+
 /** After close streaming: update header to "完成" (green) via full card PUT.
  *  PUT body = { card: { type, data }, sequence } — full replace, must carry body. */
 export async function finalizeCard(
