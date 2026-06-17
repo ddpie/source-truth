@@ -25,7 +25,7 @@ import { spawn } from "node:child_process";
 import { fromNodeProviderChain } from "@aws-sdk/credential-providers";
 
 import { invokeRuntimeStreaming } from "./sigv4";
-import { createCard, updateContent, closeStreaming, finalizeCard, appendFooter, buildSendCardContent, disableFollowUpButton, updateStage } from "./cardkit-client";
+import { createCard, updateContent, closeStreaming, finalizeCard, appendFooter, buildSendCardContent, disableFollowUpButton, updateStage, appendReasoningPanel, updateReasoningPanel } from "./cardkit-client";
 import { rememberCard, lookupCard } from "./card-registry";
 import { removeReaction } from "./reaction";
 import { redactSensitive } from "./redact";
@@ -100,34 +100,50 @@ async function streamingCardInvoke(
   let timedOut = false;
   let stage: "thinking" | "analyzing" = "thinking";
   let lastDisplay = "正在分析…";
+  let stepsShown = 0; // how many reasoning steps are currently rendered in the panel
+  let panelAppended = false;
   const THROTTLE_MS = 100; // CardKit allows 10/s; push to max for smoothest typewriter.
   const STREAM_TIMEOUT_MS = 9 * 60 * 1000; // 9 min (Feishu closes at 10)
   const deadline = Date.now() + STREAM_TIMEOUT_MS;
 
-  const { status, answer, reasoning } = await invokeRuntimeStreaming(
+  const { status, answer, steps } = await invokeRuntimeStreaming(
     { runtimeArn: RUNTIME_ARN, region: REGION, sessionId, prompt },
     { region: REGION, credentials: creds },
-    (textSoFar, latestTool) => {
+    (textSoFar, liveSteps) => {
       if (timedOut) return;
       if (Date.now() > deadline) { timedOut = true; return; }
       // Stage 2 (思考→分析): on the first tool call, flip the header to an
-      // orange "正在分析…" via a one-time full PUT (carries current text so the
-      // streaming body isn't wiped). Only once — repeated full PUTs would
-      // stutter the typewriter.
-      if (stage === "thinking" && latestTool) {
+      // orange "正在分析…" via a one-time full PUT, and seed the live reasoning
+      // panel (expanded). Carries current text so the streaming body isn't wiped.
+      if (stage === "thinking" && liveSteps.length > 0) {
         stage = "analyzing";
         seq++;
         updateStage(cardId, "🔍 正在分析…", "orange", lastDisplay, seq).catch(() => {});
         return;
       }
+      // Live reasoning panel: append once, then update in place as steps grow —
+      // separate element from the streamed conclusion, so it doesn't fight the
+      // typewriter. Only push when a NEW step appeared (not every text chunk).
+      if (liveSteps.length > stepsShown) {
+        stepsShown = liveSteps.length;
+        seq++;
+        if (!panelAppended) {
+          panelAppended = true;
+          appendReasoningPanel(cardId, liveSteps, seq).catch(() => {});
+        } else {
+          updateReasoningPanel(cardId, liveSteps, seq).catch(() => {});
+        }
+        return;
+      }
+      // Conclusion area: stream the answer text as it arrives. While the agent
+      // is still narrating between tool calls, the newest text is provisional;
+      // once it's the genuine final block (no more tools follow) the typewriter
+      // lands on it. Placeholder until any real text exists so it never flashes
+      // empty.
       const now = Date.now();
       if (now - lastUpdate < THROTTLE_MS) return;
       lastUpdate = now;
-      const display = textSoFar.length > 0
-        ? redactSensitive(textSoFar)
-        : latestTool
-          ? `*正在分析：${latestTool}*`
-          : "正在分析…";
+      const display = textSoFar.length > 0 ? redactSensitive(textSoFar) : "正在分析…";
       lastDisplay = display;
       seq++;
       updateContent(cardId, display, seq).catch(() => {});
@@ -145,9 +161,10 @@ async function streamingCardInvoke(
   seq++;
   await closeStreaming(cardId, seq);
 
-  // 4. Finalize: header → green "回答完成" + reasoning collapsed + footer.
+  // 4. Finalize: header → green "回答完成" + reasoning panel collapsed (archived)
+  //    + footer. The full PUT re-renders the panel as expanded:false.
   seq++;
-  try { await finalizeCard(cardId, finalText, reasoning, seq, isFollowUp); } catch { /* best-effort */ }
+  try { await finalizeCard(cardId, finalText, steps, seq, isFollowUp); } catch { /* best-effort */ }
   seq++;
   const followUps = extractFollowUps(finalText);
   try { await appendFooter(cardId, seq, followUps); } catch { /* best-effort */ }
