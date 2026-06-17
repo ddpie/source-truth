@@ -5,6 +5,7 @@
  */
 
 import { extractCharts } from "../src/extract-charts";
+import { buildChartElements } from "../src/cardkit-client";
 
 describe("extractCharts", () => {
   it("extracts a single chart spec and strips it from the text", () => {
@@ -49,5 +50,20 @@ describe("extractCharts", () => {
     expect(charts).toHaveLength(2);
     expect(charts[0].type).toBe("bar");
     expect(charts[1].type).toBe("line");
+  });
+});
+
+describe("buildChartElements", () => {
+  it("wraps each VChart spec as a CardKit chart element", () => {
+    const els = buildChartElements([{ type: "bar", data: { values: [] } }]) as Array<{
+      tag: string; chart_spec: { type: string };
+    }>;
+    expect(els).toHaveLength(1);
+    expect(els[0].tag).toBe("chart");
+    expect(els[0].chart_spec.type).toBe("bar");
+  });
+
+  it("returns an empty array for no specs", () => {
+    expect(buildChartElements([])).toEqual([]);
   });
 });
