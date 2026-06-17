@@ -12,6 +12,7 @@ import * as lark from "@larksuiteoapi/node-sdk";
 
 export interface CardCallbackHandler {
   onFollowUp: (chatId: string, question: string, messageId: string) => void;
+  onMessage?: (data: unknown) => void;
 }
 
 export function startCardCallbackListener(
@@ -39,6 +40,15 @@ export function startCardCallbackListener(
       } catch { /* best-effort */ }
 
       // Must return within 3 seconds; return empty object = no toast.
+      return {};
+    },
+  });
+
+  // Also register IM message event so the SDK WSClient doesn't steal events
+  // from lark-cli (both share the same app's long connection pool).
+  dispatcher.register({
+    "im.message.receive_v1": (data: unknown) => {
+      handler.onMessage?.(data);
       return {};
     },
   });
