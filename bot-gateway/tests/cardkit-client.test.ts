@@ -13,6 +13,7 @@ import {
   buildSendCardContent,
   buildStageBody,
   buildReasoningPanel,
+  buildStopButton,
   finalizeTitle,
   buildFollowUpElements,
   buildClickedButtonElement,
@@ -62,6 +63,18 @@ describe("send card as IM content", () => {
     const content = JSON.parse(buildSendCardContent("7652206316581309633"));
     expect(content.type).toBe("card");
     expect(content.data.card_id).toBe("7652206316581309633");
+  });
+});
+
+describe("buildStopButton", () => {
+  it("builds a danger stop button carrying the card_id for abort routing", () => {
+    const btn = buildStopButton("card_777") as {
+      tag: string; element_id: string; type: string; value: { action: string; card_id: string };
+    };
+    expect(btn.tag).toBe("button");
+    expect(btn.element_id).toBe("stopbtn");
+    expect(btn.value.action).toBe("stop");
+    expect(btn.value.card_id).toBe("card_777");
   });
 });
 

@@ -148,8 +148,31 @@ export async function closeStreaming(cardId: string, sequence: number): Promise<
 
 /** Completed-card header title — keeps the follow-up marker so the chat
  *  history still shows a finished follow-up card as a follow-up. */
-export function finalizeTitle(followUp?: boolean): string {
+export function finalizeTitle(followUp?: boolean, aborted?: boolean): string {
+  if (aborted) return "⏹ 已停止";
   return followUp ? "↳ 追问 · 已回答" : "回答完成";
+}
+
+/** A "⏹ 停止" button shown during streaming. value.card_id lets the click
+ *  callback route the abort to the right in-flight agent stream. */
+export function buildStopButton(cardId: string): unknown {
+  return {
+    tag: "button",
+    element_id: "stopbtn",
+    text: { tag: "plain_text", content: "⏹ 停止" },
+    type: "danger_text",
+    size: "small",
+    value: { action: "stop", card_id: cardId },
+  };
+}
+
+/** Append the stop button to the streaming card (best-effort). */
+export async function appendStopButton(cardId: string, sequence: number): Promise<void> {
+  await larkApi("POST", `/open-apis/cardkit/v1/cards/${cardId}/elements`, JSON.stringify({
+    type: "append",
+    sequence,
+    elements: JSON.stringify([buildStopButton(cardId)]),
+  }));
 }
 
 /** The "分析过程" collapsible panel — same component live (expanded, streaming
@@ -237,14 +260,15 @@ export async function finalizeCard(
   steps: string[],
   sequence: number,
   followUp?: boolean,
+  aborted?: boolean,
 ): Promise<void> {
   const panel = buildReasoningPanel(steps, false);
   const card = {
     schema: "2.0",
     config: { update_multi: true },
     header: {
-      title: { tag: "plain_text", content: finalizeTitle(followUp) },
-      template: "green",
+      title: { tag: "plain_text", content: finalizeTitle(followUp, aborted) },
+      template: aborted ? "grey" : "green",
     },
     body: {
       elements: [

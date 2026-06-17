@@ -25,7 +25,7 @@ import { spawn } from "node:child_process";
 import { fromNodeProviderChain } from "@aws-sdk/credential-providers";
 
 import { invokeRuntimeStreaming } from "./sigv4";
-import { createCard, updateContent, closeStreaming, finalizeCard, appendFooter, buildSendCardContent, disableFollowUpButton, updateStage, appendReasoningPanel, updateReasoningPanel, appendCharts } from "./cardkit-client";
+import { createCard, updateContent, closeStreaming, finalizeCard, appendFooter, buildSendCardContent, disableFollowUpButton, updateStage, appendReasoningPanel, updateReasoningPanel, appendCharts, appendStopButton } from "./cardkit-client";
 import { extractCharts } from "./extract-charts";
 import { rememberCard, lookupCard } from "./card-registry";
 import { removeReaction } from "./reaction";
@@ -47,6 +47,10 @@ function log(obj: Record<string, unknown>): void {
 // Message-level dedup: prevents double-processing on Feishu re-delivery after
 // a gateway restart (event_id dedup map is in-memory and gets cleared).
 const processedMessages = new Set<string>();
+
+// cardId → AbortController for the in-flight agent stream, so a 停止 button
+// click (card.action.trigger) can abort that specific invoke.
+const abortControllers = new Map<string, AbortController>();
 
 /** Streaming invoke: creates the card immediately (fast first render), then
  *  updates it as text arrives from the agent, and closes streaming at the end. */
@@ -107,19 +111,25 @@ async function streamingCardInvoke(
   const STREAM_TIMEOUT_MS = 9 * 60 * 1000; // 9 min (Feishu closes at 10)
   const deadline = Date.now() + STREAM_TIMEOUT_MS;
 
-  const { status, answer, steps } = await invokeRuntimeStreaming(
+  // Abort handle for the 停止 button (registered for the lifetime of the stream).
+  const abort = new AbortController();
+  abortControllers.set(cardId, abort);
+
+  const { status, answer, steps, aborted } = await invokeRuntimeStreaming(
     { runtimeArn: RUNTIME_ARN, region: REGION, sessionId, prompt },
     { region: REGION, credentials: creds },
     (textSoFar, liveSteps) => {
       if (timedOut) return;
       if (Date.now() > deadline) { timedOut = true; return; }
       // Stage 2 (思考→分析): on the first tool call, flip the header to an
-      // orange "正在分析…" via a one-time full PUT, and seed the live reasoning
-      // panel (expanded). Carries current text so the streaming body isn't wiped.
+      // orange "正在分析…" via a one-time full PUT, seed the live reasoning panel,
+      // and add the 停止 button. Carries current text so the body isn't wiped.
       if (stage === "thinking" && liveSteps.length > 0) {
         stage = "analyzing";
         seq++;
         updateStage(cardId, "🔍 正在分析…", "orange", lastDisplay, seq).catch(() => {});
+        seq++;
+        appendStopButton(cardId, seq).catch(() => {});
         return;
       }
       // Live reasoning panel: append once, then update in place as steps grow —
@@ -149,15 +159,19 @@ async function streamingCardInvoke(
       seq++;
       updateContent(cardId, display, seq).catch(() => {});
     },
+    abort.signal,
   );
+  abortControllers.delete(cardId);
 
-  if (status !== 200) throw new Error(`invoke failed: HTTP ${status}`);
+  if (status !== 200 && !aborted) throw new Error(`invoke failed: HTTP ${status}`);
 
   // 3. Final update + close streaming. Pull any ```chart blocks out of the
   //    answer first so the conclusion text is clean (charts render separately).
-  const rawFinal = timedOut && !answer
-    ? "⏱ 分析超时，请缩小问题范围后重试。"
-    : (answer || "(无内容)");
+  const rawFinal = aborted
+    ? (answer ? answer + "\n\n*（已停止，以上为已生成内容）*" : "⏹ 已停止。")
+    : timedOut && !answer
+      ? "⏱ 分析超时，请缩小问题范围后重试。"
+      : (answer || "(无内容)");
   const { text: textNoCharts, charts } = extractCharts(rawFinal);
   const finalText = redactSensitive(textNoCharts);
   seq++;
@@ -165,9 +179,11 @@ async function streamingCardInvoke(
   seq++;
   await closeStreaming(cardId, seq);
 
-  // 4. Finalize: header → green "回答完成" + reasoning panel collapsed (archived).
+  // 4. Finalize: header → green "回答完成" (or 已停止) + reasoning panel collapsed.
+  //    The full-card PUT rebuilds the body (conclusion + panel), which also drops
+  //    the now-irrelevant 停止 button.
   seq++;
-  try { await finalizeCard(cardId, finalText, steps, seq, isFollowUp); } catch { /* best-effort */ }
+  try { await finalizeCard(cardId, finalText, steps, seq, isFollowUp, aborted); } catch { /* best-effort */ }
   // 5. Data charts (if the agent emitted any), then the follow-up footer.
   if (charts.length > 0) {
     seq++;
@@ -231,13 +247,19 @@ async function main(): Promise<void> {
     "card.action.trigger": (data: unknown) => {
       try {
         const d = data as {
-          action?: { value?: { action?: string; text?: string; eid?: string } };
+          action?: { value?: { action?: string; text?: string; eid?: string; card_id?: string } };
           context?: { open_chat_id?: string; open_message_id?: string };
         };
         const value = d?.action?.value;
         const chatId = d?.context?.open_chat_id ?? "";
         const messageId = d?.context?.open_message_id ?? "";
-        if (value?.action === "follow_up" && value.text && chatId) {
+        if (value?.action === "stop" && value.card_id) {
+          // 停止: abort the in-flight agent stream for this card. The invoke
+          // then finalizes with whatever was generated, header → ⏹ 已停止.
+          const ctrl = abortControllers.get(value.card_id);
+          log({ event: "stop_clicked", card: value.card_id, found: !!ctrl });
+          if (ctrl) ctrl.abort();
+        } else if (value?.action === "follow_up" && value.text && chatId) {
           log({ event: "follow_up_clicked", chatId, question: value.text });
           const sessionId = getSessionId(chatId);
           void streamingCardInvoke(sessionId, value.text, { chatId }, {
