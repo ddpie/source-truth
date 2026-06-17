@@ -5,7 +5,8 @@
 
 | 项 | 内容 |
 |---|---|
-| **日期** | 2026-06-16 |
+| **日期** | 2026-06-16（初版）· 2026-06-17（端到端实测更新） |
+| **更新** | 2026-06-17：原 §6 多项「⚠️待验证」已在**东京 ap-northeast-1 真实部署**坐实——EFS 真挂 `/mnt/repo`（agent 真读到源码）、Model B 桥 stdio 半边真驱通、真 `InvokeAgentRuntime`。**关键修正：EFS 挂载仅东京支持，us-east-1 服务端返回 `SDK_UNKNOWN_MEMBER`（功能未上线）**；VPC microVM 无公网 IP，出站须 NAT Gateway。见 §7 更新表。 |
 | **关联** | source-truth MVP；待验证点「会话容器只读挂载客户 EFS」「CodeGraph 索引能否被会话共享 / 实时同步」（[`architecture.md`](architecture.md) 存储与索引方案） |
 | **环境** | AWS EC2（aarch64 ARM）；本地盘 NVMe EBS；Ubuntu 24.04，kernel 6.17；botocore 1.42.96（仓库钉死）与 1.43.30（PyPI 最新）；codegraph-server v0.18.5（ARM aarch64，RocksDB 后端）；AWS 仅只读权限（可 Describe，未部署） |
 | **证据等级** | ✅实测（本机跑出）/ 📄文档（官方文档 / API 模型 / 源码印证）/ ⚠️待验证 |
@@ -175,9 +176,9 @@ Model B 下只有 index-service 打开 graph.db、会话从不碰，故该风险
 
 | 问题 | 结论 |
 |---|---|
-| 1. 会话容器能否只读挂载客户 EFS？ | **能**（📄 API 模型 + 官方文档，**未部署实测**）。需 `networkMode=VPC`、同账号/同 VPC/AZ 重叠、只读靠 IAM 省略 `ClientWrite`、mountPath `/mnt/<单层>`、依赖 botocore ≥ 含 2026-05 模型的版本 |
+| 1. 会话容器能否只读挂载客户 EFS？ | **能，已真实部署坐实**（✅实测 2026-06-17，东京）。Runtime `source_truth_agent-3nxWGkGA86` 真挂 EFS `fsap-0749...` 到 `/mnt/repo`，agent 经 Glob/Read 真读到源码。需 `networkMode=VPC`、botocore≥1.43、mountPath `/mnt/<单层>`。**关键：仅东京支持**——us-east-1 同字段被服务端当 `SDK_UNKNOWN_MEMBER` 丢弃（功能未上线）。 |
 | 2. 共享卷上的 CodeGraph 索引能否被会话只读复用？ | **不能**（✅实测 + 📄源码，证据最硬）。RocksDB open 即写，只读挂载写失败并静默退化为空索引重建 |
-| 3. 可行的共享 + 实时同步方案？ | **Model B**（架构自洽，**通路未端到端验证**）：索引常驻 index-service（`--serve`，独占本机 EBS，file-watcher 实时增量 ✅实测），会话经 stdio→HTTP 桥远程查询；EFS 只放源码。读写共享挂载（RocksDB-over-NFS 多写者）会腐坏，否决 |
+| 3. 可行的共享 + 实时同步方案？ | **Model B，stdio 半边已真驱通**（✅实测 2026-06-17）：`index-service/codegraph_client.py` 用 `mcp` 包真实驱动 codegraph-server stdio MCP（42 工具、真查到符号）。索引常驻 `--serve`（file-watcher 实时增量 ✅）、EFS 只放源码。HTTP 半边（暴露给 microVM）+ 跨容器往返仍待实现。 |
 
 **总判断（分级校准）**：
 
@@ -191,11 +192,12 @@ Model B 下只有 index-service 打开 graph.db、会话从不碰，故该风险
 
 ## 8. Next Steps（后续）
 
-- [ ] **stdio→HTTP 桥 spike**：实现并压测 CodeGraph MCP 经 streamable-HTTP 暴露给 microVM 的桥（并发 / 超时 / 流式 / 鉴权 / 可达性）。
-- [ ] **AgentCore + EFS 端到端实测**（需部署授权）：验只读边界（写 `/mnt/repo` 应 EROFS）、close-to-open 新鲜度、冷启挂载延迟 vs 30s/HTTP 424。
-- [ ] **依赖版本守卫**：`scripts/check-versions.sh` 加 botocore/boto3 下限（须含 `efsAccessPoint` 的 2026-05 模型）。
-- [ ] **修订 [`architecture.md`](architecture.md)**：EFS 职责缩为「只放源码」；索引段改 Model B；补 VPC / IAM 只读 / 挂载失败语义三条前提。
-- [ ] **新鲜度纪律**：index-service 写者 vs 会话读者的 publish / 原子切换约定（避免读到半写状态）。
+- [x] **AgentCore + EFS 端到端实测** ✅ 2026-06-17：东京真实部署，EFS 挂 `/mnt/repo`、agent 真读到源码。**新发现**：仅东京支持（us-east-1 未上线）；VPC microVM 无公网 IP，出站须 **NAT Gateway**（VPC Endpoint 只覆盖单服务，不够 claude-code CLI 全部出站）。
+- [x] **CodeGraph stdio MCP 驱动** ✅ 2026-06-17：`index-service/codegraph_client.py` 真驱通（42 工具 + 真查符号）。
+- [ ] **stdio→HTTP 桥的 HTTP 半边**：把 `codegraph_client` 暴露为 streamable-HTTP 供 microVM 远程查（并发/超时/流式/鉴权）+ 跨容器往返。
+- [ ] **只读边界 / 新鲜度实测**：写 `/mnt/repo` 是否 EROFS、close-to-open 下 push 后会话多久读到、冷启挂载延迟。
+- [ ] **依赖版本守卫**：`scripts/check-versions.sh` 加 botocore/boto3 下限（须含 `efsAccessPoint`，即 **≥1.43**）。
+- [ ] **修订 [`architecture.md`](architecture.md)**：EFS 职责缩为「只放源码」；索引段改 Model B；补 VPC + NAT + 区域限制（仅东京）三条前提。
 
 ---
 

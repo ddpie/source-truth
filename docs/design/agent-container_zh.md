@@ -60,12 +60,20 @@ agent-container/
 MVP 用 `agentcore` toolkit（`configure --disable-memory` → `deploy --env CLAUDE_CODE_USE_BEDROCK=1` → `invoke`
 → `destroy`），不强求 CDK。Runtime 的 env / idle timeout / 请求头由 `scripts/deploy.sh`（p1，boto3）配。
 
-## 最大的待验证点
+## 待验证点（已定型 / 剩余）
 
-1. **CodeGraph MCP 接入形态**：SDK 是否原生支持远程 HTTP MCP（方案 A），还是须经 `streamablehttp_client` +
-   `@tool` 适配（方案 B，本地已验证）。POC 二选一定型。
-2. **路径对齐**：CodeGraph 返回路径 vs `/mnt/repo` 挂载路径的归一化（阻塞项）。
-3. **EFS 读性能 / 冷启动 / 召回率 / 流式卡片频控对接**。
+**已真实验证定型（2026-06-17，东京 ap-northeast-1 实测）：**
 
-> 方案对比、逐条 gotcha 与完整开放问题（`session` schema、模型 id 选择、claude-code CLI 是否内置、
-> `HookContext` 语义、Bedrock 配额等）见全稿 `.claude/specs/2026-06-16-agent-container-design.md`。
+1. **CodeGraph MCP 接入形态 → 方案 A**：真实 `claude-agent-sdk 0.2.103` 的 `ClaudeAgentOptions.mcp_servers`
+   原生支持 `McpHttpServerConfig`（`{type:"http", url, headers?}`，`type` 必填）。**不需** streamablehttp + `@tool` 桥。
+   `agent_lib.build_options_dict` 已据此实现并与真 SDK 一致性测试通过。
+2. **路径对齐**：codegraph-server 0.18.5 真实返回 `./`-前缀相对路径（workspace 用 `.` 时）或 workspace 绝对路径；
+   `index-service/path_align.py`（`to_container_path` + `format_location`）已据真实输出实现并测试通过。
+3. **EFS 挂载**：真实挂载 `/mnt/repo` 成功，agent 真读到源码。**仅东京支持**（us-east-1 服务端返回
+   `SDK_UNKNOWN_MEMBER`）；须 botocore≥1.43、`networkMode=VPC` + NAT 出站；模型用 `global.anthropic.*`。
+4. **真实 invoke**：`InvokeAgentRuntime`（`CLAUDE_CODE_USE_BEDROCK=1`）跑通，返回真实流式响应。
+
+**剩余待验证：** EFS 读性能 / 冷启动延迟 / CodeGraph 召回率 / 流式卡片频控对接 / index-service 桥的 HTTP 半边常驻部署。
+
+> 逐条 gotcha 与开放问题（`session` schema、`HookContext` 语义、Bedrock 配额等）见全稿
+> `.claude/specs/2026-06-16-agent-container-design.md`；真实部署资源见 `.local/deploy-config`。
