@@ -100,14 +100,21 @@ export async function invokeRuntime(
   return { status: res.status, body: await res.text() };
 }
 
-/** Streaming invoke: calls onChunk with each extracted text fragment as the SSE
- *  arrives, so the caller can update the card incrementally. Also extracts tool
- *  calls (agent reasoning steps) for the collapsible panel. */
+/** Streaming invoke. Parses the SSE stream into the agent's prose blocks and
+ *  classifies them: every text block except the last is a NARRATION (the human
+ *  "what I'm doing now" line → shown live in the 分析过程 panel), the last text
+ *  block is the CONCLUSION (the answer). Tool-use/result/thinking blocks are not
+ *  surfaced. onChunk(conclusionSoFar, narrations) fires as the stream arrives.
+ *
+ *  Streaming nuance: we can't know which text block is "last" until the stream
+ *  ends, so mid-stream the newest text block is treated as the (provisional)
+ *  conclusion; if another tool_use follows it, it retroactively becomes a
+ *  narration and a fresh conclusion block starts. */
 export async function invokeRuntimeStreaming(
   p: InvokeParams,
   opts: SignOptions,
-  onChunk: (textSoFar: string, latestTool: string) => void,
-): Promise<{ status: number; answer: string; reasoning: string }> {
+  onChunk: (conclusionSoFar: string, narrations: string[]) => void,
+): Promise<{ status: number; answer: string; steps: string[] }> {
   const signed = await signInvoke(buildInvokeRequest(p), opts);
   const res = await fetch(`https://${signed.hostname}${signed.path}`, {
     method: signed.method,
@@ -115,60 +122,62 @@ export async function invokeRuntimeStreaming(
     body: signed.body,
   });
   if (res.status !== 200 || !res.body) {
-    return { status: res.status, answer: await res.text(), reasoning: "" };
+    return { status: res.status, answer: await res.text(), steps: [] };
   }
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buf = "";
-  let answer = "";
-  const toolSteps: string[] = [];
-  const textRe = /"text":\s*"((?:[^"\\]|\\.)*)"/g;
-  // Tool use: {"name": "Read", "input": {"file_path": "..."}}
-  const toolRe = /"name":\s*"([^"]+)",\s*"input":\s*(\{[^}]*\})/g;
+
+  // texts[] = prose blocks in order; sawToolAfterLastText marks that a tool_use
+  // arrived after the latest text, so the next text starts a new block.
+  const texts: string[] = [];
+  let sawToolAfterLastText = true; // first text starts a fresh block
+
+  const processEvent = (jsonStr: string): void => {
+    let evt: { content?: Array<Record<string, unknown>> };
+    try { evt = JSON.parse(jsonStr); } catch { return; }
+    const item = evt.content?.[0];
+    if (!item) return;
+    if (typeof item.text === "string") {
+      if (sawToolAfterLastText) {
+        texts.push(item.text);
+        sawToolAfterLastText = false;
+      } else {
+        // Same logical block continued (rare): append to the current one.
+        texts[texts.length - 1] = item.text;
+      }
+    } else if (typeof item.name === "string" && "input" in item) {
+      // tool_use: the preceding text block is now a finished narration.
+      sawToolAfterLastText = true;
+    }
+    // thinking / tool_result: ignored.
+  };
 
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
     buf += decoder.decode(value, { stream: true });
-
-    // Extract text blocks (the agent's answer).
-    let match: RegExpExecArray | null;
-    while ((match = textRe.exec(buf)) !== null) {
-      try {
-        answer += JSON.parse(`"${match[1]}"`);
-      } catch {
-        answer += match[1];
+    let nl: number;
+    while ((nl = buf.indexOf("\n")) >= 0) {
+      const line = buf.slice(0, nl).trim();
+      buf = buf.slice(nl + 1);
+      if (line.startsWith("data:")) {
+        const jsonStr = line.slice(5).trim();
+        if (jsonStr.startsWith("{")) processEvent(jsonStr);
       }
     }
-
-    // Extract tool calls (reasoning steps — what the agent looked at).
-    let toolMatch: RegExpExecArray | null;
-    while ((toolMatch = toolRe.exec(buf)) !== null) {
-      const name = toolMatch[1];
-      try {
-        const input = JSON.parse(toolMatch[2]);
-        const desc = name === "Read" ? `读取 ${input.file_path ?? ""}`
-          : name === "Glob" ? `搜索 ${input.pattern ?? ""}`
-          : name === "Grep" ? `查找 ${input.pattern ?? ""}`
-          : `${name}(${JSON.stringify(input).slice(0, 60)})`;
-        if (!toolSteps.includes(desc)) toolSteps.push(desc);
-      } catch {
-        if (!toolSteps.includes(name)) toolSteps.push(name);
-      }
-    }
-
-    // Keep only the unparsed tail (last incomplete line).
-    const lastNl = buf.lastIndexOf("\n");
-    if (lastNl >= 0) {
-      buf = buf.slice(lastNl + 1);
-      textRe.lastIndex = 0;
-      toolRe.lastIndex = 0;
-    }
-    onChunk(answer, toolSteps[toolSteps.length - 1] ?? "");
+    // Mid-stream: newest text block is the provisional conclusion, the rest
+    // (before it) are narrations.
+    const conclusionSoFar = texts.length > 0 ? texts[texts.length - 1] : "";
+    onChunk(conclusionSoFar, texts.slice(0, -1));
+  }
+  // Flush any trailing buffered line.
+  if (buf.trim().startsWith("data:")) {
+    const jsonStr = buf.trim().slice(5).trim();
+    if (jsonStr.startsWith("{")) processEvent(jsonStr);
   }
 
-  const reasoning = toolSteps.length > 0
-    ? "**分析步骤：**\n" + toolSteps.map((s) => `- ${s}`).join("\n")
-    : "";
-  return { status: res.status, answer, reasoning };
+  const answer = texts.length > 0 ? texts[texts.length - 1] : "";
+  const steps = texts.slice(0, -1);
+  return { status: res.status, answer, steps };
 }

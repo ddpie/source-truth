@@ -152,15 +152,67 @@ export function finalizeTitle(followUp?: boolean): string {
   return followUp ? "↳ 追问 · 已回答" : "回答完成";
 }
 
+/** The "分析过程" collapsible panel — same component live (expanded, streaming
+ *  the steps the agent is taking) and finalized (collapsed, archived for the
+ *  dev to expand). Stable element_id="reasoning" so it can be updated in place
+ *  mid-stream. Returns null when there are no steps yet. */
+export function buildReasoningPanel(steps: string[], expanded: boolean): unknown {
+  if (steps.length === 0) return null;
+  const heading = expanded ? "**🔍 分析中…**" : "**🔍 分析过程（点开看依据）**";
+  return {
+    tag: "collapsible_panel",
+    element_id: "reasoning",
+    expanded,
+    background_color: "grey",
+    padding: "8px 8px 8px 8px",
+    border: { color: "grey", corner_radius: "5px" },
+    vertical_spacing: "8px",
+    header: {
+      title: { tag: "markdown", content: heading },
+      vertical_align: "center",
+      padding: "4px 0px 4px 8px",
+      width: "auto_when_fold",
+      icon: { tag: "standard_icon", token: "down-small-ccm_outlined", color: "grey", size: "16px 16px" },
+      icon_position: "follow_text",
+      icon_expanded_angle: -180,
+    },
+    elements: [{ tag: "markdown", content: steps.map((s) => `- ${s}`).join("\n") }],
+  };
+}
+
+/** Append the live reasoning panel (expanded) to the card — once, when the
+ *  first step appears. Inserted before the conclusion via partial-update API. */
+export async function appendReasoningPanel(cardId: string, steps: string[], sequence: number): Promise<void> {
+  const panel = buildReasoningPanel(steps, true);
+  if (!panel) return;
+  await larkApi("POST", `/open-apis/cardkit/v1/cards/${cardId}/elements`, JSON.stringify({
+    type: "insert_before",
+    target_element_id: "conclusion",
+    sequence,
+    elements: JSON.stringify([panel]),
+  }));
+}
+
+/** Update the live reasoning panel in place as steps grow (expanded). */
+export async function updateReasoningPanel(cardId: string, steps: string[], sequence: number): Promise<void> {
+  const panel = buildReasoningPanel(steps, true);
+  if (!panel) return;
+  await larkApi("PUT", `/open-apis/cardkit/v1/cards/${cardId}/elements/reasoning`, JSON.stringify({
+    element: JSON.stringify(panel),
+    sequence,
+  }));
+}
+
 /** After close streaming: update header to "完成" (green) via full card PUT.
  *  PUT body = { card: { type, data }, sequence } — full replace, must carry body. */
 export async function finalizeCard(
   cardId: string,
   conclusion: string,
-  reasoning: string,
+  steps: string[],
   sequence: number,
   followUp?: boolean,
 ): Promise<void> {
+  const panel = buildReasoningPanel(steps, false);
   const card = {
     schema: "2.0",
     config: { update_multi: true },
@@ -171,27 +223,7 @@ export async function finalizeCard(
     body: {
       elements: [
         { tag: "markdown", content: conclusion, element_id: "conclusion" },
-        // Reasoning / evidence collapsed by default (animated chevron on expand).
-        ...(reasoning
-          ? [{
-              tag: "collapsible_panel",
-              expanded: false,
-              background_color: "grey",
-              padding: "8px 8px 8px 8px",
-              border: { color: "grey", corner_radius: "5px" },
-              vertical_spacing: "8px",
-              header: {
-                title: { tag: "markdown", content: "**🔍 分析过程**" },
-                vertical_align: "center",
-                padding: "4px 0px 4px 8px",
-                width: "auto_when_fold",
-                icon: { tag: "standard_icon", token: "down-small-ccm_outlined", color: "grey", size: "16px 16px" },
-                icon_position: "follow_text",
-                icon_expanded_angle: -180,
-              },
-              elements: [{ tag: "markdown", content: reasoning }],
-            }]
-          : []),
+        ...(panel ? [panel] : []),
       ],
     },
   };

@@ -12,6 +12,7 @@ import {
   buildCloseStreamingBody,
   buildSendCardContent,
   buildStageBody,
+  buildReasoningPanel,
   finalizeTitle,
   buildFollowUpElements,
   buildClickedButtonElement,
@@ -61,6 +62,28 @@ describe("send card as IM content", () => {
     const content = JSON.parse(buildSendCardContent("7652206316581309633"));
     expect(content.type).toBe("card");
     expect(content.data.card_id).toBe("7652206316581309633");
+  });
+});
+
+describe("buildReasoningPanel", () => {
+  it("builds an expanded panel listing the live steps (in-progress)", () => {
+    const panel = buildReasoningPanel(["定位 calcDamage", "读取 SkillConfig.xlsx"], true) as {
+      tag: string; expanded: boolean; element_id: string; elements: Array<{ content: string }>;
+    };
+    expect(panel.tag).toBe("collapsible_panel");
+    expect(panel.expanded).toBe(true);
+    expect(panel.element_id).toBe("reasoning");
+    expect(panel.elements[0].content).toContain("定位 calcDamage");
+    expect(panel.elements[0].content).toContain("读取 SkillConfig.xlsx");
+  });
+
+  it("builds a collapsed panel when done (archived)", () => {
+    const panel = buildReasoningPanel(["步骤1"], false) as { expanded: boolean };
+    expect(panel.expanded).toBe(false);
+  });
+
+  it("returns null when there are no steps", () => {
+    expect(buildReasoningPanel([], true)).toBeNull();
   });
 });
 
