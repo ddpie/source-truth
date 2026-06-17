@@ -76,13 +76,18 @@ async function streamingCardInvoke(
   const { status, answer, reasoning } = await invokeRuntimeStreaming(
     { runtimeArn: RUNTIME_ARN, region: REGION, sessionId, prompt },
     { region: REGION, credentials: creds },
-    (textSoFar) => {
+    (textSoFar, latestTool) => {
       const now = Date.now();
-      if (now - lastUpdate >= THROTTLE_MS && textSoFar.length > 0) {
-        lastUpdate = now;
-        seq++;
-        updateContent(cardId, textSoFar, seq).catch(() => {});
-      }
+      if (now - lastUpdate < THROTTLE_MS) return;
+      lastUpdate = now;
+      // While agent is still thinking (no text yet), show what it's looking at.
+      const display = textSoFar.length > 0
+        ? textSoFar
+        : latestTool
+          ? `*正在取证：${latestTool}*`
+          : "正在分析…";
+      seq++;
+      updateContent(cardId, display, seq).catch(() => {});
     },
   );
 
