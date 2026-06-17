@@ -99,3 +99,50 @@ export async function invokeRuntime(
   });
   return { status: res.status, body: await res.text() };
 }
+
+/** Streaming invoke: calls onChunk with each extracted text fragment as the SSE
+ *  arrives, so the caller can update the card incrementally. Returns the full
+ *  concatenated answer when the stream ends. */
+export async function invokeRuntimeStreaming(
+  p: InvokeParams,
+  opts: SignOptions,
+  onChunk: (textSoFar: string) => void,
+): Promise<{ status: number; answer: string }> {
+  const signed = await signInvoke(buildInvokeRequest(p), opts);
+  const res = await fetch(`https://${signed.hostname}${signed.path}`, {
+    method: signed.method,
+    headers: signed.headers,
+    body: signed.body,
+  });
+  if (res.status !== 200 || !res.body) {
+    return { status: res.status, answer: await res.text() };
+  }
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  let answer = "";
+  const textRe = /"text":\s*"((?:[^"\\]|\\.)*)"/g;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    // Parse SSE lines as they arrive; extract "text" fields.
+    let match: RegExpExecArray | null;
+    while ((match = textRe.exec(buf)) !== null) {
+      try {
+        answer += JSON.parse(`"${match[1]}"`);
+      } catch {
+        answer += match[1];
+      }
+    }
+    // Keep only the unparsed tail (last incomplete line).
+    const lastNl = buf.lastIndexOf("\n");
+    if (lastNl >= 0) {
+      buf = buf.slice(lastNl + 1);
+      textRe.lastIndex = 0;
+    }
+    onChunk(answer);
+  }
+  return { status: res.status, answer };
+}
