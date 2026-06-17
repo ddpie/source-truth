@@ -158,14 +158,22 @@ export async function finalizeCard(
   await larkApi("PUT", `/open-apis/cardkit/v1/cards/${cardId}`, body);
 }
 
-/** After close streaming: append a subtle follow-up hint.
- *  Buttons removed for now — card action callbacks require a webhook endpoint
- *  which isn't set up yet; dead buttons are worse than no buttons. The user
- *  can continue asking in the same conversation (session-map reuses context). */
+/** After close streaming: append follow-up buttons.
+ *  JSON 2.0: buttons go directly as elements (no action wrapper).
+ *  "转研发" uses multi_url to jump to the dev group (no callback needed). */
 export async function appendFooter(cardId: string, sequence: number): Promise<void> {
+  // TODO: make dev group chat_id configurable (env / deploy-config).
+  const devGroupUrl = "https://applink.feishu.cn/client/chat/open?openChatId=oc_c9bce1d07bf0a51c82507473c336eda8";
   const elements = [
     { tag: "hr" },
-    { tag: "markdown", content: "💡 直接在会话里继续追问即可，上下文会延续。如需转研发，请 @相关同学。" },
+    { tag: "markdown", content: "💡 直接在会话里继续追问即可，上下文会延续。" },
+    {
+      tag: "button",
+      text: { tag: "plain_text", content: "🔧 转研发" },
+      type: "danger",
+      size: "small",
+      multi_url: { url: devGroupUrl },
+    },
   ];
   await larkApi("POST", `/open-apis/cardkit/v1/cards/${cardId}/elements`, JSON.stringify({
     type: "append",

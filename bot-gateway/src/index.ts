@@ -24,6 +24,7 @@ import { invokeRuntimeStreaming } from "./sigv4";
 import { processEventLine } from "./index-core";
 import { createCard, updateContent, closeStreaming, finalizeCard, appendFooter, buildSendCardContent } from "./cardkit-client";
 import { removeReaction } from "./reaction";
+import { redactSensitive } from "./redact";
 import type { InvokeFn } from "./handle-event";
 
 const REGION = process.env.AWS_REGION ?? "ap-northeast-1";
@@ -88,7 +89,7 @@ async function streamingCardInvoke(
       if (now - lastUpdate < THROTTLE_MS) return;
       lastUpdate = now;
       const display = textSoFar.length > 0
-        ? textSoFar
+        ? redactSensitive(textSoFar)
         : latestTool
           ? `*正在取证：${latestTool}*`
           : "正在分析…";
@@ -102,7 +103,7 @@ async function streamingCardInvoke(
   // 3. Final update + close streaming.
   const finalText = timedOut && !answer
     ? "⏱ 分析超时，请缩小问题范围后重试。"
-    : answer || "(无内容)";
+    : redactSensitive(answer || "(无内容)");
   seq++;
   await updateContent(cardId, finalText, seq);
   seq++;
