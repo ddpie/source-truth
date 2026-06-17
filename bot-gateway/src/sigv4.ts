@@ -106,7 +106,7 @@ export async function invokeRuntime(
 export async function invokeRuntimeStreaming(
   p: InvokeParams,
   opts: SignOptions,
-  onChunk: (textSoFar: string) => void,
+  onChunk: (textSoFar: string, latestTool: string) => void,
 ): Promise<{ status: number; answer: string; reasoning: string }> {
   const signed = await signInvoke(buildInvokeRequest(p), opts);
   const res = await fetch(`https://${signed.hostname}${signed.path}`, {
@@ -164,7 +164,7 @@ export async function invokeRuntimeStreaming(
       textRe.lastIndex = 0;
       toolRe.lastIndex = 0;
     }
-    onChunk(answer);
+    onChunk(answer, toolSteps[toolSteps.length - 1] ?? "");
   }
 
   const reasoning = toolSteps.length > 0
