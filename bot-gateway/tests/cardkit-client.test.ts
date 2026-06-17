@@ -23,7 +23,7 @@ describe("buildCreateCardBody", () => {
     // print_frequency_ms + print_step must be paired (else CardKit code 11311).
     expect(card.config.streaming_config.print_frequency_ms).toBeDefined();
     expect(card.config.streaming_config.print_step).toBeDefined();
-    expect(card.header.title.content).toBe("source-truth");
+    expect(card.header.title.content).toBe("正在思考…");
     expect(
       card.body.elements.some((e: { element_id?: string }) => e.element_id === "conclusion"),
     ).toBe(true);

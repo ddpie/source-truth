@@ -18,7 +18,7 @@ import { spawn } from "node:child_process";
 
 // ── pure request builders (unit-tested) ──────────────────────────────────────
 
-export function buildCreateCardBody(opts: { title: string }): string {
+export function buildCreateCardBody(_opts?: { title?: string }): string {
   const card = {
     schema: "2.0",
     config: {
@@ -30,7 +30,11 @@ export function buildCreateCardBody(opts: { title: string }): string {
         print_strategy: "fast",
       },
     },
-    header: { title: { tag: "plain_text", content: opts.title }, template: "blue" },
+    header: {
+      title: { tag: "plain_text", content: "正在思考…" },
+      template: "blue",
+      ud_icon: { tag: "standard_icon", token: "ai-lib_outlined" },
+    },
     body: { elements: [{ tag: "markdown", content: "正在分析…", element_id: "conclusion" }] },
   };
   return JSON.stringify({ type: "card_json", data: JSON.stringify(card) });
@@ -102,4 +106,41 @@ export async function updateContent(cardId: string, content: string, sequence: n
 /** Turn streaming off once the answer is final. */
 export async function closeStreaming(cardId: string, sequence: number): Promise<void> {
   await larkApi("PATCH", settingsPath(cardId), buildCloseStreamingBody(sequence));
+}
+
+/** After close streaming: update header to "完成" (green) via full card PUT.
+ *  Spike confirmed: full PUT replaces the entire body, so we must carry the
+ *  final conclusion content along with the new header. */
+export async function finalizeHeader(cardId: string, conclusion: string): Promise<void> {
+  const card = {
+    schema: "2.0",
+    config: { update_multi: true, streaming_mode: false },
+    header: {
+      title: { tag: "plain_text", content: "回答完成" },
+      template: "green",
+      ud_icon: { tag: "standard_icon", token: "ai-lib_outlined" },
+    },
+    body: { elements: [{ tag: "markdown", content: conclusion, element_id: "conclusion" }] },
+  };
+  const data = JSON.stringify({ type: "card_json", data: JSON.stringify(card) });
+  await larkApi("PUT", `/open-apis/cardkit/v1/cards/${cardId}`, data);
+}
+
+/** After close streaming: append follow-up buttons (追问 / 转研发). */
+export async function appendButtons(cardId: string, sequence: number): Promise<void> {
+  const elements = [
+    {
+      tag: "action",
+      actions: [
+        { tag: "button", text: { tag: "plain_text", content: "👍" }, type: "default", value: { action: "thumbs_up" } },
+        { tag: "button", text: { tag: "plain_text", content: "继续追问" }, type: "primary", value: { action: "follow_up" } },
+        { tag: "button", text: { tag: "plain_text", content: "转研发" }, type: "danger", value: { action: "escalate" } },
+      ],
+    },
+  ];
+  await larkApi("POST", `/open-apis/cardkit/v1/cards/${cardId}/elements`, JSON.stringify({
+    type: "append",
+    sequence,
+    elements: JSON.stringify(elements),
+  }));
 }

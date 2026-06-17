@@ -22,7 +22,7 @@ import { fromNodeProviderChain } from "@aws-sdk/credential-providers";
 
 import { invokeRuntimeStreaming } from "./sigv4";
 import { processEventLine } from "./index-core";
-import { createCard, updateContent, closeStreaming, buildSendCardContent } from "./cardkit-client";
+import { createCard, updateContent, closeStreaming, finalizeHeader, appendButtons, buildSendCardContent } from "./cardkit-client";
 import { removeReaction } from "./reaction";
 import type { InvokeFn } from "./handle-event";
 
@@ -93,6 +93,11 @@ async function streamingCardInvoke(
   await updateContent(cardId, answer || "(无内容)", seq);
   seq++;
   await closeStreaming(cardId, seq);
+
+  // 4. Append follow-up buttons (POST elements works after close streaming).
+  //    Header color change (PUT full card) deferred — format needs investigation.
+  seq++;
+  try { await appendButtons(cardId, seq); } catch { /* best-effort */ }
   log({ event: "card_closed", card: cardId, chars: answer.length });
 }
 
