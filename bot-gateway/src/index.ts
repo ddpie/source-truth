@@ -147,14 +147,21 @@ async function main(): Promise<void> {
     void processEventLine(line, { invoke })
       .then(async (res) => {
         if (res?.handled && res.messageId && res.sessionId) {
-          // Re-extract the prompt from the event (handle-event already parsed it).
-          // res.answer here is just the dummy from invoke above.
           const prompt = res.answer ?? "";
-          await streamingCardInvoke(res.sessionId, prompt, res.messageId, {
-            accessKeyId: creds.accessKeyId,
-            secretAccessKey: creds.secretAccessKey,
-            sessionToken: creds.sessionToken,
-          });
+          try {
+            await streamingCardInvoke(res.sessionId, prompt, res.messageId, {
+              accessKeyId: creds.accessKeyId,
+              secretAccessKey: creds.secretAccessKey,
+              sessionToken: creds.sessionToken,
+            });
+          } catch (cardErr) {
+            // Fallback: if CardKit fails (API 400, rate limit, etc.), reply
+            // with plain markdown so the user always gets an answer. Learned
+            // from OpenClaw issue #43322 (card failure → 13h session lock).
+            log({ event: "card_fallback", error: String(cardErr) });
+            const { sendReply } = await import("./reply.js");
+            await sendReply({ messageId: res.messageId, answer: `⚠️ 卡片渲染失败，纯文本回复：\n\n${prompt}` }).catch(() => {});
+          }
           log({ event: "replied", message: res.messageId, session: res.sessionId });
         }
       })
