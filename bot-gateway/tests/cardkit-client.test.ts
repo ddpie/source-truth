@@ -13,6 +13,8 @@ import {
   buildSendCardContent,
   buildFollowUpToast,
   finalizeTitle,
+  buildFollowUpElements,
+  buildClickedButtonElement,
 } from "../src/cardkit-client";
 
 describe("buildCreateCardBody", () => {
@@ -78,6 +80,32 @@ describe("follow-up card header", () => {
   it("finalizeTitle keeps the follow-up marker on the completed card", () => {
     expect(finalizeTitle(false)).toBe("回答完成");
     expect(finalizeTitle(true)).toContain("追问");
+  });
+});
+
+describe("follow-up buttons (clickable, with element_id)", () => {
+  it("gives each button a stable element_id and carries it in the value", () => {
+    const els = buildFollowUpElements(["Q1", "Q2"]);
+    const buttons = els.filter((e) => (e as { tag: string }).tag === "button") as Array<{
+      element_id: string;
+      value: { action: string; text: string; eid: string };
+    }>;
+    expect(buttons).toHaveLength(2);
+    expect(buttons[0].element_id).toBe("followup_0");
+    expect(buttons[0].value.eid).toBe("followup_0");
+    expect(buttons[0].value.text).toBe("Q1");
+    expect(buttons[1].element_id).toBe("followup_1");
+  });
+});
+
+describe("buildClickedButton", () => {
+  it("renders a disabled button marked as clicked (✓) for the chosen question", () => {
+    const el = JSON.parse(buildClickedButtonElement("followup_1", "战斗伤害怎么算？"));
+    expect(el.tag).toBe("button");
+    expect(el.element_id).toBe("followup_1");
+    expect(el.disabled).toBe(true);
+    expect(el.text.content).toContain("战斗伤害怎么算？");
+    expect(el.text.content).toContain("✓");
   });
 });
 
