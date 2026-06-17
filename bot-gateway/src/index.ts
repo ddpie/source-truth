@@ -69,18 +69,24 @@ async function streamingCardInvoke(
   removeReaction(messageId);
 
   // 2. Stream the agent's answer; update card content incrementally.
+  //    9-minute safety timeout: close streaming gracefully before Feishu's
+  //    10-minute hard window kills the stream (avoids broken card state).
   let seq = 1;
   let lastUpdate = 0;
-  const THROTTLE_MS = 150; // CardKit allows 10/s; ~6/s for smoother typewriter.
+  let timedOut = false;
+  const THROTTLE_MS = 100; // CardKit allows 10/s; push to max for smoothest typewriter.
+  const STREAM_TIMEOUT_MS = 9 * 60 * 1000; // 9 min (Feishu closes at 10)
+  const deadline = Date.now() + STREAM_TIMEOUT_MS;
 
   const { status, answer, reasoning } = await invokeRuntimeStreaming(
     { runtimeArn: RUNTIME_ARN, region: REGION, sessionId, prompt },
     { region: REGION, credentials: creds },
     (textSoFar, latestTool) => {
+      if (timedOut) return;
+      if (Date.now() > deadline) { timedOut = true; return; }
       const now = Date.now();
       if (now - lastUpdate < THROTTLE_MS) return;
       lastUpdate = now;
-      // While agent is still thinking (no text yet), show what it's looking at.
       const display = textSoFar.length > 0
         ? textSoFar
         : latestTool
@@ -93,18 +99,21 @@ async function streamingCardInvoke(
 
   if (status !== 200) throw new Error(`invoke failed: HTTP ${status}`);
 
-  // 3. Final update with the complete answer + close streaming.
+  // 3. Final update + close streaming.
+  const finalText = timedOut && !answer
+    ? "⏱ 分析超时，请缩小问题范围后重试。"
+    : answer || "(无内容)";
   seq++;
-  await updateContent(cardId, answer || "(无内容)", seq);
+  await updateContent(cardId, finalText, seq);
   seq++;
   await closeStreaming(cardId, seq);
 
-  // 4. Finalize: header → green "回答完成" + reasoning collapsed + append buttons.
+  // 4. Finalize: header → green "回答完成" + reasoning collapsed + footer.
   seq++;
-  try { await finalizeCard(cardId, answer || "(无内容)", reasoning, seq); } catch { /* best-effort */ }
+  try { await finalizeCard(cardId, finalText, reasoning, seq); } catch { /* best-effort */ }
   seq++;
   try { await appendFooter(cardId, seq); } catch { /* best-effort */ }
-  log({ event: "card_closed", card: cardId, chars: answer.length });
+  log({ event: "card_closed", card: cardId, chars: answer.length, timedOut });
 }
 
 async function main(): Promise<void> {
