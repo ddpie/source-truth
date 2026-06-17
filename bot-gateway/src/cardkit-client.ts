@@ -18,14 +18,17 @@ import { spawn } from "node:child_process";
 
 // ── pure request builders (unit-tested) ──────────────────────────────────────
 
-export function buildCreateCardBody(_opts?: { title?: string }): string {
+export function buildCreateCardBody(opts?: { summary?: string }): string {
+  // summary.content customizes the chat-list preview (default would be "[生成中...]").
+  const summary = opts?.summary ? `💬 ${opts.summary.slice(0, 40)}` : "source-truth 正在回答…";
   const card = {
     schema: "2.0",
     config: {
       update_multi: true,
       streaming_mode: true,
+      summary: { content: summary },
       streaming_config: {
-        print_frequency_ms: { default: 30 },
+        print_frequency_ms: { default: 70 }, // official default; smooth typewriter
         print_step: { default: 1 },
         print_strategy: "fast",
       },
@@ -33,7 +36,7 @@ export function buildCreateCardBody(_opts?: { title?: string }): string {
     header: {
       title: { tag: "plain_text", content: "正在思考…" },
       template: "blue",
-      ud_icon: { tag: "standard_icon", token: "ai-lib_outlined" },
+      icon: { tag: "standard_icon", token: "ai-lib_outlined" },
     },
     body: { elements: [{ tag: "markdown", content: "正在分析…", element_id: "conclusion" }] },
   };
@@ -90,9 +93,9 @@ function larkApi(method: string, path: string, data: string): Promise<unknown> {
   });
 }
 
-/** Create a streaming card; returns its card_id. */
-export async function createCard(title: string): Promise<string> {
-  const resp = (await larkApi("POST", "/open-apis/cardkit/v1/cards", buildCreateCardBody({ title }))) as {
+/** Create a streaming card; returns its card_id. summary = chat-list preview. */
+export async function createCard(summary?: string): Promise<string> {
+  const resp = (await larkApi("POST", "/open-apis/cardkit/v1/cards", buildCreateCardBody({ summary }))) as {
     data: { card_id: string };
   };
   return resp.data.card_id;
@@ -122,18 +125,29 @@ export async function finalizeCard(
     header: {
       title: { tag: "plain_text", content: "回答完成" },
       template: "green",
-      ud_icon: { tag: "standard_icon", token: "ai-lib_outlined" },
+      icon: { tag: "standard_icon", token: "ai-lib_outlined" },
     },
     body: {
       elements: [
         { tag: "markdown", content: conclusion, element_id: "conclusion" },
-        // Reasoning / evidence collapsed by default (user can expand to see).
+        // Reasoning / evidence collapsed by default (animated chevron on expand).
         ...(reasoning
           ? [{
               tag: "collapsible_panel",
               expanded: false,
-              header: { title: { tag: "plain_text", content: "推理过程" } },
+              background_color: "grey",
+              padding: "8px 8px 8px 8px",
+              border: { color: "grey", corner_radius: "5px" },
               vertical_spacing: "8px",
+              header: {
+                title: { tag: "markdown", content: "**🔍 取证过程**" },
+                vertical_align: "center",
+                padding: "4px 0px 4px 8px",
+                width: "auto_when_fold",
+                icon: { tag: "standard_icon", token: "down-small-ccm_outlined", color: "grey", size: "16px 16px" },
+                icon_position: "follow_text",
+                icon_expanded_angle: -180,
+              },
               elements: [{ tag: "markdown", content: reasoning }],
             }]
           : []),
