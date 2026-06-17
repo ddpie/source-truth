@@ -144,17 +144,14 @@ export async function finalizeCard(
   await larkApi("PUT", `/open-apis/cardkit/v1/cards/${cardId}`, body);
 }
 
-/** After close streaming: append follow-up buttons (追问 / 转研发). */
-export async function appendButtons(cardId: string, sequence: number): Promise<void> {
+/** After close streaming: append a subtle follow-up hint.
+ *  Buttons removed for now — card action callbacks require a webhook endpoint
+ *  which isn't set up yet; dead buttons are worse than no buttons. The user
+ *  can continue asking in the same conversation (session-map reuses context). */
+export async function appendFooter(cardId: string, sequence: number): Promise<void> {
   const elements = [
-    {
-      tag: "action",
-      actions: [
-        { tag: "button", text: { tag: "plain_text", content: "👍" }, type: "default", value: { action: "thumbs_up" } },
-        { tag: "button", text: { tag: "plain_text", content: "继续追问" }, type: "primary", value: { action: "follow_up" } },
-        { tag: "button", text: { tag: "plain_text", content: "转研发" }, type: "danger", value: { action: "escalate" } },
-      ],
-    },
+    { tag: "hr" },
+    { tag: "markdown", content: "💡 直接在会话里继续追问即可，上下文会延续。如需转研发，请 @相关同学。" },
   ];
   await larkApi("POST", `/open-apis/cardkit/v1/cards/${cardId}/elements`, JSON.stringify({
     type: "append",
