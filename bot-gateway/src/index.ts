@@ -156,8 +156,16 @@ async function sendStreamingCard(
   // payload doesn't carry).
   // Store the question too, so a follow-up on this card can replay the prior
   // turn (question + answer, filled in at finalize) as stateless context.
-  if (sentMessageId) rememberCard(sentMessageId, cardId, sessionId, question, parentMessageId);
-  log({ event: "card_sent", target: hashUserId(targetKey), card: cardId });
+  if (sentMessageId) {
+    rememberCard(sentMessageId, cardId, sessionId, question, parentMessageId);
+  } else {
+    // Send accepted but no message_id in the response → the card can't be
+    // registered, so a later follow-up/reply can't find it and silently loses
+    // context. Log it (operator-visible) so "entry_missing" follow-ups are
+    // diagnosable vs a normal eviction.
+    log({ event: "card_sent_no_message_id", target: hashUserId(targetKey), card: cardId });
+  }
+  log({ event: "card_sent", target: hashUserId(targetKey), card: cardId, hasMessageId: !!sentMessageId });
 
   // Remove the "processing" reaction now that the card is visible.
   if ("messageId" in target) removeReaction(target.messageId);
@@ -177,9 +185,16 @@ async function sendStreamingCard(
     // (The old header full-PUT left the header stuck on "排队中" forever — the
     // heartbeat drives the status element, never the header — and also wiped the
     // question element.) Consumes seq 1; hand the body seq 2+.
-    await appendStatusLine(cardId, "⏳ 排队中（正在等待上一个问题分析完成）", 1).catch(() => {});
+    // Set statusSeeded ONLY if the seed append actually succeeded. If it failed,
+    // leave it false so the body's heartbeat re-APPENDS the status element (self-
+    // healing), instead of forever PUTting a nonexistent /elements/status (the
+    // non-queued path relies on exactly this retry-as-append). startSeq advances
+    // regardless to keep CardKit's monotonic-sequence contract.
+    try {
+      await appendStatusLine(cardId, "⏳ 排队中（正在等待上一个问题分析完成）", 1);
+      statusSeeded = true;
+    } catch { /* seed failed → heartbeat will append on its first tick */ }
     startSeq = 2;
-    statusSeeded = true;
   }
   return { cardId, abort, startSeq, isFollowUp, sentMessageId, question, statusSeeded };
 }
@@ -460,7 +475,7 @@ async function runStreamingInvoke(
   //    also drops the now-irrelevant 停止 button AND the live status line.
   // Show total elapsed in the finalized header ("回答完成 · 用时 67s").
   const elapsedLabel = formatElapsed(Date.now() - startedAt);
-  await writer.write((seq) => finalizeCard(cardId, finalText, redactSteps(steps), seq, isFollowUp, aborted, hardFailed, finalEvidence, question, elapsedLabel));
+  await writer.write((seq) => finalizeCard(cardId, finalText, redactSteps(steps), seq, isFollowUp, aborted, hardFailed, finalEvidence, question, elapsedLabel, turnCapped));
   // 5. Data charts + follow-ups: skip on HARD failure (no trustworthy conclusion).
   //    A turn-capped partial keeps its charts/follow-ups (labeled incomplete).
   if (!hardFailed && charts.length > 0) {

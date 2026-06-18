@@ -165,6 +165,13 @@ describe("follow-up card header", () => {
   it("finalizeTitle does NOT show elapsed on a hard failure (misleading)", () => {
     expect(finalizeTitle(false, false, true, "1m 7s")).toBe("⚠️ 查询失败");
   });
+
+  it("finalizeTitle marks a turn-capped partial distinctly (not a green 回答完成)", () => {
+    const t = finalizeTitle(false, false, false, "2m 3s", true);
+    expect(t).toContain("部分结论");
+    expect(t).not.toContain("回答完成");
+    expect(t).toContain("用时 2m 3s"); // time IS meaningful for a partial
+  });
 });
 
 describe("follow-up buttons (clickable, with element_id)", () => {
