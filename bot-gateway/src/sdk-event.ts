@@ -56,5 +56,10 @@ export function sdkEventToImEvent(data: unknown): ImEvent | null {
     message_type: typeof message.message_type === "string" ? message.message_type : "",
     mentions,
     thread_id: typeof message.thread_id === "string" ? message.thread_id : undefined,
+    // parent_id is set when this message REPLIES to another (Feishu 引用/回复). It
+    // lets a typed reply to a bot answer-card continue that conversation: the
+    // gateway looks parent_id up in the card registry and replays the prior chain
+    // as context (same mechanism as the follow-up button).
+    parent_id: typeof message.parent_id === "string" ? message.parent_id : undefined,
   };
 }

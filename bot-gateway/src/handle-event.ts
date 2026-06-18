@@ -34,6 +34,8 @@ export interface ImEvent {
   message_type: string;
   mentions: Mention[];
   thread_id?: string;
+  /** message_id this message replies to (Feishu 回复/引用), if any. */
+  parent_id?: string;
 }
 
 /** Invoke the agent for a session; returns the answer text. */
@@ -44,6 +46,8 @@ export interface HandleResult {
   answer?: string;
   sessionId?: string;
   messageId?: string;
+  /** message_id this message replied to (for follow-up context replay), if any. */
+  parentId?: string;
   reason?: "duplicate" | "unsupported_type" | "empty" | "not_mentioned" | "not_a_user";
 }
 
@@ -116,5 +120,5 @@ export async function handleMessageEvent(
 
   // 4. Invoke the agent.
   const answer = await deps.invoke(sessionId, prompt);
-  return { handled: true, answer, sessionId, messageId: event.message_id };
+  return { handled: true, answer, sessionId, messageId: event.message_id, parentId: event.parent_id };
 }
