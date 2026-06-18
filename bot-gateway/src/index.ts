@@ -264,11 +264,13 @@ async function runStreamingInvoke(
     // the answer text IS the visible motion — skip the status write this tick. The
     // elapsed counter still advances on the next idle tick (monotonic, honest).
     if (now - lastUpdate < STREAMING_YIELD_MS) return;
-    // Cycle the ellipsis . → .. → … each write; seconds counter is the live signal.
+    // Cycle the ellipsis · → ·· → ··· each write. Put it AFTER the seconds so the
+    // seconds stay in a FIXED position (the dots changing width before the number
+    // made the number jitter left/right). seconds is the live "still working" signal.
     const dots = ELLIPSIS[frame++ % ELLIPSIS.length];
     const elapsed = formatElapsed(now - startedAt);  // s / Mm Ss / Hh Mm
     const phaseWord = stage === "thinking" ? "正在思考" : "正在分析";
-    const text = `${phaseWord}${dots} ${elapsed}`;
+    const text = `${phaseWord} ${elapsed}${dots}`;
     lastStatusWrite = now;
     // Latest-wins lane: if a status frame is still queued, this one REPLACES it
     // (stale frames dropped) instead of piling up behind a slow lark-cli spawn —
@@ -504,9 +506,24 @@ async function main(): Promise<void> {
   // After handleMessageEvent decides to answer, drive the streaming card.
   const replyWithCard = async (res: Awaited<ReturnType<typeof handleMessageEvent>>) => {
     if (!res?.handled || !res.messageId || !res.sessionId) return;
-    const prompt = res.answer ?? "";
+    const question = res.answer ?? ""; // InvokeFn passes the clean question through as `answer`
+    // If this IM message REPLIED to a prior bot card (Feishu 回复/引用), replay that
+    // card's whole conversation chain as context — so a TYPED follow-up continues
+    // the thread just like the follow-up button does. parentId → registry chain.
+    let prompt = question;
+    let parentId: string | undefined;
+    if (res.parentId) {
+      const chain = collectChain(res.parentId);
+      if (chain.length > 0) {
+        prompt = composeFollowUpPrompt(question, chain);
+        parentId = res.parentId;
+        log({ event: "reply_context_replayed", turns: chain.length });
+      } else {
+        log({ event: "reply_context_missing", reason: "parent_not_in_registry" });
+      }
+    }
     try {
-      await streamingCardInvoke(res.sessionId, prompt, { messageId: res.messageId }, credentials);
+      await streamingCardInvoke(res.sessionId, prompt, { messageId: res.messageId }, credentials, question, parentId);
     } catch (cardErr) {
       // streamingCardInvoke now finalizes the card itself on backend failure
       // (non-200 / stream error), so reaching here means something unexpected

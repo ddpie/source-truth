@@ -59,6 +59,13 @@ describe("sdkEventToImEvent", () => {
     expect(ev!.thread_id).toBe("omt_thread123");
   });
 
+  it("carries parent_id when the message REPLIES to another (follow-up context)", () => {
+    const reply = { ...LIVE_EVENT, message: { ...LIVE_EVENT.message, parent_id: "om_parent_card_99" } };
+    expect(sdkEventToImEvent(reply)!.parent_id).toBe("om_parent_card_99");
+    // absent when not a reply
+    expect(sdkEventToImEvent(LIVE_EVENT)!.parent_id).toBeUndefined();
+  });
+
   it("extracts sender_type (so non-user senders can be filtered)", () => {
     expect(sdkEventToImEvent(LIVE_EVENT)!.sender_type).toBe("user");
   });
