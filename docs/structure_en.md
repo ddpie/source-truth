@@ -8,28 +8,36 @@
 agent-container/        Claude Code Agent running inside the session microVM (Python)
   README.md             Responsibility + external contract (goal/session input, CodeGraph MCP endpoint, EFS mounts)
   prompts/              System prompt + FAQ list + answer rules (code-as-truth / flag divergence / escalate)
-  (p1) Dockerfile       ARM64 base image pinned by sha256; pins Claude Agent SDK + lark-cli
-  (p1) agent.py         @app.entrypoint async streaming handler that drives the agent loop
+  Dockerfile            ARM64 base image pinned by sha256; pins Claude Agent SDK + @anthropic-ai/claude-code
+  agent.py              @app.entrypoint async streaming handler that drives the agent loop
+  agent_lib.py          SDK-free read-only Q&A agent core (agent.py's testable kernel: option build / evidence loop)
+  requirements.txt + requirements.lock  Pinned Python deps (lock = full-transitive pip freeze)
+  tests/                pytest (invoked by scripts/test.sh)
 bot-gateway/            Feishu Bot long-connection event gateway + CardKit streaming (TypeScript long-running service)
   README.md             Long-connection / event dedup / session→runtimeSessionId map / card update throttling
   src/                  Event consumer entry, SigV4 call to AgentCore, session map, CardKit render, SSE parse, redacted logging
 index-service/          Standalone CodeGraph index service + MCP-over-HTTP bridge
   README.md             Resident single-writer session / CodeGraph / HTTP bridge / EFS mount / bootstrap
   http_bridge.py        FastMCP HTTP bridge (package root, not src/): exposes codegraph tools, aligns paths to /mnt/repo
-  codegraph_session.py  Resident codegraph-server single-writer session (worker thread + private loop, health self-heal)
-  bootstrap.sh          EC2 user-data: install deps / mount EFS / systemd build→bridge
+  codegraph_session.py  Resident codegraph-server single-writer session (worker thread + private loop, health self-heal, timeouts)
+  file_search.py        Local-copy ripgrep/grep search tool (replaces ~225x-slower EFS grep; content-dedups hits; MCP-exposed)
+  path_align.py         Index path ↔ /mnt/repo lexical alignment (rejects escapes)
+  codegraph_client.py   codegraph-server client wrapper
+  perf.py               Structured latency logging
+  bootstrap.sh          EC2 user-data: install deps / mount EFS / snapshot-stamp re-extract / systemd build→bridge
+  tests/                pytest (invoked by scripts/test.sh)
 infra/                  Infrastructure as code (MVP starts with agentcore toolkit / boto3, CDK-ified incrementally)
   README.md             IaC split: CDK owns the stable layer / deploy-all.sh provisions AgentCore Runtime via boto3
   (p2) lib/             runtime / storage(EFS) / codegraph / gateway stacks
 shared/                 Cross-package shared: structured logging (hashUserId), MCP tool schema, card protocol types
 config/                 Config-driven: i18n.json (card / alarm / error copy), alarm-thresholds.json
 scripts/                Operational lifecycle
-  check-invariants.sh   Fast structural lint (AGENTS / CLAUDE / structure / bilingual pairing / top-level dirs)
-  (p1) lib/             common.sh (formatting + dep checks), config.sh (.local config + region resolution)
-  (p1) test.sh          Single tiered test entrypoint (offline default / --full)
-  (p1) check-versions.sh Pinned-version drift guard
+  check-invariants.sh   Fast structural lint (AGENTS / CLAUDE / structure / bilingual pairing / top-level dir existence)
+  lib/                  common.sh (formatting + dep checks), env-utils.sh (.env / deploy-config shared helper)
+  test.sh               Single tiered test entrypoint (offline default / --full)
+  check-versions.sh     Pinned-version drift guard (base digest / requirements pin / Node / claude-code npm)
   deploy-all.sh         Canonical one-click deploy (artifacts→IAM→network→EFS→index-service→image→Runtime; idempotent)
-  (p1) lib/provision_*.sh + deploy_runtime.py + wait_index_health.sh  deploy-all.sh phase implementations
+  lib/provision_*.sh + deploy_runtime.py + wait_index_health.sh  deploy-all.sh phase implementations
   ⚠️ deploy.sh          Deprecated compatibility shim (delegates to deploy-all.sh)
   (p2) ops.sh           Ops toolkit (status / logs / reindex / destroy)
   (p2) teardown.sh      Ordered teardown + retained-resource list

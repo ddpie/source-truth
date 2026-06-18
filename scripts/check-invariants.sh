@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # check-invariants.sh — 快速无网络结构 lint（pre-commit / test.sh --lint 调用）。
-# 校验 AGENTS.md 约定中可机检的子集：单一真相源、双语配对、结构文档与磁盘一致。
+# 校验 AGENTS.md 约定中可机检的子集：单一真相源、双语配对、顶层目录存在性
+# （注：只校验顶层组件目录存在，不做结构文档树逐项 diff）。
 # 失败即非零退出，逐条打印问题。
 set -euo pipefail
 
