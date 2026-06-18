@@ -234,7 +234,7 @@ async function runStreamingInvoke(
   let stage: "thinking" | "analyzing" = "thinking";
   let stepsShown = 0; // how many reasoning steps are currently rendered in the panel
   let panelAppended = false;
-  const THROTTLE_MS = 100; // CardKit allows 10/s; push to max for smoothest typewriter.
+  const THROTTLE_MS = 125; // ~8/s content; leaves headroom for ~1/s status under CardKit's 10/s per-card cap.
   const STREAM_TIMEOUT_MS = 9 * 60 * 1000; // 9 min (Feishu closes at 10)
   const deadline = Date.now() + STREAM_TIMEOUT_MS;
 
@@ -270,6 +270,9 @@ async function runStreamingInvoke(
   // and the combined status+content rate stays under the cap.
   const STATUS_WRITE_MS = 200;
   const STREAMING_YIELD_MS = 200;
+  // Max time the elapsed timer may go un-refreshed during active streaming before
+  // we force a status write so the counter/ellipsis never visibly freeze (~1/s).
+  const STATUS_FLOOR_MS = 1000;
   let lastStatusWrite = 0;
   heartbeat = setInterval(() => {
     if (timedOut || Date.now() > deadline) { stopHeartbeat(); return; }
@@ -280,9 +283,14 @@ async function runStreamingInvoke(
     if (now - lastStatusWrite < STATUS_WRITE_MS) return;
     // Stay under CardKit's per-card 10/s: when the conclusion typewriter is
     // actively streaming (a content update within the last STREAMING_YIELD_MS),
-    // the answer text IS the visible motion — skip the status write this tick. The
-    // elapsed counter still advances on the next idle tick (monotonic, honest).
-    if (now - lastUpdate < STREAMING_YIELD_MS) return;
+    // the answer text IS the visible motion — yield the status write this tick so
+    // status+content don't both fire every 100ms. BUT enforce a max-staleness
+    // floor: if the timer hasn't been refreshed for STATUS_FLOOR_MS (~1s), write it
+    // anyway even mid-stream — otherwise the elapsed counter visibly FREEZES for the
+    // entire (tens-of-seconds) conclusion-streaming phase, since content keeps
+    // refreshing lastUpdate so the yield would never release. ~1/s status + ~8/s
+    // content stays under the cap (the CardWriter serial+coalesce lanes bound it).
+    if (now - lastUpdate < STREAMING_YIELD_MS && now - lastStatusWrite < STATUS_FLOOR_MS) return;
     // Cycle the ellipsis · → ·· → ··· each write. Put it AFTER the seconds so the
     // seconds stay in a FIXED position (the dots changing width before the number
     // made the number jitter left/right). seconds is the live "still working" signal.
@@ -336,35 +344,40 @@ async function runStreamingInvoke(
       // Live reasoning panel: append once, then update in place as steps grow —
       // separate element from the streamed conclusion, so it doesn't fight the
       // typewriter. Only push when a NEW step appeared (not every text chunk).
+      // NOTE: this block does NOT early-return — it falls through to the conclusion
+      // update below so that a chunk carrying BOTH a new step AND new answer text
+      // pushes both on the same tick (the panel and content are independent element
+      // lanes). Returning here used to defer the typewriter whenever a step
+      // arrived, contributing to the "stall then dump" feel.
       if (liveSteps.length > stepsShown) {
-        // Throttle panel pushes too: they share CardKit's 10/s entity cap with
-        // content/stage/button updates, so an agent emitting steps in a burst
-        // could otherwise trip the limit. Skip this tick if we updated recently
-        // (steps keep accumulating in liveSteps; the next tick renders them all).
+        // Throttle panel pushes (they share CardKit's 10/s entity cap). If we
+        // pushed a panel update recently, SKIP just the panel this tick (steps keep
+        // accumulating in liveSteps; the next tick renders them all) — but still
+        // fall through to the content update below.
         const nowPanel = Date.now();
-        if (nowPanel - lastPanelUpdate < THROTTLE_MS) return;
-        lastPanelUpdate = nowPanel;
-        stepsShown = liveSteps.length;
-        // Redact steps before they hit the group-visible panel (same safety net
-        // as the conclusion text) — a secret/path in a narration step leaks too.
-        const safeSteps = redactSteps(liveSteps);
-        // Decide append-vs-update at EXECUTION time (inside the serial callback),
-        // NOT at schedule time. The CardWriter chain is FIFO, so by the time this
-        // callback runs, any earlier panel write has already settled and set
-        // panelAppended. That means: two writes can't both append (the first sets
-        // the flag true on success before the second runs), AND a FAILED append
-        // leaves the flag false so the next write retries as an append instead of
-        // stranding an UPDATE on a never-created "reasoning" element (the bug the
-        // schedule-time capture had — caught in review).
-        void writer.write(async (seq) => {
-          if (!panelAppended) {
-            await appendReasoningPanel(cardId, safeSteps, seq);
-            panelAppended = true; // only on success → a throw leaves it false
-          } else {
-            await updateReasoningPanel(cardId, safeSteps, seq);
-          }
-        });
-        return;
+        if (nowPanel - lastPanelUpdate >= THROTTLE_MS) {
+          lastPanelUpdate = nowPanel;
+          stepsShown = liveSteps.length;
+          // Redact steps before they hit the group-visible panel (same safety net
+          // as the conclusion text) — a secret/path in a narration step leaks too.
+          const safeSteps = redactSteps(liveSteps);
+          // Decide append-vs-update at EXECUTION time (inside the serial callback),
+          // NOT at schedule time. The CardWriter chain is FIFO, so by the time this
+          // callback runs, any earlier panel write has already settled and set
+          // panelAppended. That means: two writes can't both append (the first sets
+          // the flag true on success before the second runs), AND a FAILED append
+          // leaves the flag false so the next write retries as an append instead of
+          // stranding an UPDATE on a never-created "reasoning" element (the bug the
+          // schedule-time capture had — caught in review).
+          void writer.write(async (seq) => {
+            if (!panelAppended) {
+              await appendReasoningPanel(cardId, safeSteps, seq);
+              panelAppended = true; // only on success → a throw leaves it false
+            } else {
+              await updateReasoningPanel(cardId, safeSteps, seq);
+            }
+          });
+        }
       }
       // Conclusion area: stream the answer text as it arrives. While the agent
       // is still narrating between tool calls, the newest text is provisional;
@@ -409,7 +422,10 @@ async function runStreamingInvoke(
   // Both now fold into `failed` so the SAME path finalizes the card explicitly
   // (red header, no charts, no follow-ups) instead of throwing or hanging.
   const { failed, httpFailed } = classifyInvokeOutcome({ status, aborted, error });
-  if (httpFailed) log({ event: "invoke_http_error", card: cardId, status });
+  // Include the (redacted, truncated) backend error body so a 429/400/403/503 are
+  // distinguishable to operators — not just an opaque status code. The user-facing
+  // card stays generic; only the log carries the reason.
+  if (httpFailed) log({ event: "invoke_http_error", card: cardId, status, detail: error ? redactSensitive(error).slice(0, 300) : undefined });
 
   // A Bedrock model-access denial (common on a freshly-deployed account where
   // model access isn't enabled yet) is operator-actionable, not a transient —
@@ -680,7 +696,13 @@ async function main(): Promise<void> {
           }
           // No toast — the in-place button disable (✓ + greyed) is feedback enough.
         }
-      } catch { /* best-effort */ }
+      } catch (e) {
+        // Best-effort (the SDK callback must not throw), but DON'T swallow silently:
+        // a throw in the synchronous setup before ctrl.abort()/streamingCardInvoke
+        // (malformed payload, helper throw) would otherwise leave a 停止 click with
+        // no abort + no trace, or a follow-up with no card + no error. Log it.
+        log({ event: "callback_handler_error", error: String(e) });
+      }
       return {};
     },
   });
