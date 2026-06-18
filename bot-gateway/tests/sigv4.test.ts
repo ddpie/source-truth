@@ -6,7 +6,7 @@
  * asserting the header shape (no network). Real invoke is integration-only.
  */
 
-import { buildInvokeRequest, signInvoke, MIN_SESSION_ID_LEN, classifyInvokeOutcome } from "../src/sigv4";
+import { buildInvokeRequest, signInvoke, MIN_SESSION_ID_LEN, classifyInvokeOutcome, isTurnCapError } from "../src/sigv4";
 
 const RUNTIME_ARN =
   "arn:aws:bedrock-agentcore:ap-northeast-1:557690613480:runtime/source_truth_agent-3nxWGkGA86";
@@ -144,5 +144,21 @@ describe("classifyInvokeOutcome", () => {
   it("never marks an aborted invoke as failed, even on non-200 or error", () => {
     expect(classifyInvokeOutcome({ status: 403, answer: "", steps: [], aborted: true, error: null }).failed).toBe(false);
     expect(classifyInvokeOutcome({ status: 200, answer: "", steps: [], aborted: true, error: "x" }).failed).toBe(false);
+  });
+});
+
+describe("isTurnCapError", () => {
+  it("matches every shape the turn cap surfaces as", () => {
+    // The SDK result text the gateway actually sees (parse-stream fixture):
+    expect(isTurnCapError("Maximum turns exceeded")).toBe(true);
+    // The errors[] phrasing + the subtype fallback:
+    expect(isTurnCapError("Reached maximum number of turns (20)")).toBe(true);
+    expect(isTurnCapError("result error (error_max_turns)")).toBe(true);
+  });
+
+  it("does NOT match genuine backend outages / denials / null", () => {
+    expect(isTurnCapError("ConnectionError: connection refused")).toBe(false);
+    expect(isTurnCapError("AccessDeniedException: ...")).toBe(false);
+    expect(isTurnCapError(null)).toBe(false);
   });
 });
