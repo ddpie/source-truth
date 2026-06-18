@@ -34,13 +34,20 @@ def _perf(event: str, ms: float, **ctx: Any) -> None:
     logger.info(json.dumps({"event": event, "perf": True, "latency_ms": round(ms, 1), **ctx}))
 
 # Read-only evidence tools (no Bash/Write/Edit — read-only boundary, MVP).
-READONLY_TOOLS: tuple[str, ...] = ("Read", "Glob", "Grep")
+# NOTE: the builtin Grep is deliberately ABSENT. It greps the EFS/NFS mount where
+# a whole-repo search costs ~20-47s (network round-trip per file across ~18k
+# files); the index-service exposes codegraph_search_files instead, which greps a
+# LOCAL-disk copy at ~0.2s (measured 225x faster). Read/Glob stay (single-file /
+# metadata access on EFS is acceptable; broad content scans are the slow path).
+READONLY_TOOLS: tuple[str, ...] = ("Read", "Glob")
 
 # Write/exec built-ins that must NEVER be reachable in the read-only MVP. Setting
 # ``tools`` to the read-only whitelist already removes all non-listed built-ins,
 # but this explicit blocklist is defense-in-depth: even if a future SDK/CLI
 # preset re-introduces one, ``disallowed_tools`` removes it from the model's
 # context entirely ("cannot be used, even if they would otherwise be allowed").
+# Grep is blocklisted here too: not for safety but for SPEED — it must not be a
+# slow EFS fallback the model can reach; codegraph_search_files is the only search.
 WRITE_EXEC_TOOLS: tuple[str, ...] = (
     "Bash",
     "Write",
@@ -49,6 +56,7 @@ WRITE_EXEC_TOOLS: tuple[str, ...] = (
     "NotebookEdit",
     "WebFetch",
     "WebSearch",
+    "Grep",
 )
 
 # CodeGraph MCP tools, allow-listed only when a CodeGraph endpoint is provided.
@@ -58,6 +66,9 @@ CODEGRAPH_TOOLS: tuple[str, ...] = (
     "mcp__codegraph__codegraph_symbol_search",
     "mcp__codegraph__codegraph_get_callers",
     "mcp__codegraph__codegraph_analyze_impact",
+    # Fast text search over the index-service's LOCAL repo copy (replaces the
+    # slow builtin Grep). The agent uses this for config/string/numeric lookups.
+    "mcp__codegraph__codegraph_search_files",
 )
 
 # CodeGraph MCP tools with write/state side effects. MCP tools are admitted via

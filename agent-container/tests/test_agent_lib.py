@@ -46,10 +46,24 @@ def test_load_system_prompt_missing_path_raises(tmp_path):
 def test_build_options_dict_readonly_tools_only():
     opts = agent_lib.build_options_dict(system_prompt="x")
     tools = opts["allowed_tools"]
-    assert "Read" in tools and "Glob" in tools and "Grep" in tools
+    # Read/Glob stay as builtins (single-file/metadata access on EFS is cheap).
+    assert "Read" in tools and "Glob" in tools
+    # Grep is GONE — it grepped EFS at ~20s; content search now goes through the
+    # fast index-service tool codegraph_search_files (local disk, ~0.2s).
+    assert "Grep" not in tools
     # Read-only boundary: no write/exec tools auto-approved.
     for forbidden in ("Bash", "Write", "Edit"):
         assert forbidden not in tools
+
+
+def test_build_options_dict_grep_replaced_by_fast_search():
+    # The builtin Grep must be both ABSENT from availability and blocklisted, and
+    # the fast MCP search tool present (only when a codegraph endpoint is wired).
+    assert "Grep" not in agent_lib.READONLY_TOOLS
+    assert "Grep" in agent_lib.WRITE_EXEC_TOOLS  # blocklisted (speed, not safety)
+    opts = agent_lib.build_options_dict(system_prompt="x", codegraph_url="http://10.1.1.5:8080/mcp")
+    assert "mcp__codegraph__codegraph_search_files" in opts["allowed_tools"]
+    assert "Grep" in opts["disallowed_tools"]
 
 
 def test_build_options_dict_enforces_readonly_availability():

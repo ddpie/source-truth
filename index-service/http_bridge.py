@@ -133,11 +133,14 @@ def build_bridge(
     host: str = "127.0.0.1",
     port: int = 8080,
     mount_root: str = path_align.DEFAULT_MOUNT_ROOT,
+    local_workspace: str | None = None,
 ) -> FastMCP:
     """Build (but don't run) the FastMCP HTTP bridge for a CodeGraph workspace.
 
     ``workspace`` is the index-service-side repo path codegraph-server indexes;
     its returned paths are rewritten from there onto ``mount_root``.
+    ``local_workspace`` (if given) is a LOCAL-disk copy of the same repo used by
+    the fast file-search tool (grep over EFS is ~225x slower — see file_search).
     """
     # ONE resident codegraph-server process holds the graph in memory for its
     # whole lifetime. Spawning per-query instead re-scans the repo every call
@@ -214,6 +217,33 @@ def build_bridge(
     for name in EXPOSED_TOOLS:
         app.add_tool(_make_tool(name), name=name, description=f"CodeGraph {name} (read-only).")
 
+    # Fast file-content search over the LOCAL repo copy (replaces the agent's
+    # builtin Grep, which hit EFS/NFS at ~20-47s per whole-repo search; local is
+    # ~0.2s). Registered only when a local workspace was provided AND exists.
+    if local_workspace and os.path.isdir(local_workspace):
+        import file_search
+
+        async def codegraph_search_files(pattern: str, glob: str | None = None) -> str:
+            """Fast text search across the codebase (paths returned in /mnt/repo
+            space). `pattern` is a regex; optional `glob` narrows by filename
+            (e.g. "*.cs", "*.json"). Use this instead of shell grep."""
+            try:
+                return file_search.search_to_json(
+                    pattern, local_root=local_workspace, mount_root=mount_root, glob=glob,
+                )
+            except ValueError as exc:
+                return json.dumps({"error": "bad search pattern", "detail": str(exc)})
+            except Exception as exc:  # noqa: BLE001 - isolate one query's failure
+                logger.error(json.dumps({"event": "search_error", "error": str(exc)}))
+                return json.dumps({"error": "search failed", "detail": str(exc)})
+
+        app.add_tool(codegraph_search_files, name="codegraph_search_files",
+                     description="Fast regex text search over the repo (local-disk; replaces grep).")
+        logger.info(json.dumps({"event": "search_tool_enabled", "local_workspace": local_workspace}))
+    else:
+        logger.warning(json.dumps({"event": "search_tool_disabled",
+                                   "reason": "no local_workspace", "given": local_workspace}))
+
     # Plain HTTP /health so deploy orchestration (and load balancers) can poll
     # readiness: 200 only once the graph warmed up non-empty, 503 otherwise.
     # Registered unconditionally — if this fails the bridge is misbuilt and we
@@ -268,14 +298,18 @@ def main() -> int:
     p.add_argument("--host", default="0.0.0.0")
     p.add_argument("--port", type=int, default=8080)
     p.add_argument("--mount-root", default=path_align.DEFAULT_MOUNT_ROOT)
+    p.add_argument("--local-workspace", default=None,
+                   help="local-disk copy of the repo for fast file search (grep over EFS is ~225x slower)")
     args = p.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     logger.info(json.dumps({"event": "bridge_start", "workspace": args.workspace,
-                            "host": args.host, "port": args.port}))
+                            "host": args.host, "port": args.port,
+                            "local_workspace": args.local_workspace}))
     # build_bridge already started the resident worker (warming in background).
     app = build_bridge(
-        workspace=args.workspace, host=args.host, port=args.port, mount_root=args.mount_root
+        workspace=args.workspace, host=args.host, port=args.port, mount_root=args.mount_root,
+        local_workspace=args.local_workspace,
     )
     app.run(transport="streamable-http")
     return 0

@@ -92,6 +92,27 @@ if [ ! -d "$WORKSPACE" ]; then
   tar xzf /tmp/repo.tar.gz -C "$REPO_ROOT"
 fi
 
+# --- ALSO extract the repo to LOCAL disk for fast file search ---------------
+# Grep over the EFS/NFS copy is catastrophically slow: a single whole-repo grep
+# measured 47s on NFS vs 0.21s on local disk (225x — NFS pays a network round-
+# trip per file open for 18k files). The agent's builtin Grep hits /mnt/repo
+# (EFS) and dominated end-to-end latency (~20s per broad grep). So we keep a
+# LOCAL-disk copy here and expose a fast search tool (http_bridge codegraph_
+# search_files) that greps it. It is the SAME deploy-time tarball snapshot as the
+# EFS copy — NOT a live mirror of main — so it is exactly as fresh as EFS, just
+# fast. Extracting from the already-local /tmp/repo.tar.gz costs no NFS I/O.
+LOCAL_REPO_ROOT=/data/repo
+LOCAL_WORKSPACE="$LOCAL_REPO_ROOT/$REPO_SUBDIR"
+mkdir -p "$LOCAL_REPO_ROOT"
+if [ ! -d "$LOCAL_WORKSPACE" ]; then
+  if [ ! -f /tmp/repo.tar.gz ]; then
+    aws s3 cp "s3://$BUCKET/${REPO_SUBDIR}.tar.gz" /tmp/repo.tar.gz --region "$REGION"
+  fi
+  tar xzf /tmp/repo.tar.gz -C "$LOCAL_REPO_ROOT"
+fi
+# Install ripgrep for fast, .gitignore-aware search (apt has it on Ubuntu 24.04).
+command -v rg >/dev/null || apt-get install -y ripgrep || true
+
 # --- systemd units: build (oneshot, sole writer) THEN serve (resident reader) ---
 cat > /etc/systemd/system/index-build.service <<UNIT
 [Unit]
@@ -132,7 +153,7 @@ Environment=HOME=$INDEX_HOME
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
 Environment=CODEGRAPH_MAX_FILES=$MAX_FILES
 WorkingDirectory=$APP
-ExecStart=/usr/bin/python3 -m http_bridge --workspace $WORKSPACE --host 0.0.0.0 --port 8080 --mount-root /mnt/repo/$REPO_SUBDIR
+ExecStart=/usr/bin/python3 -m http_bridge --workspace $WORKSPACE --host 0.0.0.0 --port 8080 --mount-root /mnt/repo/$REPO_SUBDIR --local-workspace $LOCAL_WORKSPACE
 Restart=always
 RestartSec=5
 [Install]
