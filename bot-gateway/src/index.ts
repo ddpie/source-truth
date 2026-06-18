@@ -215,15 +215,14 @@ async function runStreamingInvoke(
   // EVERY phase (thinking, analyzing, streaming) without disturbing anything else.
   // The SECONDS counter is the honest signal (monotonic = not frozen); the spinner
   // is decoration; the watchdog says so honestly when no SSE event arrived lately.
-  // Progress-dots animation (low-frequency friendly): a 5-slot bar where filled
-  // dots grow ∙∙∙∘∘ then reset, paired with the live seconds counter. Unlike a
-  // spinner it doesn't need high-frequency frames to look alive — the ever-
-  // advancing seconds carry the "still working" signal, and the dots add gentle
-  // motion. So even at our ~2-5 writes/s cadence it never looks frozen/laggy.
-  const DOT_SLOTS = 5;
+  // Moon-phase animation (low-frequency friendly): cycle 🌑🌒🌓🌔🌕🌖🌗🌘 paired
+  // with the live seconds counter. Emoji are colorful/lively (nicer than ASCII
+  // dots), and the ever-advancing seconds carry the "still working" signal, so
+  // even at our ~2-5 writes/s cadence it never looks frozen/laggy.
+  const MOON = ["🌑", "🌒", "🌓", "🌔", "🌕", "🌖", "🌗", "🌘"];
   const startedAt = Date.now();
   let lastEventAt = Date.now();   // updated on every real onChunk (real progress)
-  let dotFrame = 0;
+  let moonFrame = 0;
   let statusAppended = false;
   let heartbeat: ReturnType<typeof setInterval> | undefined;
   const stopHeartbeat = () => { if (heartbeat) { clearInterval(heartbeat); heartbeat = undefined; } };
@@ -249,16 +248,15 @@ async function runStreamingInvoke(
     // the answer text IS the visible motion — skip the status write this tick. The
     // elapsed counter still advances on the next idle tick (monotonic, honest).
     if (now - lastUpdate < STREAMING_YIELD_MS) return;
-    // Growing-dots bar: filled count cycles 1..DOT_SLOTS then wraps.
-    const filled = (dotFrame++ % DOT_SLOTS) + 1;
-    const dots = "●".repeat(filled) + "○".repeat(DOT_SLOTS - filled);
+    // Moon-phase frame cycles each write.
+    const moon = MOON[moonFrame++ % MOON.length];
     const sinceEvent = now - lastEventAt;
     const elapsed = formatElapsed(now - startedAt);  // s / Mm Ss / Hh Mm
     const phaseWord = stage === "thinking" ? "正在思考" : "正在分析";
     // Watchdog: >20s with no new event → say so honestly, don't fake progress.
     const text = sinceEvent > 20000
-      ? `${dots}　${phaseWord}（较久，已 ${elapsed}）`
-      : `${dots}　${phaseWord} ${elapsed}`;
+      ? `${moon} ${phaseWord}（较久，已 ${elapsed}）`
+      : `${moon} ${phaseWord} ${elapsed}`;
     lastStatusWrite = now;
     // Latest-wins lane: if a status frame is still queued, this one REPLACES it
     // (stale frames dropped) instead of piling up behind a slow lark-cli spawn —
