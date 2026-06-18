@@ -67,6 +67,9 @@ def test_build_options_dict_enforces_readonly_availability():
     assert opts["permission_mode"] == "dontAsk"
     # Only the CodeGraph MCP server we pass may load — no project/user/plugin leak.
     assert opts["strict_mcp_config"] is True
+    # Token-level streaming MUST be on, or the gateway card freezes on "正在分析…"
+    # for the whole run then dumps the answer at once (no typewriter).
+    assert opts["include_partial_messages"] is True
 
 
 def test_build_options_dict_blocklists_codegraph_write_tools():
