@@ -109,6 +109,16 @@ def run_search(
 
     matches: list[dict[str, Any]] = []
     truncated = False
+    duplicates = 0
+    # Collapse matches that are the SAME file-within-a-copy duplicated under a
+    # different top-level dir. Many game repos vendor/duplicate trees (the test
+    # repo has 10 identical dfu_scripts_N copies → every hit returned 10x, which
+    # 10x'd the agent's per-turn context and made answers minutes-slow). Keying on
+    # (path-without-its-first-segment, line, text) folds dfu_scripts_1/X:10:foo and
+    # dfu_scripts_2/X:10:foo into ONE result (first wins), while genuinely distinct
+    # files (different relative paths) are untouched. Generic: helps any repo with
+    # duplicated/vendored code, no project-specific assumptions.
+    seen: set[tuple[str, int, str]] = set()
     for raw_line in proc.stdout.splitlines():
         # Format (rg/grep -n): <path>:<line>:<text>
         parts = raw_line.split(":", 2)
@@ -122,14 +132,34 @@ def run_search(
             line_no = int(line_s)
         except ValueError:
             continue
+        # Dedup key: (path-without-its-top-level dir, line, matched text). The test
+        # repo duplicates whole trees that differ ONLY in their top-level dir
+        # (dfu_scripts_1..10/Game/Enemy.cs), so dropping that one segment folds the
+        # copies while keeping the rest of the path as a discriminator. This is
+        # LESS aggressive than a bare basename (which would also collapse two
+        # genuinely-different modules that happen to share a filename). Folding is
+        # NOT silent: `duplicates` is returned to the agent as `deduped` so it knows
+        # hits were collapsed and can re-search a specific subdir if it needs the
+        # individual copies — no invisible recall loss.
+        rel = mount_path[len(mount_root):].lstrip("/") if mount_path.startswith(mount_root) else mount_path.lstrip("/")
+        suffix = rel.split("/", 1)[1] if "/" in rel else rel  # drop top-level (copy) dir
+        key = (suffix, line_no, text)
+        if key in seen:
+            duplicates += 1
+            continue
+        seen.add(key)
         matches.append({"path": mount_path, "line": line_no, "text": text[:300]})
         if len(matches) >= max_matches:
             truncated = True
             break
 
     elapsed_ms = (perf_counter() - t0) * 1000
-    logger.info(perf_entry("file_search", elapsed_ms, pattern=pattern[:60], hits=len(matches), truncated=truncated))
-    return {"matches": matches, "truncated": truncated, "count": len(matches)}
+    logger.info(perf_entry("file_search", elapsed_ms, pattern=pattern[:60],
+                           hits=len(matches), truncated=truncated, deduped=duplicates))
+    # `deduped` is surfaced to the AGENT (not just the perf log) so a folded hit is
+    # never invisible: if it sees deduped>0 and needs the individual copies, it can
+    # re-search a specific subdir. Folding is recoverable, not a silent recall loss.
+    return {"matches": matches, "truncated": truncated, "count": len(matches), "deduped": duplicates}
 
 
 def search_to_json(pattern: str, *, local_root: str, mount_root: str, glob: str | None = None) -> str:

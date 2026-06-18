@@ -66,7 +66,7 @@ def test_search_to_json_is_valid_json(repo: Path):
     import json
     s = file_search.search_to_json("MaxEncumbrance", local_root=str(repo), mount_root="/mnt/repo")
     d = json.loads(s)
-    assert "matches" in d and "count" in d
+    assert "matches" in d and "count" in d and "deduped" in d
 
 
 def test_finds_gitignored_and_hidden_files(tmp_path: Path):
@@ -86,6 +86,62 @@ def test_finds_gitignored_and_hidden_files(tmp_path: Path):
     assert "generated.cs" in paths, f"gitignored file must be found: {paths}"
     assert ".hidden.json" in paths, f"dotfile must be found: {paths}"
     assert "normal.cs" in paths
+
+
+def test_dedups_duplicated_copies(tmp_path: Path):
+    # A repo with N identical copies of a tree (vendored/duplicated code, like the
+    # test repo's 10x dfu_scripts_N) must NOT return the same hit N times — that
+    # 10x'd the agent's context and made answers minutes-slow. The copies differ
+    # ONLY in their top-level dir (copy_a/Game/Enemy.cs vs copy_b/Game/Enemy.cs),
+    # so the (path-without-top-dir, line, text) key folds them to one match.
+    for copy in ("copy_a", "copy_b", "copy_c"):
+        d = tmp_path / copy / "Game"
+        d.mkdir(parents=True)
+        (d / "Enemy.cs").write_text("int Damage = UNIQUE_MARKER_X;\n", encoding="utf-8")
+    out = file_search.run_search("UNIQUE_MARKER_X", local_root=str(tmp_path), mount_root="/mnt/repo")
+    # 3 identical copies → exactly ONE match, not three…
+    assert out["count"] == 1, out
+    assert "Enemy.cs" in out["matches"][0]["path"]
+    # …and the fold is REPORTED (not silent): the agent sees 2 hits were collapsed
+    # and can re-search a specific copy dir if it actually needs the duplicates.
+    assert out["deduped"] == 2, out
+
+
+def test_does_not_over_dedup_distinct_subpaths(tmp_path: Path):
+    # The key keeps the path BELOW the top-level dir as a discriminator, so two
+    # genuinely-different files at different sub-paths are NOT collapsed even with
+    # identical line text — only whole-tree copies (same sub-path) fold. This is
+    # strictly less aggressive than a bare-basename key.
+    (tmp_path / "pkg" / "combat").mkdir(parents=True)
+    (tmp_path / "pkg" / "ui").mkdir(parents=True)
+    (tmp_path / "pkg" / "combat" / "Util.cs").write_text("int v = SHARED_TOKEN;\n", encoding="utf-8")
+    (tmp_path / "pkg" / "ui" / "Util.cs").write_text("int v = SHARED_TOKEN;\n", encoding="utf-8")
+    out = file_search.run_search("SHARED_TOKEN", local_root=str(tmp_path), mount_root="/mnt/repo")
+    assert out["count"] == 2, out  # combat/Util.cs ≠ ui/Util.cs → both kept
+    assert out["deduped"] == 0, out
+
+
+def test_does_not_over_dedup_distinct_files(tmp_path: Path):
+    # Different files (different basenames) with the same line content are kept.
+    (tmp_path / "A.cs").write_text("int v = SHARED_TOKEN;\n", encoding="utf-8")
+    (tmp_path / "B.cs").write_text("int v = SHARED_TOKEN;\n", encoding="utf-8")
+    out = file_search.run_search("SHARED_TOKEN", local_root=str(tmp_path), mount_root="/mnt/repo")
+    assert out["count"] == 2, out  # distinct basenames → both kept
+
+
+def test_same_basename_collapse_is_never_silent(tmp_path: Path):
+    # Worst case for any content-fold: two genuinely-distinct files that DO share
+    # the same sub-path tail + line + text (moduleA/Utils.cs vs moduleB/Utils.cs,
+    # differing only in top-level dir). The reviewer flagged that folding these is
+    # ambiguous (could be vendored copies, could be two real modules). We accept the
+    # fold for speed BUT it must be VISIBLE: deduped>0 tells the agent a hit was
+    # collapsed so it can recover by re-searching a subdir — no invisible recall loss.
+    (tmp_path / "moduleA").mkdir()
+    (tmp_path / "moduleB").mkdir()
+    (tmp_path / "moduleA" / "Utils.cs").write_text("int Clamp = AMBIG_TOKEN;\n", encoding="utf-8")
+    (tmp_path / "moduleB" / "Utils.cs").write_text("int Clamp = AMBIG_TOKEN;\n", encoding="utf-8")
+    out = file_search.run_search("AMBIG_TOKEN", local_root=str(tmp_path), mount_root="/mnt/repo")
+    assert out["deduped"] > 0, f"a same-tail collapse must be reported, not silent: {out}"
 
 
 def test_build_command_does_not_skip_gitignored_or_hidden():
