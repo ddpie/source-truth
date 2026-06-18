@@ -31,6 +31,7 @@ import { rememberCard, lookupCard } from "./card-registry";
 import { removeReaction } from "./reaction";
 import { redactSensitive, redactSteps, redactDeep } from "./redact";
 import { extractFollowUps, stripFollowUps } from "./extract-followups";
+import { splitEvidence } from "./extract-evidence";
 import { handleMessageEvent, type InvokeFn } from "./handle-event";
 import { sdkEventToImEvent } from "./sdk-event";
 import { sendReply } from "./reply";
@@ -275,29 +276,40 @@ async function streamingCardInvoke(
   // A turn-cap is handled on its own branch below, NOT as a hard failure.
   const hardFailed = failed && !turnCapped;
 
-  // 3. Final update + close streaming. Pull any ```chart blocks out of the
-  //    answer first so the conclusion text is clean (charts render separately).
-  const rawFinal = hardFailed
-    ? (accessDenied
-        ? "⚠️ 模型访问未开通：请在 AWS Bedrock 控制台为该模型开通 Model access（global.* 跨区域推理需在相关区域分别开通），开通后即可正常回答。"
-        : "⚠️ 查询失败（后端不可用或取证中断），请稍后重试；若持续失败请转研发。")
-    : turnCapped
-      ? (answer
-          ? answer + "\n\n*（分析步骤较多，未在限定步数内完成；以上为已得到的部分结论，建议把问题缩小后再问，例如只问某一个符号 / 某一处影响）*"
-          : "⚠️ 这个问题分析步骤较多，未在限定步数内得出结论。请把问题缩小（如只问某一个符号 / 某一处影响）后重试。")
-    : aborted
-      ? (answer ? answer + "\n\n*（已停止，以上为已生成内容）*" : "⏹ 已停止。")
-      : timedOut && !answer
-        ? "⏱ 分析超时，请缩小问题范围后重试。"
-        : (answer || "(无内容)");
-  // On HARD failure, suppress any partial chart/answer fragments — not trustworthy.
-  // A turn-capped partial IS shown (labeled incomplete), so parse its charts too.
-  const { text: textNoCharts, charts } = hardFailed ? { text: rawFinal, charts: [] } : extractCharts(rawFinal);
-  // Strip the "💡 你可能还想问" trailer from the rendered body — those questions
-  // become clickable footer buttons below, so leaving them in the prose shows
-  // them twice (and clutters the card the prompt was rewritten to keep clean).
-  // The full text (with trailer) is still used for extractFollowUps further down.
-  const finalText = redactSensitive(hardFailed ? textNoCharts : stripFollowUps(textNoCharts));
+  // 3. Final update + close streaming. Order matters so the "供研发复核" evidence
+  //    folds correctly AND any incompleteness disclaimer stays VISIBLE (not swept
+  //    into the folded panel):
+  //    raw answer → extractCharts → stripFollowUps → splitEvidence → THEN append
+  //    the aborted/turn-capped disclaimer to the (evidence-free) body.
+  let bodyNoEvidence: string;
+  let evidence = "";
+  let charts: ReturnType<typeof extractCharts>["charts"] = [];
+  if (hardFailed) {
+    // Hard failure: a fixed message, no real answer/charts/evidence to surface.
+    bodyNoEvidence = accessDenied
+      ? "⚠️ 模型访问未开通：请在 AWS Bedrock 控制台为该模型开通 Model access（global.* 跨区域推理需在相关区域分别开通），开通后即可正常回答。"
+      : "⚠️ 查询失败（后端不可用或取证中断），请稍后重试；若持续失败请转研发。";
+  } else {
+    const ex = extractCharts(answer);
+    charts = ex.charts;
+    const { body, evidence: ev } = splitEvidence(stripFollowUps(ex.text));
+    evidence = ev;
+    // Shape the VISIBLE body: append the incompleteness note AFTER evidence is
+    // split off, so the note isn't hidden inside the collapsed panel.
+    if (turnCapped) {
+      bodyNoEvidence = body
+        ? body + "\n\n*（分析步骤较多，未在限定步数内完成；以上为已得到的部分结论，建议把问题缩小后再问，例如只问某一个符号 / 某一处影响）*"
+        : "⚠️ 这个问题分析步骤较多，未在限定步数内得出结论。请把问题缩小（如只问某一个符号 / 某一处影响）后重试。";
+    } else if (aborted) {
+      bodyNoEvidence = body ? body + "\n\n*（已停止，以上为已生成内容）*" : "⏹ 已停止。";
+    } else if (timedOut && !body) {
+      bodyNoEvidence = "⏱ 分析超时，请缩小问题范围后重试。";
+    } else {
+      bodyNoEvidence = body || "(无内容)";
+    }
+  }
+  const finalText = redactSensitive(bodyNoEvidence);
+  const finalEvidence = redactSensitive(evidence);
   // Best-effort, independently guarded: if updateContent throws (transient
   // CardKit/lark-cli error, or a sequence rejection racing the last fire-and-
   // forget onChunk update), closeStreaming and finalizeCard MUST still run —
@@ -312,11 +324,11 @@ async function streamingCardInvoke(
   //    collapsed. The full-card PUT rebuilds the body (conclusion + panel), which
   //    also drops the now-irrelevant 停止 button.
   seq++;
-  try { await finalizeCard(cardId, finalText, redactSteps(steps), seq, isFollowUp, aborted, hardFailed); } catch { /* best-effort */ }
+  try { await finalizeCard(cardId, finalText, redactSteps(steps), seq, isFollowUp, aborted, hardFailed, finalEvidence); } catch { /* best-effort */ }
   // 5. Data charts + follow-ups: skip on HARD failure (no trustworthy conclusion).
   //    A turn-capped partial keeps its charts/follow-ups (labeled incomplete).
   if (!hardFailed && charts.length > 0) {
-    // Charts are pulled from the UNredacted answer (extractCharts ran on rawFinal),
+    // Charts are pulled from the UNredacted answer (extractCharts ran on it),
     // so scrub every string leaf of each spec before it hits the group-visible
     // card — same secret/path safety net as the conclusion and reasoning panel.
     const safeCharts = charts.map((c) => redactDeep(c));
@@ -325,8 +337,9 @@ async function streamingCardInvoke(
   }
   if (!hardFailed) {
     seq++;
-    // Extract from the UNstripped text (finalText had the trailer removed above).
-    const followUps = extractFollowUps(redactSensitive(textNoCharts));
+    // Extract follow-ups from the RAW answer (still carries the "💡 你可能还想问"
+    // trailer that stripFollowUps removed from the rendered body).
+    const followUps = extractFollowUps(redactSensitive(answer));
     try { await appendFooter(cardId, seq, followUps); } catch { /* best-effort */ }
   }
   log({ event: "card_closed", card: cardId, chars: answer.length, charts: charts.length, timedOut, failed, turnCapped, error: error ?? undefined });
