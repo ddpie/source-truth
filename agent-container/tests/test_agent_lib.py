@@ -232,3 +232,56 @@ def test_maybe_log_result_never_raises_on_garbage():
     # Best-effort: a malformed message must never break the answer stream.
     for junk in (None, 42, "str", object()):
         agent_lib._maybe_log_result(junk)  # must not raise
+
+
+# ── _track_tool_latency: per-tool round-trip timing (issue #2 / Grep latency) ──
+class _ToolUseBlock:
+    def __init__(self, tid, name):
+        self.id = tid
+        self.name = name
+        self.input = {}
+
+
+class _ToolResultBlock:
+    def __init__(self, tid, is_error=False):
+        self.tool_use_id = tid
+        self.is_error = is_error
+
+
+class _MsgWith:
+    def __init__(self, content):
+        self.content = content
+
+
+def test_track_tool_latency_emits_one_line_per_completed_tool(caplog):
+    import json as _json
+    import logging
+    pending: dict = {}
+    with caplog.at_level(logging.INFO, logger="agent"):
+        # tool_use opens (AssistantMessage), tool_result closes (UserMessage)
+        agent_lib._track_tool_latency(_MsgWith([_ToolUseBlock("t1", "Grep")]), pending)
+        assert "t1" in pending  # timer opened
+        agent_lib._track_tool_latency(_MsgWith([_ToolResultBlock("t1")]), pending)
+    assert "t1" not in pending  # timer closed
+    rows = [_json.loads(r.message) for r in caplog.records if '"tool_latency"' in r.message]
+    assert len(rows) == 1
+    assert rows[0]["tool"] == "Grep"
+    assert rows[0]["perf"] is True
+    assert rows[0]["latency_ms"] >= 0
+
+
+def test_track_tool_latency_ignores_unmatched_result(caplog):
+    import logging
+    pending: dict = {}
+    with caplog.at_level(logging.INFO, logger="agent"):
+        # a result with no prior tool_use → no perf line, no crash
+        agent_lib._track_tool_latency(_MsgWith([_ToolResultBlock("ghost")]), pending)
+    assert not any("tool_latency" in r.message for r in caplog.records)
+
+
+def test_track_tool_latency_ignores_non_content_messages():
+    # A message without a content list (e.g. a StreamEvent token) is skipped.
+    pending: dict = {}
+    for junk in (None, 42, "str", _MsgWith("not-a-list")):
+        agent_lib._track_tool_latency(junk, pending)  # must not raise
+    assert pending == {}
