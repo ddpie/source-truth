@@ -214,7 +214,19 @@ export async function invokeRuntimeStreaming(
   }
   timing.ttfbMs = Date.now() - tReq;
   if (res.status !== 200 || !res.body) {
-    return { status: res.status, answer: await res.text(), steps: [], aborted: false, error: null, timing: { ...timing, totalMs: Date.now() - t0 } };
+    // Capture the error body into BOTH answer (kept for back-compat) and error, so
+    // the caller's accessDenied / turn-cap classifiers (which inspect `error`) can
+    // match an HTTP-level Bedrock denial (e.g. a 403 access-denied), and the body
+    // reason (throttle/validation/denied) is loggable instead of just a status code.
+    const bodyText = await res.text();
+    return {
+      status: res.status,
+      answer: bodyText,
+      steps: [],
+      aborted: false,
+      error: `HTTP ${res.status}: ${bodyText.slice(0, 500)}`,
+      timing: { ...timing, totalMs: Date.now() - t0 },
+    };
   }
   const tFirstByte = Date.now();
   const reader = res.body.getReader();

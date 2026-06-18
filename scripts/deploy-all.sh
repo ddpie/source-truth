@@ -318,13 +318,31 @@ else
   # (reaches the bridge on :8080), and both the EFS SG and index SG accept
   # inbound from the VPC CIDR — which covers this SG's members.
   RUNTIME_SG="${INDEX_SERVICE_SG:?INDEX_SERVICE_SG not set — run the index-svc phase first}"
-  run python3 "$SCRIPT_DIR/lib/deploy_runtime.py" \
-    --region "$REGION" --account "$ACCOUNT" \
-    --role-arn "$ROLE_ARN" --image "$ECR_URI" --model "$MODEL" \
-    --subnets "$SUBNET" --security-groups "$RUNTIME_SG" \
-    --efs-access-point-arn "$EFS_AP_ARN" \
-    --codegraph-mcp-url "http://${IDX_IP}:8080/mcp"
-  say ok "runtime deployed (VPC sg=$RUNTIME_SG, CODEGRAPH_MCP_URL → ${IDX_IP}:8080)"
+  if [[ "$DRY_RUN" == true ]]; then
+    say info "[dry-run] deploy_runtime.py → AgentCore runtime (model=$MODEL, sg=$RUNTIME_SG, CODEGRAPH_MCP_URL=${IDX_IP}:8080)"
+  else
+    # Capture stdout (deploy_runtime.py prints AGENT_RUNTIME_ID/ARN to stdout, all
+    # status to stderr) so we can PERSIST the ARN. Without this the runtime deploys
+    # but the gateway (which hard-requires RUNTIME_ARN, src/index.ts) has no
+    # automated way to find it — breaking the one-click end-to-end goal.
+    RT_OUT="$(python3 "$SCRIPT_DIR/lib/deploy_runtime.py" \
+      --region "$REGION" --account "$ACCOUNT" \
+      --role-arn "$ROLE_ARN" --image "$ECR_URI" --model "$MODEL" \
+      --subnets "$SUBNET" --security-groups "$RUNTIME_SG" \
+      --efs-access-point-arn "$EFS_AP_ARN" \
+      --codegraph-mcp-url "http://${IDX_IP}:8080/mcp")"
+    RT_ARN="$(printf '%s\n' "$RT_OUT" | sed -n 's/^AGENT_RUNTIME_ARN=//p')"
+    RT_ID="$(printf '%s\n' "$RT_OUT" | sed -n 's/^AGENT_RUNTIME_ID=//p')"
+    if [[ -z "$RT_ARN" ]]; then
+      say err "deploy_runtime.py produced no AGENT_RUNTIME_ARN — cannot wire the gateway"
+      printf '%s\n' "$RT_OUT"
+      exit 1
+    fi
+    update_env "$CONFIG_FILE" AGENT_RUNTIME_ARN "$RT_ARN"
+    update_env "$CONFIG_FILE" RUNTIME_ARN "$RT_ARN"  # the name bot-gateway reads
+    [[ -n "$RT_ID" ]] && update_env "$CONFIG_FILE" AGENT_RUNTIME_ID "$RT_ID"
+    say ok "runtime deployed → RUNTIME_ARN persisted to ${CONFIG_FILE} (VPC sg=$RUNTIME_SG, CODEGRAPH_MCP_URL → ${IDX_IP}:8080)"
+  fi
 fi
 
 say ok "deploy-all complete"

@@ -18,6 +18,20 @@ import { feishuApi } from "./feishu-http";
 
 // ── pure request builders (unit-tested) ──────────────────────────────────────
 
+/** Escape a user-controlled string for safe interpolation into a CardKit markdown
+ *  element. The question echo is the user's raw text, so stray markdown
+ *  metacharacters (asterisks, backticks/fences, pipes, newlines, list/quote
+ *  markers) would otherwise corrupt the card's rendering — e.g. an odd `**` leaks
+ *  bold into the hr/conclusion below, a backtick opens an inline-code span, a
+ *  newline splits the bold span. JSON.stringify keeps it JSON-safe but NOT
+ *  markdown-safe. Collapse newlines to spaces, then backslash-escape the markdown
+ *  metacharacters. */
+export function escapeCardMarkdown(s: string): string {
+  return s
+    .replace(/\s*[\r\n]+\s*/g, " ") // multi-line paste → single line
+    .replace(/([\\`*_~|#>\[\]])/g, "\\$1");
+}
+
 export function buildCreateCardBody(opts?: { summary?: string; followUp?: boolean; question?: string }): string {
   // summary.content customizes the chat-list preview (default would be "[生成中...]").
   const summary = opts?.summary ? `💬 ${opts.summary.slice(0, 40)}` : "source-truth 正在回答…";
@@ -30,7 +44,7 @@ export function buildCreateCardBody(opts?: { summary?: string; followUp?: boolea
   const elements: unknown[] = [];
   const q = (opts?.question ?? "").trim();
   if (q) {
-    elements.push({ tag: "markdown", content: `**❓ ${q}**`, element_id: "question" });
+    elements.push({ tag: "markdown", content: `**❓ ${escapeCardMarkdown(q)}**`, element_id: "question" });
     elements.push({ tag: "hr" });
   }
   elements.push({ tag: "markdown", content: "正在分析…", element_id: "conclusion" });
@@ -356,7 +370,7 @@ export async function finalizeCard(
   // body, so it'd be wiped otherwise — must match the streaming layout).
   const q = (question ?? "").trim();
   const questionEls = q
-    ? [{ tag: "markdown", content: `**❓ ${q}**`, element_id: "question" }, { tag: "hr" }]
+    ? [{ tag: "markdown", content: `**❓ ${escapeCardMarkdown(q)}**`, element_id: "question" }, { tag: "hr" }]
     : [];
   const card = {
     schema: "2.0",

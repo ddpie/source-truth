@@ -18,7 +18,29 @@ import {
   buildFollowUpElements,
   buildClickedButtonElement,
   formatElapsed,
+  escapeCardMarkdown,
 } from "../src/cardkit-client";
+
+describe("escapeCardMarkdown", () => {
+  it("escapes markdown metacharacters so a user question can't corrupt the card", () => {
+    expect(escapeCardMarkdown("成本**翻倍**了吗")).toBe("成本\\*\\*翻倍\\*\\*了吗");
+    expect(escapeCardMarkdown("用 `code` 写的吗")).toBe("用 \\`code\\` 写的吗");
+    expect(escapeCardMarkdown("a|b|c 表格")).toBe("a\\|b\\|c 表格");
+  });
+  it("collapses newlines (multi-line paste) to a single line so the bold span never splits", () => {
+    expect(escapeCardMarkdown("第一行\n第二行")).toBe("第一行 第二行");
+    expect(escapeCardMarkdown("a\r\n\r\nb")).toBe("a b");
+  });
+  it("leaves a plain question untouched", () => {
+    expect(escapeCardMarkdown("怪物攻击力怎么算？")).toBe("怪物攻击力怎么算？");
+  });
+  it("escapes the question echo inside the created card body", () => {
+    const body = JSON.parse(buildCreateCardBody({ summary: "Q", question: "成本**翻倍**了吗" }));
+    const card = JSON.parse(body.data);
+    const qEl = card.body.elements.find((e: { element_id?: string }) => e.element_id === "question");
+    expect(qEl.content).toBe("**❓ 成本\\*\\*翻倍\\*\\*了吗**");
+  });
+});
 
 describe("formatElapsed", () => {
   it("shows bare seconds under a minute", () => {
