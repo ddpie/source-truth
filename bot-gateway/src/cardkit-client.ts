@@ -281,7 +281,33 @@ export function buildChartElements(specs: Array<{ type: string; [k: string]: unk
   }));
 }
 
-/** Append data charts to the card (after the conclusion, before the footer). */
+// Cap on charts actually rendered. CardKit validates an append request
+// atomically AND the card has a body-size limit, so an answer with many (or one
+// huge) chart specs could blow the limit or contend with the per-card 10/s write
+// budget. The prose table the prompt requires is the fallback for any dropped
+// chart. (buildFollowUpElements caps at 3 for the same reason.)
+export const MAX_CHARTS = 4;
+
+/** Append ONE data chart as its own element. Used so a single malformed VChart
+ *  spec can't make CardKit reject a whole batch (atomic append validation) and
+ *  wipe every chart — each is isolated; one failing append is logged and skipped
+ *  by the caller while the rest still render. `index` keeps element_ids unique. */
+export async function appendOneChart(
+  cardId: string,
+  spec: { type: string; [k: string]: unknown },
+  index: number,
+  sequence: number,
+): Promise<void> {
+  await larkApi("POST", `/open-apis/cardkit/v1/cards/${cardId}/elements`, JSON.stringify({
+    type: "append",
+    sequence,
+    elements: JSON.stringify([{ tag: "chart", element_id: `chart_${index}`, chart_spec: spec }]),
+  }));
+}
+
+/** Append data charts to the card (after the conclusion, before the footer).
+ *  Kept for callers/tests that batch; the live path uses appendOneChart per spec
+ *  for per-chart fault isolation. */
 export async function appendCharts(
   cardId: string,
   specs: Array<{ type: string; [k: string]: unknown }>,

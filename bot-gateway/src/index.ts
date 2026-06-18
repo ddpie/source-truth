@@ -23,7 +23,7 @@
 import { fromNodeProviderChain } from "@aws-sdk/credential-providers";
 
 import { invokeRuntimeStreaming, classifyInvokeOutcome, isTurnCapError, type AwsCredentials } from "./sigv4";
-import { createCard, updateContent, closeStreaming, finalizeCard, appendFooter, buildSendCardContent, disableFollowUpButton, appendReasoningPanel, updateReasoningPanel, appendCharts, appendStopButton, appendStatusLine, updateStatusLine, formatElapsed } from "./cardkit-client";
+import { createCard, updateContent, closeStreaming, finalizeCard, appendFooter, buildSendCardContent, disableFollowUpButton, appendReasoningPanel, updateReasoningPanel, appendOneChart, MAX_CHARTS, appendStopButton, appendStatusLine, updateStatusLine, formatElapsed } from "./cardkit-client";
 import { extractCharts } from "./extract-charts";
 import { rememberCard, rememberAnswer, lookupCard, collectChain } from "./card-registry";
 import { composeFollowUpPrompt } from "./followup-context";
@@ -410,7 +410,22 @@ async function runStreamingInvoke(
       const now = Date.now();
       if (now - lastUpdate < THROTTLE_MS) return;
       lastUpdate = now;
-      const display = textSoFar.length > 0 ? redactSensitive(textSoFar) : "正在分析…";
+      // Strip the evidence (供研发复核) section and the 你可能还想问 follow-up trailer
+      // from the LIVE conclusion so the typewriter shows ONLY clean business prose.
+      // Both helpers are marker-keyed and pure: they no-op when the marker hasn't
+      // streamed yet (so the partial answer shows normally), and once the agent
+      // emits the `供研发复核` heading the raw file:line block stops appearing inline.
+      // Without this, the reader watches the raw evidence block + 💡 trailer type
+      // out and then finalize abruptly re-lays-them-out (the "noise then snap"). The
+      // evidence still appears — folded — at finalize via the unchanged splitEvidence
+      // path. Charts are deliberately NOT stripped live (extractCharts on an
+      // unclosed fence is fragile; the chart fence streams briefly then renders at
+      // finalize, same as before).
+      let display = "正在分析…";
+      if (textSoFar.length > 0) {
+        const { body } = splitEvidence(stripFollowUps(textSoFar));
+        display = redactSensitive(body.length > 0 ? body : textSoFar);
+      }
       // Latest-wins lane: each content update carries the FULL text so far, so a
       // queued-but-not-yet-sent frame is stale and is replaced — the typewriter
       // shows the newest text without a backlog stalling behind a slow spawn.
@@ -532,9 +547,17 @@ async function runStreamingInvoke(
     // Charts are pulled from the UNredacted answer (extractCharts ran on it),
     // so scrub every string leaf of each spec before it hits the group-visible
     // card — same secret/path safety net as the conclusion and reasoning panel.
-    const safeCharts = charts.map((c) => redactDeep(c));
-    await writer.write((seq) => appendCharts(cardId, safeCharts, seq)
-      .catch((e) => { log({ event: "chart_error", error: String(e) }); throw e; }));
+    // Cap the count (MAX_CHARTS) — a pathological many-chart answer would blow the
+    // card-size limit / write budget; the prose table is the fallback.
+    const safeCharts = charts.slice(0, MAX_CHARTS).map((c) => redactDeep(c));
+    if (charts.length > MAX_CHARTS) log({ event: "chart_capped", total: charts.length, kept: MAX_CHARTS });
+    // Append EACH chart as its own element so one malformed VChart spec can't make
+    // CardKit reject the whole batch (atomic append) and wipe every chart. A
+    // failing append is logged and skipped; the others still render.
+    safeCharts.forEach((c, i) => {
+      void writer.write((seq) => appendOneChart(cardId, c, i, seq)
+        .catch((e) => log({ event: "chart_error", index: i, error: String(e) })));
+    });
   }
   if (!hardFailed) {
     // Extract follow-ups from the RAW answer (still carries the "💡 你可能还想问"
@@ -581,18 +604,33 @@ async function main(): Promise<void> {
     // the thread just like the follow-up button does. parentId → registry chain.
     let prompt = question;
     let parentId: string | undefined;
+    let sessionId = res.sessionId;
     if (res.parentId) {
-      const chain = collectChain(res.parentId);
-      if (chain.length > 0) {
-        prompt = composeFollowUpPrompt(question, chain);
+      const parentEntry = lookupCard(res.parentId);
+      if (parentEntry) {
+        // The reply targets a KNOWN bot card. Record the parent link REGARDLESS of
+        // whether its answer has finalized yet — if we only set parentId when the
+        // chain is currently non-empty, a reply to a still-streaming parent would
+        // be permanently orphaned from the conversation even after the parent
+        // settles. collectChain heals the chain once the parent's answer lands.
         parentId = res.parentId;
-        log({ event: "reply_context_replayed", turns: chain.length });
+        // Reuse the parent card's warm session (mirrors the follow-up button path),
+        // not a freshly-derived one — a threaded reply whose thread_id differs from
+        // the parent's would otherwise pin a different, cold microVM.
+        sessionId = parentEntry.sessionId ?? res.sessionId;
+        const chain = collectChain(res.parentId);
+        if (chain.length > 0) {
+          prompt = composeFollowUpPrompt(question, chain);
+          log({ event: "reply_context_replayed", turns: chain.length });
+        } else {
+          log({ event: "reply_context_pending", reason: "parent_not_yet_finalized" });
+        }
       } else {
         log({ event: "reply_context_missing", reason: "parent_not_in_registry" });
       }
     }
     try {
-      await streamingCardInvoke(res.sessionId, prompt, { messageId: res.messageId }, credentials, question, parentId, res.senderId);
+      await streamingCardInvoke(sessionId, prompt, { messageId: res.messageId }, credentials, question, parentId, res.senderId);
     } catch (cardErr) {
       // streamingCardInvoke now finalizes the card itself on backend failure
       // (non-200 / stream error), so reaching here means something unexpected
@@ -616,7 +654,7 @@ async function main(): Promise<void> {
       await sendReply({ messageId: res.messageId, answer: `⚠️ 暂时无法回答（服务异常），请稍后重试：\n\n${redactSensitive(prompt)}` })
         .catch((e) => log({ event: "fallback_error", error: String(e) }));
     }
-    log({ event: "replied", message: hashUserId(res.messageId), session: res.sessionId });
+    log({ event: "replied", message: hashUserId(res.messageId), session: sessionId });
   };
 
   // Single Feishu SDK WSClient long-connection: IM events + card action
