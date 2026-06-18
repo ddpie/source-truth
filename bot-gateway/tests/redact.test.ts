@@ -116,25 +116,29 @@ describe("redactSensitive", () => {
     }
   });
 
-  it("redacts bare Feishu access tokens (t-/a-/u- prefix, no key=)", () => {
-    for (const tok of [
-      "t-g204o8m5kf9d83jdkfjghd83extra",   // tenant_access_token
-      "a-abc123def456ghi789jkl012mno",     // app_access_token
-      "u-zyxw9876543210abcdefghij00",      // user_access_token
+  it("redacts Feishu access tokens in their key context (tenant/app/user_access_token=)", () => {
+    for (const line of [
+      "tenant_access_token=t-g204o8m5kf9d83jdkfjghd83extra",
+      "app_access_token: a-abc123def456ghi789jkl012mno",
+      'user_access_token="u-zyxw9876543210abcdefghij00"',
+      "access_token=t-g204o8m5kf9d83jdkfjghd83extra",
     ]) {
-      const out = redactSensitive(`调用失败：${tok} 过期了`);
-      expect(out).not.toContain(tok);
+      const out = redactSensitive(`调用失败：${line} 过期了`);
       expect(out).toContain("[已隐藏]");
+      expect(out).not.toMatch(/t-g204o8m5|a-abc123def|u-zyxw98765/);
     }
   });
 
-  it("does NOT over-redact benign kebab-case identifiers or 't-test' prose", () => {
-    // The Feishu-token rule forbids '-' inside the body so hyphenated identifiers
-    // (which have '-' word-breaks) and "t-test" survive untouched.
+  it("does NOT over-redact snake_case / kebab identifiers that merely start t-/a-/u-", () => {
+    // The token rule is anchored to an access_token key context, so identifiers
+    // that coincidentally start t-/a-/u- (incl. underscore-joined snake_case with
+    // no early hyphen) survive untouched — they're config names planners ask about.
     for (const safe of [
       "a-very-long-kebab-case-component-name",
       "u-boat-simulator-game-mode-config",
       "the t-test statistic was significant",
+      "t-distribution_table_with_long_suffix_here",
+      "a-z_compression_lookup_table_v2_field",
     ]) {
       expect(redactSensitive(safe)).toBe(safe);
     }

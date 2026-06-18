@@ -608,7 +608,12 @@ async function main(): Promise<void> {
       // resolve under ts-node (the .js specifier hits Node's native ESM loader,
       // which can't find the .ts source) — that would make the FALLBACK itself
       // throw and the user get nothing. Log the fallback's own failure too.
-      await sendReply({ messageId: res.messageId, answer: `⚠️ 暂时无法回答（服务异常），请稍后重试：\n\n${prompt}` })
+      // REDACT the echoed prompt: this error branch bypasses sendStreamingCard's
+      // redaction (the card never rendered), so a secret pasted into the question
+      // would otherwise leak verbatim into the group here. redactSensitive is
+      // idempotent, so re-redacting the already-safe chain part of a follow-up
+      // blob is harmless while it covers the raw new-question segment.
+      await sendReply({ messageId: res.messageId, answer: `⚠️ 暂时无法回答（服务异常），请稍后重试：\n\n${redactSensitive(prompt)}` })
         .catch((e) => log({ event: "fallback_error", error: String(e) }));
     }
     log({ event: "replied", message: hashUserId(res.messageId), session: res.sessionId });
