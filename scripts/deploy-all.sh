@@ -37,6 +37,7 @@ REPO_SUBDIR=""           # name the repo lives under inside EFS (defaults to bas
 INSTANCE_TYPE="t4g.large"
 MAX_FILES="10000"
 MODEL="global.anthropic.claude-opus-4-6-v1"
+REFRESH_INDEX=false       # --refresh-index: replace a running index instance if its artifacts are stale
 declare -A SKIP=()
 
 usage() {
@@ -53,6 +54,9 @@ Options:
   --max-files <n>     codegraph max files to index (default: 10000)
   --model <id>        Bedrock model id for the agent runtime
   --skip <phase>      Skip a phase: artifacts|iam|network|efs|index-svc|image|runtime (repeatable)
+  --refresh-index     Replace the running index-service instance if this run staged
+                      newer index-service code / repo to S3 (reuse can't re-bootstrap).
+                      Without it, a stale reuse only WARNs (never silently serves old code).
   --dry-run           Print the plan and resolved IDs, make no changes
   -h, --help
 EOF
@@ -68,6 +72,7 @@ while [[ $# -gt 0 ]]; do
     --max-files) MAX_FILES="$2"; shift 2 ;;
     --model) MODEL="$2"; shift 2 ;;
     --skip) SKIP["$2"]=1; shift 2 ;;
+    --refresh-index) REFRESH_INDEX=true; shift ;;
     --dry-run) DRY_RUN=true; shift ;;
     -h|--help) usage; exit 0 ;;
     *) say err "Unknown flag: $1"; usage >&2; exit 2 ;;
@@ -245,7 +250,7 @@ if skip index-svc; then say warn "skip index-svc"; elif [[ "$DRY_RUN" == true ]]
 else
   say step "Phase 4: index-service EC2"
   INDEX_IP="$("$SCRIPT_DIR/lib/provision_index_service.sh" \
-    "$REGION" "$CONFIG_FILE" "$BUCKET" "$REPO_SUBDIR" "$MAX_FILES" "$INSTANCE_TYPE")"
+    "$REGION" "$CONFIG_FILE" "$BUCKET" "$REPO_SUBDIR" "$MAX_FILES" "$INSTANCE_TYPE" "$REFRESH_INDEX")"
   update_env "$CONFIG_FILE" INDEX_SERVICE_IP "$INDEX_IP"
   safe_source_env "$CONFIG_FILE"
   # Wait for the bridge to become healthy before wiring the runtime to it. The

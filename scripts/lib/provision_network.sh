@@ -54,7 +54,21 @@ fi
 # NAT needs an EIP in the public subnet.
 NAT="$(Q describe-nat-gateways --filter "Name=tag:Name,Values=source-truth-nat" "Name=state,Values=available,pending" --query 'NatGateways[0].NatGatewayId' --output text 2>/dev/null)"
 if [[ "$NAT" == "None" || -z "$NAT" ]]; then
-  EIP="$(Q allocate-address --domain vpc --query AllocationId --output text)"
+  # Reuse a tagged, UNASSOCIATED EIP before allocating a new one. Otherwise a
+  # crash/Ctrl-C/throttle landing between allocate-address and create-nat-gateway
+  # leaks an un-tagged, un-attached EIP that no re-run can find — and each retry
+  # allocates another, exhausting the new-account default quota (5) and hard-
+  # failing on AddressLimitExceeded. We TAG the EIP at allocation time (atomic
+  # via --tag-specifications, so even a crash before any separate tag call leaves
+  # a recoverable address) and look for a reclaimable one first.
+  EIP="$(Q describe-addresses --filters "Name=tag:Name,Values=source-truth-nat-eip" "Name=domain,Values=vpc" --query 'Addresses[?AssociationId==`null`] | [0].AllocationId' --output text 2>/dev/null)"
+  if [[ "$EIP" == "None" || -z "$EIP" ]]; then
+    EIP="$(Q allocate-address --domain vpc \
+      --tag-specifications 'ResourceType=elastic-ip,Tags=[{Key=Name,Value=source-truth-nat-eip}]' \
+      --query AllocationId --output text)"
+  else
+    say info "reusing orphaned EIP $EIP"
+  fi
   NAT="$(Q create-nat-gateway --subnet-id "$PUB" --allocation-id "$EIP" --query NatGateway.NatGatewayId --output text)"
   tag "$NAT" source-truth-nat
   say info "waiting for NAT $NAT ..."

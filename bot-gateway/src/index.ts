@@ -36,6 +36,7 @@ import { handleMessageEvent, type InvokeFn } from "./handle-event";
 import { sdkEventToImEvent } from "./sdk-event";
 import { sendReply } from "./reply";
 import { getSessionId } from "./session-map";
+import { SessionSerializer } from "./serialize-session";
 import { hashUserId } from "./log";
 import { isDuplicate } from "./dedup";
 
@@ -60,6 +61,12 @@ function log(obj: Record<string, unknown>): void {
 // click (card.action.trigger) can abort that specific invoke.
 const abortControllers = new Map<string, AbortController>();
 
+// Serialize invokes per runtimeSessionId so two turns never run concurrently on
+// the same warm microVM (which would corrupt its one SDK conversation). See
+// serialize-session.ts for the why; it's a tested module so the critical
+// concurrency logic doesn't live untested in this entry shell.
+const sessionSerializer = new SessionSerializer();
+
 // Monotonic sequence for card-callback (button-disable) updates. Based on Unix
 // seconds since a 2025 epoch (stays int32 for ~60y, and is far above the
 // streaming seqs which top out in the low hundreds). A counter guarantees
@@ -72,27 +79,52 @@ function nextCallbackSeq(): number {
   return _lastCallbackSeq;
 }
 
-/** Streaming invoke: creates the card immediately (fast first render), then
- *  updates it as text arrives from the agent, and closes streaming at the end. */
+/** Public entry: dedup, create+send the card EAGERLY (so a queued request shows
+ *  feedback and is abortable immediately), then serialize the actual streaming
+ *  per runtimeSessionId so two turns never run concurrently on the same warm
+ *  microVM (which would corrupt its one SDK conversation). A busy session CHAINS
+ *  the new turn after the in-flight one; while it waits, its card shows 排队中 and
+ *  its 停止 button can already cancel it. */
 async function streamingCardInvoke(
   sessionId: string,
   prompt: string,
   target: { messageId: string } | { chatId: string },
-  // A credential PROVIDER, not a snapshot: SignatureV4 re-resolves it on every
-  // sign, so EC2 instance-role (IMDS) temporary creds get refreshed instead of
-  // going stale and 403-ing every invoke after a few hours of uptime.
   credentials: () => Promise<AwsCredentials>,
 ): Promise<void> {
-  const targetKey = "messageId" in target ? target.messageId : target.chatId;
   // Dedup only IM messages (Feishu re-delivers them on restart). Follow-up
-  // clicks (chatId target) are deliberate user actions — never dedup them,
-  // or a second follow-up in the same chat would be silently dropped.
-  if ("messageId" in target) {
-    if (isDuplicate(`msg:${target.messageId}`)) return;
-  }
+  // clicks (chatId target) are deliberate user actions — never dedup them, or a
+  // second follow-up in the same chat would be silently dropped. Done BEFORE any
+  // card/session work so a re-delivery creates no duplicate card.
+  if ("messageId" in target && isDuplicate(`msg:${target.messageId}`)) return;
 
-  // 1. Create streaming card + send it immediately. Follow-up cards carry a
-  //    "↳ 追问" summary marker so the chat history shows where they came from.
+  const queued = sessionSerializer.isBusy(sessionId);
+  if (queued) log({ event: "session_busy_queued", session: sessionId });
+
+  // Create + send the card NOW, not when the serialized turn starts. Without this
+  // a follow-up (or a 2nd message in the same chat) chained behind a 9-minute
+  // stream would show NO card and couldn't be 停止'd until it finally began. The
+  // abort handle is registered here too, so 停止 cancels even a still-queued turn.
+  const card = await sendStreamingCard(sessionId, prompt, target, queued);
+
+  return sessionSerializer.serialize(sessionId, () =>
+    runStreamingInvoke(card, sessionId, prompt, credentials),
+  );
+}
+
+/** Create + send the streaming card, register its abort handle, and (when the
+ *  session is busy) show a 排队中 header + 停止 button. Returns the cardId +
+ *  AbortController + the next free sequence number so the deferred streaming body
+ *  reuses the same card (instead of creating a second one) and never collides
+ *  with the seqs the queued-state updates already consumed. */
+async function sendStreamingCard(
+  sessionId: string,
+  prompt: string,
+  target: { messageId: string } | { chatId: string },
+  queued: boolean,
+): Promise<{ cardId: string; abort: AbortController; startSeq: number; isFollowUp: boolean }> {
+  const targetKey = "messageId" in target ? target.messageId : target.chatId;
+  // Follow-up cards carry a "↳ 追问" summary marker so the chat history shows
+  // where they came from.
   const isFollowUp = "chatId" in target;
   const summary = isFollowUp ? `↳ 追问：${prompt}` : prompt;
   const cardId = await createCard(summary, isFollowUp);
@@ -112,17 +144,59 @@ async function streamingCardInvoke(
   // open_message_id) can find this card and disable the clicked button.
   try {
     const sentMessageId = (JSON.parse(sendOut) as { data?: { message_id?: string } })?.data?.message_id;
-    if (sentMessageId) rememberCard(sentMessageId, cardId);
+    // Remember the sessionId too, so a follow-up click on THIS card resumes the
+    // exact same warm session (preserves conversation context even for threaded
+    // questions, whose thread_id the callback payload doesn't carry).
+    if (sentMessageId) rememberCard(sentMessageId, cardId, sessionId);
   } catch { /* best-effort: button-disable is a visual nicety */ }
   log({ event: "card_sent", target: hashUserId(targetKey), card: cardId });
 
   // Remove the "processing" reaction now that the card is visible.
   if ("messageId" in target) removeReaction(target.messageId);
 
+  // Register the abort handle NOW (not inside the deferred body), so 停止 can
+  // cancel a turn that's still queued behind another invoke on this session.
+  const abort = new AbortController();
+  abortControllers.set(cardId, abort);
+
+  let startSeq = 1;
+  if (queued) {
+    // Honest header while the turn waits behind another invoke on this session.
+    // ONLY the header (a full-card PUT of the conclusion area) — deliberately NO
+    // appended 停止 button here: the streaming path's whole invariant is "no
+    // appended elements exist during the thinking phase, so the heartbeat's
+    // full-card PUTs are safe to wipe-and-replace the body". A queued button
+    // would be an appended element that the first thinking-phase heartbeat PUT
+    // wipes anyway (and could race the analyzing-flip append into a DUPLICATE
+    // button). So we keep the card consistent with every normal card: the 停止
+    // button appears at the analyzing flip. The abort handle is already
+    // registered, and the in-flight card's own 停止 lets the user end the
+    // blocking turn early. This consumes seq 1; hand the body seq 2+.
+    await updateStage(cardId, "⏳ 排队中（正在等待上一个问题分析完成）", "orange", "排队中…", 1).catch(() => {});
+    startSeq = 2;
+  }
+  return { cardId, abort, startSeq, isFollowUp };
+}
+
+/** Streaming invoke body: streams the agent's answer onto the pre-created card
+ *  and finalizes it. Runs inside the per-session serializer, so at most one body
+ *  per runtimeSessionId is live at a time. */
+async function runStreamingInvoke(
+  card: { cardId: string; abort: AbortController; startSeq: number; isFollowUp: boolean },
+  sessionId: string,
+  prompt: string,
+  // A credential PROVIDER, not a snapshot: SignatureV4 re-resolves it on every
+  // sign, so EC2 instance-role (IMDS) temporary creds get refreshed instead of
+  // going stale and 403-ing every invoke after a few hours of uptime.
+  credentials: () => Promise<AwsCredentials>,
+): Promise<void> {
+  const { cardId, abort, isFollowUp } = card;
+
   // 2. Stream the agent's answer; update card content incrementally.
   //    9-minute safety timeout: close streaming gracefully before Feishu's
   //    10-minute hard window kills the stream (avoids broken card state).
-  let seq = 1;
+  //    seq starts above any sequence the queued-state card already used.
+  let seq = card.startSeq;
   let lastUpdate = 0;
   let lastPanelUpdate = 0;
   let timedOut = false;
@@ -161,6 +235,13 @@ async function streamingCardInvoke(
     // abort, and flicker the panel). It self-stops driving but keeps the watchdog
     // off the critical path by simply returning here.
     if (stage !== "thinking") return;
+    // Even in the thinking phase the conclusion CAN stream (the agent narrates
+    // before its first tool call). When it does, the content typewriter is
+    // already PUTting at up to 10/s; adding the heartbeat's ~1.25/s on top would
+    // exceed CardKit's 10/s cap and silently drop frames. The typewriter IS the
+    // animation while text flows, so skip this header tick if content updated
+    // within the last beat — keeps the combined rate at/under the cap.
+    if (Date.now() - lastUpdate < 800) return;
     const sinceEvent = Date.now() - lastEventAt;
     const elapsed = Math.floor((Date.now() - startedAt) / 1000);
     const spin = SPINNER[spinFrame++ % SPINNER.length];
@@ -173,9 +254,10 @@ async function streamingCardInvoke(
     updateStage(cardId, label, "orange", lastDisplay, seq).catch(() => {});
   }, 800);
 
-  // Abort handle for the 停止 button (registered for the lifetime of the stream).
-  const abort = new AbortController();
-  abortControllers.set(cardId, abort);
+  // The abort handle was created + registered in abortControllers at card-send
+  // time (so 停止 can cancel even a still-queued turn); reused here as-is. If the
+  // user already pressed 停止 while this turn was queued, abort.signal is already
+  // aborted and invokeRuntimeStreaming returns immediately with aborted=true.
 
   // try/finally so the abortControllers entry is removed on EVERY exit path —
   // resolve, abort, OR a thrown network/stream/signing error. Without the finally
@@ -420,12 +502,30 @@ async function main(): Promise<void> {
     "card.action.trigger": (data: unknown) => {
       try {
         const d = data as {
+          header?: { event_id?: string };
+          event_id?: string;
+          token?: string;
           action?: { value?: { action?: string; text?: string; eid?: string; card_id?: string } };
           context?: { open_chat_id?: string; open_message_id?: string };
         };
         const value = d?.action?.value;
         const chatId = d?.context?.open_chat_id ?? "";
         const messageId = d?.context?.open_message_id ?? "";
+        // Dedup re-delivered callbacks. The IM path dedups on event_id; the
+        // callback path had NO idempotency key, so a Feishu re-delivery of a
+        // follow_up callback would queue a SECOND invoke on the same session —
+        // and the per-session serializer runs both sequentially → a guaranteed
+        // DOUBLE answer (cost + a confusing 2nd card). Prefer the callback's own
+        // event_id/token (true idempotency key, location varies by SDK payload
+        // shape); fall back to a composite (clicked button + source card + chat)
+        // that a genuine re-delivery repeats identically while distinct clicks
+        // differ. "cb:" prefix keeps this keyspace disjoint from the "msg:" one.
+        const cbId = d?.header?.event_id ?? d?.event_id ?? d?.token
+          ?? `${value?.action ?? ""}:${value?.eid ?? ""}:${value?.card_id ?? ""}:${messageId}:${chatId}`;
+        if (isDuplicate(`cb:${cbId}`)) {
+          log({ event: "callback_duplicate", action: value?.action ?? "" });
+          return {};
+        }
         if (value?.action === "stop" && value.card_id) {
           // 停止: abort the in-flight agent stream for this card. The invoke
           // then finalizes with whatever was generated, header → ⏹ 已停止.
@@ -436,12 +536,28 @@ async function main(): Promise<void> {
           // Hash the chat id; log only the question LENGTH, not the text, to
           // avoid "who asked what" profiling in logs (data minimization).
           log({ event: "follow_up_clicked", chatId: hashUserId(chatId), question_len: value.text.length });
-          const sessionId = getSessionId(chatId);
+          // Resume the EXACT session the original card was answered under, so a
+          // threaded question's follow-up keeps its warm context (the callback
+          // payload has no thread_id, so re-deriving via getSessionId(chatId)
+          // would mint a different, cold session). Fall back to the chat-level
+          // session if the card isn't in the registry (evicted / pre-restart).
+          const entry = lookupCard(messageId);
+          const sessionId = entry?.sessionId ?? getSessionId(chatId);
+          // Observability for the cold-session fallback: when the original card's
+          // session is gone (registry evicted past the 500-cap, or wiped by a
+          // gateway restart), we re-derive via getSessionId(chatId) — which, for a
+          // question originally asked in a THREAD, mints a fresh/cold session that
+          // silently lacks the prior turn's context. That's exactly the
+          // silently-wrong-answer mode the project forbids, so emit a signal an
+          // operator can alarm on rather than hiding it behind `??`.
+          if (!entry?.sessionId) {
+            log({ event: "followup_session_fallback", chatId: hashUserId(chatId), reason: entry ? "no_session_on_entry" : "entry_missing" });
+          }
           void streamingCardInvoke(sessionId, value.text, { chatId }, credentials)
             .catch((e) => log({ event: "follow_up_error", error: String(e) }));
           // Mark the clicked button: disable it + ✓ on the original card, so the
           // user sees which one they picked (best-effort, async).
-          const cardId = lookupCard(messageId);
+          const cardId = entry?.cardId;
           if (cardId && value.eid) {
             // int32-safe, streaming-seq-beating, AND strictly monotonic even for
             // same-second rapid clicks (see nextCallbackSeq).
@@ -461,6 +577,19 @@ async function main(): Promise<void> {
 }
 
 if (require.main === module) {
+  // Last-resort backstop for the always-on gateway: an unhandled promise
+  // rejection or a stray async throw (e.g. an EventEmitter 'error' with no
+  // listener that slipped past our per-call guards) would otherwise terminate
+  // the process and take down EVERY in-flight session until a human restarts it.
+  // We LOG and KEEP RUNNING — a single dropped event is vastly preferable to the
+  // bot going dark. (Individual invokes still finalize their own cards via their
+  // own try/catch; this only catches what those miss.)
+  process.on("unhandledRejection", (reason) => {
+    log({ event: "unhandled_rejection", error: String(reason) });
+  });
+  process.on("uncaughtException", (err) => {
+    log({ event: "uncaught_exception", error: String(err && err.stack ? err.stack : err) });
+  });
   main().catch((err) => {
     log({ event: "fatal", error: String(err) });
     process.exit(1);
