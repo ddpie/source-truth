@@ -51,11 +51,17 @@ export function removeReaction(messageId: string): void {
           r.operator?.operator_type === "app",
       );
       if (mine?.reaction_id) {
-        spawn("lark-cli", [
+        const del = spawn("lark-cli", [
           "im", "reactions", "delete", "--as", "bot",
           "--message-id", messageId,
           "--reaction-id", mine.reaction_id,
         ], { stdio: ["ignore", "ignore", "ignore"] });
+        // MUST attach an 'error' listener: a failed spawn (e.g. EMFILE fd
+        // exhaustion under load) emits 'error' asynchronously, and with no
+        // listener Node re-throws it as an uncaught exception — crashing the
+        // always-on gateway (the surrounding try/catch can't catch an async
+        // emit). Mirror the sibling spawns' no-op guard.
+        del.on("error", () => {});
       }
     } catch { /* best-effort */ }
   });
