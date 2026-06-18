@@ -107,14 +107,17 @@ export function applyEvent(state: StreamState, evt: Record<string, unknown>): vo
     if (err !== null) state.error = err;
   }
   // Terminal ResultMessage = clean run completion. It has NO `content` array and
-  // carries a top-level run summary (subtype / stop_reason / num_turns / result).
-  // We require seeing this before trusting the stream as complete; without it, a
-  // `done` read means the connection was cut mid-run and the text is truncated.
-  // (detectEventError already flags the is_error:true variant; this also catches
-  // the is_error:false success ResultMessage, which is otherwise a no-op here.)
+  // carries a RUN-SUMMARY field (num_turns / result / is_error / a real
+  // stop_reason). We require seeing this before trusting the stream as complete;
+  // without it, a `done` read means the connection was cut mid-run and the text is
+  // truncated. Key off the run-summary fields, NOT a bare `subtype`: the SDK's
+  // system INIT message is also `{subtype:"init", data:{…}}` with no content array,
+  // and an intermediate message carries stop_reason:null (typeof null !== "string"
+  // so it's correctly ignored). detectEventError already flags the is_error:true
+  // variant; this also catches the is_error:false success ResultMessage.
   if (!Array.isArray(evt.content) &&
-      (typeof evt.subtype === "string" || typeof evt.stop_reason === "string" ||
-       typeof evt.num_turns === "number" || "result" in evt)) {
+      (typeof evt.num_turns === "number" || "result" in evt ||
+       typeof evt.is_error === "boolean" || typeof evt.stop_reason === "string")) {
     state.sawResult = true;
   }
   // Partial-message path: when the agent runs with include_partial_messages, the
