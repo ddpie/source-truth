@@ -6,14 +6,18 @@
 #     Amazon Linux 2023's glibc 2.34 is too old, verified failing).
 #   - codegraph-server + bridge code pulled from S3 (artifacts staged by deploy).
 #   - SINGLE-WRITER discipline: exactly one codegraph process ever touches
-#     graph.db. A build phase (oneshot, holds an flock) creates the graph; the
-#     serve phase (the bridge's resident --mcp session) only ever runs after the
-#     build releases the lock. Concurrent writers corrupt RocksDB → 0-node graph
-#     (the #1 failure we hit). The flock makes that impossible WITHIN one host.
-#     graph.db lives on LOCAL disk, so the lock is per-instance — the deploy
-#     provisions exactly ONE index-service instance (provision_index_service.sh
-#     reuses an existing one). Running a second instance against the same EFS is
-#     unsupported in the MVP (would need an EFS-resident or DynamoDB lock for HA).
+#     graph.db. The BUILD phase (oneshot) holds an flock while it creates the
+#     graph. The SERVE phase (the bridge's resident --mcp session) does NOT hold
+#     the flock — its single-writer guarantee rests on (a) systemd ordering
+#     (index-bridge After=/Requires= index-build, so build has fully exited before
+#     serve starts), (b) `Conflicts=` so systemd refuses to run a second build
+#     oneshot while the bridge is live (closes the `systemctl restart index-build`
+#     footgun), and (c) the bridge's in-process restart join-guard. Concurrent
+#     writers corrupt RocksDB → 0-node graph (the #1 failure we hit). graph.db
+#     lives on LOCAL disk, so this is per-instance — the deploy provisions exactly
+#     ONE index-service instance (provision_index_service.sh reuses an existing
+#     one). Running a second instance against the same EFS is unsupported in the
+#     MVP (would need an EFS-resident or DynamoDB lock for HA).
 #   - PATH baked into the unit (codegraph-server lives in /usr/local/bin; systemd
 #     has no login PATH — a bare "codegraph-server" spawn fails otherwise).
 #

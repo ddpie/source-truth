@@ -116,6 +116,43 @@ describe("redactSensitive", () => {
     }
   });
 
+  it("redacts bare Feishu access tokens (t-/a-/u- prefix, no key=)", () => {
+    for (const tok of [
+      "t-g204o8m5kf9d83jdkfjghd83extra",   // tenant_access_token
+      "a-abc123def456ghi789jkl012mno",     // app_access_token
+      "u-zyxw9876543210abcdefghij00",      // user_access_token
+    ]) {
+      const out = redactSensitive(`调用失败：${tok} 过期了`);
+      expect(out).not.toContain(tok);
+      expect(out).toContain("[已隐藏]");
+    }
+  });
+
+  it("does NOT over-redact benign kebab-case identifiers or 't-test' prose", () => {
+    // The Feishu-token rule forbids '-' inside the body so hyphenated identifiers
+    // (which have '-' word-breaks) and "t-test" survive untouched.
+    for (const safe of [
+      "a-very-long-kebab-case-component-name",
+      "u-boat-simulator-game-mode-config",
+      "the t-test statistic was significant",
+    ]) {
+      expect(redactSensitive(safe)).toBe(safe);
+    }
+  });
+
+  it("exact-redacts the process's own FEISHU_APP_SECRET even with no key= prefix", () => {
+    const prev = process.env.FEISHU_APP_SECRET;
+    process.env.FEISHU_APP_SECRET = "lWAOtestSecretValue123456";
+    try {
+      const out = redactSensitive("报错信息里混进了 lWAOtestSecretValue123456 这个串");
+      expect(out).not.toContain("lWAOtestSecretValue123456");
+      expect(out).toContain("[已隐藏]");
+    } finally {
+      if (prev === undefined) delete process.env.FEISHU_APP_SECRET;
+      else process.env.FEISHU_APP_SECRET = prev;
+    }
+  });
+
   it("redacts a Basic-auth header (base64 of user:pass)", () => {
     const b64 = "YWRtaW46c3VwZXJzZWNyZXRwYXNzd29yZA==";
     const out = redactSensitive(`Authorization: Basic ${b64}`);

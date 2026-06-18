@@ -138,15 +138,23 @@ async function sendStreamingCard(
   askerOpenId?: string,
 ): Promise<{ cardId: string; abort: AbortController; startSeq: number; isFollowUp: boolean; sentMessageId?: string; question: string; statusSeeded: boolean }> {
   const targetKey = "messageId" in target ? target.messageId : target.chatId;
+  // REDACT the user's question before it touches any group-visible / persisted /
+  // replayed surface. The question is user-typed and a 策划 could paste a secret
+  // into it ("为什么 xoxb-… 调用失败"); without this it would leak three ways — the
+  // group-visible ❓ echo, the card-registry store, and the follow-up replay prompt.
+  // redactSensitive is the same net applied to agent output; apply it ONCE here so
+  // the card echo, summary, registry, and (via the stored value) collectChain are
+  // all safe. plain_text rendering only stops markdown injection, not secret leak.
+  const safeQuestion = redactSensitive(question);
   // Follow-up cards carry a "↳ 追问" summary marker so the chat history shows
   // where they came from. Use the CLEAN question for the preview (prompt may be
   // the replayed-context blob for a follow-up).
   const isFollowUp = "chatId" in target;
-  const summary = isFollowUp ? `↳ 追问：${question}` : question;
+  const summary = isFollowUp ? `↳ 追问：${safeQuestion}` : safeQuestion;
   // Echo the question in the card body (esp. for follow-ups, so the card shows
   // WHAT was asked without scrolling). Pass it to createCard as the "question"
   // element; finalizeCard re-includes it so the full-PUT doesn't wipe it.
-  const cardId = await createCard(summary, isFollowUp, question);
+  const cardId = await createCard(summary, isFollowUp, safeQuestion);
   // Send the card in-process (HTTP), not via `spawn lark-cli` (~800ms): this is
   // on the first-render path, so the spawn cost delayed every answer's first
   // paint. Returns the sent message_id for the follow-up registry.
@@ -162,7 +170,7 @@ async function sendStreamingCard(
   // Store the question too, so a follow-up on this card can replay the prior
   // turn (question + answer, filled in at finalize) as stateless context.
   if (sentMessageId) {
-    rememberCard(sentMessageId, cardId, sessionId, question, parentMessageId, askerOpenId);
+    rememberCard(sentMessageId, cardId, sessionId, safeQuestion, parentMessageId, askerOpenId);
   } else {
     // Send accepted but no message_id in the response → the card can't be
     // registered, so a later follow-up/reply can't find it and silently loses
@@ -201,7 +209,9 @@ async function sendStreamingCard(
     } catch { /* seed failed → heartbeat will append on its first tick */ }
     startSeq = 2;
   }
-  return { cardId, abort, startSeq, isFollowUp, sentMessageId, question, statusSeeded };
+  // Return the REDACTED question so finalizeCard re-renders the safe echo (a raw
+  // value here would re-leak a secret into the finalized full-PUT card).
+  return { cardId, abort, startSeq, isFollowUp, sentMessageId, question: safeQuestion, statusSeeded };
 }
 
 /** Streaming invoke body: streams the agent's answer onto the pre-created card
