@@ -23,9 +23,10 @@
 import { fromNodeProviderChain } from "@aws-sdk/credential-providers";
 
 import { invokeRuntimeStreaming, classifyInvokeOutcome, isTurnCapError, type AwsCredentials } from "./sigv4";
-import { createCard, updateContent, closeStreaming, finalizeCard, appendFooter, buildSendCardContent, disableFollowUpButton, updateStage, appendReasoningPanel, updateReasoningPanel, appendCharts, appendStopButton, appendStatusLine, updateStatusLine, formatElapsed } from "./cardkit-client";
+import { createCard, updateContent, closeStreaming, finalizeCard, appendFooter, buildSendCardContent, disableFollowUpButton, appendReasoningPanel, updateReasoningPanel, appendCharts, appendStopButton, appendStatusLine, updateStatusLine, formatElapsed } from "./cardkit-client";
 import { extractCharts } from "./extract-charts";
-import { rememberCard, lookupCard } from "./card-registry";
+import { rememberCard, rememberAnswer, lookupCard, collectChain } from "./card-registry";
+import { composeFollowUpPrompt } from "./followup-context";
 import { removeReaction } from "./reaction";
 import { redactSensitive, redactSteps, redactDeep } from "./redact";
 import { extractFollowUps, stripFollowUps } from "./extract-followups";
@@ -90,6 +91,14 @@ async function streamingCardInvoke(
   prompt: string,
   target: { messageId: string } | { chatId: string },
   credentials: () => Promise<AwsCredentials>,
+  // The CLEAN user question for display/registry (defaults to prompt). For a
+  // follow-up, `prompt` carries the replayed prior-turn context but the card
+  // preview + the question we remember must be the bare follow-up text, or a
+  // follow-up-of-a-follow-up would replay the whole composed blob as the "question".
+  question?: string,
+  // The message_id this turn follows up / replies to, so the registry can chain
+  // it to its parent and a later follow-up walks the whole history.
+  parentMessageId?: string,
 ): Promise<void> {
   // Dedup only IM messages (Feishu re-delivers them on restart). Follow-up
   // clicks (chatId target) are deliberate user actions — never dedup them, or a
@@ -104,7 +113,7 @@ async function streamingCardInvoke(
   // a follow-up (or a 2nd message in the same chat) chained behind a 9-minute
   // stream would show NO card and couldn't be 停止'd until it finally began. The
   // abort handle is registered here too, so 停止 cancels even a still-queued turn.
-  const card = await sendStreamingCard(sessionId, prompt, target, queued);
+  const card = await sendStreamingCard(sessionId, target, queued, question ?? prompt, parentMessageId);
 
   return sessionSerializer.serialize(sessionId, () =>
     runStreamingInvoke(card, sessionId, prompt, credentials),
@@ -118,16 +127,21 @@ async function streamingCardInvoke(
  *  with the seqs the queued-state updates already consumed. */
 async function sendStreamingCard(
   sessionId: string,
-  prompt: string,
   target: { messageId: string } | { chatId: string },
   queued: boolean,
-): Promise<{ cardId: string; abort: AbortController; startSeq: number; isFollowUp: boolean }> {
+  question: string,
+  parentMessageId?: string,
+): Promise<{ cardId: string; abort: AbortController; startSeq: number; isFollowUp: boolean; sentMessageId?: string; question: string; statusSeeded: boolean }> {
   const targetKey = "messageId" in target ? target.messageId : target.chatId;
   // Follow-up cards carry a "↳ 追问" summary marker so the chat history shows
-  // where they came from.
+  // where they came from. Use the CLEAN question for the preview (prompt may be
+  // the replayed-context blob for a follow-up).
   const isFollowUp = "chatId" in target;
-  const summary = isFollowUp ? `↳ 追问：${prompt}` : prompt;
-  const cardId = await createCard(summary, isFollowUp);
+  const summary = isFollowUp ? `↳ 追问：${question}` : question;
+  // Echo the question in the card body (esp. for follow-ups, so the card shows
+  // WHAT was asked without scrolling). Pass it to createCard as the "question"
+  // element; finalizeCard re-includes it so the full-PUT doesn't wipe it.
+  const cardId = await createCard(summary, isFollowUp, question);
   // Send the card in-process (HTTP), not via `spawn lark-cli` (~800ms): this is
   // on the first-render path, so the spawn cost delayed every answer's first
   // paint. Returns the sent message_id for the follow-up registry.
@@ -140,7 +154,9 @@ async function sendStreamingCard(
   // the sessionId too, so a follow-up on THIS card resumes the same warm session
   // (preserves context even for threaded questions whose thread_id the callback
   // payload doesn't carry).
-  if (sentMessageId) rememberCard(sentMessageId, cardId, sessionId);
+  // Store the question too, so a follow-up on this card can replay the prior
+  // turn (question + answer, filled in at finalize) as stateless context.
+  if (sentMessageId) rememberCard(sentMessageId, cardId, sessionId, question, parentMessageId);
   log({ event: "card_sent", target: hashUserId(targetKey), card: cardId });
 
   // Remove the "processing" reaction now that the card is visible.
@@ -152,29 +168,27 @@ async function sendStreamingCard(
   abortControllers.set(cardId, abort);
 
   let startSeq = 1;
+  let statusSeeded = false;
   if (queued) {
-    // Honest header while the turn waits behind another invoke on this session.
-    // ONLY the header (a full-card PUT of the conclusion area) — deliberately NO
-    // appended 停止 button here: the streaming path's whole invariant is "no
-    // appended elements exist during the thinking phase, so the heartbeat's
-    // full-card PUTs are safe to wipe-and-replace the body". A queued button
-    // would be an appended element that the first thinking-phase heartbeat PUT
-    // wipes anyway (and could race the analyzing-flip append into a DUPLICATE
-    // button). So we keep the card consistent with every normal card: the 停止
-    // button appears at the analyzing flip. The abort handle is already
-    // registered, and the in-flight card's own 停止 lets the user end the
-    // blocking turn early. This consumes seq 1; hand the body seq 2+.
-    await updateStage(cardId, "⏳ 排队中（正在等待上一个问题分析完成）", "orange", "排队中…", 1).catch(() => {});
+    // Honest "排队中" indicator while the turn waits behind another invoke on this
+    // session. Write it into the SAME `status` element the running heartbeat uses
+    // (NOT a header full-PUT) so that when this turn dequeues, the heartbeat's
+    // updateStatusLine OVERWRITES "排队中" in place → it cleanly becomes "正在分析".
+    // (The old header full-PUT left the header stuck on "排队中" forever — the
+    // heartbeat drives the status element, never the header — and also wiped the
+    // question element.) Consumes seq 1; hand the body seq 2+.
+    await appendStatusLine(cardId, "⏳ 排队中（正在等待上一个问题分析完成）", 1).catch(() => {});
     startSeq = 2;
+    statusSeeded = true;
   }
-  return { cardId, abort, startSeq, isFollowUp };
+  return { cardId, abort, startSeq, isFollowUp, sentMessageId, question, statusSeeded };
 }
 
 /** Streaming invoke body: streams the agent's answer onto the pre-created card
  *  and finalizes it. Runs inside the per-session serializer, so at most one body
  *  per runtimeSessionId is live at a time. */
 async function runStreamingInvoke(
-  card: { cardId: string; abort: AbortController; startSeq: number; isFollowUp: boolean },
+  card: { cardId: string; abort: AbortController; startSeq: number; isFollowUp: boolean; sentMessageId?: string; question: string; statusSeeded: boolean },
   sessionId: string,
   prompt: string,
   // A credential PROVIDER, not a snapshot: SignatureV4 re-resolves it on every
@@ -182,7 +196,7 @@ async function runStreamingInvoke(
   // going stale and 403-ing every invoke after a few hours of uptime.
   credentials: () => Promise<AwsCredentials>,
 ): Promise<void> {
-  const { cardId, abort, isFollowUp } = card;
+  const { cardId, abort, isFollowUp, sentMessageId, question } = card;
 
   // 2. Stream the agent's answer; update card content incrementally.
   //    9-minute safety timeout: close streaming gracefully before Feishu's
@@ -222,7 +236,10 @@ async function runStreamingInvoke(
   const ELLIPSIS = ["·", "··", "···"];
   const startedAt = Date.now();
   let frame = 0;
-  let statusAppended = false;
+  // If the queued path already created the status element, the heartbeat must
+  // UPDATE it in place (so "排队中" → "正在分析" on the same element), not append a
+  // second one.
+  let statusAppended = card.statusSeeded;
   let heartbeat: ReturnType<typeof setInterval> | undefined;
   const stopHeartbeat = () => { if (heartbeat) { clearInterval(heartbeat); heartbeat = undefined; } };
   // Refresh cadence: the dominant cost is the THINKING/ANALYZING phase (live data:
@@ -439,7 +456,7 @@ async function runStreamingInvoke(
   // 4. Finalize: header → green "回答完成" (or 已停止 / 查询失败) + reasoning panel
   //    collapsed. The full-card PUT rebuilds the body (conclusion + panel), which
   //    also drops the now-irrelevant 停止 button AND the live status line.
-  await writer.write((seq) => finalizeCard(cardId, finalText, redactSteps(steps), seq, isFollowUp, aborted, hardFailed, finalEvidence));
+  await writer.write((seq) => finalizeCard(cardId, finalText, redactSteps(steps), seq, isFollowUp, aborted, hardFailed, finalEvidence, question));
   // 5. Data charts + follow-ups: skip on HARD failure (no trustworthy conclusion).
   //    A turn-capped partial keeps its charts/follow-ups (labeled incomplete).
   if (!hardFailed && charts.length > 0) {
@@ -456,6 +473,10 @@ async function runStreamingInvoke(
     const followUps = extractFollowUps(redactSensitive(answer));
     await writer.write((seq) => appendFooter(cardId, seq, followUps));
   }
+  // Remember the (redacted) answer so a follow-up on THIS card can replay the
+  // prior turn as context. Use the redacted body — never store secrets, and it's
+  // what the user actually saw. Skipped on hard failure (no trustworthy answer).
+  if (sentMessageId && !hardFailed) rememberAnswer(sentMessageId, finalText);
   log({ event: "card_closed", card: cardId, chars: answer.length, charts: charts.length, timedOut, failed, turnCapped, error: error ?? undefined });
 }
 
@@ -567,17 +588,24 @@ async function main(): Promise<void> {
           // session if the card isn't in the registry (evicted / pre-restart).
           const entry = lookupCard(messageId);
           const sessionId = entry?.sessionId ?? getSessionId(chatId);
-          // Observability for the cold-session fallback: when the original card's
-          // session is gone (registry evicted past the 500-cap, or wiped by a
-          // gateway restart), we re-derive via getSessionId(chatId) — which, for a
-          // question originally asked in a THREAD, mints a fresh/cold session that
-          // silently lacks the prior turn's context. That's exactly the
-          // silently-wrong-answer mode the project forbids, so emit a signal an
-          // operator can alarm on rather than hiding it behind `??`.
-          if (!entry?.sessionId) {
-            log({ event: "followup_session_fallback", chatId: hashUserId(chatId), reason: entry ? "no_session_on_entry" : "entry_missing" });
+          // Replay the WHOLE prior conversation chain (this card + all its
+          // ancestors) as explicit context, so multiple follow-ups build the full
+          // history — not just the last turn. Stateless: the context travels IN
+          // the prompt, not a sticky microVM (the SDK doesn't carry history across
+          // invokes; reusing the sessionId only pins the microVM).
+          const chain = collectChain(messageId);
+          const prompt = composeFollowUpPrompt(value.text, chain);
+          if (chain.length === 0) {
+            // No prior context (card evicted past the 500-cap or wiped by a gateway
+            // restart) → can't continue the thread. Log it (operator-visible)
+            // rather than silently answering context-free.
+            log({ event: "followup_context_missing", chatId: hashUserId(chatId), reason: entry ? "no_answer_stored" : "entry_missing" });
+          } else {
+            log({ event: "followup_context_replayed", chatId: hashUserId(chatId), turns: chain.length });
           }
-          void streamingCardInvoke(sessionId, value.text, { chatId }, credentials)
+          // The new follow-up card's PARENT is the card being followed up, so a
+          // follow-up-of-this-follow-up keeps walking the chain.
+          void streamingCardInvoke(sessionId, prompt, { chatId }, credentials, value.text, messageId)
             .catch((e) => log({ event: "follow_up_error", error: String(e) }));
           // Mark the clicked button: disable it + ✓ on the original card, so the
           // user sees which one they picked (best-effort, async).
