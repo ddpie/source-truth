@@ -18,12 +18,22 @@ import { feishuApi } from "./feishu-http";
 
 // ── pure request builders (unit-tested) ──────────────────────────────────────
 
-export function buildCreateCardBody(opts?: { summary?: string; followUp?: boolean }): string {
+export function buildCreateCardBody(opts?: { summary?: string; followUp?: boolean; question?: string }): string {
   // summary.content customizes the chat-list preview (default would be "[生成中...]").
   const summary = opts?.summary ? `💬 ${opts.summary.slice(0, 40)}` : "source-truth 正在回答…";
   // Follow-up cards (from a clicked button) get a distinct header so the chat
   // history clearly shows "this card answers a follow-up question".
   const title = opts?.followUp ? "↳ 正在追问…" : "正在思考…";
+  // Echo the user's question at the TOP of the card body (a quoted line), so the
+  // card is self-contained — the reader sees WHAT was asked without scrolling up
+  // the chat. element_id="question" so it stays put through streaming/finalize.
+  const elements: unknown[] = [];
+  const q = (opts?.question ?? "").trim();
+  if (q) {
+    elements.push({ tag: "markdown", content: `**❓ ${q}**`, element_id: "question" });
+    elements.push({ tag: "hr" });
+  }
+  elements.push({ tag: "markdown", content: "正在分析…", element_id: "conclusion" });
   const card = {
     schema: "2.0",
     config: {
@@ -40,7 +50,7 @@ export function buildCreateCardBody(opts?: { summary?: string; followUp?: boolea
       title: { tag: "plain_text", content: title },
       template: "blue",
     },
-    body: { elements: [{ tag: "markdown", content: "正在分析…", element_id: "conclusion" }] },
+    body: { elements },
   };
   return JSON.stringify({ type: "card_json", data: JSON.stringify(card) });
 }
@@ -162,8 +172,8 @@ function larkApi(method: string, path: string, data: string): Promise<unknown> {
 }
 
 /** Create a streaming card; returns its card_id. summary = chat-list preview. */
-export async function createCard(summary?: string, followUp?: boolean): Promise<string> {
-  const resp = (await larkApi("POST", "/open-apis/cardkit/v1/cards", buildCreateCardBody({ summary, followUp }))) as {
+export async function createCard(summary?: string, followUp?: boolean, question?: string): Promise<string> {
+  const resp = (await larkApi("POST", "/open-apis/cardkit/v1/cards", buildCreateCardBody({ summary, followUp, question }))) as {
     data: { card_id: string };
   };
   return resp.data.card_id;
@@ -328,9 +338,16 @@ export async function finalizeCard(
   aborted?: boolean,
   failed?: boolean,
   evidence?: string,
+  question?: string,
 ): Promise<void> {
   const panel = buildReasoningPanel(steps, false);
   const evidencePanel = buildEvidencePanel(evidence ?? "");
+  // Re-include the echoed question at the top (the full-PUT rebuilds the whole
+  // body, so it'd be wiped otherwise — must match the streaming layout).
+  const q = (question ?? "").trim();
+  const questionEls = q
+    ? [{ tag: "markdown", content: `**❓ ${q}**`, element_id: "question" }, { tag: "hr" }]
+    : [];
   const card = {
     schema: "2.0",
     config: { update_multi: true },
@@ -340,6 +357,7 @@ export async function finalizeCard(
     },
     body: {
       elements: [
+        ...questionEls,
         { tag: "markdown", content: conclusion, element_id: "conclusion" },
         ...(evidencePanel ? [evidencePanel] : []),
         ...(panel ? [panel] : []),
