@@ -17,7 +17,28 @@ import {
   finalizeTitle,
   buildFollowUpElements,
   buildClickedButtonElement,
+  formatElapsed,
 } from "../src/cardkit-client";
+
+describe("formatElapsed", () => {
+  it("shows bare seconds under a minute", () => {
+    expect(formatElapsed(0)).toBe("0s");
+    expect(formatElapsed(8_400)).toBe("8s");
+    expect(formatElapsed(59_900)).toBe("59s");
+  });
+  it("shows Mm Ss between one minute and one hour", () => {
+    expect(formatElapsed(60_000)).toBe("1m 0s");
+    expect(formatElapsed(247_000)).toBe("4m 7s");
+    expect(formatElapsed(3_599_000)).toBe("59m 59s");
+  });
+  it("shows Hh Mm beyond an hour", () => {
+    expect(formatElapsed(3_600_000)).toBe("1h 0m");
+    expect(formatElapsed(7_530_000)).toBe("2h 5m");
+  });
+  it("never goes negative", () => {
+    expect(formatElapsed(-500)).toBe("0s");
+  });
+});
 
 describe("buildCreateCardBody", () => {
   it("builds a schema-2.0 streaming card with paired streaming_config", () => {

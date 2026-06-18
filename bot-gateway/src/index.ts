@@ -25,7 +25,7 @@ import { spawn } from "node:child_process";
 import { fromNodeProviderChain } from "@aws-sdk/credential-providers";
 
 import { invokeRuntimeStreaming, classifyInvokeOutcome, isTurnCapError, type AwsCredentials } from "./sigv4";
-import { createCard, updateContent, closeStreaming, finalizeCard, appendFooter, buildSendCardContent, disableFollowUpButton, updateStage, appendReasoningPanel, updateReasoningPanel, appendCharts, appendStopButton, appendStatusLine, updateStatusLine } from "./cardkit-client";
+import { createCard, updateContent, closeStreaming, finalizeCard, appendFooter, buildSendCardContent, disableFollowUpButton, updateStage, appendReasoningPanel, updateReasoningPanel, appendCharts, appendStopButton, appendStatusLine, updateStatusLine, formatElapsed } from "./cardkit-client";
 import { extractCharts } from "./extract-charts";
 import { rememberCard, lookupCard } from "./card-registry";
 import { removeReaction } from "./reaction";
@@ -225,23 +225,37 @@ async function runStreamingInvoke(
   let statusInFlight = false;     // serialize status updates (avoid seq races / pile-up)
   let heartbeat: ReturnType<typeof setInterval> | undefined;
   const stopHeartbeat = () => { if (heartbeat) { clearInterval(heartbeat); heartbeat = undefined; } };
+  // Refresh cadence: a status WRITE goes out every STATUS_WRITE_MS — faster than
+  // the old 800ms so the spinner + elapsed timer feel lively — while staying well
+  // within CardKit's 10/s budget shared with the content typewriter (a card only
+  // visually refreshes on a write, so there's no point ticking faster than we
+  // write). At ~2.5 writes/s for status + ≤10/s content the combined rate is safe.
+  const STATUS_WRITE_MS = 400;
+  let lastStatusWrite = 0;
   heartbeat = setInterval(() => {
     if (timedOut || Date.now() > deadline) { stopHeartbeat(); return; }
-    // Skip this tick if a prior status write is still in flight (its lark-cli
-    // spawn hasn't returned) — prevents seq races and request pile-up under a
-    // slow API. The seconds counter will simply jump by one tick, still honest.
-    if (statusInFlight) return;
-    const sinceEvent = Date.now() - lastEventAt;
-    const elapsed = Math.floor((Date.now() - startedAt) / 1000);
+    const now = Date.now();
+    // Rate-limit the actual network write; also skip if a prior write is still in
+    // flight (its lark-cli spawn hasn't settled) — prevents seq races / pile-up.
+    if (statusInFlight || now - lastStatusWrite < STATUS_WRITE_MS) return;
+    // Stay under CardKit's per-card 10/s: when the conclusion typewriter is
+    // actively streaming (a content update within the last 250ms), the answer
+    // text IS the visible motion — skip the status write this tick so status
+    // (~2.5/s) + content (≤10/s) can't sum past the cap. The elapsed counter
+    // still advances on the next idle tick (monotonic, stays honest).
+    if (now - lastUpdate < 250) return;
     const spin = SPINNER[spinFrame++ % SPINNER.length];
+    const sinceEvent = now - lastEventAt;
+    const elapsed = formatElapsed(now - startedAt);  // s / Mm Ss / Hh Mm
     const phaseWord = stage === "thinking" ? "正在思考" : "正在分析";
     // Watchdog: >20s with no new event → say so honestly, don't fake progress.
     const text = sinceEvent > 20000
-      ? `${spin} ${phaseWord}（较久，已 ${elapsed}s）`
-      : `${spin} ${phaseWord} ${elapsed}s`;
+      ? `${spin} ${phaseWord}（较久，已 ${elapsed}）`
+      : `${spin} ${phaseWord} ${elapsed}`;
     seq++;
     const mySeq = seq;
     statusInFlight = true;
+    lastStatusWrite = now;
     const done = () => { statusInFlight = false; };
     if (!statusAppended) {
       statusAppended = true;
@@ -249,7 +263,7 @@ async function runStreamingInvoke(
     } else {
       updateStatusLine(cardId, text, mySeq).then(done, done);
     }
-  }, 800);
+  }, STATUS_WRITE_MS);
 
   // The abort handle was created + registered in abortControllers at card-send
   // time (so 停止 can cancel even a still-queued turn); reused here as-is. If the
@@ -298,7 +312,18 @@ async function runStreamingInvoke(
         const safeSteps = redactSteps(liveSteps);
         if (!panelAppended) {
           panelAppended = true;
-          appendReasoningPanel(cardId, safeSteps, seq).catch(() => {});
+          // On append FAILURE, do NOT re-APPEND next time — that risks a second
+          // insert_before with the same element_id="reasoning" if the first call
+          // actually committed server-side but its HTTP response was lost
+          // (duplicate/ambiguous element). Instead fall through to UPDATE: a PUT
+          // to /elements/reasoning succeeds if the element exists and harmlessly
+          // no-ops if it never got created — idempotent either way. (The earlier
+          // bug was panelAppended sticking true with NO retry at all; this keeps
+          // retrying via the safe verb.) Reset stepsShown so the next step still
+          // pushes the accumulated narration through the update path.
+          appendReasoningPanel(cardId, safeSteps, seq).catch(() => {
+            stepsShown = 0; // keep panelAppended=true → next attempt uses UPDATE
+          });
         } else {
           updateReasoningPanel(cardId, safeSteps, seq).catch(() => {});
         }

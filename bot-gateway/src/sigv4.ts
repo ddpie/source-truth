@@ -180,6 +180,13 @@ export interface InvokeTiming {
   streamMs: number;     // first byte → stream end (the long pole: model+tools)
   totalMs: number;      // whole invokeRuntimeStreaming call
   events: number;       // SSE data events parsed
+  chars: number;        // final conclusion length (with conclusionMs → chars/sec)
+  conclusionMs: number; // lastTokenMs - ttfcMs: time spent streaming the answer
+                        // itself (vs thinking before it). A huge streamMs with a
+                        // tiny conclusionMs = "thought forever, answered fast".
+  toolCalls: number;    // total tool_use blocks (codegraph + Read/Glob/Grep) — the
+                        // "few deep turns vs many round-trips" disambiguator
+  toolCallsByName: Record<string, number>; // per-tool tally
 }
 
 export async function invokeRuntimeStreaming(
@@ -189,7 +196,7 @@ export async function invokeRuntimeStreaming(
   signal?: AbortSignal,
 ): Promise<{ status: number; answer: string; steps: string[]; aborted: boolean; error: string | null; timing: InvokeTiming }> {
   const t0 = Date.now();
-  const timing: InvokeTiming = { signMs: 0, ttfbMs: -1, ttftMs: -1, ttfcMs: -1, lastTokenMs: -1, streamMs: -1, totalMs: 0, events: 0 };
+  const timing: InvokeTiming = { signMs: 0, ttfbMs: -1, ttftMs: -1, ttfcMs: -1, lastTokenMs: -1, streamMs: -1, totalMs: 0, events: 0, chars: 0, conclusionMs: -1, toolCalls: 0, toolCallsByName: {} };
   const signed = await signInvoke(buildInvokeRequest(p), opts);
   timing.signMs = Date.now() - t0;
   const tReq = Date.now();
@@ -278,5 +285,9 @@ export async function invokeRuntimeStreaming(
   const steps = texts.slice(0, -1);
   timing.streamMs = Date.now() - tFirstByte;
   timing.totalMs = Date.now() - t0;
+  timing.chars = answer.length;
+  timing.conclusionMs = timing.ttfcMs >= 0 && timing.lastTokenMs >= 0 ? timing.lastTokenMs - timing.ttfcMs : -1;
+  timing.toolCalls = state.toolCalls;
+  timing.toolCallsByName = state.toolCallsByName;
   return { status: res.status, answer, steps, aborted, error: state.error, timing };
 }
