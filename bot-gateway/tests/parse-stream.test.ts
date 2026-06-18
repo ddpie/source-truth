@@ -92,6 +92,44 @@ describe("parseAgentStream error detection", () => {
   });
 });
 
+describe("stream completion flag (sawResult) — truncation detection", () => {
+  // Drive applyEvent directly so we can inspect state.sawResult (the caller uses
+  // it to flip a truncated stream to an error instead of a finished answer).
+  const run = (lines: string[]) => {
+    const st = newStreamState();
+    for (const l of lines) applyEvent(st, JSON.parse(l));
+    return st;
+  };
+
+  it("sets sawResult on a terminal success ResultMessage (clean completion)", () => {
+    const st = run([
+      '{"content":[{"text":"最终答案。"}],"stop_reason":"end_turn"}',
+      '{"subtype":"success","is_error":false,"num_turns":9,"stop_reason":"end_turn","result":"最终答案。"}',
+    ]);
+    expect(st.sawResult).toBe(true);
+    expect(st.error).toBeNull();
+  });
+
+  it("leaves sawResult FALSE when the stream is cut mid-answer (no terminal event)", () => {
+    // No ResultMessage ever arrives — connection dropped mid-conclusion.
+    const st = run([
+      '{"content":[{"text":"答案的前半"}]}',
+      '{"content":[{"text":"句还没说完"}]}',
+    ]);
+    expect(st.sawResult).toBe(false); // caller will flip this to a truncation error
+    expect(st.error).toBeNull();      // no explicit backend error — the gap is the missing terminal event
+  });
+
+  it("sets sawResult on the is_error terminal ResultMessage too (turn cap)", () => {
+    const st = run([
+      '{"content":[{"text":"partial"}]}',
+      '{"subtype":"error_max_turns","is_error":true,"result":"Maximum turns exceeded"}',
+    ]);
+    expect(st.sawResult).toBe(true); // terminal event seen — not a truncation, it's a turn cap
+    expect(st.error).toBe("Maximum turns exceeded");
+  });
+});
+
 describe("parseAgentStream — partial messages (include_partial_messages)", () => {
   // AgentCore serializes an SDK StreamEvent dataclass via asdict() →
   // {uuid, session_id, event:{...raw Anthropic stream event...}, parent_tool_use_id}.

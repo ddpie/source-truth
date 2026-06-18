@@ -50,10 +50,17 @@ export interface StreamState {
    *  Auto-detected so this is fully backward-compatible: a stream WITHOUT partial
    *  messages never flips this and uses the old full-message path unchanged. */
   sawStreamEvent: boolean;
+  /** True once the terminal ResultMessage arrived (the SDK's run-completion event:
+   *  no `content` array + a top-level subtype/result/stop_reason). The stream is
+   *  only TRUSTWORTHY-complete when this is set. If the read loop ends (done) WITHOUT
+   *  it, the connection was cut mid-run (NAT/LB idle-timeout, microVM killed) and the
+   *  accumulated text is a TRUNCATED answer that must NOT be shown as a finished
+   *  conclusion — the caller flips it to an error. */
+  sawResult: boolean;
 }
 
 export function newStreamState(): StreamState {
-  return { texts: [], sawToolAfterLastText: true /* first text starts a fresh block */, error: null, toolCalls: 0, toolCallsByName: {}, sawStreamEvent: false };
+  return { texts: [], sawToolAfterLastText: true /* first text starts a fresh block */, error: null, toolCalls: 0, toolCallsByName: {}, sawStreamEvent: false, sawResult: false };
 }
 
 /** Tally one tool_use by name (perf accounting). */
@@ -98,6 +105,17 @@ export function applyEvent(state: StreamState, evt: Record<string, unknown>): vo
   if (state.error === null) {
     const err = detectEventError(evt);
     if (err !== null) state.error = err;
+  }
+  // Terminal ResultMessage = clean run completion. It has NO `content` array and
+  // carries a top-level run summary (subtype / stop_reason / num_turns / result).
+  // We require seeing this before trusting the stream as complete; without it, a
+  // `done` read means the connection was cut mid-run and the text is truncated.
+  // (detectEventError already flags the is_error:true variant; this also catches
+  // the is_error:false success ResultMessage, which is otherwise a no-op here.)
+  if (!Array.isArray(evt.content) &&
+      (typeof evt.subtype === "string" || typeof evt.stop_reason === "string" ||
+       typeof evt.num_turns === "number" || "result" in evt)) {
+    state.sawResult = true;
   }
   // Partial-message path: when the agent runs with include_partial_messages, the
   // AgentCore SDK yields StreamEvent objects — serialized as {uuid, session_id,

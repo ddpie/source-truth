@@ -10,6 +10,11 @@
  * We parse these out and return them as strings for the card buttons.
  */
 
+/** Single source of truth for the follow-up suggestion cap. Used BOTH here (stop
+ *  collecting) and by the card renderer (slice), so the extractor and renderer
+ *  can't drift to different caps. */
+export const MAX_FOLLOW_UPS = 3;
+
 export function extractFollowUps(answer: string): string[] {
   // Find the section after "你可能还想问" (tolerant of formatting variations).
   const marker = answer.indexOf("你可能还想问");
@@ -46,7 +51,7 @@ function _extractAfter(afterMarker: string): string[] {
     if (trimmed.length >= 4 && trimmed.length <= 80 && !trimmed.startsWith("💡") && !trimmed.includes("你可能还想问") && !trimmed.includes("继续追问")) {
       questions.push(trimmed);
     }
-    if (questions.length >= 3) break;
+    if (questions.length >= MAX_FOLLOW_UPS) break;
   }
   return questions;
 }

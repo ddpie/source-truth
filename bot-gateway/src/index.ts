@@ -255,7 +255,11 @@ async function runStreamingInvoke(
   // stays at/under the cap; if Feishu ever speeds up materially, add an explicit
   // min-inter-write gate in CardWriter rather than relying on RTT.
   const THROTTLE_MS = 125;
-  const STREAM_TIMEOUT_MS = 9 * 60 * 1000; // 9 min (Feishu closes at 10)
+  // Derive the safety timeout from the external Feishu hard limit so the "must
+  // stay below the hard window" invariant is self-documenting (not a magic 9 vs a
+  // prose "Feishu closes at 10" comment that can drift if either value changes).
+  const FEISHU_STREAM_HARD_LIMIT_MS = 10 * 60 * 1000; // Feishu force-closes a streaming card at 10 min
+  const STREAM_TIMEOUT_MS = FEISHU_STREAM_HARD_LIMIT_MS - 60 * 1000; // 1-min margin to finalize gracefully
   const deadline = Date.now() + STREAM_TIMEOUT_MS;
 
   // ── 始终生效的"正在分析"动效 (Claude-Code/Codex 风格: spinner + 秒数 + 阶段词) ──
@@ -781,8 +785,31 @@ async function main(): Promise<void> {
       return {};
     },
   });
-  const ws = new lark.WSClient({ appId: APP_ID, appSecret: APP_SECRET, loggerLevel: lark.LoggerLevel.warn });
+  // Wire lifecycle callbacks for observability AND fail-loud recovery. Transient
+  // drops (network blip / Feishu restart / token expiry surfacing as a socket
+  // close) auto-reconnect inside the SDK (infinite retries). But a TERMINAL error
+  // — non-retryable bad/revoked/expired credentials — makes the SDK stop trying
+  // and (without onError) NO exception propagates: the process stays up but the
+  // gateway, the ONLY event consumer, goes permanently DARK with zero signal. So
+  // onError logs loudly and exits(1) so the supervisor (the run_in_background /
+  // systemd launcher) restarts with a clean attempt rather than running blind.
+  const ws = new lark.WSClient({
+    appId: APP_ID,
+    appSecret: APP_SECRET,
+    loggerLevel: lark.LoggerLevel.warn,
+    onReady: () => log({ event: "sdk_wsclient_connected" }), // the REAL "receiving events" signal
+    onReconnecting: () => log({ event: "sdk_wsclient_reconnecting" }),
+    onReconnected: () => log({ event: "sdk_wsclient_reconnected" }),
+    onError: (err: unknown) => {
+      log({ event: "ws_terminal_error", error: String(err) });
+      // Terminal (non-retryable) — don't run dark. Exit so the supervisor restarts.
+      process.exit(1);
+    },
+  });
   ws.start({ eventDispatcher: dispatcher });
+  // NOTE: start() resolves before the connection is established; this marks only
+  // "start() invoked". The real "connected + receiving events" signal is the
+  // sdk_wsclient_connected log from onReady above.
   log({ event: "sdk_wsclient_started" });
 }
 

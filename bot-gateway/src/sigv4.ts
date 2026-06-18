@@ -289,13 +289,32 @@ export async function invokeRuntimeStreaming(
     }
   } catch (e) {
     // User pressed 停止 → fetch/read aborted. Keep whatever we have so far.
-    if (signal?.aborted) aborted = true;
-    else throw e;
+    if (signal?.aborted) {
+      aborted = true;
+    } else {
+      // A genuine mid-stream network reset (ECONNRESET / h2 GOAWAY / TLS error)
+      // rejects reader.read(). DON'T rethrow: that escapes the caller's finalize
+      // block and leaves the streaming card stuck on "正在分析…" forever. Instead
+      // record it as a stream error and fall through so the caller finalizes a red
+      // "查询失败" card (consistent with the non-200 HTTP branch). Partial text is
+      // discarded as untrustworthy (hardFailed path).
+      if (state.error === null) state.error = `stream read error: ${String(e)}`;
+      void reader.cancel().catch(() => {});
+    }
   }
   // Flush any trailing buffered line.
   if (buf.trim().startsWith("data:")) {
     const jsonStr = buf.trim().slice(5).trim();
     if (jsonStr.startsWith("{")) processEvent(jsonStr);
+  }
+  // TRUNCATION GUARD: a clean run ends with a terminal ResultMessage (sawResult).
+  // If the loop ended normally (not aborted) on a 200 stream but we never saw it,
+  // the connection was cut mid-run (NAT/LB idle-timeout, microVM killed) — the
+  // accumulated text is a TRUNCATED answer. Flip to an error so the caller shows
+  // an explicit failure card and does NOT persist the half-answer as context,
+  // rather than silently presenting a half-sentence as a finished 回答完成.
+  if (!aborted && state.error === null && !state.sawResult) {
+    state.error = "stream truncated before completion (no terminal result event)";
   }
 
   const answer = texts.length > 0 ? texts[texts.length - 1] : "";
