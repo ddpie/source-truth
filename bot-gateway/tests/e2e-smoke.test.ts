@@ -11,7 +11,7 @@
 
 import { isDuplicate, resetForTesting as resetDedup } from "../src/dedup";
 import { getSessionId, resetForTesting as resetSessions } from "../src/session-map";
-import { CardStream } from "../src/cardkit";
+import { parseAgentStream } from "../src/parse-stream";
 
 afterEach(() => {
   resetDedup();
@@ -57,19 +57,20 @@ describe("E2E smoke (offline, stubbed externals)", () => {
     // Included by reference: CodeGraph paths are rewritten to /mnt/repo/*.
     // Verified in index-service/tests/test_path_align.py (8 tests passing).
 
-    // --- 7. CardKit streaming: rate-limited card update (✅ real) ---
-    const cardUpdates: string[] = [];
-    const card = new CardStream((content) => cardUpdates.push(content));
-
-    for (const msg of agentMessages) {
-      card.push(msg);
-    }
-    card.close();
-
-    // First message sent immediately; close flushes the second.
-    expect(cardUpdates.length).toBe(2);
-    expect(cardUpdates[0]).toContain("MatchResolver.cs");
-    expect(cardUpdates[1]).toContain("RESULT");
-    expect(card.isClosed).toBe(true);
+    // --- 7. Stream parsing: narrations vs conclusion (✅ real prod logic) ---
+    // The live path (sigv4.invokeRuntimeStreaming) folds the SSE stream via the
+    // SAME shared parser as parseAgentStream. Real agents emit: narration →
+    // tool_use → final answer; a tool_use is what SEPARATES text blocks (two
+    // consecutive texts with no tool between them are one block).
+    const sse = [
+      `data: ${JSON.stringify({ content: [{ text: agentMessages[0] }] })}`,
+      `data: ${JSON.stringify({ content: [{ name: "codegraph_symbol_search", input: {} }] })}`,
+      `data: ${JSON.stringify({ content: [{ text: agentMessages[1] }] })}`,
+    ].join("\n");
+    const parsed = parseAgentStream(sse);
+    // The pre-tool text is a narration; the post-tool text is the conclusion.
+    expect(parsed.narrations).toEqual([agentMessages[0]]);
+    expect(parsed.conclusion).toContain("RESULT");
+    expect(parsed.conclusion).not.toContain("MatchResolver.cs"); // that was the narration
   });
 });

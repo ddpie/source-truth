@@ -29,10 +29,10 @@ structure）描述系统*是什么*；本文描述*一次提问如何穿过系�
               (2) EFS /mnt/repo 只读挂载 → 按定位点读最新主分支源码与工程内配置表（Excel/JSON/CSV）
           · per-session 写盘走 Session Storage /mnt/workspace（microVM 级隔离的临时文件）
           · 逐步 yield 输出（AssistantMessage / ResultMessage）
-  → bot-gateway 把流式输出 update 回 CardKit 卡片（(p1) src/cardkit.ts）
+  → bot-gateway 把流式输出 update 回 CardKit 卡片（src/cardkit-client.ts；SSE 解析 src/parse-stream.ts）
       · 单一 markdown 组件适配所有格式；注意飞书卡片 update 有频控与 10 分钟更新窗口
       · 流式完成后按 AI 实际输出动态追加交互组件：多方案→选项按钮、数值→VChart 图表、低置信度→"转研发"
-      · 记录 prompt/response 审计日志（(p1) src/audit.ts，hashUserId 脱敏，MVP 仅防滥用）
+      · 结构化日志 + hashUserId 脱敏（src/log.ts，用户/会话标识不落明文，MVP 仅防滥用）
 ```
 
 ## 数据面：代码如何进入 EFS、索引如何更新（NOT in README）
@@ -73,12 +73,13 @@ index-service 以 mcp-proxy 类桥把 CodeGraph 的 stdio MCP 暴露为 streamab
   1–5ms）。
 - **post-MVP（p2，渐进）**：CDK 管**稳定层**——会话容器镜像（DockerImageAsset，`Platform.LINUX_ARM64`）、
   AgentCore 执行 IAM 角色、EFS（FileSystem + AccessPoint + VPC）、index-service 常驻计算、网关基础设施；
-  而 **AgentCore Runtime 本身**（其 env、idle timeout、网络模式、请求头 allowlist）由 `scripts/deploy.sh`
-  （p1，待实现）用 boto3（`bedrock-agentcore-control` create/update_agent_runtime + endpoint）配——因为
-  Runtime 是快速演进的服务，CloudFormation 支持未稳定。
+  而 **AgentCore Runtime 本身**（其 env、idle timeout、网络模式、请求头 allowlist）由 `scripts/deploy-all.sh`
+  （已实现；内部 `lib/deploy_runtime.py`）用 boto3（`bedrock-agentcore-control` create/update_agent_runtime
+  + endpoint）配——因为 Runtime 是快速演进的服务，CloudFormation 支持未稳定。
 
-**含义**：要改 Runtime 的 env / idle timeout / 请求头，编辑 `scripts/deploy.sh`（p1）并重跑——改 CDK 不会生效。
-密钥（飞书 app secret、bot token）由 deploy.sh 在 CDK 外创建，重部署不覆盖真实凭证。
+**含义**：要改 Runtime 的 env / idle timeout / 请求头，编辑 `scripts/lib/deploy_runtime.py` 并重跑
+`deploy-all.sh`（`deploy.sh` 为已废弃转发垫片）——改 CDK 不会生效。密钥（飞书 app secret、bot token）走
+Secrets Manager / SSM，**当前需手工在 CDK 外创建**（编排脚本尚未自动建密钥），重部署不覆盖真实凭证。
 
 ## 四个核心架构选择
 

@@ -19,9 +19,25 @@ import os
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 # Read-only evidence tools (no Bash/Write/Edit — read-only boundary, MVP).
 READONLY_TOOLS: tuple[str, ...] = ("Read", "Glob", "Grep")
+
+# Write/exec built-ins that must NEVER be reachable in the read-only MVP. Setting
+# ``tools`` to the read-only whitelist already removes all non-listed built-ins,
+# but this explicit blocklist is defense-in-depth: even if a future SDK/CLI
+# preset re-introduces one, ``disallowed_tools`` removes it from the model's
+# context entirely ("cannot be used, even if they would otherwise be allowed").
+WRITE_EXEC_TOOLS: tuple[str, ...] = (
+    "Bash",
+    "Write",
+    "Edit",
+    "MultiEdit",
+    "NotebookEdit",
+    "WebFetch",
+    "WebSearch",
+)
 
 # CodeGraph MCP tools, allow-listed only when a CodeGraph endpoint is provided.
 # Tool name form is mcp__<server_key>__<tool_name> (double underscores, exact).
@@ -32,7 +48,39 @@ CODEGRAPH_TOOLS: tuple[str, ...] = (
     "mcp__codegraph__codegraph_analyze_impact",
 )
 
+# CodeGraph MCP tools with write/state side effects. MCP tools are admitted via
+# mcp_servers and are NOT gated by ``tools`` (built-ins only), so the read-only
+# boundary for them would otherwise rest solely on "absent from allow-list +
+# dontAsk rejects the rest". Blocklisting them explicitly is defense-in-depth:
+# the codegraph server exposes these (reindex/index_*/memory_*), and a future
+# allow-list change or preset must not be able to admit a graph mutation.
+CODEGRAPH_WRITE_TOOLS: tuple[str, ...] = (
+    "mcp__codegraph__codegraph_reindex_workspace",
+    "mcp__codegraph__codegraph_index_directory",
+    "mcp__codegraph__codegraph_index_files",
+    "mcp__codegraph__codegraph_index_markdown",
+    "mcp__codegraph__codegraph_memory_store",
+    "mcp__codegraph__codegraph_memory_invalidate",
+)
+
 DEFAULT_SYSTEM_PROMPT_PATH = Path(__file__).resolve().parent / "prompts" / "system.md"
+
+
+def _validate_codegraph_url(url: str) -> None:
+    """Defense-in-depth check on the CodeGraph MCP endpoint URL.
+
+    CODEGRAPH_MCP_URL is set by the deploy operator (deploy_runtime.py), not by
+    any end user, so this is NOT a user-facing injection surface — it's a guard
+    against a malformed/typo'd deploy value reaching the SDK as a silent bad
+    endpoint. We only enforce scheme + structure: the legitimate value is a
+    PRIVATE-IP in-VPC URL (e.g. http://10.1.1.x:8080/mcp), so we deliberately do
+    NOT block private ranges (that would reject the real index-service).
+    """
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError(f"CODEGRAPH_MCP_URL must be http(s), got scheme {parsed.scheme!r}")
+    if not parsed.netloc:
+        raise ValueError(f"CODEGRAPH_MCP_URL has no host: {url!r}")
 
 
 def load_system_prompt(path: Path | str | None = None) -> str:
@@ -45,23 +93,55 @@ def load_system_prompt(path: Path | str | None = None) -> str:
     return p.read_text(encoding="utf-8")
 
 
+DEFAULT_MAX_TURNS = 20
+
+
 def build_options_dict(
     *,
     system_prompt: str,
     codegraph_url: str | None = None,
     codegraph_headers: dict[str, str] | None = None,
     model: str | None = None,
+    max_turns: int = DEFAULT_MAX_TURNS,
 ) -> dict[str, Any]:
     """Assemble the option payload as a plain dict (SDK-free, pure).
 
-    The allow-list always includes the read-only built-in tools and never the
-    write/exec ones. CodeGraph MCP tools and server config are added only when a
-    CodeGraph endpoint URL is supplied.
+    Enforces the MVP read-only boundary at the SDK level, not by hope:
+
+    - ``tools`` (the SDK's *availability* gate) is set to exactly the read-only
+      built-ins, so Bash/Write/Edit are never even in the model's context. This
+      is load-bearing: with ``tools`` unset the CLI loads the full Claude Code
+      preset (``--tools default``), leaving write/exec tools callable — and
+      ``allowed_tools`` only governs *auto-approval*, not availability. In a
+      headless microVM (no human, no ``can_use_tool`` handler) an unapproved
+      call would merely be denied/hang — accidental, not enforced. We enforce.
+    - ``disallowed_tools`` blocklists write/exec built-ins as defense-in-depth.
+    - ``permission_mode="dontAsk"`` denies any non-pre-approved call outright
+      instead of hanging on a prompt that no one can answer (NOT
+      ``bypassPermissions``, which would auto-allow everything; NOT ``plan``,
+      which would also block the read tools we need).
+    - ``strict_mcp_config=True`` loads only the CodeGraph MCP server we pass in,
+      not any project/user/plugin ``.mcp.json`` servers that could leak in extra
+      tools.
+    - ``max_turns`` caps the agentic loop. Unset, the SDK loop has NO ceiling, so
+      a CodeGraph result that keeps pointing the model at more files could drive
+      an unbounded read→grep→read loop — runaway Bedrock spend + microVM wall-time
+      with the user stuck on a "thinking" card. The cap turns that into a clean
+      terminal ResultMessage (``error_max_turns``) the gateway renders as a
+      failure card. Operator-tunable via ``AGENT_MAX_TURNS``.
+
+    ``allowed_tools`` (auto-approve list) mirrors the read-only set so the
+    permitted tools run without prompting under ``dontAsk``. CodeGraph MCP tools
+    and server config are added only when a CodeGraph endpoint URL is supplied.
     """
+    tools: list[str] = list(READONLY_TOOLS)
     allowed_tools: list[str] = list(READONLY_TOOLS)
     mcp_servers: dict[str, Any] = {}
 
     if codegraph_url:
+        _validate_codegraph_url(codegraph_url)
+        # MCP tools are provided via mcp_servers and are not gated by `tools`
+        # (which governs built-ins only); they still must be auto-approved.
         allowed_tools.extend(CODEGRAPH_TOOLS)
         # McpHttpServerConfig (claude-agent-sdk 0.2.103) requires type + url;
         # headers optional. Verified against the real SDK TypedDict. This is
@@ -73,7 +153,12 @@ def build_options_dict(
 
     opts: dict[str, Any] = {
         "system_prompt": system_prompt,
+        "tools": tools,
         "allowed_tools": allowed_tools,
+        "disallowed_tools": list(WRITE_EXEC_TOOLS) + list(CODEGRAPH_WRITE_TOOLS),
+        "permission_mode": "dontAsk",
+        "strict_mcp_config": True,
+        "max_turns": max_turns,
         "mcp_servers": mcp_servers,
     }
     if model:
@@ -103,6 +188,22 @@ def _default_query_fn() -> Any:
     return query
 
 
+def _env_max_turns() -> int:
+    """Resolve the agentic-loop turn cap from ``AGENT_MAX_TURNS`` (operator-tunable).
+
+    Falls back to ``DEFAULT_MAX_TURNS`` on unset/invalid/non-positive values — the
+    loop must always be bounded (an unbounded loop is the defect this guards).
+    """
+    raw = os.environ.get("AGENT_MAX_TURNS")
+    if raw is None:
+        return DEFAULT_MAX_TURNS
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_MAX_TURNS
+    return n if n > 0 else DEFAULT_MAX_TURNS
+
+
 async def run_agent(
     payload: dict[str, Any],
     *,
@@ -115,8 +216,10 @@ async def run_agent(
     drive ``query_fn`` (defaults to the real SDK ``query``), and yield each
     message through to the caller. ``session`` is treated as opaque context.
 
-    Raises ValueError when ``prompt`` is missing/empty.
+    Raises ValueError when ``payload`` is not a dict or ``prompt`` is missing/empty.
     """
+    if not isinstance(payload, dict):
+        raise ValueError(f"payload must be a dict, got {type(payload).__name__}")
     prompt = payload.get("prompt")
     if not isinstance(prompt, str) or not prompt.strip():
         raise ValueError("payload.prompt is required and must be a non-empty string")
@@ -125,6 +228,7 @@ async def run_agent(
         system_prompt=load_system_prompt(),
         codegraph_url=os.environ.get("CODEGRAPH_MCP_URL"),
         model=model or os.environ.get("ANTHROPIC_MODEL"),
+        max_turns=_env_max_turns(),
     )
 
     qfn = query_fn if query_fn is not None else _default_query_fn()

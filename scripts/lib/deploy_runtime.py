@@ -27,10 +27,22 @@ import boto3
 
 
 def find_existing(client, name: str) -> str | None:
-    for rt in client.list_agent_runtimes(maxResults=100).get("agentRuntimes", []):
-        if rt.get("agentRuntimeName") == name:
-            return rt["agentRuntimeId"]
-    return None
+    # ListAgentRuntimes is paginated (<=100/page); follow nextToken so an existing
+    # same-named runtime past page 1 is still found. Missing it would wrongly take
+    # the create branch and hard-fail with a name conflict, breaking the
+    # update-in-place idempotency contract once an account holds >100 runtimes.
+    token: str | None = None
+    while True:
+        kwargs = {"maxResults": 100}
+        if token:
+            kwargs["nextToken"] = token
+        resp = client.list_agent_runtimes(**kwargs)
+        for rt in resp.get("agentRuntimes", []):
+            if rt.get("agentRuntimeName") == name:
+                return rt["agentRuntimeId"]
+        token = resp.get("nextToken")
+        if not token:
+            return None
 
 
 def deploy(
@@ -44,10 +56,15 @@ def deploy(
     security_groups: list[str] | None = None,
     efs_access_point_arn: str | None = None,
     efs_mount_path: str = "/mnt/repo",
+    codegraph_mcp_url: str | None = None,
 ) -> tuple[str, str]:
     client = boto3.client("bedrock-agentcore-control", region_name=region)
     artifact = {"containerConfiguration": {"containerUri": image}}
     env = {"CLAUDE_CODE_USE_BEDROCK": "1", "ANTHROPIC_MODEL": model}
+    # CodeGraph MCP endpoint (index-service). Only set when provided so a
+    # PUBLIC-mode runtime without an index-service stays a plain agent.
+    if codegraph_mcp_url:
+        env["CODEGRAPH_MCP_URL"] = codegraph_mcp_url
 
     # Network: VPC mode if subnets provided, else PUBLIC.
     if subnets and security_groups:
@@ -121,6 +138,7 @@ def main() -> int:
     p.add_argument("--subnets", help="comma-separated subnet ids (VPC mode)")
     p.add_argument("--security-groups", help="comma-separated security group ids")
     p.add_argument("--efs-access-point-arn", help="EFS access point ARN to mount at /mnt/repo")
+    p.add_argument("--codegraph-mcp-url", help="index-service CodeGraph MCP-over-HTTP URL")
     args = p.parse_args()
 
     rid, arn = deploy(
@@ -132,6 +150,7 @@ def main() -> int:
         subnets=args.subnets.split(",") if args.subnets else None,
         security_groups=args.security_groups.split(",") if args.security_groups else None,
         efs_access_point_arn=args.efs_access_point_arn,
+        codegraph_mcp_url=args.codegraph_mcp_url,
     )
     print(f"AGENT_RUNTIME_ID={rid}")
     print(f"AGENT_RUNTIME_ARN={arn}")

@@ -58,7 +58,8 @@ agent-container/
 ## 部署
 
 MVP 用 `agentcore` toolkit（`configure --disable-memory` → `deploy --env CLAUDE_CODE_USE_BEDROCK=1` → `invoke`
-→ `destroy`），不强求 CDK。Runtime 的 env / idle timeout / 请求头由 `scripts/deploy.sh`（p1，boto3）配。
+→ `destroy`），不强求 CDK。Runtime 的 env / idle timeout / 请求头由 `scripts/lib/deploy_runtime.py`（boto3，
+由 `scripts/deploy-all.sh` 调用）配；`deploy.sh` 为已废弃兼容垫片。
 
 ## 待验证点（已定型 / 剩余）
 

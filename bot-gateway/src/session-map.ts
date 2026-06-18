@@ -4,6 +4,11 @@
  * Architecture contract: same question thread reuses the same warm microVM
  * (same runtimeSessionId); different users/threads never share a session.
  *
+ * IMPORTANT: the returned id is sent as the AgentCore runtimeSessionId, which
+ * AgentCore requires to be >= 33 chars (HTTP 400 otherwise — verified live).
+ * randomUUID() is 36 chars, so it satisfies this; any future id scheme MUST
+ * keep >= 33 chars (sigv4.buildInvokeRequest asserts MIN_SESSION_ID_LEN).
+ *
  * MVP: in-memory Map with TTL. If scaled to multi-process, replace with DDB
  * (chatId#threadId as PK, TTL attribute for auto-expiry).
  */
@@ -35,18 +40,24 @@ export function getSessionId(
   ttlMs: number = DEFAULT_TTL_MS,
 ): string {
   const key = makeKey(chatId, threadId);
+  const arm = (): NodeJS.Timeout => {
+    const t = setTimeout(() => { sessions.delete(key); }, ttlMs);
+    if (typeof t.unref === "function") t.unref();
+    return t;
+  };
+
   const existing = sessions.get(key);
   if (existing) {
+    // Sliding TTL: refresh the expiry on every reuse so an actively-used
+    // conversation isn't dropped mid-thread at the fixed 30-min mark (which
+    // would spawn a new session and lose context). Idle keys still expire.
+    clearTimeout(existing.timer);
+    existing.timer = arm();
     return existing.sessionId;
   }
 
   const sessionId = randomUUID();
-  const timer = setTimeout(() => {
-    sessions.delete(key);
-  }, ttlMs);
-  if (typeof timer.unref === "function") timer.unref();
-
-  sessions.set(key, { sessionId, timer });
+  sessions.set(key, { sessionId, timer: arm() });
   return sessionId;
 }
 

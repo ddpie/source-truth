@@ -15,6 +15,8 @@ import { Sha256 } from "@aws-crypto/sha256-js";
 import { SignatureV4 } from "@aws-sdk/signature-v4";
 import { HttpRequest } from "@smithy/protocol-http";
 
+import { newStreamState, applyEvent } from "./parse-stream";
+
 const SERVICE = "bedrock-agentcore";
 const SESSION_HEADER = "X-Amzn-Bedrock-AgentCore-Runtime-Session-Id";
 
@@ -33,17 +35,59 @@ export interface InvokeParams {
   prompt: string;
 }
 
+export interface AwsCredentials {
+  accessKeyId: string;
+  secretAccessKey: string;
+  sessionToken?: string;
+}
+
+/** Either a static credential object OR a provider that re-resolves on each
+ *  call. Production passes the PROVIDER (from `fromNodeProviderChain()`): EC2
+ *  instance-role (IMDS) credentials are temporary and expire after a few hours,
+ *  so a snapshot resolved once at startup goes stale and every later invoke
+ *  403s. SignatureV4 accepts a provider directly and re-resolves it (refreshing
+ *  the underlying creds) on each sign. */
+export type CredentialSource = AwsCredentials | (() => Promise<AwsCredentials>);
+
 export interface SignOptions {
   region: string;
-  credentials: {
-    accessKeyId: string;
-    secretAccessKey: string;
-    sessionToken?: string;
-  };
+  credentials: CredentialSource;
+}
+
+// AgentCore rejects (HTTP 400) a runtimeSessionId shorter than this — verified
+// live. randomUUID() (36 chars) satisfies it, but assert so a future change to
+// the session-id scheme fails loudly here instead of 400-ing every invoke.
+export const MIN_SESSION_ID_LEN = 33;
+
+/** The settled result of a (streaming) invoke — what invokeRuntimeStreaming
+ *  returns and what classifyInvokeOutcome judges. */
+export interface InvokeOutcome {
+  status: number;
+  aborted: boolean;
+  error: string | null;
+}
+
+/** Decide whether an invoke FAILED (so the caller renders an explicit failure
+ *  card instead of a fake answer) or hung/threw. A user-pressed 停止 (`aborted`)
+ *  is never a failure. Two failure shapes fold into one flag:
+ *    - non-200 HTTP (403 from expired SigV4 creds, 4xx/5xx from AgentCore) —
+ *      this previously THREW, leaving the already-sent streaming card stuck.
+ *    - a top-level error event over an open 200 stream (backend unreachable,
+ *      model throttled, run errored).
+ *  Pure so the failure policy is unit-tested, not buried in the stream loop. */
+export function classifyInvokeOutcome(r: InvokeOutcome): { failed: boolean; httpFailed: boolean } {
+  const httpFailed = r.status !== 200 && !r.aborted;
+  const failed = (r.error !== null || httpFailed) && !r.aborted;
+  return { failed, httpFailed };
 }
 
 /** Build the (unsigned) InvokeAgentRuntime request. Pure. */
 export function buildInvokeRequest(p: InvokeParams): InvokeRequest {
+  if (!p.sessionId || p.sessionId.length < MIN_SESSION_ID_LEN) {
+    throw new Error(
+      `runtimeSessionId must be >= ${MIN_SESSION_ID_LEN} chars (AgentCore constraint); got ${p.sessionId?.length ?? 0}`,
+    );
+  }
   const hostname = `${SERVICE}.${p.region}.amazonaws.com`;
   const path = `/runtimes/${encodeURIComponent(p.runtimeArn)}/invocations`;
   const body = JSON.stringify({ prompt: p.prompt });
@@ -115,7 +159,7 @@ export async function invokeRuntimeStreaming(
   opts: SignOptions,
   onChunk: (conclusionSoFar: string, narrations: string[]) => void,
   signal?: AbortSignal,
-): Promise<{ status: number; answer: string; steps: string[]; aborted: boolean }> {
+): Promise<{ status: number; answer: string; steps: string[]; aborted: boolean; error: string | null }> {
   const signed = await signInvoke(buildInvokeRequest(p), opts);
   let res: Response;
   try {
@@ -126,39 +170,24 @@ export async function invokeRuntimeStreaming(
       signal,
     });
   } catch (e) {
-    if (signal?.aborted) return { status: 200, answer: "", steps: [], aborted: true };
+    if (signal?.aborted) return { status: 200, answer: "", steps: [], aborted: true, error: null };
     throw e;
   }
   if (res.status !== 200 || !res.body) {
-    return { status: res.status, answer: await res.text(), steps: [], aborted: false };
+    return { status: res.status, answer: await res.text(), steps: [], aborted: false, error: null };
   }
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buf = "";
 
-  // texts[] = prose blocks in order; sawToolAfterLastText marks that a tool_use
-  // arrived after the latest text, so the next text starts a new block.
-  const texts: string[] = [];
-  let sawToolAfterLastText = true; // first text starts a fresh block
-
+  // Shared tool-gated accumulator (parse-stream.ts) — single source of truth so
+  // the live incremental parse and the whole-string parseAgentStream can't diverge.
+  const state = newStreamState();
+  const texts = state.texts;
   const processEvent = (jsonStr: string): void => {
-    let evt: { content?: Array<Record<string, unknown>> };
+    let evt: Record<string, unknown>;
     try { evt = JSON.parse(jsonStr); } catch { return; }
-    const item = evt.content?.[0];
-    if (!item) return;
-    if (typeof item.text === "string") {
-      if (sawToolAfterLastText) {
-        texts.push(item.text);
-        sawToolAfterLastText = false;
-      } else {
-        // Same logical block continued (rare): append to the current one.
-        texts[texts.length - 1] = item.text;
-      }
-    } else if (typeof item.name === "string" && "input" in item) {
-      // tool_use: the preceding text block is now a finished narration.
-      sawToolAfterLastText = true;
-    }
-    // thinking / tool_result: ignored.
+    applyEvent(state, evt);
   };
 
   let aborted = false;
@@ -194,5 +223,5 @@ export async function invokeRuntimeStreaming(
 
   const answer = texts.length > 0 ? texts[texts.length - 1] : "";
   const steps = texts.slice(0, -1);
-  return { status: res.status, answer, steps, aborted };
+  return { status: res.status, answer, steps, aborted, error: state.error };
 }

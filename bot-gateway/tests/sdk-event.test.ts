@@ -58,4 +58,29 @@ describe("sdkEventToImEvent", () => {
     const ev = sdkEventToImEvent(threaded);
     expect(ev!.thread_id).toBe("omt_thread123");
   });
+
+  it("extracts sender_type (so non-user senders can be filtered)", () => {
+    expect(sdkEventToImEvent(LIVE_EVENT)!.sender_type).toBe("user");
+  });
+
+  it("extracts the mentions array (key + open_id) for group @-gating", () => {
+    const grp = {
+      ...LIVE_EVENT,
+      message: {
+        ...LIVE_EVENT.message,
+        chat_type: "group",
+        content: '{"text":"@_user_1 消除判定在哪"}',
+        mentions: [{ key: "@_user_1", id: { open_id: "ou_bot" }, name: "助手" }],
+      },
+    };
+    const ev = sdkEventToImEvent(grp);
+    expect(ev!.chat_type).toBe("group");
+    expect(ev!.mentions).toEqual([{ key: "@_user_1", open_id: "ou_bot", name: "助手" }]);
+  });
+
+  it("defaults mentions to [] and sender_type to '' when absent", () => {
+    const ev = sdkEventToImEvent({ event_id: "x", message: { chat_id: "oc_1", content: '{"text":"hi"}', message_type: "text" } });
+    expect(ev!.mentions).toEqual([]);
+    expect(ev!.sender_type).toBe("");
+  });
 });

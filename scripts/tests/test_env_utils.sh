@@ -41,5 +41,38 @@ printf '# comment\n\nKEY1=val1\nKEY2=val 2\n' > "$TMP/env2"
 # safe_source_env: missing file is no-op
 safe_source_env "$TMP/no-such-file"; check "safe_source_env missing file ok" $?
 
+# safe_source_env: a whitespace-only / malformed LAST line must NOT abort the
+# caller (the bug was: trailing bad line → failing export → rc 1 under set -e).
+printf 'GOOD=1\nAFTER=3\n   \n' > "$TMP/env3"
+(
+  unset GOOD AFTER 2>/dev/null || true
+  safe_source_env "$TMP/env3"; rc=$?
+  [[ "$rc" -eq 0 && "$GOOD" == "1" && "$AFTER" == "3" ]]
+); check "safe_source_env tolerates trailing whitespace line" $?
+
+# safe_source_env: indented key + blank lines are skipped/trimmed, not garbage
+printf 'A=1\n   \n  INDENTED=x\nB=2\n' > "$TMP/env4"
+(
+  unset A B INDENTED 2>/dev/null || true
+  safe_source_env "$TMP/env4"
+  [[ "$A" == "1" && "$B" == "2" && "$INDENTED" == "x" ]]
+); check "safe_source_env trims indented keys, skips blanks" $?
+
+# safe_source_env: CRLF-saved config must not inject a trailing \r into values
+printf 'REGION=ap-northeast-1\r\nBUCKET=my-bucket\r\n' > "$TMP/env5"
+(
+  unset REGION BUCKET 2>/dev/null || true
+  safe_source_env "$TMP/env5"
+  [[ "$REGION" == "ap-northeast-1" && "$BUCKET" == "my-bucket" ]]
+); check "safe_source_env strips trailing CR (CRLF files)" $?
+
+# safe_source_env: a non-identifier key line is skipped, not fatal
+printf 'X=1\n123BAD=nope\nY=2\n' > "$TMP/env6"
+(
+  unset X Y 2>/dev/null || true
+  safe_source_env "$TMP/env6"; rc=$?
+  [[ "$rc" -eq 0 && "$X" == "1" && "$Y" == "2" ]]
+); check "safe_source_env skips non-identifier keys" $?
+
 echo "  ran=$_run failed=$_fail"
 [[ "$_fail" -eq 0 ]]

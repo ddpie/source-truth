@@ -58,6 +58,8 @@ discover_py_units() {
 run_lint() {
   say step "lint：结构自检 check-invariants"
   bash "$ROOT/scripts/check-invariants.sh"
+  say step "lint：版本钉死防漂移 check-versions"
+  bash "$ROOT/scripts/check-versions.sh"
 }
 
 run_unit() {
