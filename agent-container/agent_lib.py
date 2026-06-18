@@ -179,6 +179,14 @@ def build_options_dict(
         "strict_mcp_config": True,
         "max_turns": max_turns,
         "mcp_servers": mcp_servers,
+        # Stream token-level partial messages (Anthropic content_block_delta
+        # events) instead of only complete messages. Without this the SDK yields
+        # the final answer as ONE complete AssistantMessage at the very end, so
+        # the gateway card freezes on "正在分析…" for the whole run and then dumps
+        # the entire answer at once. With it, the conclusion streams token-by-
+        # token → a real typewriter. The gateway's parse-stream auto-detects the
+        # delta events (backward-compatible). See parse-stream.applyStreamEvent.
+        "include_partial_messages": True,
     }
     if model:
         opts["model"] = model

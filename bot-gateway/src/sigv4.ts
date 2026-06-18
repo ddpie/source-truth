@@ -170,6 +170,13 @@ export interface InvokeTiming {
   signMs: number;       // SigV4 sign + build
   ttfbMs: number;       // request sent → response headers (first byte)
   ttftMs: number;       // request sent → first non-empty text block on screen
+  ttfcMs: number;       // request sent → first token of the FINAL conclusion block
+                        // (the "how long until the answer starts" metric — the
+                        // gap ttfcMs→streamEnd is the conclusion's own stream time;
+                        // a huge ttfcMs with a tiny conclusion gap is the
+                        // "thinks forever, dumps at end" signature issue #3 fixes)
+  lastTokenMs: number;  // request sent → last text token (trailing time after =
+                        // streamMs+ttfbMs - lastTokenMs is dead time at the end)
   streamMs: number;     // first byte → stream end (the long pole: model+tools)
   totalMs: number;      // whole invokeRuntimeStreaming call
   events: number;       // SSE data events parsed
@@ -182,7 +189,7 @@ export async function invokeRuntimeStreaming(
   signal?: AbortSignal,
 ): Promise<{ status: number; answer: string; steps: string[]; aborted: boolean; error: string | null; timing: InvokeTiming }> {
   const t0 = Date.now();
-  const timing: InvokeTiming = { signMs: 0, ttfbMs: -1, ttftMs: -1, streamMs: -1, totalMs: 0, events: 0 };
+  const timing: InvokeTiming = { signMs: 0, ttfbMs: -1, ttftMs: -1, ttfcMs: -1, lastTokenMs: -1, streamMs: -1, totalMs: 0, events: 0 };
   const signed = await signInvoke(buildInvokeRequest(p), opts);
   timing.signMs = Date.now() - t0;
   const tReq = Date.now();
@@ -211,14 +218,28 @@ export async function invokeRuntimeStreaming(
   // the live incremental parse and the whole-string parseAgentStream can't diverge.
   const state = newStreamState();
   const texts = state.texts;
+  let lastTextLen = 0;          // total text chars seen, to detect token growth
+  let lastBlockCount = 0;       // number of text blocks, to detect a NEW conclusion block
   const processEvent = (jsonStr: string): void => {
     let evt: Record<string, unknown>;
     try { evt = JSON.parse(jsonStr); } catch { return; }
     timing.events++;
     applyEvent(state, evt);
+    const totalLen = state.texts.reduce((n, t) => n + t.length, 0);
     // First moment real answer text exists → time-to-first-token (on screen).
-    if (timing.ttftMs < 0 && state.texts.some((t) => t.length > 0)) {
-      timing.ttftMs = Date.now() - tReq;
+    if (timing.ttftMs < 0 && totalLen > 0) timing.ttftMs = Date.now() - tReq;
+    // Time-to-first-conclusion: the LAST text block is the (provisional)
+    // conclusion. Each time a NEW text block opens, the prior provisional
+    // conclusion was actually a narration; so re-arm ttfc to the first token of
+    // the newest block. On stream end the last value sticks = the real conclusion.
+    if (state.texts.length > lastBlockCount && totalLen > lastTextLen) {
+      timing.ttfcMs = Date.now() - tReq;  // newest block's first token
+      lastBlockCount = state.texts.length;
+    }
+    // Track the last moment any token arrived (trailing dead-time analysis).
+    if (totalLen > lastTextLen) {
+      timing.lastTokenMs = Date.now() - tReq;
+      lastTextLen = totalLen;
     }
   };
 

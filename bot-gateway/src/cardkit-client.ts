@@ -90,6 +90,31 @@ export function buildStageBody(title: string, template: string, conclusion: stri
   return JSON.stringify({ card: { type: "card_json", data: JSON.stringify(card) }, sequence });
 }
 
+/** Append a dedicated status line element (element_id="status") ONCE, above the
+ *  conclusion. This element is updated ELEMENT-LEVEL (never a full-card PUT), so
+ *  the live "正在分析 12s ⠹" timer can advance in EVERY phase — including after
+ *  the stop button / reasoning panel are appended — without wiping them. (The
+ *  header-based heartbeat could only animate in the thinking phase because its
+ *  full-card PUT wiped appended elements.) */
+export async function appendStatusLine(cardId: string, text: string, sequence: number): Promise<void> {
+  await larkApi("POST", `/open-apis/cardkit/v1/cards/${cardId}/elements`, JSON.stringify({
+    type: "insert_before",
+    target_element_id: "conclusion",
+    sequence,
+    elements: JSON.stringify([{ tag: "markdown", content: text, element_id: "status" }]),
+  }));
+}
+
+/** Update the live status line in place (element-level PUT — does NOT touch any
+ *  other element, so the stop button / reasoning panel / streamed conclusion all
+ *  survive). This is what keeps the timer animating continuously. */
+export async function updateStatusLine(cardId: string, text: string, sequence: number): Promise<void> {
+  await larkApi("PUT", `/open-apis/cardkit/v1/cards/${cardId}/elements/status`, JSON.stringify({
+    element: JSON.stringify({ tag: "markdown", content: text, element_id: "status" }),
+    sequence,
+  }));
+}
+
 /** Change the card's stage (header title + color) mid-stream via full PUT. */
 export async function updateStage(
   cardId: string,

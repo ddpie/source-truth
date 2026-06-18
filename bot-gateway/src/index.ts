@@ -25,7 +25,7 @@ import { spawn } from "node:child_process";
 import { fromNodeProviderChain } from "@aws-sdk/credential-providers";
 
 import { invokeRuntimeStreaming, classifyInvokeOutcome, isTurnCapError, type AwsCredentials } from "./sigv4";
-import { createCard, updateContent, closeStreaming, finalizeCard, appendFooter, buildSendCardContent, disableFollowUpButton, updateStage, appendReasoningPanel, updateReasoningPanel, appendCharts, appendStopButton } from "./cardkit-client";
+import { createCard, updateContent, closeStreaming, finalizeCard, appendFooter, buildSendCardContent, disableFollowUpButton, updateStage, appendReasoningPanel, updateReasoningPanel, appendCharts, appendStopButton, appendStatusLine, updateStatusLine } from "./cardkit-client";
 import { extractCharts } from "./extract-charts";
 import { rememberCard, lookupCard } from "./card-registry";
 import { removeReaction } from "./reaction";
@@ -201,57 +201,54 @@ async function runStreamingInvoke(
   let lastPanelUpdate = 0;
   let timedOut = false;
   let stage: "thinking" | "analyzing" = "thinking";
-  let lastDisplay = "正在分析…";
   let stepsShown = 0; // how many reasoning steps are currently rendered in the panel
   let panelAppended = false;
   const THROTTLE_MS = 100; // CardKit allows 10/s; push to max for smoothest typewriter.
   const STREAM_TIMEOUT_MS = 9 * 60 * 1000; // 9 min (Feishu closes at 10)
   const deadline = Date.now() + STREAM_TIMEOUT_MS;
 
-  // ── "正在分析" 动效 (Claude-Code/Codex 风格: spinner 持续转 + 秒数 + 阶段词) ──
-  // A heartbeat timer animates the header so the card feels alive while the agent
-  // thinks. The SECONDS counter is the honest signal (monotonic = not frozen);
-  // the spinner is decoration. A watchdog degrades the text when NO real SSE
-  // event has arrived for a while, so we never imply progress that isn't there.
-  // The timer ONLY drives the header during the THINKING phase and during
-  // analyzing GAPS — once the conclusion is actively streaming, the typewriter IS
-  // the animation and we don't fight it with full-card PUTs (which re-carry the
-  // body and could race the streamed text). MUST be cleared on every exit path.
+  // ── 始终生效的"正在分析"动效 (Claude-Code/Codex 风格: spinner + 秒数 + 阶段词) ──
+  // The animation/timer is a DEDICATED body element (element_id="status") updated
+  // ELEMENT-LEVEL, NOT the header. The old header-based heartbeat used a full-card
+  // PUT, which wipes appended elements (停止 button, 分析过程 panel), so it had to
+  // self-disable the moment the analyzing phase appended them — leaving the timer
+  // frozen for most of the run (the user's complaint). An element-level update
+  // touches only the status line, so the spinner + elapsed-seconds advance in
+  // EVERY phase (thinking, analyzing, streaming) without disturbing anything else.
+  // The SECONDS counter is the honest signal (monotonic = not frozen); the spinner
+  // is decoration; the watchdog says so honestly when no SSE event arrived lately.
   const SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏";
   const startedAt = Date.now();
   let lastEventAt = Date.now();   // updated on every real onChunk (real progress)
   let spinFrame = 0;
+  let statusAppended = false;
+  let statusInFlight = false;     // serialize status updates (avoid seq races / pile-up)
   let heartbeat: ReturnType<typeof setInterval> | undefined;
   const stopHeartbeat = () => { if (heartbeat) { clearInterval(heartbeat); heartbeat = undefined; } };
   heartbeat = setInterval(() => {
     if (timedOut || Date.now() > deadline) { stopHeartbeat(); return; }
-    // The header animation uses updateStage = a FULL-card PUT, which replaces the
-    // whole body and would WIPE any separately-appended elements (the 停止 button
-    // and the live 分析过程 panel). So the heartbeat may ONLY drive the header
-    // while NO such elements exist yet — i.e. the early "thinking" phase, before
-    // the first tool call flips stage→analyzing and appends them. Once we're in
-    // analyzing, the typewriter + live panel ARE the animation; the heartbeat
-    // must NOT full-PUT (it would delete the stop button mid-run → user can't
-    // abort, and flicker the panel). It self-stops driving but keeps the watchdog
-    // off the critical path by simply returning here.
-    if (stage !== "thinking") return;
-    // Even in the thinking phase the conclusion CAN stream (the agent narrates
-    // before its first tool call). When it does, the content typewriter is
-    // already PUTting at up to 10/s; adding the heartbeat's ~1.25/s on top would
-    // exceed CardKit's 10/s cap and silently drop frames. The typewriter IS the
-    // animation while text flows, so skip this header tick if content updated
-    // within the last beat — keeps the combined rate at/under the cap.
-    if (Date.now() - lastUpdate < 800) return;
+    // Skip this tick if a prior status write is still in flight (its lark-cli
+    // spawn hasn't returned) — prevents seq races and request pile-up under a
+    // slow API. The seconds counter will simply jump by one tick, still honest.
+    if (statusInFlight) return;
     const sinceEvent = Date.now() - lastEventAt;
     const elapsed = Math.floor((Date.now() - startedAt) / 1000);
     const spin = SPINNER[spinFrame++ % SPINNER.length];
-    // Watchdog: >15s with no new event → say so honestly, don't fake progress.
-    const label = sinceEvent > 15000
-      ? `${spin} 仍在思考（较久）${elapsed}s`
-      : `${spin} 正在分析 ${elapsed}s`;
+    const phaseWord = stage === "thinking" ? "正在思考" : "正在分析";
+    // Watchdog: >20s with no new event → say so honestly, don't fake progress.
+    const text = sinceEvent > 20000
+      ? `${spin} ${phaseWord}（较久，已 ${elapsed}s）`
+      : `${spin} ${phaseWord} ${elapsed}s`;
     seq++;
-    // body still the placeholder "正在分析…" in thinking phase → nothing to wipe.
-    updateStage(cardId, label, "orange", lastDisplay, seq).catch(() => {});
+    const mySeq = seq;
+    statusInFlight = true;
+    const done = () => { statusInFlight = false; };
+    if (!statusAppended) {
+      statusAppended = true;
+      appendStatusLine(cardId, text, mySeq).then(done, () => { statusAppended = false; done(); });
+    } else {
+      updateStatusLine(cardId, text, mySeq).then(done, done);
+    }
   }, 800);
 
   // The abort handle was created + registered in abortControllers at card-send
@@ -272,15 +269,13 @@ async function runStreamingInvoke(
       if (timedOut) return;
       if (Date.now() > deadline) { timedOut = true; return; }
       lastEventAt = Date.now(); // real SSE activity → resets the watchdog
-      // Stage 2 (思考→分析): on the first tool call, set the orange header ONCE
-      // (this is the LAST full-card PUT — nothing appended yet to wipe), then add
-      // the 停止 button. After this flip the heartbeat stops full-PUTting (it
-      // gates on stage==="thinking"), so the button + live panel appended here and
-      // below survive; the typewriter + live panel are the animation from now on.
+      // Stage 2 (思考→分析): on the first tool call, just append the 停止 button.
+      // We deliberately do NOT full-PUT the header here anymore — that wiped the
+      // status line / panel and is why the timer used to freeze. The phase word
+      // ("正在思考"→"正在分析") now lives in the element-level status line (above),
+      // so the only thing to do at the flip is reveal the stop button.
       if (stage === "thinking" && liveSteps.length > 0) {
         stage = "analyzing";
-        seq++;
-        updateStage(cardId, "🔍 正在分析…", "orange", lastDisplay, seq).catch(() => {});
         seq++;
         appendStopButton(cardId, seq).catch(() => {});
         return;
@@ -318,7 +313,6 @@ async function runStreamingInvoke(
       if (now - lastUpdate < THROTTLE_MS) return;
       lastUpdate = now;
       const display = textSoFar.length > 0 ? redactSensitive(textSoFar) : "正在分析…";
-      lastDisplay = display;
       seq++;
       updateContent(cardId, display, seq).catch(() => {});
     },

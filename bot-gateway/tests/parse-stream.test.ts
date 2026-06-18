@@ -91,3 +91,55 @@ describe("parseAgentStream error detection", () => {
     expect(parseAgentStream(sse).error).toBe("EarlyError: first");
   });
 });
+
+describe("parseAgentStream — partial messages (include_partial_messages)", () => {
+  // AgentCore serializes an SDK StreamEvent dataclass via asdict() →
+  // {uuid, session_id, event:{...raw Anthropic stream event...}, parent_tool_use_id}.
+  // Helper builds one SSE line in that shape.
+  const ev = (event: Record<string, unknown>) =>
+    `data: ${JSON.stringify({ uuid: "u", session_id: "s", event, parent_tool_use_id: null })}\n`;
+  const textDelta = (t: string) => ev({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: t } });
+  const textStart = () => ev({ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } });
+  const toolStart = () => ev({ type: "content_block_start", index: 1, content_block: { type: "tool_use", name: "codegraph_symbol_search", input: {} } });
+
+  it("assembles a conclusion from token deltas (the typewriter path)", () => {
+    const sse = textStart() + textDelta("负重上限 ") + textDelta("= 力量 ") + textDelta("× 1.5。");
+    const { conclusion, narrations } = parseAgentStream(sse);
+    expect(conclusion).toBe("负重上限 = 力量 × 1.5。");
+    expect(narrations).toEqual([]);
+  });
+
+  it("tool-gates delta blocks: a narration delta-block then a tool then the conclusion", () => {
+    const sse =
+      textStart() + textDelta("正在定位 MaxEncumbrance") +
+      toolStart() +
+      textStart() + textDelta("结论：负重=力量×1.5");
+    const { narrations, conclusion } = parseAgentStream(sse);
+    expect(narrations).toEqual(["正在定位 MaxEncumbrance"]);
+    expect(conclusion).toBe("结论：负重=力量×1.5");
+  });
+
+  it("does NOT double-count: a closing full AssistantMessage after deltas is ignored", () => {
+    // With partial messages on, the SDK still emits the complete AssistantMessage
+    // at turn end carrying the SAME text. Once in delta mode we must skip it.
+    const sse =
+      textStart() + textDelta("答案 ") + textDelta("片段") +
+      'data: {"content": [{"text": "答案 片段"}]}\n';
+    expect(parseAgentStream(sse).conclusion).toBe("答案 片段");
+  });
+
+  it("still detects a stream-level error alongside partial messages", () => {
+    const sse = textStart() + textDelta("partial") + 'data: {"error": "boom", "error_type": "RunError"}\n';
+    expect(parseAgentStream(sse).error).toBe("RunError: boom");
+  });
+
+  it("is backward-compatible: a non-partial stream (full messages only) is unchanged", () => {
+    const sse =
+      'data: {"content": [{"text": "narration"}]}\n' +
+      'data: {"content": [{"name": "tool", "input": {}}]}\n' +
+      'data: {"content": [{"text": "conclusion"}]}\n';
+    const { narrations, conclusion } = parseAgentStream(sse);
+    expect(narrations).toEqual(["narration"]);
+    expect(conclusion).toBe("conclusion");
+  });
+});

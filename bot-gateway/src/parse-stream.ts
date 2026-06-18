@@ -35,10 +35,19 @@ export interface StreamState {
    *  value means the answer is NOT trustworthy and must be shown as an error,
    *  never as a completed conclusion. */
   error: string | null;
+  /** True once we've seen a partial-message StreamEvent (token deltas). When the
+   *  agent runs with include_partial_messages, the conclusion streams token-by-
+   *  token via content_block_delta events INSTEAD of arriving as one complete
+   *  text block at the end ("freezes then dumps" → smooth typewriter). Once we're
+   *  in delta mode, the full AssistantMessage that closes each turn is redundant
+   *  with the accumulated deltas, so we stop taking text from it (would double).
+   *  Auto-detected so this is fully backward-compatible: a stream WITHOUT partial
+   *  messages never flips this and uses the old full-message path unchanged. */
+  sawStreamEvent: boolean;
 }
 
 export function newStreamState(): StreamState {
-  return { texts: [], sawToolAfterLastText: true /* first text starts a fresh block */, error: null };
+  return { texts: [], sawToolAfterLastText: true /* first text starts a fresh block */, error: null, sawStreamEvent: false };
 }
 
 /**
@@ -69,14 +78,69 @@ export function detectEventError(evt: Record<string, unknown>): string | null {
 }
 
 /** Fold one whole parsed event into the state: capture a stream-level error,
- *  then fold its content[0] (tool-gated). Single entry point so the live
- *  (sigv4) and whole-string parsers detect errors identically. */
+ *  then fold either a partial-message token delta (StreamEvent) OR a complete
+ *  message's content[0] (tool-gated). Single entry point so the live (sigv4) and
+ *  whole-string parsers behave identically. */
 export function applyEvent(state: StreamState, evt: Record<string, unknown>): void {
   if (state.error === null) {
     const err = detectEventError(evt);
     if (err !== null) state.error = err;
   }
+  // Partial-message path: when the agent runs with include_partial_messages, the
+  // AgentCore SDK yields StreamEvent objects — serialized as {uuid, session_id,
+  // event:{...raw Anthropic stream event...}, parent_tool_use_id}. The raw event
+  // carries token deltas, so we fold those and skip the redundant full message.
+  if (typeof evt.event === "object" && evt.event !== null && "session_id" in evt) {
+    applyStreamEvent(state, evt.event as Record<string, unknown>);
+    return;
+  }
+  // Once we've started consuming deltas, the closing AssistantMessage for a turn
+  // repeats the same text we already accumulated — skip it so text isn't doubled.
+  if (state.sawStreamEvent && Array.isArray(evt.content)) return;
   applyContentItem(state, (evt.content as Array<Record<string, unknown>> | undefined)?.[0]);
+}
+
+/** Fold one raw Anthropic stream event (from a StreamEvent's `event` field) into
+ *  the state. We care about three shapes:
+ *   - content_block_start {index, content_block:{type:"tool_use"|"text"}} → a
+ *     tool_use block opening means the preceding text block is a finished
+ *     narration (same tool-gating as the full-message path); a text block
+ *     opening after a tool starts a new logical block.
+ *   - content_block_delta {delta:{type:"text_delta", text}} → append tokens to
+ *     the current text block (the streaming typewriter).
+ *  thinking deltas / message_start / message_delta / *_stop are ignored. */
+export function applyStreamEvent(state: StreamState, raw: Record<string, unknown>): void {
+  const type = raw.type;
+  if (type === "content_block_start") {
+    const block = raw.content_block as Record<string, unknown> | undefined;
+    const blockType = block?.type;
+    if (blockType === "tool_use") {
+      // A tool started → the current text block is now a finished narration.
+      state.sawToolAfterLastText = true;
+    } else if (blockType === "text") {
+      // A new text block opened. Mark stream-event mode and open a fresh block
+      // ONLY if a tool intervened (or none exists yet); otherwise the existing
+      // block continues (deltas append to it).
+      state.sawStreamEvent = true;
+      if (state.sawToolAfterLastText || state.texts.length === 0) {
+        state.texts.push("");
+        state.sawToolAfterLastText = false;
+      }
+    }
+    return;
+  }
+  if (type === "content_block_delta") {
+    const delta = raw.delta as Record<string, unknown> | undefined;
+    if (delta?.type === "text_delta" && typeof delta.text === "string") {
+      state.sawStreamEvent = true;
+      if (state.texts.length === 0 || state.sawToolAfterLastText) {
+        state.texts.push("");
+        state.sawToolAfterLastText = false;
+      }
+      state.texts[state.texts.length - 1] += delta.text;
+    }
+    // thinking_delta / input_json_delta (tool args) are ignored.
+  }
 }
 
 /** Fold one already-parsed event's content[0] into the state (tool-gated). */
