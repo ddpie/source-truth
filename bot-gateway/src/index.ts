@@ -37,6 +37,7 @@ import { sdkEventToImEvent } from "./sdk-event";
 import { sendReply } from "./reply";
 import { getSessionId } from "./session-map";
 import { SessionSerializer } from "./serialize-session";
+import { CardWriter } from "./card-writer";
 import { hashUserId } from "./log";
 import { isDuplicate } from "./dedup";
 
@@ -196,7 +197,13 @@ async function runStreamingInvoke(
   //    9-minute safety timeout: close streaming gracefully before Feishu's
   //    10-minute hard window kills the stream (avoids broken card state).
   //    seq starts above any sequence the queued-state card already used.
-  let seq = card.startSeq;
+  // ALL card writes go through one serial queue (CardWriter): it assigns the
+  // sequence at SEND time and awaits each write before the next, so CardKit always
+  // sees strictly-increasing sequences in arrival order. This kills the whole
+  // class of "two fire-and-forget writes race → the lower-seq one is stale-
+  // rejected and dropped" bugs (status wiping the stop button, double stop button,
+  // and the 分析过程 panel never appearing — the last one caught in live self-test).
+  const writer = new CardWriter(card.startSeq);
   let lastUpdate = 0;
   let lastPanelUpdate = 0;
   let timedOut = false;
@@ -225,25 +232,28 @@ async function runStreamingInvoke(
   let statusInFlight = false;     // serialize status updates (avoid seq races / pile-up)
   let heartbeat: ReturnType<typeof setInterval> | undefined;
   const stopHeartbeat = () => { if (heartbeat) { clearInterval(heartbeat); heartbeat = undefined; } };
-  // Refresh cadence: a status WRITE goes out every STATUS_WRITE_MS — faster than
-  // the old 800ms so the spinner + elapsed timer feel lively — while staying well
-  // within CardKit's 10/s budget shared with the content typewriter (a card only
-  // visually refreshes on a write, so there's no point ticking faster than we
-  // write). At ~2.5 writes/s for status + ≤10/s content the combined rate is safe.
-  const STATUS_WRITE_MS = 400;
+  // Refresh cadence: the dominant cost is the THINKING/ANALYZING phase (live data:
+  // ~68s before the conclusion even starts), and during it NO conclusion content
+  // streams — so the status line is the ONLY motion and can safely run fast. We
+  // write every STATUS_WRITE_MS=200ms (~5 spinner frames/s, feels smooth, well
+  // under CardKit's 10/s). Once the conclusion typewriter IS streaming, the answer
+  // text is the motion, so we yield to it (the `< STREAMING_YIELD_MS` skip below)
+  // and the combined status+content rate stays under the cap.
+  const STATUS_WRITE_MS = 200;
+  const STREAMING_YIELD_MS = 200;
   let lastStatusWrite = 0;
   heartbeat = setInterval(() => {
     if (timedOut || Date.now() > deadline) { stopHeartbeat(); return; }
     const now = Date.now();
     // Rate-limit the actual network write; also skip if a prior write is still in
-    // flight (its lark-cli spawn hasn't settled) — prevents seq races / pile-up.
+    // flight — prevents request pile-up under a slow API (the writer serializes
+    // ordering, this just avoids queueing a backlog of stale status frames).
     if (statusInFlight || now - lastStatusWrite < STATUS_WRITE_MS) return;
     // Stay under CardKit's per-card 10/s: when the conclusion typewriter is
-    // actively streaming (a content update within the last 250ms), the answer
-    // text IS the visible motion — skip the status write this tick so status
-    // (~2.5/s) + content (≤10/s) can't sum past the cap. The elapsed counter
-    // still advances on the next idle tick (monotonic, stays honest).
-    if (now - lastUpdate < 250) return;
+    // actively streaming (a content update within the last STREAMING_YIELD_MS),
+    // the answer text IS the visible motion — skip the status write this tick. The
+    // elapsed counter still advances on the next idle tick (monotonic, honest).
+    if (now - lastUpdate < STREAMING_YIELD_MS) return;
     const spin = SPINNER[spinFrame++ % SPINNER.length];
     const sinceEvent = now - lastEventAt;
     const elapsed = formatElapsed(now - startedAt);  // s / Mm Ss / Hh Mm
@@ -252,17 +262,19 @@ async function runStreamingInvoke(
     const text = sinceEvent > 20000
       ? `${spin} ${phaseWord}（较久，已 ${elapsed}）`
       : `${spin} ${phaseWord} ${elapsed}`;
-    seq++;
-    const mySeq = seq;
     statusInFlight = true;
     lastStatusWrite = now;
-    const done = () => { statusInFlight = false; };
-    if (!statusAppended) {
-      statusAppended = true;
-      appendStatusLine(cardId, text, mySeq).then(done, () => { statusAppended = false; done(); });
-    } else {
-      updateStatusLine(cardId, text, mySeq).then(done, done);
-    }
+    // Serial write: seq assigned at send time (monotonic, no race). Decide
+    // append-vs-update at EXECUTION time on the live flag (same FIFO reasoning as
+    // the panel path) so a failed append always retries as an append.
+    void writer.write(async (seq) => {
+      if (!statusAppended) {
+        await appendStatusLine(cardId, text, seq);
+        statusAppended = true; // only on success → a throw leaves it false
+      } else {
+        await updateStatusLine(cardId, text, seq);
+      }
+    }).then(() => { statusInFlight = false; });
   }, STATUS_WRITE_MS);
 
   // The abort handle was created + registered in abortControllers at card-send
@@ -290,8 +302,7 @@ async function runStreamingInvoke(
       // so the only thing to do at the flip is reveal the stop button.
       if (stage === "thinking" && liveSteps.length > 0) {
         stage = "analyzing";
-        seq++;
-        appendStopButton(cardId, seq).catch(() => {});
+        void writer.write((seq) => appendStopButton(cardId, seq));
         return;
       }
       // Live reasoning panel: append once, then update in place as steps grow —
@@ -306,27 +317,25 @@ async function runStreamingInvoke(
         if (nowPanel - lastPanelUpdate < THROTTLE_MS) return;
         lastPanelUpdate = nowPanel;
         stepsShown = liveSteps.length;
-        seq++;
         // Redact steps before they hit the group-visible panel (same safety net
         // as the conclusion text) — a secret/path in a narration step leaks too.
         const safeSteps = redactSteps(liveSteps);
-        if (!panelAppended) {
-          panelAppended = true;
-          // On append FAILURE, do NOT re-APPEND next time — that risks a second
-          // insert_before with the same element_id="reasoning" if the first call
-          // actually committed server-side but its HTTP response was lost
-          // (duplicate/ambiguous element). Instead fall through to UPDATE: a PUT
-          // to /elements/reasoning succeeds if the element exists and harmlessly
-          // no-ops if it never got created — idempotent either way. (The earlier
-          // bug was panelAppended sticking true with NO retry at all; this keeps
-          // retrying via the safe verb.) Reset stepsShown so the next step still
-          // pushes the accumulated narration through the update path.
-          appendReasoningPanel(cardId, safeSteps, seq).catch(() => {
-            stepsShown = 0; // keep panelAppended=true → next attempt uses UPDATE
-          });
-        } else {
-          updateReasoningPanel(cardId, safeSteps, seq).catch(() => {});
-        }
+        // Decide append-vs-update at EXECUTION time (inside the serial callback),
+        // NOT at schedule time. The CardWriter chain is FIFO, so by the time this
+        // callback runs, any earlier panel write has already settled and set
+        // panelAppended. That means: two writes can't both append (the first sets
+        // the flag true on success before the second runs), AND a FAILED append
+        // leaves the flag false so the next write retries as an append instead of
+        // stranding an UPDATE on a never-created "reasoning" element (the bug the
+        // schedule-time capture had — caught in review).
+        void writer.write(async (seq) => {
+          if (!panelAppended) {
+            await appendReasoningPanel(cardId, safeSteps, seq);
+            panelAppended = true; // only on success → a throw leaves it false
+          } else {
+            await updateReasoningPanel(cardId, safeSteps, seq);
+          }
+        });
         return;
       }
       // Conclusion area: stream the answer text as it arrives. While the agent
@@ -338,8 +347,7 @@ async function runStreamingInvoke(
       if (now - lastUpdate < THROTTLE_MS) return;
       lastUpdate = now;
       const display = textSoFar.length > 0 ? redactSensitive(textSoFar) : "正在分析…";
-      seq++;
-      updateContent(cardId, display, seq).catch(() => {});
+      void writer.write((seq) => updateContent(cardId, display, seq));
     },
     abort.signal,
     );
@@ -419,21 +427,21 @@ async function runStreamingInvoke(
   }
   const finalText = redactSensitive(bodyNoEvidence);
   const finalEvidence = redactSensitive(evidence);
-  // Best-effort, independently guarded: if updateContent throws (transient
-  // CardKit/lark-cli error, or a sequence rejection racing the last fire-and-
-  // forget onChunk update), closeStreaming and finalizeCard MUST still run —
-  // otherwise an aborted/finished card stays stuck in "正在分析…" with streaming
-  // on and a dead 停止 button (finalizeCard's full PUT is what clears both).
-  seq++;
-  try { await updateContent(cardId, finalText, seq); } catch (e) { log({ event: "finalize_content_error", card: cardId, error: String(e) }); }
-  seq++;
-  try { await closeStreaming(cardId, seq); } catch (e) { log({ event: "close_streaming_error", card: cardId, error: String(e) }); }
+  // Finalize writes go through the SAME serial writer, so they're ordered AFTER
+  // every streaming write drained (FIFO) and carry strictly-higher sequences —
+  // no stale rejection. Each is independently guarded inside writer.write (a
+  // failed write is swallowed, never wedges the chain), and we await each so the
+  // card always ends up finalized (header green, streaming off, stop button gone)
+  // even if one mid-step write failed.
+  await writer.write((seq) => updateContent(cardId, finalText, seq)
+    .catch((e) => { log({ event: "finalize_content_error", card: cardId, error: String(e) }); throw e; }));
+  await writer.write((seq) => closeStreaming(cardId, seq)
+    .catch((e) => { log({ event: "close_streaming_error", card: cardId, error: String(e) }); throw e; }));
 
   // 4. Finalize: header → green "回答完成" (or 已停止 / 查询失败) + reasoning panel
   //    collapsed. The full-card PUT rebuilds the body (conclusion + panel), which
-  //    also drops the now-irrelevant 停止 button.
-  seq++;
-  try { await finalizeCard(cardId, finalText, redactSteps(steps), seq, isFollowUp, aborted, hardFailed, finalEvidence); } catch { /* best-effort */ }
+  //    also drops the now-irrelevant 停止 button AND the live status line.
+  await writer.write((seq) => finalizeCard(cardId, finalText, redactSteps(steps), seq, isFollowUp, aborted, hardFailed, finalEvidence));
   // 5. Data charts + follow-ups: skip on HARD failure (no trustworthy conclusion).
   //    A turn-capped partial keeps its charts/follow-ups (labeled incomplete).
   if (!hardFailed && charts.length > 0) {
@@ -441,15 +449,14 @@ async function runStreamingInvoke(
     // so scrub every string leaf of each spec before it hits the group-visible
     // card — same secret/path safety net as the conclusion and reasoning panel.
     const safeCharts = charts.map((c) => redactDeep(c));
-    seq++;
-    try { await appendCharts(cardId, safeCharts, seq); } catch (e) { log({ event: "chart_error", error: String(e) }); }
+    await writer.write((seq) => appendCharts(cardId, safeCharts, seq)
+      .catch((e) => { log({ event: "chart_error", error: String(e) }); throw e; }));
   }
   if (!hardFailed) {
-    seq++;
     // Extract follow-ups from the RAW answer (still carries the "💡 你可能还想问"
     // trailer that stripFollowUps removed from the rendered body).
     const followUps = extractFollowUps(redactSensitive(answer));
-    try { await appendFooter(cardId, seq, followUps); } catch { /* best-effort */ }
+    await writer.write((seq) => appendFooter(cardId, seq, followUps));
   }
   log({ event: "card_closed", card: cardId, chars: answer.length, charts: charts.length, timedOut, failed, turnCapped, error: error ?? undefined });
 }

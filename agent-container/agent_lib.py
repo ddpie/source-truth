@@ -265,16 +265,48 @@ async def run_agent(
     t0 = time.perf_counter()
     first_emitted = False
     n = 0
+    # Per-tool latency: a tool_use block (in an AssistantMessage) opens a timer
+    # keyed by its id; the matching tool_result (in a UserMessage) closes it and
+    # emits a `tool_latency` perf line per call. This is what localizes "10 Grep
+    # calls on EFS" vs "model thinking" — the dominant cost in live self-test.
+    pending: dict[str, tuple[str, float]] = {}  # tool_use_id → (name, start)
     try:
         async for message in qfn(prompt=prompt, options=options):
             if not first_emitted:
                 first_emitted = True
                 _perf("agent_first_message", (time.perf_counter() - t0) * 1000)
             n += 1
+            _track_tool_latency(message, pending)
             _maybe_log_result(message)
             yield message
     finally:
         _perf("agent_run_total", (time.perf_counter() - t0) * 1000, messages=n)
+
+
+def _track_tool_latency(message: Any, pending: dict[str, tuple[str, float]]) -> None:
+    """Time each tool round-trip: open a timer on a tool_use block, close + emit a
+    `tool_latency` perf line on the matching tool_result. Best-effort + duck-typed
+    (no SDK import); a shape we don't recognize is simply ignored. The per-tool
+    breakdown (esp. Grep/Read on EFS vs codegraph MCP) is the issue-#2 lever for
+    deciding whether to cut tool calls or speed up file I/O."""
+    try:
+        content = getattr(message, "content", None)
+        if not isinstance(content, (list, tuple)):
+            return
+        now = time.perf_counter()
+        for block in content:
+            tool_id = getattr(block, "id", None)
+            name = getattr(block, "name", None)
+            if tool_id is not None and name is not None and getattr(block, "input", None) is not None:
+                pending[tool_id] = (name, now)  # tool_use opened
+                continue
+            result_id = getattr(block, "tool_use_id", None)
+            if result_id is not None and result_id in pending:
+                name, start = pending.pop(result_id)
+                _perf("tool_latency", (now - start) * 1000, tool=name,
+                      is_error=getattr(block, "is_error", None))
+    except Exception as exc:  # noqa: BLE001 - perf logging must never break the stream
+        logger.warning(json.dumps({"event": "tool_latency_log_failed", "error": str(exc)}))
 
 
 def _maybe_log_result(message: Any) -> None:
