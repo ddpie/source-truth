@@ -1,19 +1,45 @@
 #!/usr/bin/env bash
-# provision_index_service.sh <region> <config> <bucket> <repo_subdir> <max_files> <instance_type>
+# provision_index_service.sh <region> <config> <bucket> <repo_subdir> <max_files> <instance_type> [refresh]
 # Idempotent ARM EC2 (Ubuntu 24.04 — glibc 2.39 for codegraph-server) in the
 # private subnet, running index-service/bootstrap.sh as user-data. Prints the
 # instance's private IP on stdout (the only stdout line; logs go to stderr).
 #
 # Security: index-svc SG accepts 8080 from the VPC; the runtime reaches it over
 # the private network. The instance also gets 2049 egress to EFS via its SG.
+#
+# refresh (7th arg, "true"/"false", default false): when true, a reused instance
+# whose bootstrapped artifacts are STALE (S3 tarballs re-staged since it booted)
+# is terminated so a fresh one re-bootstraps the new code/repo. When false, a
+# stale reuse only WARNs (loudly) — it never silently serves old code as "green".
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 source "$SCRIPT_DIR/common.sh"; source "$SCRIPT_DIR/env-utils.sh"
-REGION="$1"; CONFIG="$2"; BUCKET="$3"; REPO_SUBDIR="$4"; MAX_FILES="$5"; ITYPE="$6"
+REGION="$1"; CONFIG="$2"; BUCKET="$3"; REPO_SUBDIR="$4"; MAX_FILES="$5"; ITYPE="$6"; REFRESH="${7:-false}"
 safe_source_env "$CONFIG"
 Q() { aws ec2 "$@" --region "$REGION"; }
+QS() { aws s3api "$@" --region "$REGION"; }
 log() { say "$@" >&2; }
+
+# A signature of the artifacts an instance would bootstrap from: the ETags of the
+# index-service code tarball + the repo tarball in S3. If either changed since an
+# instance booted, that instance is serving STALE code/index. ETag is S3's
+# content hash, so this changes iff the staged content changed.
+artifact_signature() {
+  local idx repo
+  idx="$(QS head-object --bucket "$BUCKET" --key index-service.tar.gz --query ETag --output text 2>/dev/null || echo none)"
+  repo="$(QS head-object --bucket "$BUCKET" --key "${REPO_SUBDIR}.tar.gz" --query ETag --output text 2>/dev/null || echo none)"
+  # S3 returns ETags WITH literal surrounding double-quotes (e.g. "abc123"). They
+  # must be stripped before this value lands in the run-instances
+  # --tag-specifications SHORTHAND: a Value= starting with `"` makes the shorthand
+  # parser terminate the string at the closing quote, then choke on the `|`
+  # separator (ParamValidation: Expected ','), which under set -e aborts the whole
+  # fresh launch. Strip quotes so the joined signature is a plain, parseable,
+  # human-readable tag value. Comparison stays consistent (both sides quote-free).
+  idx="${idx//\"/}"
+  repo="${repo//\"/}"
+  echo "${idx}|${repo}"
+}
 
 # Authorize an ingress rule idempotently: tolerate ONLY the benign "rule already
 # exists" (InvalidPermission.Duplicate) error, and HARD-FAIL on anything else
@@ -45,10 +71,36 @@ reconcile_index_sg_ingress() { # <sg>
 }
 
 # Reuse a running index-service instance if present.
-# NOTE: reuse does NOT re-bootstrap, so it will NOT pick up new index-service
-# code staged to S3 this run. To deploy code changes, terminate the existing
-# instance first (aws ec2 terminate-instances) so a fresh one bootstraps.
+# A reused instance does NOT re-run bootstrap.sh (that's EC2 user-data, fires
+# only on first boot), so it will NOT pick up index-service code or repo changes
+# re-staged to S3 this run. The single-writer invariant (exactly one instance may
+# ever build graph.db on its local disk) forbids just launching a second one. So:
+#   - compute the current artifact signature (S3 ETags) and compare to the tag we
+#     stamped on the instance when it last bootstrapped;
+#   - if they match → genuine reuse, fast-path;
+#   - if they differ and REFRESH=true → terminate it so a fresh instance
+#     re-bootstraps from the new artifacts (sequential — the old one is gone
+#     before the new one builds, preserving single-writer);
+#   - if they differ and REFRESH=false → LOUD WARN and reuse anyway, so the green
+#     deploy is never a SILENT no-op (the operator is told their changes aren't
+#     live and how to apply them).
+CURRENT_SIG="$(artifact_signature)"
 EXISTING="$(Q describe-instances --filters "Name=tag:Name,Values=source-truth-index-service" "Name=instance-state-name,Values=running,pending" --query 'Reservations[0].Instances[0].InstanceId' --output text 2>/dev/null)"
+if [[ "$EXISTING" != "None" && -n "$EXISTING" ]]; then
+  BOOTED_SIG="$(Q describe-instances --instance-ids "$EXISTING" --query "Reservations[0].Instances[0].Tags[?Key=='ArtifactSig'].Value | [0]" --output text 2>/dev/null)"
+  if [[ "$BOOTED_SIG" != "$CURRENT_SIG" ]]; then
+    if [[ "$REFRESH" == "true" ]]; then
+      log warn "index-service artifacts changed since $EXISTING booted (sig: ${BOOTED_SIG:-none} → $CURRENT_SIG); --refresh-index set → terminating it for a fresh bootstrap"
+      Q terminate-instances --instance-ids "$EXISTING" >/dev/null
+      Q wait instance-terminated --instance-ids "$EXISTING"
+      EXISTING="None"  # fall through to fresh launch below
+    else
+      log warn "STALE index-service: instance $EXISTING booted from older artifacts (sig ${BOOTED_SIG:-none}, current $CURRENT_SIG)."
+      log warn "  → This deploy re-staged index-service code/repo to S3 but reuse does NOT re-bootstrap, so those changes are NOT live."
+      log warn "  → Re-run with --refresh-index to replace the instance, or terminate $EXISTING manually, then re-run."
+    fi
+  fi
+fi
 if [[ "$EXISTING" != "None" && -n "$EXISTING" ]]; then
   IP="$(Q describe-instances --instance-ids "$EXISTING" --query 'Reservations[0].Instances[0].PrivateIpAddress' --output text)"
   if [[ -z "$IP" || "$IP" == "None" ]]; then
@@ -125,7 +177,7 @@ IID="$(Q run-instances --image-id "$AMI" --instance-type "$ITYPE" \
   "${PROFILE_ARG[@]}" \
   --user-data "$UD" \
   --block-device-mappings '[{"DeviceName":"/dev/sda1","Ebs":{"VolumeSize":30,"VolumeType":"gp3"}}]' \
-  --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=source-truth-index-service}]' \
+  --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=source-truth-index-service},{Key=ArtifactSig,Value=$CURRENT_SIG}]" \
   --query 'Instances[0].InstanceId' --output text)"
 log info "launched index-service $IID (Ubuntu 24.04 ARM); bootstrap runs build→serve"
 # Wait for the instance to be running so its ENI/private IP is assigned — a

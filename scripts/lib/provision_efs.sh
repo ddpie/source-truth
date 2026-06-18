@@ -25,11 +25,19 @@ if [[ "$EFS_ID" == "None" || -z "$EFS_ID" ]]; then
 fi
 
 # Access point: root /repo owned 1000:1000 (matches container non-root user).
-AP="$(Q describe-access-points --file-system-id "$EFS_ID" --query 'AccessPoints[0].AccessPointId' --output text 2>/dev/null)"
+# Select by the LOAD-BEARING property (RootDirectory.Path == /repo), NOT by
+# position ([0]). The runtime mounts this AP's root at /mnt/repo; if a foreign or
+# stale AP (manual, sibling stack, or a future schema migration that left an old
+# one) sorted ahead of ours, positional [0] would bind the runtime to the wrong
+# directory tree — the agent then reads the wrong code with NOTHING downstream
+# catching it (the health gate is loopback on the index instance, never crossing
+# the runtime's mount), directly violating "code is the only source of truth".
+AP="$(Q describe-access-points --file-system-id "$EFS_ID" --query "AccessPoints[?RootDirectory.Path=='/repo'].AccessPointId | [0]" --output text 2>/dev/null)"
 if [[ "$AP" == "None" || -z "$AP" ]]; then
   AP="$(Q create-access-point --file-system-id "$EFS_ID" \
     --posix-user "Uid=1000,Gid=1000" \
     --root-directory "Path=/repo,CreationInfo={OwnerUid=1000,OwnerGid=1000,Permissions=755}" \
+    --tags Key=Name,Value=source-truth-repo-ap \
     --query AccessPointId --output text)"
   # Wait for the access point to be 'available' before any client mounts it —
   # mounting a still-'creating' AP can fail the access-point permission checks.
