@@ -142,27 +142,54 @@ def test_root_file_not_folded_with_nested_same_name(tmp_path: Path):
     assert out["deduped"] == 0, out
 
 
-def test_scan_row_cap_bounds_heavy_duplication(tmp_path: Path):
+def test_dup_cap_bounds_heavy_duplication(tmp_path: Path):
     # Under pathological duplication almost every hit is a fold (never appends), so
     # the max_matches break can't fire — the scan must still be bounded by
-    # SCAN_ROW_CAP so the loop can't iterate unbounded output. Force a tiny cap and
+    # SCAN_DUP_CAP so the loop can't iterate unbounded output. Force a tiny cap and
     # assert truncation kicks in well before processing everything.
     import file_search as fs
-    orig = fs.SCAN_ROW_CAP
-    fs.SCAN_ROW_CAP = 5
+    orig = fs.SCAN_DUP_CAP
+    fs.SCAN_DUP_CAP = 5
     try:
-        # Many identical copies (all fold to one match) — rows processed >> 5.
+        # Many identical copies (all fold to one match) — dup rows >> 5.
         for i in range(20):
             d = tmp_path / f"copy_{i}" / "Game"
             d.mkdir(parents=True)
             (d / "Enemy.cs").write_text("int Damage = CAP_TOKEN;\n", encoding="utf-8")
         out = fs.run_search("CAP_TOKEN", local_root=str(tmp_path), mount_root="/mnt/repo")
-        # Folds to 1 kept match, but the scan stopped at the row cap (5 rows seen).
+        # Folds to 1 kept match, but the scan stopped at the dup cap.
         assert out["count"] == 1, out
         assert out["truncated"] is True, out
-        assert out["deduped"] <= fs.SCAN_ROW_CAP, out
+        assert out["deduped"] <= fs.SCAN_DUP_CAP, out
     finally:
-        fs.SCAN_ROW_CAP = orig
+        fs.SCAN_DUP_CAP = orig
+
+
+def test_dup_flood_does_not_starve_distinct_matches(tmp_path: Path):
+    # Regression for the round-3 finding: a flood of folded duplicates emitted
+    # BEFORE distinct files must NOT consume the distinct-match budget. With the
+    # cap gating on duplicates alone, distinct hits keep being appended even after
+    # a large dup flood. Force a small dup cap; ensure a distinct file that sorts
+    # AFTER the dup flood is still surfaced.
+    import file_search as fs
+    orig = fs.SCAN_DUP_CAP
+    fs.SCAN_DUP_CAP = 100  # generous enough to pass the flood, small enough to bound
+    try:
+        # "0_dups": many identical copies of one file → fold to 1 match, many dups.
+        for i in range(8):
+            d = tmp_path / "0_dups" / f"copy_{i}"
+            d.mkdir(parents=True)
+            (d / "Same.cs").write_text("int x = FLOOD_TOKEN;\n", encoding="utf-8")
+        # "9_distinct": a genuinely distinct file that sorts AFTER the dup flood.
+        d2 = tmp_path / "9_distinct"
+        d2.mkdir()
+        (d2 / "Unique.cs").write_text("int y = FLOOD_TOKEN;\n", encoding="utf-8")
+        out = fs.run_search("FLOOD_TOKEN", local_root=str(tmp_path), mount_root="/mnt/repo")
+        paths = " ".join(m["path"] for m in out["matches"])
+        # The distinct file after the flood is NOT starved out.
+        assert "9_distinct/Unique.cs" in paths, out
+    finally:
+        fs.SCAN_DUP_CAP = orig
 
 
 def test_same_basename_collapse_is_never_silent(tmp_path: Path):

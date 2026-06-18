@@ -30,12 +30,14 @@ logger = logging.getLogger("file-search")
 # Hard cap so a pathological pattern can't return megabytes or run unbounded.
 MAX_MATCHES = 200
 SEARCH_TIMEOUT_S = 20
-# Cap on TOTAL rows processed (kept + folded-duplicate), independent of
-# max_matches: heavy duplication makes almost every row a fold (which never
-# counts toward max_matches), so without this the post-processing loop would
-# iterate the entire rg/grep output. 10x the match cap leaves ample headroom for
-# legitimate vendored copies while bounding the worst case.
-SCAN_ROW_CAP = MAX_MATCHES * 10
+# Cap on FOLDED-DUPLICATE rows processed, independent of max_matches: heavy
+# duplication makes almost every row a fold (which never counts toward
+# max_matches), so without this the post-processing loop would iterate the entire
+# rg/grep output. Gating on duplicates ALONE (not total rows) means a dup flood
+# can't eat into the distinct-match budget — distinct hits keep being appended
+# until max_matches. Generous so legitimate vendored copies (e.g. 10x trees)
+# don't trip it on a normal search while still bounding the pathological case.
+SCAN_DUP_CAP = MAX_MATCHES * 50
 
 
 def _rg_available() -> bool:
@@ -165,11 +167,15 @@ def run_search(
             if len(matches) >= max_matches:
                 truncated = True
                 break
-        # Scan budget independent of dedup: under heavy duplication nearly every
-        # row is a dup (it never appends, so the max_matches break above can't
-        # fire), which would let the loop run over the ENTIRE rg/grep output. Cap
-        # total ROWS PROCESSED so memory/CPU stay bounded regardless of fold rate.
-        if len(matches) + duplicates >= SCAN_ROW_CAP:
+        # Bound runaway DUPLICATE scanning only. Under heavy duplication nearly
+        # every row folds (never appends, so the max_matches break above can't
+        # fire), which would let the loop run over the ENTIRE rg/grep output. Gate
+        # on the DUPLICATE count alone — NOT len(matches)+duplicates — so a flood
+        # of folded copies emitted before the distinct files can't eat into the
+        # distinct-match budget and silently drop genuine hits (distinct matches
+        # are already capped by max_matches above). This bounds CPU/memory without
+        # costing recall regardless of the order rg/grep emits rows.
+        if duplicates >= SCAN_DUP_CAP:
             truncated = True
             break
 
