@@ -29,6 +29,13 @@ exec > /var/log/index-svc-bootstrap.log 2>&1
 # shellcheck disable=SC1091
 source /etc/index-service.env
 
+# REPO_SUBDIR MUST be non-empty before any path is built from it: WORKSPACE and
+# LOCAL_WORKSPACE are "$REPO_ROOT/$REPO_SUBDIR", and the freshness re-extract does
+# `rm -rf "$WORKSPACE"`. set -u does NOT catch an empty-but-set var, so an empty
+# REPO_SUBDIR would make those paths the repo ROOT and `rm -rf` would wipe the whole
+# tree. The :? form errors on unset OR empty — abort loudly before building paths.
+: "${REPO_SUBDIR:?BOOTSTRAP_FAILED: REPO_SUBDIR must be set and non-empty}"
+
 export DEBIAN_FRONTEND=noninteractive
 INDEX_HOME=/data                       # codegraph graph.db lives here (LOCAL disk, never EFS)
 APP=/opt/idx/app
@@ -159,7 +166,7 @@ Environment=PATH=/usr/local/bin:/usr/bin:/bin
 # wrong "not found" answers (Requires=index-build keeps the bridge from serving a
 # failed build). `test -d` alone only proves the dir exists, not that it has code.
 ExecStartPre=/usr/bin/mountpoint -q $EFS_MNT
-ExecStartPre=/bin/bash -c '[ -n "\$(ls -A $WORKSPACE 2>/dev/null)" ] || { echo "FATAL: \$WORKSPACE is empty — refusing to build a 0-node graph"; exit 1; }'
+ExecStartPre=/bin/bash -c '[ -n "\$(ls -A $WORKSPACE 2>/dev/null)" ] || { echo "FATAL: $WORKSPACE is empty — refusing to build a 0-node graph"; exit 1; }'
 # flock guarantees only ONE codegraph process writes graph.db at a time.
 ExecStart=/usr/bin/flock $LOCK $BIN --graph-only --workspace $WORKSPACE \\
   --exclude node_modules --exclude .venv --exclude .git --max-files $MAX_FILES \\
@@ -168,7 +175,7 @@ ExecStart=/usr/bin/flock $LOCK $BIN --graph-only --workspace $WORKSPACE \\
 # above an empty-RocksDB baseline. If it's trivially small the build silently
 # produced ~0 nodes (corrupt/empty) — FAIL the unit so the bridge (Requires=)
 # never serves it, instead of relying solely on the bridge's warmup string-match.
-ExecStartPost=/bin/bash -c 'sz=\$(du -sb $INDEX_HOME/.codegraph/graph.db 2>/dev/null | cut -f1 || echo 0); [ "\$sz" -ge 65536 ] || { echo "FATAL: graph.db is \$sz bytes (<64KiB) — build produced an empty/corrupt graph"; exit 1; }'
+ExecStartPost=/bin/bash -c 'sz=\$(du -sb $INDEX_HOME/.codegraph/graph.db 2>/dev/null | cut -f1); [ "\${sz:-0}" -ge 65536 ] || { echo "FATAL: graph.db is \${sz:-0} bytes (<64KiB) — build produced an empty/corrupt graph"; exit 1; }'
 UNIT
 
 cat > /etc/systemd/system/index-bridge.service <<UNIT
