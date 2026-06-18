@@ -22,7 +22,9 @@
 // (e.g. "```chart json"); whitespace-or-newline between the tag and the body
 // (covers compact single-line "```chart {…}```"); and a missing trailing newline
 // before the closing fence. `m` so ^ anchors per line. Body captured lazily.
-const CHART_BLOCK = /^[ \t]*```chart[^\S\n]*\w*[^\S\n]*([\s\S]*?)\n?[ \t]*```[ \t]*$/gm;
+// `(?![A-Za-z0-9])` right after `chart` so "```chartreuse"/"```charts" (a real
+// language tag) is NOT mistaken for a chart fence (which would delete its prose).
+const CHART_BLOCK = /^[ \t]*```chart(?![A-Za-z0-9])[^\S\n]*\w*[^\S\n]*([\s\S]*?)\n?[ \t]*```[ \t]*$/gm;
 
 export interface ChartSpec {
   type: string;
@@ -38,12 +40,17 @@ export function extractCharts(answer: string): { text: string; charts: ChartSpec
     } catch { /* invalid JSON → drop the block, don't render a broken chart */ }
     return ""; // strip the block from the prose regardless
   });
-  // Defense-in-depth: if any ```chart fence STILL slipped through (a shape the
-  // regex didn't anticipate), strip the residual fence so the raw spec never
-  // renders verbatim in the group-visible card. We drop from the fence to the next
-  // closing ``` (or end of text if unterminated).
-  if (/```chart/.test(text)) {
-    text = text.replace(/```chart[\s\S]*?(?:```|$)/g, "");
+  // Defense-in-depth: if a residual ```chart fence STILL slipped through (a shape
+  // the primary regex didn't anticipate), strip it. CRITICAL: this must be
+  // FENCE-SHAPED (line-start fence → line-start closing fence), NOT a bare
+  // substring match — a substring backstop would delete legitimate PROSE that
+  // merely mentions the literal text "```chart" (e.g. a how-to answer explaining
+  // charting), and its `$` fallback would nuke everything to end-of-string on an
+  // unterminated mention. The line-anchored form only removes an actual fenced
+  // block and stops at the matching closing fence. `(?![A-Za-z0-9])` so
+  // "```chartreuse" prose isn't caught either.
+  if (/^[ \t]*```chart(?![A-Za-z0-9])/m.test(text)) {
+    text = text.replace(/^[ \t]*```chart(?![A-Za-z0-9])[\s\S]*?^[ \t]*```[ \t]*$/gm, "");
   }
   // Collapse the blank lines left where blocks were removed.
   return { text: text.replace(/\n{3,}/g, "\n\n").trim(), charts };
