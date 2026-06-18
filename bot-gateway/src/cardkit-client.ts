@@ -237,14 +237,18 @@ export function buildReasoningPanel(steps: string[], expanded: boolean): unknown
   };
 }
 
-/** Append the live reasoning panel (expanded) to the card — once, when the
- *  first step appears. Inserted before the conclusion via partial-update API. */
+/** Append the live reasoning panel (expanded) to the card — once, when the first
+ *  step appears. APPENDED (after the conclusion), NOT inserted before it, so the
+ *  layout matches finalizeCard's order [conclusion, evidence, reasoning]. If the
+ *  panel sat above the conclusion during streaming and below it at finalize, the
+ *  whole card would visibly re-layout at stream-end (the 分析过程 / 供研发复核
+ *  jumping position) — confusing the reader. Keeping the answer first and the
+ *  panel below it THROUGHOUT (streaming and finalized) means nothing reorders. */
 export async function appendReasoningPanel(cardId: string, steps: string[], sequence: number): Promise<void> {
   const panel = buildReasoningPanel(steps, true);
   if (!panel) return;
   await larkApi("POST", `/open-apis/cardkit/v1/cards/${cardId}/elements`, JSON.stringify({
-    type: "insert_before",
-    target_element_id: "conclusion",
+    type: "append",
     sequence,
     elements: JSON.stringify([panel]),
   }));
