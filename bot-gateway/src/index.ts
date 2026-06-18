@@ -356,6 +356,11 @@ async function runStreamingInvoke(
     );
   } finally {
     stopHeartbeat(); // ALWAYS clear the animation timer — no leak in the always-on process
+    // Drop any queued-but-unsent status/content frame so it can't repaint the
+    // live timer or stale "正在分析" text ONTO the card AFTER finalize runs (and
+    // so the finalize writes aren't stuck behind a backlog — the "停止 no response
+    // / card frozen" symptom). finalize uses one-shot write() which lands next.
+    writer.dropLanes("status", "content");
     abortControllers.delete(cardId);
   }
   const { status, answer, steps, aborted, error, timing } = result;

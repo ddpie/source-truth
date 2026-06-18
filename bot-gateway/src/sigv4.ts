@@ -253,6 +253,11 @@ export async function invokeRuntimeStreaming(
   let aborted = false;
   try {
     while (true) {
+      // Fast-path abort: if 停止 was clicked, stop reading immediately and also
+      // cancel the underlying stream so we don't keep consuming bytes after the
+      // user asked to stop (the read below would also reject on abort, but
+      // checking here makes the stop visibly prompt even between chunks).
+      if (signal?.aborted) { aborted = true; void reader.cancel().catch(() => {}); break; }
       const { done, value } = await reader.read();
       if (done) break;
       buf += decoder.decode(value, { stream: true });

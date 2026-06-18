@@ -89,6 +89,15 @@ export class CardWriter {
     this.chain = run.catch(() => undefined);
   }
 
+  /** Drop any pending (not-yet-run) coalesced frame for these lanes. Called
+   *  before finalize so a queued status/content frame can't repaint stale "正在
+   *  分析" text or the live timer ONTO the finalized card after it's done. A lane
+   *  whose slot is mid-execution still completes (harmless — finalize's full PUT
+   *  runs after it on the FIFO chain and overwrites). */
+  dropLanes(...lanes: string[]): void {
+    for (const lane of lanes) this.latestByLane.delete(lane);
+  }
+
   /** Current high-water sequence (for tests / diagnostics). */
   get currentSeq(): number {
     return this.seq;
