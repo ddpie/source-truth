@@ -100,6 +100,33 @@ def _align_paths(raw_json: str, tool_name: str, *, index_root: str, mount_root: 
     return json.dumps(data, ensure_ascii=False)
 
 
+def _parse_symbol_location(raw: str, query: str) -> tuple[str, int]:
+    """Pure parse of a symbol_search payload → index-space (uri, 0-based line).
+
+    Split out of _resolve_uri_line so the null-safe extraction is unit-testable
+    without a live codegraph subprocess. Raises ValueError for any unusable shape
+    (no results, null/non-dict symbol, missing location/line) so the caller
+    surfaces a clean "symbol not found" rather than a generic "{tool} failed".
+    """
+    data = json.loads(raw)
+    results = data.get("results") if isinstance(data, dict) else None
+    if not isinstance(results, list) or not results:
+        raise ValueError(f"no symbol matched query {query!r}")
+    # Null-safe chain (mirrors _align_paths.fix_location): a real partial hit can
+    # be `{"symbol": null}` or a non-dict; `.get("symbol", {})` only defaults a
+    # MISSING key, so a null VALUE would make `None.get("location")` raise
+    # AttributeError → mislabelled as an internal "{tool} failed".
+    top = results[0]
+    sym = top.get("symbol") if isinstance(top, dict) else None
+    loc = sym.get("location") if isinstance(sym, dict) else None
+    index_file = loc.get("file") if isinstance(loc, dict) else None
+    line = loc.get("line") if isinstance(loc, dict) else None
+    if not index_file or not isinstance(line, int):
+        raise ValueError(f"symbol match for {query!r} has no usable location")
+    # codegraph identifies a symbol by file URI + 0-based line (verified live).
+    return f"file://{index_file}", line
+
+
 def build_bridge(
     *,
     workspace: str,
@@ -137,17 +164,10 @@ def build_bridge(
         unusable index; ValueError if the symbol can't be located.
         """
         raw = await session.call_tool("codegraph_symbol_search", {"query": query})
-        data = json.loads(raw)
-        results = data.get("results")
-        if not isinstance(results, list) or not results:
-            raise ValueError(f"no symbol matched query {query!r}")
-        loc = results[0].get("symbol", {}).get("location", {})
-        index_file = loc.get("file")
-        line = loc.get("line")
-        if not index_file or not isinstance(line, int):
-            raise ValueError(f"symbol match for {query!r} has no usable location")
-        # codegraph identifies a symbol by file URI + 0-based line (verified live).
-        return f"file://{index_file}", line
+        # Pure, null-safe parse (unit-tested in test_http_bridge_resolve.py): any
+        # unusable shape (null/non-dict symbol, missing location) raises ValueError
+        # → clean "symbol not found", never a generic "{tool} failed".
+        return _parse_symbol_location(raw, query)
 
     async def _build_args(tool_name: str, query: str) -> dict[str, Any]:
         """Map the uniform `query` UX onto each tool's real argument shape."""

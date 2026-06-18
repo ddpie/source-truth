@@ -106,3 +106,40 @@ def test_malformed_json_is_unhealthy():
 
 def test_empty_content_is_unhealthy():
     assert CodegraphSession._classify(_Result(None), "codegraph_symbol_search")[0] is True
+
+
+# ── health AND-gates on a live worker thread (subprocess-death defense) ──────
+def test_healthy_is_false_when_worker_thread_is_dead():
+    # A subprocess that dies while idle could leave _healthy True between liveness
+    # probe ticks; /health must still report unhealthy because the worker thread
+    # is gone. The `healthy` property AND-gates on a live thread to guarantee that.
+    sess = CodegraphSession("/tmp/ws")
+    sess._healthy = True  # flag says healthy …
+    assert sess._thread is None  # … but no worker thread was ever started
+    assert sess.healthy is False  # AND-gate → reported unhealthy
+
+    class _DeadThread:
+        def is_alive(self) -> bool:
+            return False
+
+    sess._thread = _DeadThread()  # type: ignore[assignment]
+    assert sess.healthy is False  # dead thread → unhealthy even with _healthy True
+
+
+def test_needs_restart_when_thread_dead_or_wedged():
+    sess = CodegraphSession("/tmp/ws")
+    # No thread yet → needs (re)start.
+    assert sess._needs_restart() is True
+
+    class _LiveThread:
+        def is_alive(self) -> bool:
+            return True
+
+    sess._thread = _LiveThread()  # type: ignore[assignment]
+    # Alive but warmup not finished (_ready unset) → still coming up, do NOT restart.
+    sess._ready.clear()
+    assert sess._needs_restart() is False
+    # Alive, warmup finished, but unhealthy → wedged → needs restart.
+    sess._ready.set()
+    sess._healthy = False
+    assert sess._needs_restart() is True

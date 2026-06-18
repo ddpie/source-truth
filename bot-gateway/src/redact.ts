@@ -13,10 +13,50 @@ const PATTERNS: Array<[RegExp, string | ((...args: string[]) => string)]> = [
   [/AKIA[0-9A-Z]{16}/g, REDACTED],
   // PEM private key blocks (multi-line).
   [/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, REDACTED],
+  // JWTs (header.payload.signature). Both leading segments start with the
+  // base64url of '{"' = "eyJ"; each segment is terminated by a required literal
+  // '.' it can't consume, so no ReDoS. Bare JWTs (no key= prefix) are the common
+  // shape in auth-header constants / fixtures / env dumps the agent reads.
+  [/eyJ[A-Za-z0-9_-]{6,}\.eyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}/g, REDACTED],
   // Bearer tokens.
   [/Bearer\s+[A-Za-z0-9._-]{16,}/g, `Bearer ${REDACTED}`],
-  // secret= / appSecret= / token= / password= followed by a long value.
-  [/((?:app)?secret|token|password|passwd|api[_-]?key)(["']?\s*[:=]\s*["']?)([A-Za-z0-9._-]{12,})/gi,
+  // Basic-auth headers: "Basic <base64>" decodes straight to user:password.
+  // ANCHORED to an Authorization header (covers Proxy-Authorization too, whose
+  // suffix contains "Authorization:") + real base64 shape (core chars then 0-2
+  // '=' padding). Without the anchor, a bare "Basic <word>" matched ordinary
+  // prose ("Basic mechanics" → "Basic [已隐藏]") and corrupted answers — the
+  // prefix "Basic" is a common English word, unlike the other fixed prefixes.
+  [/(Authorization\s*:\s*)Basic\s+[A-Za-z0-9+/]{8,}={0,2}/gi,
+    (_m, pre: string) => `${pre}Basic ${REDACTED}`],
+  // High-distinctiveness, fixed-prefix vendor tokens (no key= needed; unique
+  // prefixes → near-zero false positives). Each is a single char-class with a
+  // length floor — no nested quantifier, no ReDoS.
+  [/xox[baprs]-[A-Za-z0-9-]{10,}/g, REDACTED],     // Slack
+  [/AIza[0-9A-Za-z_-]{35}/g, REDACTED],            // Google API key
+  [/npm_[A-Za-z0-9]{36,}/g, REDACTED],             // npm access token
+  [/pypi-[A-Za-z0-9_-]{16,}/g, REDACTED],          // PyPI API token
+  // GitHub personal access tokens (ghp_/gho_/ghs_/ghr_ + 36+ chars), no key prefix.
+  [/gh[pousr]_[A-Za-z0-9]{36,}/g, REDACTED],
+  // key=value secrets. The KEY alternation covers pwd/pass/private_key in addition
+  // to secret/token/password/api_key (client_secret/access_token already match via
+  // the secret/token substrings). The VALUE class is "everything up to a
+  // whitespace/quote/structural delimiter" so a base64 / path-style secret
+  // (containing / + =) is redacted IN FULL — the old [A-Za-z0-9._-]+ stopped at
+  // the first '/'+'=' and leaked the tail (AWS secret access keys, SAS tokens).
+  // The value is a single negated char-class with a length floor → no ReDoS; the
+  // recognized key prefix keeps it anchored so prose isn't over-redacted.
+  // The KEY may carry surrounding identifier chars (bounded {0,32} → no ReDoS),
+  // so AWS_SECRET_ACCESS_KEY / db_password / X_API_KEY all match via their inner
+  // token. Bare "pass" is guarded by (?![a-z]) so it matches pass=/db_pass= but
+  // NOT passing_score=/passenger=. The VALUE is guarded by (?![\d.,]+(?:\s|$|...))
+  // — i.e. a PURELY-NUMERIC value is NOT redacted: real secrets are never
+  // all-digits, but game-balance fields whose NAME embeds a token word
+  // (token_reward=50000000, access_key_count=99999999) are exactly the NUMBERS
+  // this product must surface to planners. So we redact only non-numeric values
+  // (actual keys/tokens), preserving numeric config. (A secret that is coincidentally
+  // all-digits is implausible; the conn-string / vendor-prefix patterns still
+  // cover other shapes.)
+  [/([A-Za-z0-9_]{0,32}(?:secret|token|password|passwd|pwd|pass(?![a-z])|api[_-]?key|private[_-]?key|access[_-]?key)[A-Za-z0-9_]{0,32})(["']?\s*[:=]\s*["']?)(?![\d.,]+(?:["'\s,;)}\]]|$))([^\s"'`,;)}\]]{8,})/gi,
     (_m, k: string, sep: string) => `${k}${sep}${REDACTED}`],
   // Connection-string inline password: scheme://user:PASSWORD@host (jdbc:mysql://,
   // mongodb://, redis://, https:// with userinfo …). The password sits between
@@ -33,11 +73,13 @@ const PATTERNS: Array<[RegExp, string | ((...args: string[]) => string)]> = [
   // catastrophically — and a {1,256} cap on the password would silently LEAK a
   // password longer than 256 chars (long tokens/JWTs used as a connection
   // password are common) by failing the whole match. Real schemes are short, so
-  // {0,39} covers them with no blowup.
-  [/([a-zA-Z][a-zA-Z0-9+.-]{0,39}:\/\/[^\s:@/]*):([^\s:@/]+)@/g,
+  // {0,39} covers them with no blowup. The password class EXCLUDES '@' (its
+  // terminator) but ALLOWS '/' so a base64/AWS-secret-style password containing
+  // '/' (e.g. wJalrXUt.../K7MDENG...) is fully redacted rather than failing the
+  // whole match at the first '/' and leaking it; the userinfo (pre-':') still
+  // excludes '/' so a plain "http://host/path" with no '@' can't false-match.
+  [/([a-zA-Z][a-zA-Z0-9+.-]{0,39}:\/\/[^\s:@/]*):([^\s@]+)@/g,
     (_m, pre: string) => `${pre}:${REDACTED}@`],
-  // GitHub personal access tokens (ghp_/gho_/ghs_/ghr_ + 36+ chars), no key prefix.
-  [/gh[pousr]_[A-Za-z0-9]{36,}/g, REDACTED],
 ];
 
 export function redactSensitive(text: string): string {
@@ -76,7 +118,16 @@ export function redactDeep<T>(value: T): T {
   if (Array.isArray(value)) return value.map((v) => redactDeep(v)) as unknown as T;
   if (value && typeof value === "object") {
     const out: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(value as Record<string, unknown>)) out[k] = redactDeep(v);
+    // Redact the KEY as well as the value: VChart renders data-record / series /
+    // legend / tooltip KEYS (field names taken from the data the agent read) into
+    // the group-visible card, so a secret or /mnt/repo path in a key position
+    // would leak unredacted if we copied k verbatim. Routing k through
+    // redactSensitive closes that hole (the only redaction path that emits raw
+    // object keys). If two keys collapse to the same redacted string they clash —
+    // acceptable for a safety net (a secret-bearing key isn't a stable id).
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      out[redactSensitive(k)] = redactDeep(v);
+    }
     return out as unknown as T;
   }
   return value;

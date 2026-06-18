@@ -97,6 +97,108 @@ describe("redactSensitive", () => {
       expect(Date.now() - t0).toBeLessThan(1000); // was ~18000ms before the fix
     }
   });
+
+  it("redacts a bare JWT (eyJ.eyJ.sig) with no key prefix", () => {
+    const jwt = "eyJhbGciOiJIUzI1Ni9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36";
+    const out = redactSensitive(`Authorization header: ${jwt}`);
+    expect(out).not.toContain(jwt);
+    expect(out).toContain("[已隐藏]");
+  });
+
+  it("redacts vendor tokens with no key prefix (Slack/Google/npm/PyPI)", () => {
+    for (const tok of [
+      "xoxb-2345678901-2345678901234-AbCdEfGhIjKlMnOpQrStUvWx",
+      "AIzaSyD-1234567890abcdefghijklmnopqrstuv",
+      "npm_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789",
+      "pypi-AgEIcHlwaS5vcmcAAAAAAAAAAA",
+    ]) {
+      expect(redactSensitive(`配置里有 ${tok} 这一行`)).not.toContain(tok);
+    }
+  });
+
+  it("redacts a Basic-auth header (base64 of user:pass)", () => {
+    const b64 = "YWRtaW46c3VwZXJzZWNyZXRwYXNzd29yZA==";
+    const out = redactSensitive(`Authorization: Basic ${b64}`);
+    expect(out).not.toContain(b64);
+    expect(out).toContain("Basic [已隐藏]");
+  });
+
+  it("does NOT touch the English word 'Basic' in ordinary prose (anchor to header)", () => {
+    // Basic-auth redaction is anchored to "Authorization:" — a bare "Basic <word>"
+    // is normal prose ("Basic mechanics") and must survive untouched, or the
+    // non-technical answer gets mangled mid-sentence.
+    for (const prose of [
+      "Basic mechanics overview of the system",
+      "Basic configuration loads first",
+      "Basic 机制：连击伤害提升到 1.5 倍",
+    ]) {
+      expect(redactSensitive(prose)).toBe(prose);
+    }
+  });
+
+  it("redacts the FULL value when a secret contains base64 chars (/ + =)", () => {
+    // The old value class [A-Za-z0-9._-]+ stopped at the first '/' and leaked the
+    // tail. AWS secret access keys and base64 tokens routinely contain / + =.
+    for (const [line, leakNeedle] of [
+      ["password=YWRtaW46c3VwZXJ/c2VjcmV0+cGFzcw==", "c2VjcmV0"],
+      ["AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", "K7MDENG"],
+    ] as const) {
+      expect(redactSensitive(line)).not.toContain(leakNeedle);
+    }
+  });
+
+  it("redacts pwd= / pass= / private_key= keyed secrets", () => {
+    for (const line of [
+      "pwd=My_Str0ng_Pass99x",
+      "pass=My_Str0ng_Pass99x",
+      "private_key=My_Str0ng_Pass99xZ",
+      "db_password: hunter2hunter2hunter2",
+    ]) {
+      const out = redactSensitive(line);
+      expect(out).toContain("[已隐藏]");
+      expect(out).not.toMatch(/My_Str0ng_Pass99x|hunter2hunter2hunter2/);
+    }
+  });
+
+  it("redacts a connection-string password containing '/' (was a total leak)", () => {
+    // password group once excluded '/', so it couldn't reach the closing '@' and
+    // the WHOLE match failed → the entire password leaked.
+    const out = redactSensitive("mongodb://u:pa/sssecretword@h:27017/db");
+    expect(out).not.toContain("sssecretword");
+    expect(out).toContain("@h:27017/db");
+  });
+
+  it("does NOT over-redact game-balance numbers whose field merely contains 'pass'", () => {
+    // This product surfaces NUMBERS for planners; a value must not be redacted
+    // just because the field name contains the substring 'pass'.
+    for (const safe of ["passing_score=85", "passenger_count=120", "the password policy needs 8 chars"]) {
+      expect(redactSensitive(safe)).toBe(safe);
+    }
+  });
+
+  it("does NOT over-redact a NUMERIC value even when the field name embeds a secret word", () => {
+    // token_reward / access_key_count / max_password_attempts are game-config
+    // NUMBERS planners ask about — a real secret is never all-digits, so a numeric
+    // value is preserved even though the field name contains token/access_key/etc.
+    for (const safe of [
+      "token_reward=50000000",
+      "access_key_count=99999999",
+      "item_pass_rate=87654321",
+      "max_password_attempts=10000000",
+    ]) {
+      expect(redactSensitive(safe)).toBe(safe);
+    }
+  });
+
+  it("STILL redacts a non-numeric secret value when the field embeds a secret word", () => {
+    // The numeric-value carve-out must not let an actual key/token through.
+    for (const [line, secret] of [
+      ["session_secret=Xj3kLmN0pQrStUvWx", "Xj3kLmN0pQrStUvWx"],
+      ["api_token=A1b2C3d4E5f6G7h8", "A1b2C3d4E5f6G7h8"],
+    ] as const) {
+      expect(redactSensitive(line)).not.toContain(secret);
+    }
+  });
 });
 
 describe("redactSteps", () => {
@@ -143,5 +245,15 @@ describe("redactDeep (chart specs)", () => {
   it("preserves non-string scalars and shape", () => {
     const spec = { type: "line", n: 7, flag: true, nil: null, arr: [1, 2, 3] };
     expect(redactDeep(spec)).toEqual(spec);
+  });
+
+  it("scrubs secrets/paths in object KEYS, not just values (VChart renders keys)", () => {
+    const spec = {
+      data: { values: [{ "appSecret=Xj3kLmN0pQrStUvWxYz12345678": 42, "/mnt/repo/config/Hero.json": 1 }] },
+    };
+    const out = redactDeep(spec) as { data: { values: Array<Record<string, number>> } };
+    const keys = Object.keys(out.data.values[0]);
+    expect(keys.some((k) => k.includes("Xj3kLmN0pQrStUvWxYz12345678"))).toBe(false);
+    expect(keys.some((k) => k.includes("/mnt/repo/"))).toBe(false);
   });
 });
