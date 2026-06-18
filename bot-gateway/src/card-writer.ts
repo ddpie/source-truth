@@ -23,6 +23,17 @@
 export class CardWriter {
   private chain: Promise<void> = Promise.resolve();
   private seq: number;
+  // Coalescing lanes: a "lane" is a single card element whose updates are
+  // latest-wins (the status timer, the conclusion typewriter). Each carries the
+  // FULL current value, so intermediate frames are stale and droppable. We keep
+  // only the latest pending fn per lane + whether that lane already has a slot in
+  // the FIFO chain. This bounds the queue to ~1 write per lane regardless of how
+  // fast the heartbeat/typewriter ticks — so a slow lark-cli spawn can't let a
+  // backlog of stale status frames pile up and make the timer crawl seconds
+  // behind real time (the "卡在 11s" complaint). One-shot writes (append, stop
+  // button, finalize) bypass coalescing via write().
+  private latestByLane = new Map<string, (seq: number) => Promise<void>>();
+  private laneQueued = new Set<string>();
 
   /** startSeq is the last sequence already consumed before this writer takes
    *  over (e.g. the queued-card "排队中" header used seq 1); the first write gets
@@ -32,10 +43,11 @@ export class CardWriter {
   }
 
   /**
-   * Enqueue a card write. `fn` receives the sequence number to use and must
-   * perform exactly one CardKit call with it. Returns a promise that settles when
-   * THIS write completes (resolves even if the write failed — failures are
-   * swallowed so one bad write can't stall every later write).
+   * Enqueue a one-shot card write (never coalesced/dropped — use for appends,
+   * the stop button, and the finalize sequence). `fn` receives the sequence to
+   * use and must perform exactly one CardKit call. Resolves when THIS write
+   * completes (resolves even on failure — swallowed so one bad write can't stall
+   * the chain).
    */
   write(fn: (seq: number) => Promise<void>): Promise<void> {
     const run = this.chain.then(async () => {
@@ -46,9 +58,35 @@ export class CardWriter {
         /* best-effort: a dropped card update must never wedge the queue */
       }
     });
-    // Keep the chain alive regardless of this write's outcome.
     this.chain = run.catch(() => undefined);
     return run;
+  }
+
+  /**
+   * Enqueue a LATEST-WINS write for `lane`. If a write for this lane is already
+   * pending (queued but not yet run), its fn is replaced by this one — the stale
+   * frame is dropped — instead of appending another slot. The sequence is still
+   * assigned at run time (monotonic, in FIFO order across all lanes), so CardKit
+   * never sees an out-of-order sequence. Use for the status timer and conclusion
+   * typewriter, where only the newest value matters.
+   */
+  coalesce(lane: string, fn: (seq: number) => Promise<void>): void {
+    this.latestByLane.set(lane, fn); // latest wins
+    if (this.laneQueued.has(lane)) return; // a slot is already scheduled for this lane
+    this.laneQueued.add(lane);
+    const run = this.chain.then(async () => {
+      this.laneQueued.delete(lane);
+      const latest = this.latestByLane.get(lane);
+      this.latestByLane.delete(lane);
+      if (!latest) return;
+      const seq = ++this.seq;
+      try {
+        await latest(seq);
+      } catch {
+        /* best-effort */
+      }
+    });
+    this.chain = run.catch(() => undefined);
   }
 
   /** Current high-water sequence (for tests / diagnostics). */
