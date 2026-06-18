@@ -20,8 +20,6 @@
  *   FEISHU_APP_SECRET   app secret
  */
 
-import { spawn } from "node:child_process";
-
 import { fromNodeProviderChain } from "@aws-sdk/credential-providers";
 
 import { invokeRuntimeStreaming, classifyInvokeOutcome, isTurnCapError, type AwsCredentials } from "./sigv4";
@@ -35,6 +33,7 @@ import { splitEvidence } from "./extract-evidence";
 import { handleMessageEvent, type InvokeFn } from "./handle-event";
 import { sdkEventToImEvent } from "./sdk-event";
 import { sendReply } from "./reply";
+import { imReply, imSendToChat } from "./feishu-http";
 import { getSessionId } from "./session-map";
 import { SessionSerializer } from "./serialize-session";
 import { CardWriter } from "./card-writer";
@@ -129,27 +128,19 @@ async function sendStreamingCard(
   const isFollowUp = "chatId" in target;
   const summary = isFollowUp ? `↳ 追问：${prompt}` : prompt;
   const cardId = await createCard(summary, isFollowUp);
-  const sendArgs = "messageId" in target
-    ? ["im", "+messages-reply", "--as", "bot", "--message-id", target.messageId,
-       "--msg-type", "interactive", "--content", buildSendCardContent(cardId)]
-    : ["im", "+messages-send", "--as", "bot", "--chat-id", target.chatId,
-       "--msg-type", "interactive", "--content", buildSendCardContent(cardId)];
-  const sendChild = spawn("lark-cli", sendArgs, { stdio: ["ignore", "pipe", "inherit"] });
-  let sendOut = "";
-  sendChild.stdout.on("data", (d) => (sendOut += d));
-  await new Promise<void>((res, rej) => {
-    sendChild.on("exit", (c) => (c === 0 ? res() : rej(new Error(`send card exited ${c}`))));
-    sendChild.on("error", rej);
-  });
+  // Send the card in-process (HTTP), not via `spawn lark-cli` (~800ms): this is
+  // on the first-render path, so the spawn cost delayed every answer's first
+  // paint. Returns the sent message_id for the follow-up registry.
+  const cardContent = buildSendCardContent(cardId);
+  const sentMessageId = "messageId" in target
+    ? await imReply(target.messageId, "interactive", cardContent)
+    : await imSendToChat(target.chatId, "interactive", cardContent);
   // Record message_id → card_id so a follow-up click (which only carries
-  // open_message_id) can find this card and disable the clicked button.
-  try {
-    const sentMessageId = (JSON.parse(sendOut) as { data?: { message_id?: string } })?.data?.message_id;
-    // Remember the sessionId too, so a follow-up click on THIS card resumes the
-    // exact same warm session (preserves conversation context even for threaded
-    // questions, whose thread_id the callback payload doesn't carry).
-    if (sentMessageId) rememberCard(sentMessageId, cardId, sessionId);
-  } catch { /* best-effort: button-disable is a visual nicety */ }
+  // open_message_id) can find this card and disable the clicked button. Remember
+  // the sessionId too, so a follow-up on THIS card resumes the same warm session
+  // (preserves context even for threaded questions whose thread_id the callback
+  // payload doesn't carry).
+  if (sentMessageId) rememberCard(sentMessageId, cardId, sessionId);
   log({ event: "card_sent", target: hashUserId(targetKey), card: cardId });
 
   // Remove the "processing" reaction now that the card is visible.

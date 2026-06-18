@@ -14,7 +14,7 @@
  * the same /open-apis/cardkit/v1 endpoints the node-sdk hits.
  */
 
-import { spawn } from "node:child_process";
+import { feishuApi } from "./feishu-http";
 
 // ── pure request builders (unit-tested) ──────────────────────────────────────
 
@@ -139,49 +139,26 @@ export async function updateStage(
   await larkApi("PUT", `/open-apis/cardkit/v1/cards/${cardId}`, buildStageBody(title, template, conclusion, sequence));
 }
 
-// ── lark-cli runners (integration) ───────────────────────────────────────────
+// ── CardKit transport (in-process HTTP) ──────────────────────────────────────
 
-// Hard ceiling on a single lark-cli call. A spawned `lark-cli api` that hangs
-// (stalled network with no TCP timeout, never exits, never errors) would leave
-// its promise unsettled forever. That is benign for the fire-and-forget content
-// updates, but the live status-line heartbeat gates the next tick on the prior
-// write settling (statusInFlight) — an unsettled write freezes the timer for the
-// rest of the run, the exact "frozen animation" symptom the status line exists to
-// kill. So every call is bounded: on timeout we SIGKILL the child and reject, which
-// settles the promise and frees the heartbeat.
-const LARK_API_TIMEOUT_MS = 15000;
-
+// Every CardKit write goes through the Feishu OpenAPI directly via `fetch` with a
+// cached tenant_access_token — NOT `spawn lark-cli`. A lark-cli spawn costs ~800ms
+// (Node cold start + token handling); a direct HTTPS call is ~50-100ms. On the
+// serial card-write queue that was the difference between the live timer updating
+// every ~1-2s (laggy) and several times a second (smooth), and it speeds up the
+// conclusion typewriter too. feishuApi enforces the same contract the old wrapper
+// did (timeout, non-2xx → throw, non-zero Feishu code → throw) plus a one-shot
+// 401 token-refresh retry. The data builders below emit a JSON STRING (historical
+// shape); we parse it back to an object for the JSON body. Kept as a thin wrapper
+// so all existing callers (build*Body → larkApi) are unchanged.
 function larkApi(method: string, path: string, data: string): Promise<unknown> {
-  return new Promise((resolve, reject) => {
-    const child = spawn("lark-cli", ["api", method, path, "--as", "bot", "--data", data], {
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    let out = "";
-    let err = "";
-    let settled = false;
-    const finish = (fn: () => void) => { if (settled) return; settled = true; clearTimeout(timer); fn(); };
-    const timer = setTimeout(() => {
-      child.kill("SIGKILL");
-      finish(() => reject(new Error(`lark-cli api ${method} ${path} timed out after ${LARK_API_TIMEOUT_MS}ms`)));
-    }, LARK_API_TIMEOUT_MS);
-    if (typeof timer.unref === "function") timer.unref();
-    child.stdout.on("data", (d) => (out += d));
-    child.stderr.on("data", (d) => (err += d));
-    child.on("exit", (code) => {
-      // kill() also fires 'exit'; the `settled` guard makes this a no-op then.
-      if (code !== 0) return finish(() => reject(new Error(`lark-cli api ${method} ${path} exited ${code}: ${err}`)));
-      try {
-        const json = JSON.parse(out) as { code?: number; msg?: string };
-        if (json.code !== undefined && json.code !== 0) {
-          return finish(() => reject(new Error(`CardKit ${path} code ${json.code}: ${json.msg}`)));
-        }
-        finish(() => resolve(json));
-      } catch (e) {
-        finish(() => reject(new Error(`bad CardKit response: ${out.slice(0, 200)} (${String(e)})`)));
-      }
-    });
-    child.on("error", (e) => finish(() => reject(e)));
-  });
+  let body: unknown;
+  try {
+    body = JSON.parse(data);
+  } catch (e) {
+    return Promise.reject(new Error(`bad CardKit request body for ${method} ${path}: ${String(e)}`));
+  }
+  return feishuApi(method as "GET" | "POST" | "PUT" | "PATCH" | "DELETE", path, body);
 }
 
 /** Create a streaming card; returns its card_id. summary = chat-list preview. */
