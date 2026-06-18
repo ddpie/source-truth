@@ -215,14 +215,13 @@ async function runStreamingInvoke(
   // EVERY phase (thinking, analyzing, streaming) without disturbing anything else.
   // The SECONDS counter is the honest signal (monotonic = not frozen); the spinner
   // is decoration; the watchdog says so honestly when no SSE event arrived lately.
-  // Moon-phase animation (low-frequency friendly): cycle 🌑🌒🌓🌔🌕🌖🌗🌘 paired
-  // with the live seconds counter. Emoji are colorful/lively (nicer than ASCII
-  // dots), and the ever-advancing seconds carry the "still working" signal, so
-  // even at our ~2-5 writes/s cadence it never looks frozen/laggy.
-  const MOON = ["🌑", "🌒", "🌓", "🌔", "🌕", "🌖", "🌗", "🌘"];
+  // Typewriter-ellipsis animation (community-standard "AI is typing…" style:
+  // restrained + informational, not a flashy spinner). The dots cycle . → .. → …
+  // and the live seconds counter carries the honest "still working" signal, so it
+  // reads as professional/calm and never looks frozen at the low write cadence.
+  const ELLIPSIS = ["·", "··", "···"];
   const startedAt = Date.now();
-  let lastEventAt = Date.now();   // updated on every real onChunk (real progress)
-  let moonFrame = 0;
+  let frame = 0;
   let statusAppended = false;
   let heartbeat: ReturnType<typeof setInterval> | undefined;
   const stopHeartbeat = () => { if (heartbeat) { clearInterval(heartbeat); heartbeat = undefined; } };
@@ -248,15 +247,11 @@ async function runStreamingInvoke(
     // the answer text IS the visible motion — skip the status write this tick. The
     // elapsed counter still advances on the next idle tick (monotonic, honest).
     if (now - lastUpdate < STREAMING_YIELD_MS) return;
-    // Moon-phase frame cycles each write.
-    const moon = MOON[moonFrame++ % MOON.length];
-    const sinceEvent = now - lastEventAt;
+    // Cycle the ellipsis . → .. → … each write; seconds counter is the live signal.
+    const dots = ELLIPSIS[frame++ % ELLIPSIS.length];
     const elapsed = formatElapsed(now - startedAt);  // s / Mm Ss / Hh Mm
     const phaseWord = stage === "thinking" ? "正在思考" : "正在分析";
-    // Watchdog: >20s with no new event → say so honestly, don't fake progress.
-    const text = sinceEvent > 20000
-      ? `${moon} ${phaseWord}（较久，已 ${elapsed}）`
-      : `${moon} ${phaseWord} ${elapsed}`;
+    const text = `${phaseWord}${dots} ${elapsed}`;
     lastStatusWrite = now;
     // Latest-wins lane: if a status frame is still queued, this one REPLACES it
     // (stale frames dropped) instead of piling up behind a slow lark-cli spawn —
@@ -290,7 +285,6 @@ async function runStreamingInvoke(
     (textSoFar, liveSteps) => {
       if (timedOut) return;
       if (Date.now() > deadline) { timedOut = true; return; }
-      lastEventAt = Date.now(); // real SSE activity → resets the watchdog
       // Stage 2 (思考→分析): on the first tool call, just append the 停止 button.
       // We deliberately do NOT full-PUT the header here anymore — that wiped the
       // status line / panel and is why the timer used to freeze. The phase word
