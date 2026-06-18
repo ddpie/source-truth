@@ -120,6 +120,14 @@ describe("stream completion flag (sawResult) — truncation detection", () => {
     expect(st.error).toBeNull();      // no explicit backend error — the gap is the missing terminal event
   });
 
+  it("does NOT set sawResult on the SDK init message (subtype:init, no run summary)", () => {
+    const st = run([
+      '{"subtype":"init","data":{"session_id":"s"}}',  // SDK system init — NOT terminal
+      '{"content":[{"text":"答案前半"}]}',              // then a cut
+    ]);
+    expect(st.sawResult).toBe(false); // init must not be mistaken for the terminal event
+  });
+
   it("sets sawResult on the is_error terminal ResultMessage too (turn cap)", () => {
     const st = run([
       '{"content":[{"text":"partial"}]}',

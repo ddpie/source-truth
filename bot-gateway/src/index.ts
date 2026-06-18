@@ -801,7 +801,22 @@ async function main(): Promise<void> {
     onReconnecting: () => log({ event: "sdk_wsclient_reconnecting" }),
     onReconnected: () => log({ event: "sdk_wsclient_reconnected" }),
     onError: (err: unknown) => {
-      log({ event: "ws_terminal_error", error: String(err) });
+      const msg = String(err);
+      // exceed_conn_limit (code 1000040350) is the cluster-mode "too many
+      // connections for this app" case — NOT permanent. It happens when a previous
+      // gateway's WS connection hasn't been torn down server-side yet (or a stray
+      // consumer lingers). Exiting immediately would race a supervised restart into
+      // the SAME limit → tight crash-loop, gateway dark throughout. So for THIS code
+      // only, wait a randomized backoff (let the stale peer drop) and retry start()
+      // in-process instead of exiting. Truly-terminal codes (forbidden/auth_failed —
+      // bad/revoked creds) still exit(1) so the supervisor restarts with fresh state.
+      if (msg.includes("1000040350") || msg.includes("exceed_conn_limit")) {
+        const backoffMs = 3000 + Math.floor(Math.random() * 4000);
+        log({ event: "ws_conn_limit_retry", error: msg, backoffMs });
+        setTimeout(() => { try { ws.start({ eventDispatcher: dispatcher }); } catch (e) { log({ event: "ws_retry_failed", error: String(e) }); } }, backoffMs);
+        return;
+      }
+      log({ event: "ws_terminal_error", error: msg });
       // Terminal (non-retryable) — don't run dark. Exit so the supervisor restarts.
       process.exit(1);
     },
