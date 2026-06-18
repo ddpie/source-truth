@@ -183,6 +183,14 @@ def build_options_dict(
 
     opts: dict[str, Any] = {
         "system_prompt": system_prompt,
+        # Anchor the agent's working dir to the repo mount. The container WORKDIR is
+        # /app (the assistant's OWN code); without this, a reflexive relative
+        # Glob/Read lands there and the model wastes 1-2 opening turns discovering
+        # "this isn't the game project" before re-orienting to /mnt/repo. Defense-
+        # in-depth alongside the system-prompt orientation block (a stray relative
+        # path now lands INSIDE the repo). Falls back gracefully if the mount path
+        # differs (PATH_ALIGN/mount is /mnt/repo across the deploy; see path_align).
+        "cwd": os.environ.get("REPO_MOUNT_ROOT", "/mnt/repo"),
         "tools": tools,
         "allowed_tools": allowed_tools,
         "disallowed_tools": list(WRITE_EXEC_TOOLS) + list(CODEGRAPH_WRITE_TOOLS),

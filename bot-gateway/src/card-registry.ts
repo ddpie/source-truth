@@ -43,6 +43,11 @@ export interface CardEntry {
    *  conversation chain. Walking parentMessageId back collects the WHOLE history
    *  so multi-step 追问/reply串 carry the full context, not just the last turn. */
   parentMessageId?: string;
+  /** open_id of the user who asked this turn's question. A bare reply (no @) to a
+   *  bot card is auto-answered only when it comes from THIS asker — so one card
+   *  doesn't let every group member trigger an invoke (cost), and a bot replying
+   *  to our card never matches an asker. Other members must still @-mention. */
+  askerOpenId?: string;
 }
 
 /** One prior turn in a replayed conversation chain (oldest→newest order). */
@@ -56,12 +61,13 @@ export function rememberCard(
   sessionId?: string,
   question?: string,
   parentMessageId?: string,
+  askerOpenId?: string,
 ): void {
   if (!messageId || !cardId) return;
   // Re-insert to keep Map insertion order = recency for eviction.
   const prev = registry.get(messageId);
   registry.delete(messageId);
-  registry.set(messageId, { cardId, sessionId, question, answer: prev?.answer, parentMessageId });
+  registry.set(messageId, { cardId, sessionId, question, answer: prev?.answer, parentMessageId, askerOpenId });
   if (registry.size > MAX_ENTRIES) {
     const oldest = registry.keys().next().value;
     if (oldest !== undefined) registry.delete(oldest);

@@ -129,6 +129,42 @@ def test_does_not_over_dedup_distinct_files(tmp_path: Path):
     assert out["count"] == 2, out  # distinct basenames → both kept
 
 
+def test_root_file_not_folded_with_nested_same_name(tmp_path: Path):
+    # A repo-ROOT file and a nested file sharing a basename + line + text must NOT
+    # fold: the root file has no top-level dir to drop, so it must stay distinct
+    # from a nested file whose suffix degenerates to the same basename. (Regression
+    # for the bare-basename degeneration the docstring promises it avoids.)
+    (tmp_path / "Config.cs").write_text("int v = ROOT_TOKEN;\n", encoding="utf-8")
+    (tmp_path / "legacy").mkdir()
+    (tmp_path / "legacy" / "Config.cs").write_text("int v = ROOT_TOKEN;\n", encoding="utf-8")
+    out = file_search.run_search("ROOT_TOKEN", local_root=str(tmp_path), mount_root="/mnt/repo")
+    assert out["count"] == 2, out  # /Config.cs ≠ /legacy/Config.cs → both kept
+    assert out["deduped"] == 0, out
+
+
+def test_scan_row_cap_bounds_heavy_duplication(tmp_path: Path):
+    # Under pathological duplication almost every hit is a fold (never appends), so
+    # the max_matches break can't fire — the scan must still be bounded by
+    # SCAN_ROW_CAP so the loop can't iterate unbounded output. Force a tiny cap and
+    # assert truncation kicks in well before processing everything.
+    import file_search as fs
+    orig = fs.SCAN_ROW_CAP
+    fs.SCAN_ROW_CAP = 5
+    try:
+        # Many identical copies (all fold to one match) — rows processed >> 5.
+        for i in range(20):
+            d = tmp_path / f"copy_{i}" / "Game"
+            d.mkdir(parents=True)
+            (d / "Enemy.cs").write_text("int Damage = CAP_TOKEN;\n", encoding="utf-8")
+        out = fs.run_search("CAP_TOKEN", local_root=str(tmp_path), mount_root="/mnt/repo")
+        # Folds to 1 kept match, but the scan stopped at the row cap (5 rows seen).
+        assert out["count"] == 1, out
+        assert out["truncated"] is True, out
+        assert out["deduped"] <= fs.SCAN_ROW_CAP, out
+    finally:
+        fs.SCAN_ROW_CAP = orig
+
+
 def test_same_basename_collapse_is_never_silent(tmp_path: Path):
     # Worst case for any content-fold: two genuinely-distinct files that DO share
     # the same sub-path tail + line + text (moduleA/Utils.cs vs moduleB/Utils.cs,
