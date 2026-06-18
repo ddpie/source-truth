@@ -37,6 +37,14 @@ const PATTERNS: Array<[RegExp, string | ((...args: string[]) => string)]> = [
   [/pypi-[A-Za-z0-9_-]{16,}/g, REDACTED],          // PyPI API token
   // GitHub personal access tokens (ghp_/gho_/ghs_/ghr_ + 36+ chars), no key prefix.
   [/gh[pousr]_[A-Za-z0-9]{36,}/g, REDACTED],
+  // Feishu/Lark access tokens: tenant_access_token (t-), app_access_token (a-),
+  // user_access_token (u-) — bare "<x>-<20+ chars>" shape with NO key= prefix, so
+  // the keyed rule below misses a bare echo. The body is a CONTINUOUS run of
+  // [A-Za-z0-9_] (NO internal '-'): real Feishu tokens are base64url-ish with no
+  // mid-token hyphen, and forbidding '-' in the body avoids over-redacting benign
+  // kebab-case identifiers like "a-very-long-kebab-case-name" (verified: those
+  // contain '-' word-breaks and so no longer match). Single char-class → no ReDoS.
+  [/\b[tau]-[A-Za-z0-9_]{20,}/g, REDACTED],
   // key=value secrets. The KEY alternation covers pwd/pass/private_key in addition
   // to secret/token/password/api_key (client_secret/access_token already match via
   // the secret/token substrings). The VALUE class is "everything up to a
@@ -89,6 +97,15 @@ export function redactSensitive(text: string): string {
       ? out.replace(re, repl as (...args: string[]) => string)
       : out.replace(re, repl);
   }
+  // EXACT-match the process's OWN Feishu app secret. The app secret is ~32 chars
+  // with NO fixed prefix/shape, so no general pattern can catch it without heavy
+  // false positives — but we hold the exact value, so a literal replace is a
+  // zero-false-positive, 100%-reliable catch for the single most sensitive string
+  // the system possesses (covers a bare echo with no key= prefix). Length floor
+  // avoids nuking a short/empty env value. Recomputed each call (cheap) so a
+  // rotated secret is picked up without restart.
+  const appSecret = process.env.FEISHU_APP_SECRET;
+  if (appSecret && appSecret.length >= 12) out = out.split(appSecret).join(REDACTED);
   // Strip the internal EFS mount prefix; keep the meaningful relative path so
   // code citations (file:line) still work, just without exposing /mnt/repo.
   out = out.replace(/\/mnt\/repo\//g, "");

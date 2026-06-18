@@ -81,6 +81,11 @@ def test_build_options_dict_enforces_readonly_availability():
     assert opts["permission_mode"] == "dontAsk"
     # Only the CodeGraph MCP server we pass may load — no project/user/plugin leak.
     assert opts["strict_mcp_config"] is True
+    # ISOLATION: load NO filesystem settings. Unset, the SDK loads user+project
+    # settings AND project CLAUDE.md from cwd (=/mnt/repo, the attacker-influenceable
+    # repo mount) as TRUSTED INSTRUCTIONS — an instruction-channel injection that
+    # bypasses the in-prompt 防注入 guard. [] = full isolation; this is load-bearing.
+    assert opts["setting_sources"] == []
     # Token-level streaming MUST be on, or the gateway card freezes on "正在分析…"
     # for the whole run then dumps the answer at once (no typewriter).
     assert opts["include_partial_messages"] is True

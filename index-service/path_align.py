@@ -13,8 +13,13 @@ Both forms (plus bare relative) are normalized and re-rooted at ``mount_root``.
 ``format_location`` consumes the full ``symbol.location`` dict
 (``{file, line, column, end_line, end_column}``) into a ``path:line`` reference.
 
-Security: any path that resolves outside the repo root is rejected, so a stray
-CodeGraph path can never point the agent at files outside ``/mnt/repo``.
+Security: any path that LEXICALLY resolves outside the repo root is rejected
+(``..`` escapes, sibling-prefix paths), so a stray CodeGraph path can never point
+the agent at files outside ``/mnt/repo``. NOTE this is a LEXICAL guard only — it
+does not follow symlinks, so a symlink INSIDE the repo whose target is outside is
+not detected. That is acceptable for the MVP (single trusted main-branch repo,
+read-only mount); add ``os.path.realpath`` re-validation if untrusted symlinks
+ever enter the indexed tree.
 """
 
 from __future__ import annotations
