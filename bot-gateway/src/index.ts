@@ -229,7 +229,6 @@ async function runStreamingInvoke(
   let lastEventAt = Date.now();   // updated on every real onChunk (real progress)
   let spinFrame = 0;
   let statusAppended = false;
-  let statusInFlight = false;     // serialize status updates (avoid seq races / pile-up)
   let heartbeat: ReturnType<typeof setInterval> | undefined;
   const stopHeartbeat = () => { if (heartbeat) { clearInterval(heartbeat); heartbeat = undefined; } };
   // Refresh cadence: the dominant cost is the THINKING/ANALYZING phase (live data:
@@ -245,10 +244,10 @@ async function runStreamingInvoke(
   heartbeat = setInterval(() => {
     if (timedOut || Date.now() > deadline) { stopHeartbeat(); return; }
     const now = Date.now();
-    // Rate-limit the actual network write; also skip if a prior write is still in
-    // flight — prevents request pile-up under a slow API (the writer serializes
-    // ordering, this just avoids queueing a backlog of stale status frames).
-    if (statusInFlight || now - lastStatusWrite < STATUS_WRITE_MS) return;
+    // Throttle the cadence. Coalescing (writer.coalesce) already drops stale
+    // frames so a backlog can't build, but we still don't need to enqueue more
+    // than ~5 frames/s.
+    if (now - lastStatusWrite < STATUS_WRITE_MS) return;
     // Stay under CardKit's per-card 10/s: when the conclusion typewriter is
     // actively streaming (a content update within the last STREAMING_YIELD_MS),
     // the answer text IS the visible motion — skip the status write this tick. The
@@ -262,19 +261,20 @@ async function runStreamingInvoke(
     const text = sinceEvent > 20000
       ? `${spin} ${phaseWord}（较久，已 ${elapsed}）`
       : `${spin} ${phaseWord} ${elapsed}`;
-    statusInFlight = true;
     lastStatusWrite = now;
-    // Serial write: seq assigned at send time (monotonic, no race). Decide
-    // append-vs-update at EXECUTION time on the live flag (same FIFO reasoning as
-    // the panel path) so a failed append always retries as an append.
-    void writer.write(async (seq) => {
+    // Latest-wins lane: if a status frame is still queued, this one REPLACES it
+    // (stale frames dropped) instead of piling up behind a slow lark-cli spawn —
+    // so the timer always shows the CURRENT elapsed time, never a frame queued
+    // seconds ago (the "卡在 11s" complaint). Decide append-vs-update at execution
+    // time on the live flag so a failed append retries as an append.
+    writer.coalesce("status", async (seq) => {
       if (!statusAppended) {
         await appendStatusLine(cardId, text, seq);
         statusAppended = true; // only on success → a throw leaves it false
       } else {
         await updateStatusLine(cardId, text, seq);
       }
-    }).then(() => { statusInFlight = false; });
+    });
   }, STATUS_WRITE_MS);
 
   // The abort handle was created + registered in abortControllers at card-send
@@ -347,7 +347,10 @@ async function runStreamingInvoke(
       if (now - lastUpdate < THROTTLE_MS) return;
       lastUpdate = now;
       const display = textSoFar.length > 0 ? redactSensitive(textSoFar) : "正在分析…";
-      void writer.write((seq) => updateContent(cardId, display, seq));
+      // Latest-wins lane: each content update carries the FULL text so far, so a
+      // queued-but-not-yet-sent frame is stale and is replaced — the typewriter
+      // shows the newest text without a backlog stalling behind a slow spawn.
+      writer.coalesce("content", (seq) => updateContent(cardId, display, seq));
     },
     abort.signal,
     );

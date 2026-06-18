@@ -66,3 +66,55 @@ describe("CardWriter", () => {
     expect(w.currentSeq).toBe(7);
   });
 });
+
+describe("CardWriter.coalesce (latest-wins lane)", () => {
+  it("drops stale frames: a burst of coalesce calls runs only the LATEST", async () => {
+    const w = new CardWriter();
+    const seen: string[] = [];
+    // First write occupies the chain; the next 5 all queue onto the same lane.
+    const first = w.write(async () => { await tick(20); seen.push("blocker"); });
+    for (const v of ["a", "b", "c", "d", "e"]) {
+      w.coalesce("status", async () => { seen.push(v); });
+    }
+    await first;
+    await tick(30);
+    // The blocker ran, then ONLY the latest queued status frame ("e") ran — the
+    // intermediate stale frames (a..d) were dropped, not executed.
+    expect(seen).toEqual(["blocker", "e"]);
+  });
+
+  it("keeps sequences monotonic across coalesced + one-shot writes", async () => {
+    const w = new CardWriter();
+    const seqs: number[] = [];
+    const blocker = w.write(async (s) => { await tick(20); seqs.push(s); });
+    w.coalesce("status", async (s) => { seqs.push(s); });
+    w.coalesce("status", async (s) => { seqs.push(s); }); // replaces the above
+    await w.write(async (s) => { seqs.push(s); });
+    await blocker;
+    await tick(40);
+    // blocker=1, the single surviving status frame=2, the one-shot=3 — strictly
+    // increasing, no gaps from the dropped frame consuming a sequence.
+    expect(seqs).toEqual([1, 2, 3]);
+  });
+
+  it("separate lanes don't coalesce into each other", async () => {
+    const w = new CardWriter();
+    const seen: string[] = [];
+    const blocker = w.write(async () => { await tick(20); });
+    w.coalesce("status", async () => { seen.push("status"); });
+    w.coalesce("content", async () => { seen.push("content"); });
+    await blocker;
+    await tick(30);
+    expect(seen.sort()).toEqual(["content", "status"]); // both lanes ran
+  });
+
+  it("re-queues a lane after its slot drained (a later tick runs again)", async () => {
+    const w = new CardWriter();
+    const seen: number[] = [];
+    w.coalesce("status", async (s) => { seen.push(s); });
+    await tick(15);
+    w.coalesce("status", async (s) => { seen.push(s); });
+    await tick(15);
+    expect(seen).toEqual([1, 2]); // ran once per drained slot
+  });
+});
