@@ -30,10 +30,28 @@ describe("extractCharts", () => {
     expect(text).toBe("就是一段普通回答，没有图。");
   });
 
-  it("ignores a chart block with invalid JSON (keeps it out of charts)", () => {
+  it("ignores a chart block with invalid JSON (keeps it out of charts AND out of prose)", () => {
     const answer = "见图：\n```chart\n{not valid json}\n```\n完。";
-    const { charts } = extractCharts(answer);
+    const { text, charts } = extractCharts(answer);
     expect(charts).toHaveLength(0);
+    expect(text).not.toContain("```chart"); // must not leak the raw fence
+    expect(text).not.toContain("not valid json");
+  });
+
+  it("tolerates LLM fence variants (no trailing newline / indented / 'chart json' / compact inline) — extracts AND never leaks the raw fence", () => {
+    const variants = [
+      '答案\n```chart\n{"type":"line"}```',                 // no newline before closing fence
+      "答案\n  ```chart\n  {\"type\":\"pie\"}\n  ```",         // indented
+      '答案\n```chart json\n{"type":"area"}\n```',          // extra language token
+      '答案\n```chart {"type":"scatter"}```',               // compact single-line
+    ];
+    for (const v of variants) {
+      const { text, charts } = extractCharts(v);
+      expect(charts).toHaveLength(1);
+      expect(text).not.toContain("```chart"); // never leak the fence into the card
+      expect(text).not.toContain("type"); // nor the raw spec JSON
+      expect(text).toContain("答案");
+    }
   });
 
   it("extracts multiple chart blocks", () => {
