@@ -253,8 +253,35 @@ export async function appendCharts(
   }));
 }
 
+/** Collapsible "供研发复核" panel for the evidence section (file paths / symbols
+ *  / line numbers). Folded by default so the non-technical reader sees only the
+ *  business answer; a dev expands it to verify. null when there's no evidence. */
+export function buildEvidencePanel(evidence: string): unknown {
+  if (!evidence.trim()) return null;
+  return {
+    tag: "collapsible_panel",
+    element_id: "evidence",
+    expanded: false,
+    background_color: "grey",
+    padding: "8px 8px 8px 8px",
+    border: { color: "grey", corner_radius: "5px" },
+    vertical_spacing: "8px",
+    header: {
+      title: { tag: "markdown", content: "**📎 供研发复核（点开看代码出处）**" },
+      vertical_align: "center",
+      padding: "4px 0px 4px 8px",
+      width: "auto_when_fold",
+      icon: { tag: "standard_icon", token: "down-small-ccm_outlined", color: "grey", size: "16px 16px" },
+      icon_position: "follow_text",
+      icon_expanded_angle: -180,
+    },
+    elements: [{ tag: "markdown", content: evidence }],
+  };
+}
+
 /** After close streaming: update header to "完成" (green) via full card PUT.
- *  PUT body = { card: { type, data }, sequence } — full replace, must carry body. */
+ *  PUT body = { card: { type, data }, sequence } — full replace, must carry body.
+ *  `evidence` (optional) renders as a folded "供研发复核" panel below the answer. */
 export async function finalizeCard(
   cardId: string,
   conclusion: string,
@@ -263,8 +290,10 @@ export async function finalizeCard(
   followUp?: boolean,
   aborted?: boolean,
   failed?: boolean,
+  evidence?: string,
 ): Promise<void> {
   const panel = buildReasoningPanel(steps, false);
+  const evidencePanel = buildEvidencePanel(evidence ?? "");
   const card = {
     schema: "2.0",
     config: { update_multi: true },
@@ -275,6 +304,7 @@ export async function finalizeCard(
     body: {
       elements: [
         { tag: "markdown", content: conclusion, element_id: "conclusion" },
+        ...(evidencePanel ? [evidencePanel] : []),
         ...(panel ? [panel] : []),
       ],
     },
