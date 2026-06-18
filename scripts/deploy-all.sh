@@ -36,7 +36,7 @@ REPO_PATH=""
 REPO_SUBDIR=""           # name the repo lives under inside EFS (defaults to basename)
 INSTANCE_TYPE="t4g.large"
 MAX_FILES="10000"
-MODEL="global.anthropic.claude-sonnet-4-6"
+MODEL="global.anthropic.claude-opus-4-8"
 REFRESH_INDEX=false       # --refresh-index: replace a running index instance if its artifacts are stale
 declare -A SKIP=()
 
