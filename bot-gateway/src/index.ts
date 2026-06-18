@@ -23,6 +23,7 @@
 import { fromNodeProviderChain } from "@aws-sdk/credential-providers";
 
 import { invokeRuntimeStreaming, classifyInvokeOutcome, isTurnCapError, type AwsCredentials } from "./sigv4";
+import { decideFinalize, hardFailureMessage, shapeBody } from "./finalize-decision";
 import { createCard, updateContent, closeStreaming, finalizeCard, appendFooter, buildSendCardContent, disableFollowUpButton, appendReasoningPanel, updateReasoningPanel, appendOneChart, MAX_CHARTS, appendStopButton, appendStatusLine, updateStatusLine, formatElapsed } from "./cardkit-client";
 import { extractCharts } from "./extract-charts";
 import { rememberCard, rememberAnswer, lookupCard, collectChain } from "./card-registry";
@@ -513,10 +514,14 @@ async function runStreamingInvoke(
   // turns" would otherwise mis-route an HTTP outage into the partial-answer branch
   // and render the raw error envelope as an "answer". So never treat an HTTP failure
   // as a turn cap.
-  const turnCapped = !httpFailed && isTurnCapError(error);
-  // "Hard failure" = a real outage/denial (discard partial, it's untrustworthy).
-  // A turn-cap is handled on its own branch below, NOT as a hard failure.
-  const hardFailed = failed && !turnCapped;
+  // The terminal classification + chart/footer/remember gating is now a PURE,
+  // unit-tested decision (finalize-decision.ts) so a regression in this composition
+  // (e.g. dropping follow-ups on a turn cap, or storing a hard-failure body) is
+  // caught by tests rather than only in production.
+  const decision = decideFinalize({
+    failed, httpFailed, turnCappedRaw: isTurnCapError(error), aborted, timedOut, accessDenied,
+  });
+  const { turnCapped, hardFailed } = decision;
 
   // 3. Final update + close streaming. Order matters so the "供研发复核" evidence
   //    folds correctly AND any incompleteness disclaimer stays VISIBLE (not swept
@@ -528,9 +533,7 @@ async function runStreamingInvoke(
   let charts: ReturnType<typeof extractCharts>["charts"] = [];
   if (hardFailed) {
     // Hard failure: a fixed message, no real answer/charts/evidence to surface.
-    bodyNoEvidence = accessDenied
-      ? "⚠️ 模型访问未开通：请在 AWS Bedrock 控制台为该模型开通 Model access（global.* 跨区域推理需在相关区域分别开通），开通后即可正常回答。"
-      : "⚠️ 查询失败（后端不可用或取证中断），请稍后重试；若持续失败请转研发。";
+    bodyNoEvidence = hardFailureMessage(accessDenied);
   } else {
     const ex = extractCharts(answer);
     charts = ex.charts;
@@ -538,17 +541,7 @@ async function runStreamingInvoke(
     evidence = ev;
     // Shape the VISIBLE body: append the incompleteness note AFTER evidence is
     // split off, so the note isn't hidden inside the collapsed panel.
-    if (turnCapped) {
-      bodyNoEvidence = body
-        ? body + "\n\n*（分析步骤较多，未在限定步数内完成；以上为已得到的部分结论，建议把问题缩小后再问，例如只问某一个符号 / 某一处影响）*"
-        : "⚠️ 这个问题分析步骤较多，未在限定步数内得出结论。请把问题缩小（如只问某一个符号 / 某一处影响）后重试。";
-    } else if (aborted) {
-      bodyNoEvidence = body ? body + "\n\n*（已停止，以上为已生成内容）*" : "⏹ 已停止。";
-    } else if (timedOut && !body) {
-      bodyNoEvidence = "⏱ 分析超时，请缩小问题范围后重试。";
-    } else {
-      bodyNoEvidence = body || "(无内容)";
-    }
+    bodyNoEvidence = shapeBody(body, { turnCapped, aborted, timedOut });
   }
   const finalText = redactSensitive(bodyNoEvidence);
   const finalEvidence = redactSensitive(evidence);
