@@ -190,11 +190,14 @@ export async function closeStreaming(cardId: string, sequence: number): Promise<
 }
 
 /** Completed-card header title — keeps the follow-up marker so the chat
- *  history still shows a finished follow-up card as a follow-up. */
-export function finalizeTitle(followUp?: boolean, aborted?: boolean, failed?: boolean): string {
-  if (failed) return "⚠️ 查询失败";
-  if (aborted) return "⏹ 已停止";
-  return followUp ? "↳ 追问 · 已回答" : "回答完成";
+ *  history still shows a finished follow-up card as a follow-up. When an
+ *  elapsedLabel is given (e.g. "用时 67s"), it's appended so the user sees the
+ *  total time the answer took. */
+export function finalizeTitle(followUp?: boolean, aborted?: boolean, failed?: boolean, elapsedLabel?: string): string {
+  const base = failed ? "⚠️ 查询失败" : aborted ? "⏹ 已停止" : followUp ? "↳ 追问 · 已回答" : "回答完成";
+  // Show elapsed only on a real completed answer (not a hard failure, where the
+  // "time" is meaningless / could mislead).
+  return elapsedLabel && !failed ? `${base} · 用时 ${elapsedLabel}` : base;
 }
 
 /** A "⏹ 停止" button shown during streaming. value.card_id lets the click
@@ -339,6 +342,7 @@ export async function finalizeCard(
   failed?: boolean,
   evidence?: string,
   question?: string,
+  elapsedLabel?: string,
 ): Promise<void> {
   const panel = buildReasoningPanel(steps, false);
   const evidencePanel = buildEvidencePanel(evidence ?? "");
@@ -352,7 +356,7 @@ export async function finalizeCard(
     schema: "2.0",
     config: { update_multi: true },
     header: {
-      title: { tag: "plain_text", content: finalizeTitle(followUp, aborted, failed) },
+      title: { tag: "plain_text", content: finalizeTitle(followUp, aborted, failed, elapsedLabel) },
       template: failed ? "red" : aborted ? "grey" : "green",
     },
     body: {
@@ -388,7 +392,11 @@ export function buildFollowUpElements(followUps: string[]): unknown[] {
       });
     });
   } else {
-    elements.push({ tag: "markdown", content: "💡 直接在会话里继续追问即可，上下文会延续。" });
+    // No suggested follow-ups. Tell the user HOW to continue with context: reply
+    // to this card (or @ the bot referencing it). A bare "继续追问即可，上下文会
+    //延续" was misleading — context only carries when the message replies to a
+    // prior card, not for any new message.
+    elements.push({ tag: "markdown", content: "💡 想继续追问，**回复本条消息**即可（会带上本轮的上下文）。" });
   }
   return elements;
 }
