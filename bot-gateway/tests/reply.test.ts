@@ -1,27 +1,19 @@
 /**
- * Unit tests for buildReplyArgs — builds the `lark-cli im +messages-reply`
- * argv that sends the agent's answer back to Feishu as a bot markdown reply.
- * Pure (argv construction); the actual spawn is integration-only.
+ * Unit tests for buildTextContent — builds the Feishu text-message content
+ * payload (JSON string) for a plain bot reply. The actual send is in-process
+ * HTTP (feishu-http), integration-only.
  */
 
-import { buildReplyArgs } from "../src/reply";
+import { buildTextContent } from "../src/reply";
 
-describe("buildReplyArgs", () => {
-  it("replies to the originating message as the bot, in markdown", () => {
-    const argv = buildReplyArgs({ messageId: "om_123", answer: "**1+1 = 2**" });
-    expect(argv[0]).toBe("im");
-    expect(argv).toContain("+messages-reply");
-    expect(argv).toContain("--as");
-    expect(argv).toContain("bot");
-    expect(argv).toContain("--message-id");
-    expect(argv).toContain("om_123");
-    expect(argv).toContain("--markdown");
-    expect(argv).toContain("**1+1 = 2**");
+describe("buildTextContent", () => {
+  it("wraps the answer as a Feishu text content payload", () => {
+    const content = buildTextContent("**1+1 = 2**");
+    expect(JSON.parse(content)).toEqual({ text: "**1+1 = 2**" });
   });
 
-  it("keeps message-id and markdown adjacent to their flags", () => {
-    const argv = buildReplyArgs({ messageId: "om_x", answer: "ans" });
-    expect(argv[argv.indexOf("--message-id") + 1]).toBe("om_x");
-    expect(argv[argv.indexOf("--markdown") + 1]).toBe("ans");
+  it("escapes newlines/quotes safely via JSON", () => {
+    const content = buildTextContent('line1\n"quoted"');
+    expect(JSON.parse(content).text).toBe('line1\n"quoted"');
   });
 });
