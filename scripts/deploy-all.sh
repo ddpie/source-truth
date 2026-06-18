@@ -34,9 +34,17 @@ mkdir -p "$CONFIG_DIR"
 REGION=""
 REPO_PATH=""
 REPO_SUBDIR=""           # name the repo lives under inside EFS (defaults to basename)
-INSTANCE_TYPE="t4g.large"
-MAX_FILES="10000"
-MODEL="global.anthropic.claude-opus-4-8"
+# These three honor a persist-and-read-back contract (flag > persisted > default)
+# so a flagless reconcile re-run does NOT silently revert an operator's earlier
+# choice (deploy_runtime.py updates the runtime IN PLACE, so a reverted MODEL would
+# actually flip the live runtime). Empty here = "not given on the CLI"; resolved
+# against the persisted config + defaults after safe_source_env below.
+INSTANCE_TYPE=""
+MAX_FILES=""
+MODEL=""
+DEFAULT_INSTANCE_TYPE="t4g.large"
+DEFAULT_MAX_FILES="10000"
+DEFAULT_MODEL="global.anthropic.claude-opus-4-8"
 REFRESH_INDEX=false       # --refresh-index: replace a running index instance if its artifacts are stale
 declare -A SKIP=()
 
@@ -86,6 +94,12 @@ require_cmd python3 || exit 1
 safe_source_env "$CONFIG_FILE"
 REGION="${REGION:-${DEPLOY_REGION:-}}"
 [[ -n "$REGION" ]] || { say err "--region required"; exit 2; }
+# Resolve flag > persisted > default for the operator-tunable knobs, so a flagless
+# reconcile re-run keeps the earlier choice instead of reverting to the default
+# (which would flip the live runtime's model via the in-place update).
+MODEL="${MODEL:-${DEPLOY_MODEL:-$DEFAULT_MODEL}}"
+INSTANCE_TYPE="${INSTANCE_TYPE:-${DEPLOY_INSTANCE_TYPE:-$DEFAULT_INSTANCE_TYPE}}"
+MAX_FILES="${MAX_FILES:-${DEPLOY_MAX_FILES:-$DEFAULT_MAX_FILES}}"
 ACCOUNT="$(aws sts get-caller-identity --query Account --output text)"
 [[ -n "$REPO_SUBDIR" ]] || REPO_SUBDIR="$(basename "${REPO_PATH:-${REPO_SUBDIR:-repo}}")"
 BUCKET="source-truth-repo-${ACCOUNT}-$(echo "$REGION" | tr -d '-')"
@@ -141,6 +155,10 @@ if [[ "$DRY_RUN" != true ]]; then
   update_env "$CONFIG_FILE" DEPLOY_REGION "$REGION"
   update_env "$CONFIG_FILE" ARTIFACT_BUCKET "$BUCKET"
   update_env "$CONFIG_FILE" REPO_SUBDIR "$REPO_SUBDIR"
+  # Persist the resolved knobs so the next flagless run reads them back.
+  update_env "$CONFIG_FILE" DEPLOY_MODEL "$MODEL"
+  update_env "$CONFIG_FILE" DEPLOY_INSTANCE_TYPE "$INSTANCE_TYPE"
+  update_env "$CONFIG_FILE" DEPLOY_MAX_FILES "$MAX_FILES"
 fi
 
 run() { if [[ "$DRY_RUN" == true ]]; then say info "[dry-run] $*"; else "$@"; fi; }
@@ -346,3 +364,17 @@ else
 fi
 
 say ok "deploy-all complete"
+
+# Final next-steps: the backend (index-service + AgentCore runtime) is now up, but
+# the Feishu bot-gateway is NOT deployed by this script and needs the ONE manual
+# prerequisite AGENTS.md flags. Surface it loudly (non-blocking) so a fresh-account
+# run doesn't report success while the end-to-end 策划→answer path is silently dead.
+if [[ "$DRY_RUN" != true ]]; then
+  say warn "NEXT STEPS — the backend is READY but the bot-gateway is NOT yet running:"
+  say warn "  • bot-gateway is a long-lived process you run separately (not provisioned here)."
+  say warn "  • It requires env: FEISHU_APP_ID + FEISHU_APP_SECRET (create the secret by hand —"
+  say warn "    Secrets Manager/SSM, per AGENTS.md; this script does NOT create it), FEISHU_BOT_OPEN_ID,"
+  say warn "    AWS_REGION, and RUNTIME_ARN (already persisted to ${CONFIG_FILE})."
+  say warn "  • Until the gateway runs with those, 策划 @机器人 → answer will NOT work even though"
+  say warn "    every AWS resource above is healthy."
+fi

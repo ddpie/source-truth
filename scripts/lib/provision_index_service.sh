@@ -148,6 +148,7 @@ REGION=$REGION
 EFS_ID=$EFS_ID
 REPO_SUBDIR=$REPO_SUBDIR
 MAX_FILES=$MAX_FILES
+ARTIFACT_SIG=$CURRENT_SIG
 ENV
 echo "$BOOT_B64" | base64 -d > /opt/bootstrap.sh
 bash /opt/bootstrap.sh

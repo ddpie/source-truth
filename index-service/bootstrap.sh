@@ -90,10 +90,26 @@ fi
 # --- ensure the repo is on EFS (deploy stages <repo>.tar.gz in S3) ---
 # Extract under the access-point root /repo so the path matches what the runtime
 # sees at /mnt/repo/<subdir>.
-mkdir -p "$REPO_ROOT"
-if [ ! -d "$WORKSPACE" ]; then
+#
+# FRESHNESS: EFS PERSISTS across instance replacement, but the local EBS copy is
+# fresh per instance. A plain `[ ! -d "$WORKSPACE" ]` guard would SKIP re-extract
+# when EFS still holds an OLD snapshot, while the fresh instance extracts the NEW
+# snapshot locally → codegraph (EFS) and file-search (local) would serve DIFFERENT
+# code (silent drift; --refresh-index would not actually refresh the indexed code).
+# So we stamp the deploy's ARTIFACT_SIG (S3 ETags of the staged tarballs, passed in
+# the env) under $WORKSPACE and RE-EXTRACT whenever the stamp differs (or is
+# missing, or the dir is empty). Both copies are derived from the SAME downloaded
+# /tmp/repo.tar.gz, so they can never diverge.
+SIG_STAMP="$REPO_ROOT/.artifact_sig"
+WANT_SIG="${ARTIFACT_SIG:-unset}"
+HAVE_SIG="$(cat "$SIG_STAMP" 2>/dev/null || echo none)"
+# Re-extract EFS if: never extracted, empty tree, or the staged snapshot changed.
+if [ ! -d "$WORKSPACE" ] || [ -z "$(ls -A "$WORKSPACE" 2>/dev/null)" ] || [ "$HAVE_SIG" != "$WANT_SIG" ]; then
+  mkdir -p "$REPO_ROOT"
   aws s3 cp "s3://$BUCKET/${REPO_SUBDIR}.tar.gz" /tmp/repo.tar.gz --region "$REGION"
+  rm -rf "$WORKSPACE"                       # drop the stale snapshot so the new one is clean
   tar xzf /tmp/repo.tar.gz -C "$REPO_ROOT"
+  echo "$WANT_SIG" > "$SIG_STAMP"           # stamp AFTER a successful extract
 fi
 
 # --- ALSO extract the repo to LOCAL disk for fast file search ---------------
@@ -102,17 +118,21 @@ fi
 # trip per file open for 18k files). The agent's builtin Grep hits /mnt/repo
 # (EFS) and dominated end-to-end latency (~20s per broad grep). So we keep a
 # LOCAL-disk copy here and expose a fast search tool (http_bridge codegraph_
-# search_files) that greps it. It is the SAME deploy-time tarball snapshot as the
-# EFS copy — NOT a live mirror of main — so it is exactly as fresh as EFS, just
-# fast. Extracting from the already-local /tmp/repo.tar.gz costs no NFS I/O.
+# search_files) that greps it. It is derived from the SAME /tmp/repo.tar.gz the
+# EFS copy came from (re-downloaded above on a sig change), so the two can never
+# drift. Extracting from the already-local tarball costs no NFS I/O.
 LOCAL_REPO_ROOT=/data/repo
 LOCAL_WORKSPACE="$LOCAL_REPO_ROOT/$REPO_SUBDIR"
+LOCAL_SIG_STAMP="$LOCAL_REPO_ROOT/.artifact_sig"
+LOCAL_HAVE_SIG="$(cat "$LOCAL_SIG_STAMP" 2>/dev/null || echo none)"
 mkdir -p "$LOCAL_REPO_ROOT"
-if [ ! -d "$LOCAL_WORKSPACE" ]; then
+if [ ! -d "$LOCAL_WORKSPACE" ] || [ -z "$(ls -A "$LOCAL_WORKSPACE" 2>/dev/null)" ] || [ "$LOCAL_HAVE_SIG" != "$WANT_SIG" ]; then
   if [ ! -f /tmp/repo.tar.gz ]; then
     aws s3 cp "s3://$BUCKET/${REPO_SUBDIR}.tar.gz" /tmp/repo.tar.gz --region "$REGION"
   fi
+  rm -rf "$LOCAL_WORKSPACE"
   tar xzf /tmp/repo.tar.gz -C "$LOCAL_REPO_ROOT"
+  echo "$WANT_SIG" > "$LOCAL_SIG_STAMP"
 fi
 # Install ripgrep for fast, .gitignore-aware search (apt has it on Ubuntu 24.04).
 command -v rg >/dev/null || apt-get install -y ripgrep || true
@@ -134,14 +154,21 @@ RemainAfterExit=yes
 Environment=HOME=$INDEX_HOME
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
 # Belt-and-suspenders: refuse to build unless EFS is actually mounted AND the
-# workspace exists — so a late/failed mount fails loudly instead of building
-# garbage (Requires=index-build then keeps the bridge from serving it).
+# workspace exists AND is NON-EMPTY — so a late/failed mount or a partial/empty
+# extract fails loudly instead of building a 0-node graph that would then serve
+# wrong "not found" answers (Requires=index-build keeps the bridge from serving a
+# failed build). `test -d` alone only proves the dir exists, not that it has code.
 ExecStartPre=/usr/bin/mountpoint -q $EFS_MNT
-ExecStartPre=/usr/bin/test -d $WORKSPACE
+ExecStartPre=/bin/bash -c '[ -n "\$(ls -A $WORKSPACE 2>/dev/null)" ] || { echo "FATAL: \$WORKSPACE is empty — refusing to build a 0-node graph"; exit 1; }'
 # flock guarantees only ONE codegraph process writes graph.db at a time.
 ExecStart=/usr/bin/flock $LOCK $BIN --graph-only --workspace $WORKSPACE \\
   --exclude node_modules --exclude .venv --exclude .git --max-files $MAX_FILES \\
   --run-tool codegraph_symbol_search --tool-args '{"query":"__build__"}'
+# Post-build floor: a real build of a non-empty repo produces a graph.db well
+# above an empty-RocksDB baseline. If it's trivially small the build silently
+# produced ~0 nodes (corrupt/empty) — FAIL the unit so the bridge (Requires=)
+# never serves it, instead of relying solely on the bridge's warmup string-match.
+ExecStartPost=/bin/bash -c 'sz=\$(du -sb $INDEX_HOME/.codegraph/graph.db 2>/dev/null | cut -f1 || echo 0); [ "\$sz" -ge 65536 ] || { echo "FATAL: graph.db is \$sz bytes (<64KiB) — build produced an empty/corrupt graph"; exit 1; }'
 UNIT
 
 cat > /etc/systemd/system/index-bridge.service <<UNIT
