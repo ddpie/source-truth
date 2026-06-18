@@ -31,6 +31,7 @@ import asyncio
 import json
 import logging
 import threading
+from datetime import timedelta
 from time import perf_counter
 from typing import Any
 
@@ -42,6 +43,18 @@ from perf import perf_entry
 logger = logging.getLogger("codegraph-session")
 
 DEFAULT_EXCLUDES = ("node_modules", ".venv", ".git")
+
+# Bounded timeouts so a hung codegraph-server can never wedge the service forever.
+# Without these, session.call_tool awaits indefinitely WHILE HOLDING _call_lock →
+# every other request blocks on the lock, the liveness probe (same lock) can't run,
+# _healthy never flips, /health lies 200, and the self-heal never fires. A timeout
+# converts that permanent wedge into a TimeoutError → unhealthy → worker exits →
+# _needs_restart() respawns a fresh process (single-writer preserved by the join
+# guard). WARMUP is generous (cold graph load from EFS ~20s, headroom to 90s);
+# QUERY bounds a pathological traversal; LIVENESS is short so health tracks reality.
+WARMUP_TIMEOUT_S = 90.0
+QUERY_TIMEOUT_S = 30.0
+LIVENESS_TIMEOUT_S = 8.0
 
 
 class IndexUnhealthy(RuntimeError):
@@ -132,7 +145,16 @@ class CodegraphSession:
                 # assert it is non-empty before declaring the session healthy.
                 warm_t0 = perf_counter()
                 try:
-                    result = await session.call_tool("codegraph_symbol_search", {"query": "__warmup__"})
+                    # Bounded: a warmup that hangs (codegraph stuck on a blocked EFS
+                    # read) must not leave _ready unset forever — that would wedge
+                    # every request at wait_ready for 120s on repeat with no restart.
+                    # On timeout we flip unhealthy, set _ready, and fall through to
+                    # return from _serve so the thread exits and _needs_restart()
+                    # respawns a fresh worker.
+                    result = await session.call_tool(
+                        "codegraph_symbol_search", {"query": "__warmup__"},
+                        read_timeout_seconds=timedelta(seconds=WARMUP_TIMEOUT_S),
+                    )
                     warm_ms = (perf_counter() - warm_t0) * 1000
                     unhealthy, reason = self._classify(result)
                     if unhealthy:
@@ -151,6 +173,11 @@ class CodegraphSession:
                     self._healthy = False
                     self._health_detail = "warmup failed: %s" % str(exc)
                     logger.error(json.dumps({"event": "warmup_failed", "error": str(exc)}))
+                    # A hung/failed warmup must self-heal: unblock waiters and exit
+                    # _serve so the thread ends → _needs_restart() (dead thread) →
+                    # _restart() brings up a fresh worker on the next call.
+                    self._ready.set()
+                    return
                 self._ready.set()
                 # Keep the loop (and subprocess) alive until stop() is requested,
                 # AND actively probe liveness so an IDLE subprocess death is caught
@@ -175,7 +202,8 @@ class CodegraphSession:
                     try:
                         async with self._call_lock:
                             probe = await session.call_tool(
-                                "codegraph_symbol_search", {"query": "__liveness__"}
+                                "codegraph_symbol_search", {"query": "__liveness__"},
+                                read_timeout_seconds=timedelta(seconds=LIVENESS_TIMEOUT_S),
                             )
                         unhealthy, reason = self._classify(probe)
                         if unhealthy:
@@ -293,7 +321,13 @@ class CodegraphSession:
         # so measure wait+call as one number rather than hiding the queueing.
         t0 = perf_counter()
         async with self._call_lock:  # codegraph isn't concurrent-safe on its graph
-            result = await self._session.call_tool(name, arguments)
+            # Bounded: a pathological query must not hold _call_lock forever (which
+            # would head-of-line-block every other caller AND freeze the liveness
+            # probe). On timeout the MCP layer raises → _do_call's caller flips
+            # unhealthy and the worker recovers, rather than wedging permanently.
+            result = await self._session.call_tool(
+                name, arguments, read_timeout_seconds=timedelta(seconds=QUERY_TIMEOUT_S)
+            )
         logger.info(perf_entry("codegraph_call", (perf_counter() - t0) * 1000, tool=name))
         # Re-validate health on every response — a graph that degrades after
         # startup must flip us unhealthy, not silently serve garbage. Tool-aware:

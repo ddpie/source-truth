@@ -12,7 +12,7 @@ Usage:
   python3 deploy_runtime.py --region us-east-1 --account 557690613480 \
     --role-arn arn:...:role/SourceTruthAgentRuntimeRole \
     --image <acct>.dkr.ecr.<region>.amazonaws.com/source-truth/agent:latest \
-    [--name source_truth_agent] [--model global.anthropic.claude-sonnet-4-6]
+    --model global.anthropic.claude-opus-4-8 [--name source_truth_agent]
 
 Prints `AGENT_RUNTIME_ID=<id>` and `AGENT_RUNTIME_ARN=<arn>` on success.
 """
@@ -133,7 +133,10 @@ def main() -> int:
     p.add_argument("--role-arn", required=True)
     p.add_argument("--image", required=True)
     p.add_argument("--name", default="source_truth_agent")
-    p.add_argument("--model", default="global.anthropic.claude-sonnet-4-6")
+    # Required (no default): the model id is owned in ONE place — deploy-all.sh's
+    # resolved MODEL — so this script can't silently deploy a different default than
+    # the orchestrator intends. Callers must pass --model explicitly.
+    p.add_argument("--model", required=True)
     # VPC mode (for EFS): all three must be provided together.
     p.add_argument("--subnets", help="comma-separated subnet ids (VPC mode)")
     p.add_argument("--security-groups", help="comma-separated security group ids")
