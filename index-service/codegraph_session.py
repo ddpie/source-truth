@@ -152,9 +152,46 @@ class CodegraphSession:
                     self._health_detail = "warmup failed: %s" % str(exc)
                     logger.error(json.dumps({"event": "warmup_failed", "error": str(exc)}))
                 self._ready.set()
-                # Keep the loop (and subprocess) alive until stop() is requested.
+                # Keep the loop (and subprocess) alive until stop() is requested,
+                # AND actively probe liveness so an IDLE subprocess death is caught
+                # proactively. Without this, codegraph-server dying while no traffic
+                # flows (OOM/crash of the grandchild process — systemd's
+                # Restart=always only watches the python bridge, not the grandchild)
+                # leaves _session non-None and _healthy True, so /health lies (200
+                # over a dead graph) until the NEXT user query happens to fail. We
+                # send a cheap symbol_search every few seconds (serialized through
+                # the same _call_lock, so it can't race a real query) and flip
+                # unhealthy + exit _serve the moment it fails — _needs_restart()
+                # then recovers on the next request, and /health reflects reality
+                # within one probe interval instead of waiting for a user to hit it.
+                probe_every = 5.0
+                since_probe = 0.0
                 while not self._stop.is_set():
                     await asyncio.sleep(0.5)
+                    since_probe += 0.5
+                    if since_probe < probe_every:
+                        continue
+                    since_probe = 0.0
+                    try:
+                        async with self._call_lock:
+                            probe = await session.call_tool(
+                                "codegraph_symbol_search", {"query": "__liveness__"}
+                            )
+                        unhealthy, reason = self._classify(probe)
+                        if unhealthy:
+                            self._healthy = False
+                            self._health_detail = "liveness: %s" % reason
+                            logger.error(json.dumps({"event": "liveness_unhealthy", "reason": reason}))
+                            return  # exit _serve → thread ends → _needs_restart() recovers
+                        # A successful probe re-affirms health (recovers a transient
+                        # blip that a failed user query may have flipped).
+                        self._healthy = True
+                        self._health_detail = "ok"
+                    except Exception as exc:  # noqa: BLE001 - subprocess/stream died
+                        self._healthy = False
+                        self._health_detail = "liveness probe failed: %s" % str(exc)
+                        logger.error(json.dumps({"event": "liveness_failed", "error": str(exc)}))
+                        return  # exit _serve → thread ends → next call restarts worker
 
     async def stop(self) -> None:
         self._stop.set()
@@ -218,7 +255,12 @@ class CodegraphSession:
 
     @property
     def healthy(self) -> bool:
-        return self._healthy
+        # AND-gate on the worker thread actually being alive: _healthy is a flag
+        # flipped by warmup / responses / the liveness probe, but between probe
+        # ticks a just-dead worker could still read True. Requiring a live thread
+        # means /health can never out-live a dead worker. (_needs_restart() will
+        # bring a fresh worker up on the next call_tool.)
+        return self._healthy and self._thread is not None and self._thread.is_alive()
 
     @property
     def health_detail(self) -> str:
