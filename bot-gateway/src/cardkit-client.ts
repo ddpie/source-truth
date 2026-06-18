@@ -193,10 +193,15 @@ export async function closeStreaming(cardId: string, sequence: number): Promise<
  *  history still shows a finished follow-up card as a follow-up. When an
  *  elapsedLabel is given (e.g. "用时 67s"), it's appended so the user sees the
  *  total time the answer took. */
-export function finalizeTitle(followUp?: boolean, aborted?: boolean, failed?: boolean, elapsedLabel?: string): string {
-  const base = failed ? "⚠️ 查询失败" : aborted ? "⏹ 已停止" : followUp ? "↳ 追问 · 已回答" : "回答完成";
-  // Show elapsed only on a real completed answer (not a hard failure, where the
-  // "time" is meaningless / could mislead).
+export function finalizeTitle(followUp?: boolean, aborted?: boolean, failed?: boolean, elapsedLabel?: string, turnCapped?: boolean): string {
+  // turnCapped is a PARTIAL result (hit the step cap) — its header must NOT read
+  // as a confident green "回答完成" while the body says "未完成". Distinct signal.
+  const base = failed ? "⚠️ 查询失败"
+    : aborted ? "⏹ 已停止"
+    : turnCapped ? "⚠️ 部分结论（步数受限）"
+    : followUp ? "↳ 追问 · 已回答"
+    : "回答完成";
+  // Show elapsed except on a hard failure (where "time" is meaningless/misleading).
   return elapsedLabel && !failed ? `${base} · 用时 ${elapsedLabel}` : base;
 }
 
@@ -343,6 +348,7 @@ export async function finalizeCard(
   evidence?: string,
   question?: string,
   elapsedLabel?: string,
+  turnCapped?: boolean,
 ): Promise<void> {
   const panel = buildReasoningPanel(steps, false);
   const evidencePanel = buildEvidencePanel(evidence ?? "");
@@ -356,8 +362,8 @@ export async function finalizeCard(
     schema: "2.0",
     config: { update_multi: true },
     header: {
-      title: { tag: "plain_text", content: finalizeTitle(followUp, aborted, failed, elapsedLabel) },
-      template: failed ? "red" : aborted ? "grey" : "green",
+      title: { tag: "plain_text", content: finalizeTitle(followUp, aborted, failed, elapsedLabel, turnCapped) },
+      template: failed ? "red" : aborted ? "grey" : turnCapped ? "orange" : "green",
     },
     body: {
       elements: [

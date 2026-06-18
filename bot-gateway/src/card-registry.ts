@@ -84,7 +84,12 @@ export function collectChain(messageId: string): ChainTurn[] {
     seen.add(id);
     const e = registry.get(id);
     if (!e) break;
-    if (e.question || e.answer) turns.unshift({ question: e.question, answer: e.answer });
+    // Require a SETTLED answer for the turn to count. A turn with a question but
+    // no answer = the card is still streaming (answer stored only at finalize) or
+    // it hard-failed (answer never stored). Replaying a bare question the agent
+    // can't see the answer to degrades context for the most-relevant turn, so we
+    // skip it (but keep walking to its finalized ancestors via parentMessageId).
+    if (e.answer) turns.unshift({ question: e.question, answer: e.answer });
     id = e.parentMessageId;
   }
   // Trim from the OLDEST end if over the char budget (keep the most recent turns,

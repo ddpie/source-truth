@@ -76,6 +76,19 @@ describe("collectChain (multi-turn follow-up history)", () => {
     expect(collectChain("solo")).toEqual([{ question: "Q", answer: "A" }]);
   });
 
+  it("SKIPS a turn with no settled answer (in-flight / hard-failed) but keeps finalized ancestors", () => {
+    rememberCard("p1", "c1", "s", "Q1"); rememberAnswer("p1", "A1"); // finalized
+    rememberCard("p2", "c2", "s", "Q2", "p1");                        // in-flight: no answer yet
+    // collectChain on the answer-less newest card drops it, keeps the ancestor.
+    expect(collectChain("p2")).toEqual([{ question: "Q1", answer: "A1" }]);
+    // once it finalizes, it's included.
+    rememberAnswer("p2", "A2");
+    expect(collectChain("p2")).toEqual([
+      { question: "Q1", answer: "A1" },
+      { question: "Q2", answer: "A2" },
+    ]);
+  });
+
   it("returns [] for an unknown/evicted card", () => {
     expect(collectChain("nope")).toEqual([]);
   });
