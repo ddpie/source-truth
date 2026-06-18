@@ -90,6 +90,19 @@ export function buildStageBody(title: string, template: string, conclusion: stri
   return JSON.stringify({ card: { type: "card_json", data: JSON.stringify(card) }, sequence });
 }
 
+/** Human-readable elapsed duration: seconds under a minute, "Mm Ss" under an
+ *  hour, "Hh Mm" beyond. Keeps the live timer honest AND readable on a long run
+ *  (a bare seconds counter reaching "247s" reads worse than "4m 7s"). */
+export function formatElapsed(ms: number): string {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  if (total < 60) return `${total}s`;
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  if (h > 0) return `${h}h ${m}m`;
+  return `${m}m ${s}s`;
+}
+
 /** Append a dedicated status line element (element_id="status") ONCE, above the
  *  conclusion. This element is updated ELEMENT-LEVEL (never a full-card PUT), so
  *  the live "正在分析 12s ⠹" timer can advance in EVERY phase — including after
@@ -128,6 +141,16 @@ export async function updateStage(
 
 // ── lark-cli runners (integration) ───────────────────────────────────────────
 
+// Hard ceiling on a single lark-cli call. A spawned `lark-cli api` that hangs
+// (stalled network with no TCP timeout, never exits, never errors) would leave
+// its promise unsettled forever. That is benign for the fire-and-forget content
+// updates, but the live status-line heartbeat gates the next tick on the prior
+// write settling (statusInFlight) — an unsettled write freezes the timer for the
+// rest of the run, the exact "frozen animation" symptom the status line exists to
+// kill. So every call is bounded: on timeout we SIGKILL the child and reject, which
+// settles the promise and frees the heartbeat.
+const LARK_API_TIMEOUT_MS = 15000;
+
 function larkApi(method: string, path: string, data: string): Promise<unknown> {
   return new Promise((resolve, reject) => {
     const child = spawn("lark-cli", ["api", method, path, "--as", "bot", "--data", data], {
@@ -135,21 +158,29 @@ function larkApi(method: string, path: string, data: string): Promise<unknown> {
     });
     let out = "";
     let err = "";
+    let settled = false;
+    const finish = (fn: () => void) => { if (settled) return; settled = true; clearTimeout(timer); fn(); };
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      finish(() => reject(new Error(`lark-cli api ${method} ${path} timed out after ${LARK_API_TIMEOUT_MS}ms`)));
+    }, LARK_API_TIMEOUT_MS);
+    if (typeof timer.unref === "function") timer.unref();
     child.stdout.on("data", (d) => (out += d));
     child.stderr.on("data", (d) => (err += d));
     child.on("exit", (code) => {
-      if (code !== 0) return reject(new Error(`lark-cli api ${method} ${path} exited ${code}: ${err}`));
+      // kill() also fires 'exit'; the `settled` guard makes this a no-op then.
+      if (code !== 0) return finish(() => reject(new Error(`lark-cli api ${method} ${path} exited ${code}: ${err}`)));
       try {
         const json = JSON.parse(out) as { code?: number; msg?: string };
         if (json.code !== undefined && json.code !== 0) {
-          return reject(new Error(`CardKit ${path} code ${json.code}: ${json.msg}`));
+          return finish(() => reject(new Error(`CardKit ${path} code ${json.code}: ${json.msg}`)));
         }
-        resolve(json);
+        finish(() => resolve(json));
       } catch (e) {
-        reject(new Error(`bad CardKit response: ${out.slice(0, 200)} (${String(e)})`));
+        finish(() => reject(new Error(`bad CardKit response: ${out.slice(0, 200)} (${String(e)})`)));
       }
     });
-    child.on("error", reject);
+    child.on("error", (e) => finish(() => reject(e)));
   });
 }
 

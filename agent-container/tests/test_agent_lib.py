@@ -190,3 +190,45 @@ def test_codegraph_url_rejects_non_http_scheme():
     for bad in ("file:///etc/passwd", "gopher://x", "not-a-url", "ftp://h/x"):
         with pytest.raises(ValueError):
             agent_lib.build_options_dict(system_prompt="x", codegraph_url=bad)
+
+
+# ── _maybe_log_result: ResultMessage perf extraction (issue #2 instrumentation) ──
+class _FakeResult:
+    """Duck-typed stand-in for the SDK ResultMessage (the attrs _maybe_log_result reads)."""
+    def __init__(self):
+        self.num_turns = 7
+        self.duration_ms = 12345
+        self.duration_api_ms = 9000
+        self.usage = {"input_tokens": 5000, "output_tokens": 800, "cache_read_input_tokens": 4000}
+        self.is_error = False
+        self.subtype = "success"
+
+
+def test_maybe_log_result_emits_perf_for_resultmessage(caplog):
+    import json as _json
+    import logging
+    with caplog.at_level(logging.INFO, logger="agent"):
+        agent_lib._maybe_log_result(_FakeResult())
+    rows = [_json.loads(r.message) for r in caplog.records if '"agent_result"' in r.message]
+    assert len(rows) == 1, "exactly one agent_result perf line expected"
+    row = rows[0]
+    assert row["perf"] is True
+    assert row["num_turns"] == 7
+    assert row["output_tokens"] == 800
+    assert row["latency_ms"] == 12345.0  # duration_ms is the headline latency
+
+
+def test_maybe_log_result_ignores_non_resultmessage(caplog):
+    import logging
+    # An AssistantMessage-like object lacking num_turns/duration_ms must be skipped.
+    class _Msg:
+        content = [{"text": "hi"}]
+    with caplog.at_level(logging.INFO, logger="agent"):
+        agent_lib._maybe_log_result(_Msg())
+    assert not any("agent_result" in r.message for r in caplog.records)
+
+
+def test_maybe_log_result_never_raises_on_garbage():
+    # Best-effort: a malformed message must never break the answer stream.
+    for junk in (None, 42, "str", object()):
+        agent_lib._maybe_log_result(junk)  # must not raise

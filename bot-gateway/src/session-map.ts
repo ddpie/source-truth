@@ -39,6 +39,18 @@ export function getSessionId(
   threadId?: string,
   ttlMs: number = DEFAULT_TTL_MS,
 ): string {
+  return getSessionState(chatId, threadId, ttlMs).sessionId;
+}
+
+/** Like getSessionId but also reports whether the session was REUSED (warm) or
+ *  freshly minted (cold). `cold` is the perf signal for issue #2: a cold invoke
+ *  folds in microVM spin-up + AgentCore routing (native cc has none), so only
+ *  warm rows are apples-to-apples comparable to native-cc steady state. */
+export function getSessionState(
+  chatId: string,
+  threadId?: string,
+  ttlMs: number = DEFAULT_TTL_MS,
+): { sessionId: string; cold: boolean } {
   const key = makeKey(chatId, threadId);
   const arm = (): NodeJS.Timeout => {
     const t = setTimeout(() => { sessions.delete(key); }, ttlMs);
@@ -53,12 +65,12 @@ export function getSessionId(
     // would spawn a new session and lose context). Idle keys still expire.
     clearTimeout(existing.timer);
     existing.timer = arm();
-    return existing.sessionId;
+    return { sessionId: existing.sessionId, cold: false };
   }
 
   const sessionId = randomUUID();
   sessions.set(key, { sessionId, timer: arm() });
-  return sessionId;
+  return { sessionId, cold: true };
 }
 
 /** Clear all sessions. Test-only. */

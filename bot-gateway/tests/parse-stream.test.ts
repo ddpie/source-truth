@@ -9,7 +9,7 @@
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { parseAgentStream } from "../src/parse-stream";
+import { parseAgentStream, newStreamState, applyEvent } from "../src/parse-stream";
 
 const FIXTURE = readFileSync(join(__dirname, "fixtures/agent-stream-sample.txt"), "utf8");
 
@@ -141,5 +141,56 @@ describe("parseAgentStream — partial messages (include_partial_messages)", () 
     const { narrations, conclusion } = parseAgentStream(sse);
     expect(narrations).toEqual(["narration"]);
     expect(conclusion).toBe("conclusion");
+  });
+});
+
+describe("tool-call accounting (perf: few-deep-turns vs many-round-trips)", () => {
+  it("counts tool_use blocks per name in the full-message path", () => {
+    const sse =
+      'data: {"content": [{"text": "n1"}]}\n' +
+      'data: {"content": [{"name": "mcp__codegraph__codegraph_symbol_search", "input": {}}]}\n' +
+      'data: {"content": [{"text": "n2"}]}\n' +
+      'data: {"content": [{"name": "mcp__codegraph__codegraph_get_callers", "input": {}}]}\n' +
+      'data: {"content": [{"name": "Grep", "input": {}}]}\n' +
+      'data: {"content": [{"text": "conclusion"}]}\n';
+    const st = newStreamState();
+    for (const line of sse.split("\n")) {
+      const t = line.trim();
+      if (!t.startsWith("data:")) continue;
+      applyEvent(st, JSON.parse(t.slice(5).trim()));
+    }
+    expect(st.toolCalls).toBe(3);
+    expect(st.toolCallsByName).toEqual({
+      mcp__codegraph__codegraph_symbol_search: 1,
+      mcp__codegraph__codegraph_get_callers: 1,
+      Grep: 1,
+    });
+  });
+
+  it("counts tool_use blocks in the partial-message (StreamEvent) path", () => {
+    const ev = (event: Record<string, unknown>) =>
+      JSON.stringify({ uuid: "u", session_id: "s", event, parent_tool_use_id: null });
+    const st = newStreamState();
+    applyEvent(st, JSON.parse(ev({ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } })));
+    applyEvent(st, JSON.parse(ev({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "narrate" } })));
+    applyEvent(st, JSON.parse(ev({ type: "content_block_start", index: 1, content_block: { type: "tool_use", name: "Read", input: {} } })));
+    applyEvent(st, JSON.parse(ev({ type: "content_block_start", index: 2, content_block: { type: "tool_use", name: "Read", input: {} } })));
+    expect(st.toolCalls).toBe(2);
+    expect(st.toolCallsByName).toEqual({ Read: 2 });
+  });
+
+  it("does NOT double-count a tool-first turn (tool_use then the closing full message)", () => {
+    // A turn that OPENS with a tool (no narration text first) must still mark
+    // partial mode active, so the redundant closing full AssistantMessage is
+    // deduped and the tool is counted exactly once. Regression for the
+    // sawStreamEvent-only-on-text bug.
+    const ev = (event: Record<string, unknown>) =>
+      JSON.stringify({ uuid: "u", session_id: "s", event, parent_tool_use_id: null });
+    const st = newStreamState();
+    applyEvent(st, JSON.parse(ev({ type: "content_block_start", index: 0, content_block: { type: "tool_use", name: "Read", input: {} } })));
+    // The SDK's closing full AssistantMessage repeats the same tool_use:
+    applyEvent(st, { content: [{ name: "Read", input: {} }] });
+    expect(st.toolCalls).toBe(1);
+    expect(st.toolCallsByName).toEqual({ Read: 1 });
   });
 });

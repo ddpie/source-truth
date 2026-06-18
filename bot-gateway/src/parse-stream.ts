@@ -35,6 +35,12 @@ export interface StreamState {
    *  value means the answer is NOT trustworthy and must be shown as an error,
    *  never as a completed conclusion. */
   error: string | null;
+  /** Total tool_use blocks seen (codegraph calls + Read/Glob/Grep), and a per-
+   *  tool-name tally. The gateway already sees every tool_use here (tool-gating),
+   *  so counting them is free and answers the key issue-#2 question: was a slow
+   *  run "few deep model turns" or "many tool round-trips"? — different fixes. */
+  toolCalls: number;
+  toolCallsByName: Record<string, number>;
   /** True once we've seen a partial-message StreamEvent (token deltas). When the
    *  agent runs with include_partial_messages, the conclusion streams token-by-
    *  token via content_block_delta events INSTEAD of arriving as one complete
@@ -47,7 +53,14 @@ export interface StreamState {
 }
 
 export function newStreamState(): StreamState {
-  return { texts: [], sawToolAfterLastText: true /* first text starts a fresh block */, error: null, sawStreamEvent: false };
+  return { texts: [], sawToolAfterLastText: true /* first text starts a fresh block */, error: null, toolCalls: 0, toolCallsByName: {}, sawStreamEvent: false };
+}
+
+/** Tally one tool_use by name (perf accounting). */
+function countTool(state: StreamState, name: unknown): void {
+  state.toolCalls++;
+  const key = typeof name === "string" && name ? name : "(unknown)";
+  state.toolCallsByName[key] = (state.toolCallsByName[key] ?? 0) + 1;
 }
 
 /**
@@ -116,7 +129,13 @@ export function applyStreamEvent(state: StreamState, raw: Record<string, unknown
     const blockType = block?.type;
     if (blockType === "tool_use") {
       // A tool started → the current text block is now a finished narration.
+      // Mark partial mode active even when a turn OPENS with a tool (no narration
+      // first): otherwise sawStreamEvent stays false, the closing full
+      // AssistantMessage isn't deduped by applyEvent's guard, and this tool_use
+      // gets counted a SECOND time → corrupted toolCalls telemetry.
+      state.sawStreamEvent = true;
       state.sawToolAfterLastText = true;
+      countTool(state, block?.name);
     } else if (blockType === "text") {
       // A new text block opened. Mark stream-event mode and open a fresh block
       // ONLY if a tool intervened (or none exists yet); otherwise the existing
@@ -158,6 +177,7 @@ export function applyContentItem(state: StreamState, item: Record<string, unknow
   } else if (typeof item.name === "string" && "input" in item) {
     // tool_use: the preceding text block is now a finished narration.
     state.sawToolAfterLastText = true;
+    countTool(state, item.name);
   }
   // thinking / tool_result: ignored.
 }

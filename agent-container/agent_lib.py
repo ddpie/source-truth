@@ -271,6 +271,41 @@ async def run_agent(
                 first_emitted = True
                 _perf("agent_first_message", (time.perf_counter() - t0) * 1000)
             n += 1
+            _maybe_log_result(message)
             yield message
     finally:
         _perf("agent_run_total", (time.perf_counter() - t0) * 1000, messages=n)
+
+
+def _maybe_log_result(message: Any) -> None:
+    """If this is the SDK's terminal ResultMessage, emit its rich perf numbers.
+
+    ResultMessage carries exactly the metrics needed to optimize latency vs native
+    cc (issue #2): num_turns (agent-turn count — "few deep turns vs many round-
+    trips"), duration_ms / duration_api_ms (model+API wall time vs total →
+    separates model thinking from tool round-trips), and usage.output_tokens (→
+    output tokens/sec). Native cc prints these same numbers at the end of a run,
+    so this is the apples-to-apples comparison data. Duck-typed (num_turns +
+    duration_ms) so this module stays SDK-import-free for unit tests; any non-
+    ResultMessage simply lacks the attributes and is skipped. Best-effort: a
+    malformed message must never break the answer stream."""
+    try:
+        num_turns = getattr(message, "num_turns", None)
+        duration_ms = getattr(message, "duration_ms", None)
+        if num_turns is None or duration_ms is None:
+            return  # not a ResultMessage
+        usage = getattr(message, "usage", None) or {}
+        get = usage.get if isinstance(usage, dict) else (lambda _k: None)
+        _perf(
+            "agent_result",
+            float(duration_ms),
+            duration_api_ms=getattr(message, "duration_api_ms", None),
+            num_turns=num_turns,
+            input_tokens=get("input_tokens"),
+            output_tokens=get("output_tokens"),
+            cache_read_input_tokens=get("cache_read_input_tokens"),
+            is_error=getattr(message, "is_error", None),
+            subtype=getattr(message, "subtype", None),
+        )
+    except Exception as exc:  # noqa: BLE001 - perf logging must never break the stream
+        logger.warning(json.dumps({"event": "agent_result_log_failed", "error": str(exc)}))
