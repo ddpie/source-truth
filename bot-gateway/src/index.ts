@@ -572,7 +572,12 @@ async function main(): Promise<void> {
     "im.message.receive_v1": (data: unknown) => {
       const event = sdkEventToImEvent(data);
       if (event) {
-        void handleMessageEvent(event, { invoke }, { botOpenId: BOT_OPEN_ID || undefined })
+        void handleMessageEvent(event, { invoke }, {
+          botOpenId: BOT_OPEN_ID || undefined,
+          // A reply to one of our remembered bot cards counts as an implicit
+          // mention so group reply-follow-ups don't require an extra @.
+          isKnownCard: (pid) => lookupCard(pid) !== undefined,
+        })
           .then(replyWithCard)
           .catch((err) => log({ event: "handle_error", error: String(err) }));
       }
