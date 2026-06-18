@@ -458,7 +458,9 @@ async function runStreamingInvoke(
   // 4. Finalize: header → green "回答完成" (or 已停止 / 查询失败) + reasoning panel
   //    collapsed. The full-card PUT rebuilds the body (conclusion + panel), which
   //    also drops the now-irrelevant 停止 button AND the live status line.
-  await writer.write((seq) => finalizeCard(cardId, finalText, redactSteps(steps), seq, isFollowUp, aborted, hardFailed, finalEvidence, question));
+  // Show total elapsed in the finalized header ("回答完成 · 用时 67s").
+  const elapsedLabel = formatElapsed(Date.now() - startedAt);
+  await writer.write((seq) => finalizeCard(cardId, finalText, redactSteps(steps), seq, isFollowUp, aborted, hardFailed, finalEvidence, question, elapsedLabel));
   // 5. Data charts + follow-ups: skip on HARD failure (no trustworthy conclusion).
   //    A turn-capped partial keeps its charts/follow-ups (labeled incomplete).
   if (!hardFailed && charts.length > 0) {

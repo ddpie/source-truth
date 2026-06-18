@@ -155,6 +155,16 @@ describe("follow-up card header", () => {
     expect(finalizeTitle(false)).toBe("回答完成");
     expect(finalizeTitle(true)).toContain("追问");
   });
+
+  it("finalizeTitle appends elapsed time on a completed answer", () => {
+    // elapsedLabel is whatever formatElapsed produced ("1m 7s" style).
+    expect(finalizeTitle(false, false, false, "1m 7s")).toBe("回答完成 · 用时 1m 7s");
+    expect(finalizeTitle(true, false, false, "1m 5s")).toContain("用时 1m 5s");
+  });
+
+  it("finalizeTitle does NOT show elapsed on a hard failure (misleading)", () => {
+    expect(finalizeTitle(false, false, true, "1m 7s")).toBe("⚠️ 查询失败");
+  });
 });
 
 describe("follow-up buttons (clickable, with element_id)", () => {
