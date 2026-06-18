@@ -72,7 +72,11 @@ def _align_paths(raw_json: str, tool_name: str, *, index_root: str, mount_root: 
         return raw_json
 
     def fix_location(item: Any) -> None:
-        loc = item.get("symbol", {}).get("location") if isinstance(item, dict) else None
+        # Null-safe chain: `item.get("symbol", {})` only defaults a MISSING key,
+        # not a JSON-null value, so a `{"symbol": null}` node (a real partial/
+        # unresolved codegraph result) would crash `None.get(...)`. Guard each hop.
+        sym = item.get("symbol") if isinstance(item, dict) else None
+        loc = sym.get("location") if isinstance(sym, dict) else None
         if isinstance(loc, dict) and "file" in loc:
             loc["file"] = _align_one(loc.get("file"), index_root=index_root, mount_root=mount_root)
         # get_callers entries also carry a call_site with its own file path.
@@ -167,6 +171,10 @@ def build_bridge(
             try:
                 arguments = await _build_args(tool_name, query)
                 raw = await session.call_tool(tool_name, arguments)
+                # Path alignment is INSIDE the try so an unexpected envelope shape
+                # can't escape this per-query isolation boundary into FastMCP — it
+                # falls to the generic handler below and returns an error JSON.
+                return _align_paths(raw, tool_name, index_root=workspace, mount_root=mount_root)
             except IndexUnhealthy as exc:
                 logger.error(json.dumps({"event": "refuse_unhealthy", "tool": tool_name,
                                          "detail": str(exc)}))
@@ -179,7 +187,6 @@ def build_bridge(
             except Exception as exc:  # noqa: BLE001 - isolate one query's failure
                 logger.error(json.dumps({"event": "tool_error", "tool": tool_name, "error": str(exc)}))
                 return json.dumps({"error": f"{tool_name} failed", "detail": str(exc)})
-            return _align_paths(raw, tool_name, index_root=workspace, mount_root=mount_root)
 
         _tool.__name__ = tool_name
         return _tool
