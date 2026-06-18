@@ -151,11 +151,17 @@ async function streamingCardInvoke(
   const stopHeartbeat = () => { if (heartbeat) { clearInterval(heartbeat); heartbeat = undefined; } };
   heartbeat = setInterval(() => {
     if (timedOut || Date.now() > deadline) { stopHeartbeat(); return; }
-    // While the conclusion is streaming (analyzing + real text flowing recently),
-    // the typewriter is the animation — skip the header spinner to avoid racing
-    // the body's streamed text with a full-card PUT.
+    // The header animation uses updateStage = a FULL-card PUT, which replaces the
+    // whole body and would WIPE any separately-appended elements (the 停止 button
+    // and the live 分析过程 panel). So the heartbeat may ONLY drive the header
+    // while NO such elements exist yet — i.e. the early "thinking" phase, before
+    // the first tool call flips stage→analyzing and appends them. Once we're in
+    // analyzing, the typewriter + live panel ARE the animation; the heartbeat
+    // must NOT full-PUT (it would delete the stop button mid-run → user can't
+    // abort, and flicker the panel). It self-stops driving but keeps the watchdog
+    // off the critical path by simply returning here.
+    if (stage !== "thinking") return;
     const sinceEvent = Date.now() - lastEventAt;
-    if (stage === "analyzing" && lastDisplay !== "正在分析…" && sinceEvent < 1500) return;
     const elapsed = Math.floor((Date.now() - startedAt) / 1000);
     const spin = SPINNER[spinFrame++ % SPINNER.length];
     // Watchdog: >15s with no new event → say so honestly, don't fake progress.
@@ -163,6 +169,7 @@ async function streamingCardInvoke(
       ? `${spin} 仍在思考（较久）${elapsed}s`
       : `${spin} 正在分析 ${elapsed}s`;
     seq++;
+    // body still the placeholder "正在分析…" in thinking phase → nothing to wipe.
     updateStage(cardId, label, "orange", lastDisplay, seq).catch(() => {});
   }, 800);
 
@@ -183,10 +190,11 @@ async function streamingCardInvoke(
       if (timedOut) return;
       if (Date.now() > deadline) { timedOut = true; return; }
       lastEventAt = Date.now(); // real SSE activity → resets the watchdog
-      // Stage 2 (思考→分析): on the first tool call, add the 停止 button + seed the
-      // live reasoning panel. The header spinner/text is driven by the heartbeat
-      // timer (which reads `stage`), so we no longer push a static "正在分析…"
-      // here — just flip the stage and add the stop button.
+      // Stage 2 (思考→分析): on the first tool call, set the orange header ONCE
+      // (this is the LAST full-card PUT — nothing appended yet to wipe), then add
+      // the 停止 button. After this flip the heartbeat stops full-PUTting (it
+      // gates on stage==="thinking"), so the button + live panel appended here and
+      // below survive; the typewriter + live panel are the animation from now on.
       if (stage === "thinking" && liveSteps.length > 0) {
         stage = "analyzing";
         seq++;
