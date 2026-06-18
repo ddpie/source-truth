@@ -4,19 +4,24 @@
 
 ## 职责
 
-独立常驻服务（非会话容器内）：
+> ⚠️ **本节（下列 1/2 项）是目标形态，当前 MVP 未实现**：当前没有 git clone / webhook / git pull /
+> inotify 增量 / 夜间 CI。**MVP 实况**＝ deploy 时打包仓库 tar.gz→S3 → bootstrap 首次解包到 EFS →
+> index-build 一次性建图 → `codegraph-server --mcp` 常驻只读，**刷新靠重部署**。只有第 3 项（MCP-over-HTTP
+> 桥）已落地（即 `http_bridge.py`）。详见文末「实现现状」与 `docs/agent/architecture.md` 数据面。
 
-1. **持 clone + 同步**：内网 GitLab 反向拉取 / 打包至 AWS；`git push` → webhook → `git pull`（~1s）写
-   EFS worktree（MVP 仅 main 分支）。
-2. **增量索引**：`inotify` 监听 EFS worktree 变更 → CodeGraph（Tree-sitter）增量重建调用关系图（~3s）；
-   夜间 CI 全量重建兜底。
-3. **MCP-over-HTTP 桥**：CodeGraph 原生仅 stdio MCP，用 mcp-proxy 类组件把它暴露为 streamable HTTP，
-   供会话容器远程查询（`codegraph_search` / `codegraph_callers` / `codegraph_impact` 等）。
+独立常驻服务（非会话容器内），**目标形态**：
+
+1. **持 clone + 同步**（目标，未实现）：内网 GitLab 反向拉取 / 打包至 AWS；`git push` → webhook →
+   `git pull`（~1s）写 EFS worktree（MVP 仅 main 分支）。
+2. **增量索引**（目标，未实现）：`inotify` 监听 EFS worktree 变更 → CodeGraph（Tree-sitter）增量重建
+   调用关系图（~3s）；夜间 CI 全量重建兜底。
+3. **MCP-over-HTTP 桥**（已落地）：CodeGraph 原生仅 stdio MCP，把它暴露为 streamable HTTP，
+   供会话容器远程查询（`codegraph_symbol_search` / `codegraph_get_callers` / `codegraph_analyze_impact`）。
 
 ## 存储模型（单一份代码，无副本）
 
-EFS 卷被本服务**可写**挂载（建索引），被每个会话 microVM **只读**挂载 `/mnt/repo`（读最新代码）。
-AI 通过索引定位文件后读的是代码最新版本，不是索引快照。
+EFS 卷被本服务**可写**挂载（部署时建索引），被每个会话 microVM **只读**挂载 `/mnt/repo`。
+一份代码无副本。代码与索引是**部署时快照**，刷新靠重部署（非随 push 更新）。
 
 ## 待 POC 验证（影响架构定型）
 
@@ -49,4 +54,5 @@ CodeGraph 引擎是一个独立的原生二进制 `codegraph-server`，**不在�
 `bootstrap.sh` 用 `pip install -r` 安装；`scripts/check-versions.sh` 守卫不漂移）。
 
 > 注：上文「持 clone / inotify 增量 / mcp-proxy / src/」描述的是早期规划形态；当前 MVP 实为
-> EFS 只读挂载 + 常驻单写者会话直连 `codegraph-server --mcp`，索引随主机 file-watcher 增量。
+> EFS 只读挂载 + 常驻单写者会话直连 `codegraph-server --mcp`；索引是**部署时一次性快照、刷新靠重部署**
+>（无 webhook / git pull / file-watcher 增量，留作 post-MVP）。与 `docs/agent/architecture.md` 数据面一致。

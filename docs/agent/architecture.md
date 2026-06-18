@@ -35,20 +35,28 @@ structure）描述系统*是什么*；本文描述*一次提问如何穿过系�
       · 结构化日志 + hashUserId 脱敏（src/log.ts，用户/会话标识不落明文，MVP 仅防滥用）
 ```
 
-## 数据面：代码如何进入 EFS、索引如何更新（NOT in README）
+## 数据面：代码如何进入 EFS、索引如何更新（MVP 实况）
+
+**当前 MVP 的真实管线**（一次性快照构建，靠重部署刷新——**没有** webhook / git pull / inotify
+增量 / 夜间 CI；那是 post-MVP 目标形态，未实现）：
 
 ```
-内网 GitLab ──(反向拉取 / 打包至 AWS)──▶ index-service（常驻，持 clone）
-  git push → webhook → git pull (~1s) → 写 EFS worktree（MVP 仅 main）
-                                          → inotify 监听 → CodeGraph 增量重建 (~3s)
-                                          → 夜间 CI 全量重建兜底
-index-service 以 mcp-proxy 类桥把 CodeGraph 的 stdio MCP 暴露为 streamable HTTP，
-会话容器通过该 HTTP 端点远程查询（codegraph_search / callers / impact 等）。
+deploy-all.sh Phase 1：把目标仓库整体打成 <repo>.tar.gz 上传 S3（部署时快照）
+  ▼
+bootstrap.sh（EC2 user-data，仅首启跑）：从 S3 解包到 EFS（if [ ! -d $WORKSPACE ]，仅一次）
+  ▼
+index-build.service（systemd oneshot，flock 单写者）：codegraph-server --graph-only 建图一次
+  ▼
+index-bridge.service：codegraph-server --mcp（常驻、内存图、只读）+ http_bridge 暴露 streamable HTTP
+  ▼
+会话容器经该 HTTP 端点远程查询（codegraph_symbol_search / get_callers / analyze_impact）
 ```
 
-**单一份代码、无副本**：EFS 卷被 index-service **可写**挂载（监听变更建索引），被每个会话 microVM
-**只读**挂载到 `/mnt/repo`（读最新代码）。一份代码，没有副本同步问题。AI 通过索引定位文件后读的是
-**代码最新版本**，不是索引快照。
+**单一份代码、无副本**：EFS 卷被 index-service **可写**挂载（部署时建一次索引），被每个会话 microVM
+**只读**挂载到 `/mnt/repo`。一份代码，没有副本同步问题。**刷新方式**：代码与索引都冻结在部署时的
+S3 tarball 快照，**要更新主分支代码 / 索引必须重新部署**（替换 index-service 实例重跑 bootstrap）——
+当前没有随 git push 自动刷新的链路。注：codegraph-server 的 `--serve` 带 file-watcher 增量是已实测的
+引擎能力，但 MVP 用 `--mcp` 未启用，留作 post-MVP。
 
 ## 会话隔离模型（NOT in README）
 
@@ -57,7 +65,7 @@ index-service 以 mcp-proxy 类桥把 CodeGraph 的 stdio MCP 暴露为 streamab
 | 内容 | 项目代码（主分支 worktree）+ CodeGraph 索引 | Agent 产生的临时文件 |
 | 载体 | EFS 卷只读挂载 `/mnt/repo` | AgentCore Session Storage `/mnt/workspace` |
 | 可见性 | 所有会话 | 仅本 microVM |
-| 生命周期 | 持久（push 增量 + 夜间兜底） | per-session（约 14 天空闲过期） |
+| 生命周期 | 持久（部署时构建一次，重部署刷新） | per-session（约 14 天空闲过期） |
 
 机器人粒度：**每个游戏项目一个机器人**，机器人内**按会话隔离**。上下文挂在飞书对话上、按需拉取消息
 记录；多用户不可共用 session。
@@ -90,8 +98,8 @@ source-truth 不同于「在容器外把 AI 当远程 MCP 客户端」的常见�
    agent 循环），AI 既是推理主体也是 MCP 消费端，而非外部 MCP 客户端。
 2. **飞书 Bot 网关**——机器人身份 + 长连接事件流 + 会话→runtimeSessionId 映射。MVP 不引入 per-user
    OAuth 体系；上下文挂在飞书对话上、按需拉取。
-3. **独立 CodeGraph 索引服务**——常驻、持 clone、inotify 增量、stdio→HTTP 桥，对会话容器暴露只读查询。
-4. **EFS 共享代码仓**——index-service 可写挂载监听、会话容器只读挂载读取，一份代码无副本。
+3. **独立 CodeGraph 索引服务**——常驻单写者会话（部署时建图一次）、stdio→streamable-HTTP 桥，对会话容器暴露只读查询。（持 clone / inotify 增量为 post-MVP，未实现）
+4. **EFS 共享代码仓**——index-service 可写挂载（部署时落代码+建索引）、会话容器只读挂载读取，一份代码无副本。
 
 通用运维惯例：ARM64 容器 + DockerImageAsset、CDK / boto3 混合 IaC 分工、飞书 SDK / CardKit 生态、
 空闲缩零按量计费、按游戏项目隔离机器人、结构化 JSON 日志 + hashUserId 脱敏、`deploy/ops/test` 三件套。
