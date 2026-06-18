@@ -4,7 +4,7 @@
  * CardKit applies updates in strictly-increasing `sequence` order and REJECTS
  * any update whose sequence is <= the last one it applied. The gateway used to
  * assign the sequence synchronously (correct order) but SEND writes fire-and-
- * forget with a shared mutable counter — so two concurrent writes (the 400ms
+ * forget with a shared mutable counter — so two concurrent writes (the 200ms
  * status heartbeat vs an onChunk panel/content update) could arrive at CardKit
  * out of order: the higher-seq one lands first, and the lower-seq one is then
  * stale-rejected and silently dropped. That single race caused a recurring class

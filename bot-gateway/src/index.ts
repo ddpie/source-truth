@@ -69,8 +69,9 @@ const abortControllers = new Map<string, AbortController>();
 const sessionSerializer = new SessionSerializer();
 
 // Monotonic sequence for card-callback (button-disable) updates. Based on Unix
-// seconds since a 2025 epoch (stays int32 for ~60y, and is far above the
-// streaming seqs which top out in the low hundreds). A counter guarantees
+// seconds since a 2025 epoch (stays int32 for ~60y, and is orders of magnitude
+// above any streaming seq reached in one card's lifetime — a 9-min run at the
+// 200ms status cadence reaches only the low thousands). A counter guarantees
 // strict monotonicity even for multiple clicks within the SAME second (plain
 // seconds would collide → CardKit rejects the 2nd update, button never greys).
 let _lastCallbackSeq = 0;
@@ -236,7 +237,8 @@ async function runStreamingInvoke(
   let panelAppended = false;
   // ~8/s nominal per timer-driven lane (content + panel). NOTE: the nominal per-lane
   // rates do NOT by themselves bound the CardKit-facing rate — content(~8/s) +
-  // panel(~8/s) + status(~1/s) can nominally sum >10/s. What actually keeps us under
+  // panel(~8/s) + status(nominal ~5/s at the 200ms tick, throttled to a ~1/s floor
+  // mid-stream) can nominally sum >10/s. What actually keeps us under
   // CardKit's 10/s per-card cap is the CardWriter single FIFO chain (card-writer.ts):
   // each write awaits the prior HTTP call and coalesce() collapses each lane to 1
   // pending, so the real outbound rate = 1/(Feishu RTT ~50-150ms). In practice that
@@ -292,7 +294,7 @@ async function runStreamingInvoke(
     // Stay under CardKit's per-card 10/s: when the conclusion typewriter is
     // actively streaming (a content update within the last STREAMING_YIELD_MS),
     // the answer text IS the visible motion — yield the status write this tick so
-    // status+content don't both fire every 100ms. BUT enforce a max-staleness
+    // status+content don't both fire on every 200ms heartbeat tick. BUT enforce a max-staleness
     // floor: if the timer hasn't been refreshed for STATUS_FLOOR_MS (~1s), write it
     // anyway even mid-stream — otherwise the elapsed counter visibly FREEZES for the
     // entire (tens-of-seconds) conclusion-streaming phase, since content keeps

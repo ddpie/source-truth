@@ -43,9 +43,11 @@ export function buildCreateCardBody(opts?: { summary?: string; followUp?: boolea
   // Follow-up cards (from a clicked button) get a distinct header so the chat
   // history clearly shows "this card answers a follow-up question".
   const title = opts?.followUp ? "↳ 正在追问…" : "正在思考…";
-  // Echo the user's question at the TOP of the card body (a quoted line), so the
-  // card is self-contained — the reader sees WHAT was asked without scrolling up
-  // the chat. element_id="question" so it stays put through streaming/finalize.
+  // Echo the user's question at the TOP of the card body as a plain_text div
+  // (buildQuestionElement), so the card is self-contained — the reader sees WHAT
+  // was asked without scrolling up the chat. element_id="question" so it stays put
+  // through streaming/finalize; plain_text means raw markdown in the question can't
+  // corrupt the card.
   const elements: unknown[] = [];
   const q = (opts?.question ?? "").trim();
   if (q) {
@@ -97,28 +99,6 @@ export function buildSendCardContent(cardId: string): string {
   return JSON.stringify({ type: "card", data: { card_id: cardId } });
 }
 
-/** Full-card PUT body that swaps the header (title + color) mid-stream while
- *  keeping streaming_mode on and re-carrying the current conclusion text — a
- *  full PUT replaces the whole body, so the in-progress text must be included
- *  or it would be wiped. Verified: streaming text survives a full PUT. */
-export function buildStageBody(title: string, template: string, conclusion: string, sequence: number): string {
-  const card = {
-    schema: "2.0",
-    config: {
-      update_multi: true,
-      streaming_mode: true,
-      streaming_config: {
-        print_frequency_ms: { default: 70 },
-        print_step: { default: 1 },
-        print_strategy: "fast",
-      },
-    },
-    header: { title: { tag: "plain_text", content: title }, template },
-    body: { elements: [{ tag: "markdown", content: conclusion, element_id: "conclusion" }] },
-  };
-  return JSON.stringify({ card: { type: "card_json", data: JSON.stringify(card) }, sequence });
-}
-
 /** Human-readable elapsed duration: seconds under a minute, "Mm Ss" under an
  *  hour, "Hh Mm" beyond. Keeps the live timer honest AND readable on a long run
  *  (a bare seconds counter reaching "247s" reads worse than "4m 7s"). */
@@ -155,17 +135,6 @@ export async function updateStatusLine(cardId: string, text: string, sequence: n
     element: JSON.stringify({ tag: "markdown", content: text, element_id: "status" }),
     sequence,
   }));
-}
-
-/** Change the card's stage (header title + color) mid-stream via full PUT. */
-export async function updateStage(
-  cardId: string,
-  title: string,
-  template: string,
-  conclusion: string,
-  sequence: number,
-): Promise<void> {
-  await larkApi("PUT", `/open-apis/cardkit/v1/cards/${cardId}`, buildStageBody(title, template, conclusion, sequence));
 }
 
 // ── CardKit transport (in-process HTTP) ──────────────────────────────────────
