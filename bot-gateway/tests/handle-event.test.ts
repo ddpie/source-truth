@@ -160,4 +160,30 @@ describe("handleMessageEvent", () => {
     const out = await handleMessageEvent(evt({ chat_type: "p2p", mentions: [] }), { invoke: async () => "ok" }, { botOpenId: "ou_bot" });
     expect(out.handled).toBe(true);
   });
+
+  it("in a GROUP, answers a bare reply to one of OUR bot cards (implicit mention)", async () => {
+    let captured = "";
+    const invoke = async (_s: string, prompt: string) => { captured = prompt; return "ok"; };
+    const out = await handleMessageEvent(
+      evt({ chat_type: "group", content: "那骷髅呢", mentions: [], parent_id: "om_ourcard" }),
+      { invoke },
+      { botOpenId: "ou_bot", isKnownCard: (pid) => pid === "om_ourcard" },
+    );
+    expect(out.handled).toBe(true);
+    expect(out.parentId).toBe("om_ourcard");
+    expect(captured).toBe("那骷髅呢");
+  });
+
+  it("in a GROUP, still ignores a reply to a message that is NOT our card", async () => {
+    let n = 0;
+    const invoke = async () => { n++; return "ok"; };
+    const out = await handleMessageEvent(
+      evt({ chat_type: "group", content: "收到", mentions: [], parent_id: "om_someoneelse" }),
+      { invoke },
+      { botOpenId: "ou_bot", isKnownCard: (pid) => pid === "om_ourcard" },
+    );
+    expect(out.handled).toBe(false);
+    expect(out.reason).toBe("not_mentioned");
+    expect(n).toBe(0);
+  });
 });

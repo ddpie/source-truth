@@ -52,9 +52,14 @@ export interface HandleResult {
 }
 
 /** Options that gate WHEN to answer. botOpenId is the bot's own open_id; when
- *  set, group messages are answered only if the bot was @-mentioned. */
+ *  set, group messages are answered only if the bot was @-mentioned.
+ *  isKnownCard(parentId) returns true when a message replies to one of OUR bot
+ *  cards — such a reply is unambiguous intent toward the bot, so it counts as an
+ *  implicit @-mention (the user replied directly to our answer). Injected as a
+ *  predicate so this module stays decoupled from the card registry / testable. */
 export interface HandleOptions {
   botOpenId?: string;
+  isKnownCard?: (parentId: string) => boolean;
 }
 
 /**
@@ -102,7 +107,12 @@ export async function handleMessageEvent(
     const mentioned = options.botOpenId
       ? event.mentions.some((m) => m.open_id === options.botOpenId)
       : event.mentions.length > 0;
-    if (!mentioned) {
+    // A reply to one of our own bot cards is addressed to the bot just as
+    // unambiguously as an @-mention — treat it as an implicit mention so
+    // reply-based follow-ups work in groups without forcing the user to also @.
+    const repliesToOurCard =
+      !!event.parent_id && !!options.isKnownCard && options.isKnownCard(event.parent_id);
+    if (!mentioned && !repliesToOurCard) {
       return { handled: false, reason: "not_mentioned" };
     }
   }
