@@ -148,7 +148,8 @@ export async function closeStreaming(cardId: string, sequence: number): Promise<
 
 /** Completed-card header title — keeps the follow-up marker so the chat
  *  history still shows a finished follow-up card as a follow-up. */
-export function finalizeTitle(followUp?: boolean, aborted?: boolean): string {
+export function finalizeTitle(followUp?: boolean, aborted?: boolean, failed?: boolean): string {
+  if (failed) return "⚠️ 查询失败";
   if (aborted) return "⏹ 已停止";
   return followUp ? "↳ 追问 · 已回答" : "回答完成";
 }
@@ -261,14 +262,15 @@ export async function finalizeCard(
   sequence: number,
   followUp?: boolean,
   aborted?: boolean,
+  failed?: boolean,
 ): Promise<void> {
   const panel = buildReasoningPanel(steps, false);
   const card = {
     schema: "2.0",
     config: { update_multi: true },
     header: {
-      title: { tag: "plain_text", content: finalizeTitle(followUp, aborted) },
-      template: aborted ? "grey" : "green",
+      title: { tag: "plain_text", content: finalizeTitle(followUp, aborted, failed) },
+      template: failed ? "red" : aborted ? "grey" : "green",
     },
     body: {
       elements: [

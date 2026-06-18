@@ -47,9 +47,60 @@ def test_build_options_dict_readonly_tools_only():
     opts = agent_lib.build_options_dict(system_prompt="x")
     tools = opts["allowed_tools"]
     assert "Read" in tools and "Glob" in tools and "Grep" in tools
-    # Read-only boundary: no write/exec tools.
+    # Read-only boundary: no write/exec tools auto-approved.
     for forbidden in ("Bash", "Write", "Edit"):
         assert forbidden not in tools
+
+
+def test_build_options_dict_enforces_readonly_availability():
+    # The read-only boundary must be ENFORCED, not merely "not auto-approved".
+    # `tools` is the SDK availability gate: with it set to the read-only set,
+    # Bash/Write/Edit are never in the model's context. Asserting only their
+    # absence from allowed_tools (auto-approval) would green-light an UNENFORCED
+    # boundary, since unset `tools` loads the full Claude Code preset.
+    opts = agent_lib.build_options_dict(system_prompt="x")
+    assert opts["tools"] == list(agent_lib.READONLY_TOOLS)
+    for forbidden in ("Bash", "Write", "Edit", "MultiEdit", "NotebookEdit"):
+        assert forbidden not in opts["tools"], f"{forbidden} must not be AVAILABLE"
+        assert forbidden in opts["disallowed_tools"], f"{forbidden} must be blocklisted"
+    # Headless runtime: deny non-pre-approved calls, never hang on a prompt.
+    assert opts["permission_mode"] == "dontAsk"
+    # Only the CodeGraph MCP server we pass may load — no project/user/plugin leak.
+    assert opts["strict_mcp_config"] is True
+
+
+def test_build_options_dict_blocklists_codegraph_write_tools():
+    # Defense-in-depth: MCP tools are NOT gated by `tools` (built-ins only) and
+    # are admitted via mcp_servers, so the read-only boundary for CodeGraph rests
+    # solely on "not in allowed_tools + dontAsk rejects the rest". The codegraph
+    # server actually exposes write/state tools (reindex, index_*, memory_store/
+    # invalidate); blocklist them explicitly so they're removed from context even
+    # if a future allow-list change or preset would otherwise admit them.
+    opts = agent_lib.build_options_dict(
+        system_prompt="x", codegraph_url="http://10.1.1.5:8080/mcp",
+    )
+    for write_tool in (
+        "mcp__codegraph__codegraph_reindex_workspace",
+        "mcp__codegraph__codegraph_index_directory",
+        "mcp__codegraph__codegraph_index_files",
+        "mcp__codegraph__codegraph_index_markdown",
+        "mcp__codegraph__codegraph_memory_store",
+        "mcp__codegraph__codegraph_memory_invalidate",
+    ):
+        assert write_tool in opts["disallowed_tools"], f"{write_tool} must be blocklisted"
+        assert write_tool not in opts["allowed_tools"], f"{write_tool} must not be auto-approved"
+
+
+def test_build_options_dict_codegraph_tools_not_in_availability_gate():
+    # `tools` governs BUILT-INS only; MCP tools arrive via mcp_servers. The
+    # availability gate must stay the read-only built-in set even with CodeGraph
+    # wired, while the MCP tools are auto-approved via allowed_tools.
+    opts = agent_lib.build_options_dict(
+        system_prompt="x", codegraph_url="http://10.1.1.5:8080/mcp",
+    )
+    assert opts["tools"] == list(agent_lib.READONLY_TOOLS)
+    assert any(t.startswith("mcp__codegraph__") for t in opts["allowed_tools"])
+    assert not any(t.startswith("mcp__codegraph__") for t in opts["tools"])
 
 
 def test_build_options_dict_includes_system_prompt():
@@ -82,6 +133,33 @@ def test_build_options_dict_matches_real_sdk_options():
     real = sdk.ClaudeAgentOptions(**opts)
     assert real.mcp_servers["codegraph"]["type"] == "http"
     assert "Read" in real.allowed_tools
+    # The enforcing fields must round-trip onto the real options object, so the
+    # CLI transport emits --tools / --disallowedTools / --permission-mode and the
+    # read-only boundary is genuinely enforced (not just a dict we hand-built).
+    assert real.tools == list(agent_lib.READONLY_TOOLS)
+    assert "Bash" in real.disallowed_tools
+    assert real.permission_mode == "dontAsk"
+    assert real.strict_mcp_config is True
+    # The agentic loop must be bounded (no unbounded read→grep→read runaway).
+    assert real.max_turns == agent_lib.DEFAULT_MAX_TURNS
+
+
+def test_build_options_dict_bounds_agentic_loop():
+    # max_turns must always be set (default), and honor an explicit override.
+    assert agent_lib.build_options_dict(system_prompt="x")["max_turns"] == agent_lib.DEFAULT_MAX_TURNS
+    assert agent_lib.build_options_dict(system_prompt="x", max_turns=7)["max_turns"] == 7
+
+
+def test_env_max_turns_resolution(monkeypatch):
+    # Operator override via AGENT_MAX_TURNS; invalid/non-positive → safe default.
+    monkeypatch.setenv("AGENT_MAX_TURNS", "35")
+    assert agent_lib._env_max_turns() == 35
+    monkeypatch.setenv("AGENT_MAX_TURNS", "0")
+    assert agent_lib._env_max_turns() == agent_lib.DEFAULT_MAX_TURNS
+    monkeypatch.setenv("AGENT_MAX_TURNS", "not-an-int")
+    assert agent_lib._env_max_turns() == agent_lib.DEFAULT_MAX_TURNS
+    monkeypatch.delenv("AGENT_MAX_TURNS", raising=False)
+    assert agent_lib._env_max_turns() == agent_lib.DEFAULT_MAX_TURNS
 
 
 def test_build_options_dict_no_codegraph_when_url_absent():
@@ -93,3 +171,19 @@ def test_build_options_dict_no_codegraph_when_url_absent():
 def test_build_options_dict_model_passthrough():
     opts = agent_lib.build_options_dict(system_prompt="x", model="global.anthropic.claude-foo:0")
     assert opts["model"] == "global.anthropic.claude-foo:0"
+
+
+def test_codegraph_url_accepts_private_ip_http():
+    # The real deploy value is an in-VPC private IP http URL — must be accepted
+    # (we deliberately do NOT block private ranges, that's the legit endpoint).
+    opts = agent_lib.build_options_dict(
+        system_prompt="x", codegraph_url="http://10.1.1.159:8080/mcp",
+    )
+    assert opts["mcp_servers"]["codegraph"]["url"] == "http://10.1.1.159:8080/mcp"
+
+
+def test_codegraph_url_rejects_non_http_scheme():
+    # Defense-in-depth: a malformed/typo'd deploy value fails loudly, not silently.
+    for bad in ("file:///etc/passwd", "gopher://x", "not-a-url", "ftp://h/x"):
+        with pytest.raises(ValueError):
+            agent_lib.build_options_dict(system_prompt="x", codegraph_url=bad)

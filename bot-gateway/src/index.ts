@@ -24,33 +24,52 @@ import { spawn } from "node:child_process";
 
 import { fromNodeProviderChain } from "@aws-sdk/credential-providers";
 
-import { invokeRuntimeStreaming } from "./sigv4";
+import { invokeRuntimeStreaming, classifyInvokeOutcome, type AwsCredentials } from "./sigv4";
 import { createCard, updateContent, closeStreaming, finalizeCard, appendFooter, buildSendCardContent, disableFollowUpButton, updateStage, appendReasoningPanel, updateReasoningPanel, appendCharts, appendStopButton } from "./cardkit-client";
 import { extractCharts } from "./extract-charts";
 import { rememberCard, lookupCard } from "./card-registry";
 import { removeReaction } from "./reaction";
-import { redactSensitive } from "./redact";
-import { extractFollowUps } from "./extract-followups";
+import { redactSensitive, redactSteps, redactDeep } from "./redact";
+import { extractFollowUps, stripFollowUps } from "./extract-followups";
 import { handleMessageEvent, type InvokeFn } from "./handle-event";
 import { sdkEventToImEvent } from "./sdk-event";
+import { sendReply } from "./reply";
 import { getSessionId } from "./session-map";
+import { hashUserId } from "./log";
+import { isDuplicate } from "./dedup";
 
 const REGION = process.env.AWS_REGION ?? "ap-northeast-1";
 const RUNTIME_ARN = process.env.RUNTIME_ARN ?? "";
 const APP_ID = process.env.FEISHU_APP_ID ?? "";
 const APP_SECRET = process.env.FEISHU_APP_SECRET ?? "";
+// The bot's own open_id (optional). When set, group messages are answered only
+// if THIS bot was @-mentioned (precise). When unset, the gate falls back to
+// "any @-mention present" — still blocks the answer-everything behavior.
+const BOT_OPEN_ID = process.env.FEISHU_BOT_OPEN_ID ?? "";
 
 function log(obj: Record<string, unknown>): void {
   console.log(JSON.stringify({ ts: new Date().toISOString(), ...obj }));
 }
 
-// Message-level dedup: prevents double-processing on Feishu re-delivery after
-// a gateway restart (event_id dedup map is in-memory and gets cleared).
-const processedMessages = new Set<string>();
+// Message-level dedup uses the shared TTL-bounded `isDuplicate` (dedup.ts) with
+// a "msg:" prefix so it can't collide with event_id keys. This replaces an
+// earlier unbounded Set that leaked memory in an always-on gateway.
 
 // cardId → AbortController for the in-flight agent stream, so a 停止 button
 // click (card.action.trigger) can abort that specific invoke.
 const abortControllers = new Map<string, AbortController>();
+
+// Monotonic sequence for card-callback (button-disable) updates. Based on Unix
+// seconds since a 2025 epoch (stays int32 for ~60y, and is far above the
+// streaming seqs which top out in the low hundreds). A counter guarantees
+// strict monotonicity even for multiple clicks within the SAME second (plain
+// seconds would collide → CardKit rejects the 2nd update, button never greys).
+let _lastCallbackSeq = 0;
+function nextCallbackSeq(): number {
+  const base = Math.floor(Date.now() / 1000) - 1_700_000_000;
+  _lastCallbackSeq = base > _lastCallbackSeq ? base : _lastCallbackSeq + 1;
+  return _lastCallbackSeq;
+}
 
 /** Streaming invoke: creates the card immediately (fast first render), then
  *  updates it as text arrives from the agent, and closes streaming at the end. */
@@ -58,15 +77,17 @@ async function streamingCardInvoke(
   sessionId: string,
   prompt: string,
   target: { messageId: string } | { chatId: string },
-  creds: { accessKeyId: string; secretAccessKey: string; sessionToken?: string },
+  // A credential PROVIDER, not a snapshot: SignatureV4 re-resolves it on every
+  // sign, so EC2 instance-role (IMDS) temporary creds get refreshed instead of
+  // going stale and 403-ing every invoke after a few hours of uptime.
+  credentials: () => Promise<AwsCredentials>,
 ): Promise<void> {
   const targetKey = "messageId" in target ? target.messageId : target.chatId;
   // Dedup only IM messages (Feishu re-delivers them on restart). Follow-up
   // clicks (chatId target) are deliberate user actions — never dedup them,
   // or a second follow-up in the same chat would be silently dropped.
   if ("messageId" in target) {
-    if (processedMessages.has(target.messageId)) return;
-    processedMessages.add(target.messageId);
+    if (isDuplicate(`msg:${target.messageId}`)) return;
   }
 
   // 1. Create streaming card + send it immediately. Follow-up cards carry a
@@ -92,7 +113,7 @@ async function streamingCardInvoke(
     const sentMessageId = (JSON.parse(sendOut) as { data?: { message_id?: string } })?.data?.message_id;
     if (sentMessageId) rememberCard(sentMessageId, cardId);
   } catch { /* best-effort: button-disable is a visual nicety */ }
-  log({ event: "card_sent", target: targetKey, card: cardId });
+  log({ event: "card_sent", target: hashUserId(targetKey), card: cardId });
 
   // Remove the "processing" reaction now that the card is visible.
   if ("messageId" in target) removeReaction(target.messageId);
@@ -102,6 +123,7 @@ async function streamingCardInvoke(
   //    10-minute hard window kills the stream (avoids broken card state).
   let seq = 1;
   let lastUpdate = 0;
+  let lastPanelUpdate = 0;
   let timedOut = false;
   let stage: "thinking" | "analyzing" = "thinking";
   let lastDisplay = "正在分析…";
@@ -115,9 +137,15 @@ async function streamingCardInvoke(
   const abort = new AbortController();
   abortControllers.set(cardId, abort);
 
-  const { status, answer, steps, aborted } = await invokeRuntimeStreaming(
+  // try/finally so the abortControllers entry is removed on EVERY exit path —
+  // resolve, abort, OR a thrown network/stream/signing error. Without the finally
+  // a non-abort throw skips the delete and leaks one AbortController per failed
+  // invoke for the lifetime of this always-on process.
+  let result: Awaited<ReturnType<typeof invokeRuntimeStreaming>>;
+  try {
+    result = await invokeRuntimeStreaming(
     { runtimeArn: RUNTIME_ARN, region: REGION, sessionId, prompt },
-    { region: REGION, credentials: creds },
+    { region: REGION, credentials },
     (textSoFar, liveSteps) => {
       if (timedOut) return;
       if (Date.now() > deadline) { timedOut = true; return; }
@@ -136,13 +164,23 @@ async function streamingCardInvoke(
       // separate element from the streamed conclusion, so it doesn't fight the
       // typewriter. Only push when a NEW step appeared (not every text chunk).
       if (liveSteps.length > stepsShown) {
+        // Throttle panel pushes too: they share CardKit's 10/s entity cap with
+        // content/stage/button updates, so an agent emitting steps in a burst
+        // could otherwise trip the limit. Skip this tick if we updated recently
+        // (steps keep accumulating in liveSteps; the next tick renders them all).
+        const nowPanel = Date.now();
+        if (nowPanel - lastPanelUpdate < THROTTLE_MS) return;
+        lastPanelUpdate = nowPanel;
         stepsShown = liveSteps.length;
         seq++;
+        // Redact steps before they hit the group-visible panel (same safety net
+        // as the conclusion text) — a secret/path in a narration step leaks too.
+        const safeSteps = redactSteps(liveSteps);
         if (!panelAppended) {
           panelAppended = true;
-          appendReasoningPanel(cardId, liveSteps, seq).catch(() => {});
+          appendReasoningPanel(cardId, safeSteps, seq).catch(() => {});
         } else {
-          updateReasoningPanel(cardId, liveSteps, seq).catch(() => {});
+          updateReasoningPanel(cardId, safeSteps, seq).catch(() => {});
         }
         return;
       }
@@ -160,44 +198,93 @@ async function streamingCardInvoke(
       updateContent(cardId, display, seq).catch(() => {});
     },
     abort.signal,
-  );
-  abortControllers.delete(cardId);
+    );
+  } finally {
+    abortControllers.delete(cardId);
+  }
+  const { status, answer, steps, aborted, error } = result;
 
-  if (status !== 200 && !aborted) throw new Error(`invoke failed: HTTP ${status}`);
+  // A backend failure must NEVER masquerade as a completed answer — that is the
+  // "silent wrong answer when the index is unavailable" mode the code-as-only-
+  // truth design forbids (system.md: 出错就说出错). Two failure shapes:
+  //   (a) non-200 HTTP — e.g. 403 when the SigV4 creds expired, 4xx/5xx from
+  //       AgentCore. Earlier this THREW, which left the already-sent streaming
+  //       card stuck forever in "正在分析…" (never closed); the IM path showed a
+  //       misleading "卡片渲染失败" while the follow-up path showed nothing.
+  //   (b) a top-level error event over an open 200 stream (CodeGraph/index-
+  //       service unreachable, model throttled, run errored).
+  // Both now fold into `failed` so the SAME path finalizes the card explicitly
+  // (red header, no charts, no follow-ups) instead of throwing or hanging.
+  const { failed, httpFailed } = classifyInvokeOutcome({ status, aborted, error });
+  if (httpFailed) log({ event: "invoke_http_error", card: cardId, status });
+
+  // A Bedrock model-access denial (common on a freshly-deployed account where
+  // model access isn't enabled yet) is operator-actionable, not a transient —
+  // surface a specific hint instead of the generic "稍后重试".
+  const accessDenied = !!error && /accessdenied|don't have access|not authorized to invoke/i.test(error);
 
   // 3. Final update + close streaming. Pull any ```chart blocks out of the
   //    answer first so the conclusion text is clean (charts render separately).
-  const rawFinal = aborted
-    ? (answer ? answer + "\n\n*（已停止，以上为已生成内容）*" : "⏹ 已停止。")
-    : timedOut && !answer
-      ? "⏱ 分析超时，请缩小问题范围后重试。"
-      : (answer || "(无内容)");
-  const { text: textNoCharts, charts } = extractCharts(rawFinal);
-  const finalText = redactSensitive(textNoCharts);
+  const rawFinal = failed
+    ? (accessDenied
+        ? "⚠️ 模型访问未开通：请在 AWS Bedrock 控制台为该模型开通 Model access（global.* 跨区域推理需在相关区域分别开通），开通后即可正常回答。"
+        : "⚠️ 查询失败（后端不可用或取证中断），请稍后重试；若持续失败请转研发。")
+    : aborted
+      ? (answer ? answer + "\n\n*（已停止，以上为已生成内容）*" : "⏹ 已停止。")
+      : timedOut && !answer
+        ? "⏱ 分析超时，请缩小问题范围后重试。"
+        : (answer || "(无内容)");
+  // On failure, suppress any partial chart/answer fragments — they're not a
+  // trustworthy conclusion. Only parse charts out of a genuine answer.
+  const { text: textNoCharts, charts } = failed ? { text: rawFinal, charts: [] } : extractCharts(rawFinal);
+  // Strip the "💡 你可能还想问" trailer from the rendered body — those questions
+  // become clickable footer buttons below, so leaving them in the prose shows
+  // them twice (and clutters the card the prompt was rewritten to keep clean).
+  // The full text (with trailer) is still used for extractFollowUps further down.
+  const finalText = redactSensitive(failed ? textNoCharts : stripFollowUps(textNoCharts));
+  // Best-effort, independently guarded: if updateContent throws (transient
+  // CardKit/lark-cli error, or a sequence rejection racing the last fire-and-
+  // forget onChunk update), closeStreaming and finalizeCard MUST still run —
+  // otherwise an aborted/finished card stays stuck in "正在分析…" with streaming
+  // on and a dead 停止 button (finalizeCard's full PUT is what clears both).
   seq++;
-  await updateContent(cardId, finalText, seq);
+  try { await updateContent(cardId, finalText, seq); } catch (e) { log({ event: "finalize_content_error", card: cardId, error: String(e) }); }
   seq++;
-  await closeStreaming(cardId, seq);
+  try { await closeStreaming(cardId, seq); } catch (e) { log({ event: "close_streaming_error", card: cardId, error: String(e) }); }
 
-  // 4. Finalize: header → green "回答完成" (or 已停止) + reasoning panel collapsed.
-  //    The full-card PUT rebuilds the body (conclusion + panel), which also drops
-  //    the now-irrelevant 停止 button.
+  // 4. Finalize: header → green "回答完成" (or 已停止 / 查询失败) + reasoning panel
+  //    collapsed. The full-card PUT rebuilds the body (conclusion + panel), which
+  //    also drops the now-irrelevant 停止 button.
   seq++;
-  try { await finalizeCard(cardId, finalText, steps, seq, isFollowUp, aborted); } catch { /* best-effort */ }
-  // 5. Data charts (if the agent emitted any), then the follow-up footer.
-  if (charts.length > 0) {
+  try { await finalizeCard(cardId, finalText, redactSteps(steps), seq, isFollowUp, aborted, failed); } catch { /* best-effort */ }
+  // 5. Data charts + follow-ups: only on a real answer (skip both on failure —
+  //    a failed query has no conclusion to chart or follow up on).
+  if (!failed && charts.length > 0) {
+    // Charts are pulled from the UNredacted answer (extractCharts ran on rawFinal),
+    // so scrub every string leaf of each spec before it hits the group-visible
+    // card — same secret/path safety net as the conclusion and reasoning panel.
+    const safeCharts = charts.map((c) => redactDeep(c));
     seq++;
-    try { await appendCharts(cardId, charts, seq); } catch (e) { log({ event: "chart_error", error: String(e) }); }
+    try { await appendCharts(cardId, safeCharts, seq); } catch (e) { log({ event: "chart_error", error: String(e) }); }
   }
-  seq++;
-  const followUps = extractFollowUps(finalText);
-  try { await appendFooter(cardId, seq, followUps); } catch { /* best-effort */ }
-  log({ event: "card_closed", card: cardId, chars: answer.length, charts: charts.length, timedOut });
+  if (!failed) {
+    seq++;
+    // Extract from the UNstripped text (finalText had the trailer removed above).
+    const followUps = extractFollowUps(redactSensitive(textNoCharts));
+    try { await appendFooter(cardId, seq, followUps); } catch { /* best-effort */ }
+  }
+  log({ event: "card_closed", card: cardId, chars: answer.length, charts: charts.length, timedOut, failed, error: error ?? undefined });
 }
 
 async function main(): Promise<void> {
   if (!RUNTIME_ARN) throw new Error("RUNTIME_ARN env is required");
-  const creds = await fromNodeProviderChain()();
+  // Hold the credential PROVIDER, not a one-time resolved snapshot. EC2 instance-
+  // role creds (IMDS) are temporary; resolving once at startup and reusing the
+  // snapshot for the lifetime of this always-on process meant every invoke 403'd
+  // once those creds expired (~hours in). The provider re-resolves (and refreshes)
+  // per sign. fromNodeProviderChain() memoizes internally and only hits IMDS when
+  // the cached creds are near expiry, so this is cheap to call per request.
+  const credentials = fromNodeProviderChain();
 
   // The InvokeFn for handleMessageEvent: it returns the final answer (for
   // logging), but the real streaming card lifecycle is driven by
@@ -215,17 +302,26 @@ async function main(): Promise<void> {
     if (!res?.handled || !res.messageId || !res.sessionId) return;
     const prompt = res.answer ?? "";
     try {
-      await streamingCardInvoke(res.sessionId, prompt, { messageId: res.messageId }, {
-        accessKeyId: creds.accessKeyId,
-        secretAccessKey: creds.secretAccessKey,
-        sessionToken: creds.sessionToken,
-      });
+      await streamingCardInvoke(res.sessionId, prompt, { messageId: res.messageId }, credentials);
     } catch (cardErr) {
+      // streamingCardInvoke now finalizes the card itself on backend failure
+      // (non-200 / stream error), so reaching here means something unexpected
+      // broke (e.g. the initial card create/send). Fall back to plain text and
+      // keep the message neutral — it is NOT necessarily a card-render issue.
       log({ event: "card_fallback", error: String(cardErr) });
-      const { sendReply } = await import("./reply.js");
-      await sendReply({ messageId: res.messageId, answer: `⚠️ 卡片渲染失败，纯文本回复：\n\n${prompt}` }).catch(() => {});
+      // If streamingCardInvoke threw BEFORE it removed the "processing" reaction
+      // (e.g. the initial createCard / card-send failed at index.ts:97-109), that
+      // emoji is still stuck on the user's message. Clear it here so a failed
+      // answer doesn't leave the message looking perpetually "in progress".
+      removeReaction(res.messageId);
+      // Static import (top of file): a dynamic import("./reply.js") fails to
+      // resolve under ts-node (the .js specifier hits Node's native ESM loader,
+      // which can't find the .ts source) — that would make the FALLBACK itself
+      // throw and the user get nothing. Log the fallback's own failure too.
+      await sendReply({ messageId: res.messageId, answer: `⚠️ 暂时无法回答（服务异常），请稍后重试：\n\n${prompt}` })
+        .catch((e) => log({ event: "fallback_error", error: String(e) }));
     }
-    log({ event: "replied", message: res.messageId, session: res.sessionId });
+    log({ event: "replied", message: hashUserId(res.messageId), session: res.sessionId });
   };
 
   // Single Feishu SDK WSClient long-connection: IM events + card action
@@ -238,7 +334,7 @@ async function main(): Promise<void> {
     "im.message.receive_v1": (data: unknown) => {
       const event = sdkEventToImEvent(data);
       if (event) {
-        void handleMessageEvent(event, { invoke })
+        void handleMessageEvent(event, { invoke }, { botOpenId: BOT_OPEN_ID || undefined })
           .then(replyWithCard)
           .catch((err) => log({ event: "handle_error", error: String(err) }));
       }
@@ -260,21 +356,19 @@ async function main(): Promise<void> {
           log({ event: "stop_clicked", card: value.card_id, found: !!ctrl });
           if (ctrl) ctrl.abort();
         } else if (value?.action === "follow_up" && value.text && chatId) {
-          log({ event: "follow_up_clicked", chatId, question: value.text });
+          // Hash the chat id; log only the question LENGTH, not the text, to
+          // avoid "who asked what" profiling in logs (data minimization).
+          log({ event: "follow_up_clicked", chatId: hashUserId(chatId), question_len: value.text.length });
           const sessionId = getSessionId(chatId);
-          void streamingCardInvoke(sessionId, value.text, { chatId }, {
-            accessKeyId: creds.accessKeyId,
-            secretAccessKey: creds.secretAccessKey,
-            sessionToken: creds.sessionToken,
-          }).catch((e) => log({ event: "follow_up_error", error: String(e) }));
+          void streamingCardInvoke(sessionId, value.text, { chatId }, credentials)
+            .catch((e) => log({ event: "follow_up_error", error: String(e) }));
           // Mark the clicked button: disable it + ✓ on the original card, so the
           // user sees which one they picked (best-effort, async).
           const cardId = lookupCard(messageId);
           if (cardId && value.eid) {
-            // sequence must be int32 (≤2147483647) AND > the card's streaming
-            // seqs (which top out in the low hundreds). Unix seconds since a
-            // 2025 epoch fits int32 for ~60y and is monotonic across clicks.
-            const seq = Math.floor(Date.now() / 1000) - 1_700_000_000;
+            // int32-safe, streaming-seq-beating, AND strictly monotonic even for
+            // same-second rapid clicks (see nextCallbackSeq).
+            const seq = nextCallbackSeq();
             void disableFollowUpButton(cardId, value.eid, value.text, seq)
               .catch((e) => log({ event: "disable_button_error", error: String(e) }));
           }

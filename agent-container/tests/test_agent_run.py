@@ -71,3 +71,14 @@ def test_run_agent_rejects_missing_prompt():
 
     with pytest.raises((KeyError, ValueError)):
         _collect(agent_lib.run_agent({}, query_fn=fake_query))
+
+
+def test_run_agent_rejects_non_dict_payload():
+    # A non-dict payload (None / str / list) must fail with a CLEAR ValueError,
+    # not a cryptic AttributeError from payload.get(...).
+    async def fake_query(*, prompt, options):  # pragma: no cover
+        yield None
+
+    for bad in (None, "just a string", ["prompt"], 42):
+        with pytest.raises(ValueError):
+            _collect(agent_lib.run_agent(bad, query_fn=fake_query))

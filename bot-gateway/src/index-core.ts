@@ -20,6 +20,7 @@ function asImEvent(data: unknown): ImEvent | null {
     typeof d.content === "string" &&
     typeof d.message_type === "string"
   ) {
+    const rawMentions = Array.isArray(d.mentions) ? d.mentions : [];
     return {
       event_id: d.event_id,
       chat_id: d.chat_id,
@@ -27,7 +28,18 @@ function asImEvent(data: unknown): ImEvent | null {
       content: d.content,
       message_id: typeof d.message_id === "string" ? d.message_id : "",
       sender_id: typeof d.sender_id === "string" ? d.sender_id : "",
+      sender_type: typeof d.sender_type === "string" ? d.sender_type : "",
       message_type: d.message_type,
+      mentions: rawMentions
+        .map((m) => {
+          const mm = m as { key?: unknown; open_id?: unknown; name?: unknown };
+          return {
+            key: typeof mm.key === "string" ? mm.key : "",
+            open_id: typeof mm.open_id === "string" ? mm.open_id : "",
+            name: typeof mm.name === "string" ? mm.name : undefined,
+          };
+        })
+        .filter((m) => m.key || m.open_id),
       thread_id: typeof d.thread_id === "string" ? d.thread_id : undefined,
     };
   }

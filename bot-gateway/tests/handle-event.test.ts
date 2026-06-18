@@ -20,11 +20,13 @@ function evt(overrides: Partial<ImEvent> = {}): ImEvent {
   return {
     event_id: "evt_1",
     chat_id: "oc_chat1",
-    chat_type: "group",
+    chat_type: "p2p", // default p2p: no @-mention needed (group gating tested separately)
     content: "消除判定逻辑在哪",
     message_id: "om_1",
     sender_id: "ou_user1",
+    sender_type: "user",
     message_type: "text",
+    mentions: [],
     ...overrides,
   };
 }
@@ -68,14 +70,31 @@ describe("handleMessageEvent", () => {
     expect(seen[0]).toBe(seen[1]);
   });
 
-  it("strips the @bot mention from the prompt", async () => {
+  it("strips a leading @bot mention from the prompt", async () => {
     let captured = "";
     const invoke = async (_s: string, prompt: string) => {
       captured = prompt;
       return "ok";
     };
-    await handleMessageEvent(evt({ content: "@_user_1 消除判定在哪" }), { invoke });
+    await handleMessageEvent(
+      evt({ content: "@_user_1 消除判定在哪", mentions: [{ key: "@_user_1", open_id: "ou_bot" }] }),
+      { invoke },
+    );
     expect(captured).toBe("消除判定在哪");
+  });
+
+  it("strips a NON-leading @bot mention (text before the @)", async () => {
+    let captured = "";
+    const invoke = async (_s: string, prompt: string) => {
+      captured = prompt;
+      return "ok";
+    };
+    await handleMessageEvent(
+      evt({ content: "请问 @_user_1 消除判定在哪", mentions: [{ key: "@_user_1", open_id: "ou_bot" }] }),
+      { invoke },
+    );
+    expect(captured).toBe("请问 消除判定在哪");
+    expect(captured).not.toContain("@_user_"); // no dangling placeholder
   });
 
   it("ignores non-text messages", async () => {
@@ -88,5 +107,57 @@ describe("handleMessageEvent", () => {
     expect(out.handled).toBe(false);
     expect(out.reason).toBe("unsupported_type");
     expect(n).toBe(0);
+  });
+
+  it("ignores non-user senders (no bot-answers-bot loop)", async () => {
+    let n = 0;
+    const invoke = async () => { n++; return "ok"; };
+    const out = await handleMessageEvent(evt({ sender_type: "bot" }), { invoke });
+    expect(out.handled).toBe(false);
+    expect(out.reason).toBe("not_a_user");
+    expect(n).toBe(0);
+  });
+
+  it("in a GROUP, ignores a message that does not @-mention the bot", async () => {
+    let n = 0;
+    const invoke = async () => { n++; return "ok"; };
+    const out = await handleMessageEvent(
+      evt({ chat_type: "group", content: "大家觉得这个数值怎么样", mentions: [] }),
+      { invoke },
+      { botOpenId: "ou_bot" },
+    );
+    expect(out.handled).toBe(false);
+    expect(out.reason).toBe("not_mentioned");
+    expect(n).toBe(0);
+  });
+
+  it("in a GROUP, answers when the bot IS @-mentioned", async () => {
+    let captured = "";
+    const invoke = async (_s: string, prompt: string) => { captured = prompt; return "ok"; };
+    const out = await handleMessageEvent(
+      evt({ chat_type: "group", content: "@_user_1 消除判定在哪", mentions: [{ key: "@_user_1", open_id: "ou_bot" }] }),
+      { invoke },
+      { botOpenId: "ou_bot" },
+    );
+    expect(out.handled).toBe(true);
+    expect(captured).toBe("消除判定在哪");
+  });
+
+  it("in a GROUP with another user @-mentioned (not the bot), stays silent", async () => {
+    let n = 0;
+    const invoke = async () => { n++; return "ok"; };
+    const out = await handleMessageEvent(
+      evt({ chat_type: "group", content: "@_user_2 你看看", mentions: [{ key: "@_user_2", open_id: "ou_someone_else" }] }),
+      { invoke },
+      { botOpenId: "ou_bot" },
+    );
+    expect(out.handled).toBe(false);
+    expect(out.reason).toBe("not_mentioned");
+    expect(n).toBe(0);
+  });
+
+  it("p2p answers without requiring an @-mention", async () => {
+    const out = await handleMessageEvent(evt({ chat_type: "p2p", mentions: [] }), { invoke: async () => "ok" }, { botOpenId: "ou_bot" });
+    expect(out.handled).toBe(true);
   });
 });

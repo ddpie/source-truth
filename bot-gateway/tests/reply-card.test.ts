@@ -47,7 +47,13 @@ describe("replyWithCard", () => {
       .map((c) => c.match(/:(\d+)$/)?.[1])
       .filter((s): s is string => Boolean(s))
       .map(Number);
-    const sorted = [...seqs].sort((a, b) => a - b);
-    expect(seqs).toEqual(sorted); // monotonically increasing
+    // Must be STRICTLY increasing — CardKit drops an update whose sequence is
+    // <= a prior one, so a constant/non-decreasing series silently loses updates.
+    // (The old `seqs===sorted` assertion passed on a constant [1,1,1], masking
+    // exactly that regression.)
+    expect(seqs.length).toBeGreaterThanOrEqual(2); // there ARE multiple seq'd ops
+    for (let i = 1; i < seqs.length; i++) {
+      expect(seqs[i]).toBeGreaterThan(seqs[i - 1]);
+    }
   });
 });

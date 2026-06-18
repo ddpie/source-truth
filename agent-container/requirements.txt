@@ -1,13 +1,13 @@
 # agent-container runtime dependencies.
 #
-# HARD CONSTRAINT (AGENTS.md): every dependency EXACT-pinned (==<version>),
-# guarded by scripts/check-versions.sh. claude-agent-sdk pinned to the version
-# verified locally (mcp_servers McpHttpServerConfig confirmed = design 方案 A).
-# Remaining pins resolved against the ARM64 base image during deploy — left
-# unpinned only where not yet installed/verified.
+# HARD CONSTRAINT (AGENTS.md): every dependency EXACT-pinned (==<version>).
+# All versions below were RESOLVED FROM A REAL ARM64 BUILD that succeeded
+# (docker build --platform linux/arm64), i.e. they freeze the known-good status
+# quo — not a speculative bump. Re-pin by rebuilding + `pip freeze` and verifying
+# the agent still boots; bumping claude-agent-sdk is "Ask first" per AGENTS.md.
 
-claude-agent-sdk==0.2.103  # agent reasoning loop (query / ClaudeAgentOptions); HTTP MCP native
-bedrock-agentcore          # microVM HTTP/streaming host (BedrockAgentCoreApp) — pin at deploy
-boto3                      # AWS control plane — pin at deploy
-httpx                      # CodeGraph MCP-over-HTTP evidence channel — pin at deploy
-aws-opentelemetry-distro   # observability (toolkit default) — pin at deploy
+claude-agent-sdk==0.2.103          # agent reasoning loop (query / ClaudeAgentOptions); HTTP MCP native
+bedrock-agentcore==1.14.1          # microVM HTTP/streaming host (BedrockAgentCoreApp)
+boto3==1.43.31                     # AWS control plane
+httpx==0.28.1                      # CodeGraph MCP-over-HTTP evidence channel
+aws-opentelemetry-distro==0.17.1   # observability (toolkit default)

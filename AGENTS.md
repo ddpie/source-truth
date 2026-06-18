@@ -24,15 +24,17 @@ Bash（`scripts/`）。会话容器 ARM64-only。
 
 ```bash
 ./scripts/check-invariants.sh   # 结构自检：AGENTS / CLAUDE / structure / 双语配对 / 顶层目录
+
+# 各组件依赖见其 README（agent-container: uv；bot-gateway: npm）。
+./scripts/test.sh           # 已实现。离线默认：lint + unit + typecheck（pre-push 跑这个）
+./scripts/test.sh --full    # 已实现。加 smoke / e2e（需 Docker / AWS；smoke/e2e 目前为占位）
+# 一键部署（已实现、全新账号/区域可跑、幂等）：artifacts→IAM→network→EFS→index-service→镜像→Runtime
+./scripts/deploy-all.sh --region <r> --repo <path>   # 加 --dry-run 仅打印计划；deploy.sh 已废弃→转发垫片
 ```
 
 规划中的命令（**尚未实现**，阶段标注见 `scripts/README.md`；不要当作已存在去调用）：
 
 ```bash
-# 各组件依赖见其 README（agent-container: uv；bot-gateway: npm）。
-./scripts/test.sh           # (p1) 离线默认：unit + typecheck + lint
-./scripts/test.sh --full    # (p1) 加 smoke / e2e（需 Docker / AWS）
-./scripts/deploy.sh         # (p1) 编排部署：index-service → AgentCore Runtime(boto3) → bot-gateway
 ./scripts/ops.sh status     # (p2) 运维：三组件健康 + 索引新鲜度
 ```
 
@@ -59,16 +61,16 @@ Agent）、`bot-gateway/`（TS 网关 + CardKit）、`index-service/`（CodeGrap
 
 ## Testing
 
-`./scripts/test.sh`（p1，待实现）将是单一入口。离线默认安全（unit + typecheck + lint）；`--full` 才跑
-需要 Docker / AWS 的 smoke / e2e。pre-push 自动跑离线套件（`lefthook.yml`，随 p1 补）。当前可用的结构
-自检是 `./scripts/check-invariants.sh`。
+`./scripts/test.sh`（**已实现**）是单一入口。离线默认安全（lint + unit + typecheck）；`--full` 才跑
+需要 Docker / AWS 的 smoke / e2e（smoke/e2e 目前为占位）。pre-push 跑离线套件。结构自检
+`./scripts/check-invariants.sh` 由 lint 层调用。
 
 ## Critical constraints（细节随 p1 落到 docs/agent/invariants.md）
 
 - **代码为唯一依据**：答案必须基于 EFS 上最新主分支真实代码 + CodeGraph 取证；代码与文档 / 记忆
   冲突时以代码为准，并标注差异与文档时间；低置信度转研发。
 - **会话容器 ARM64-only**；基础镜像与 Claude Agent SDK / lark-cli 版本钉死（pin），漂移由
-  `scripts/check-versions.sh`（p1，待实现）守卫。
+  `scripts/check-versions.sh`（已实现，`test.sh --lint` 调用）守卫。
 - **生成物绝不手改**——改源再重生成。
 - **改顶层目录 ⇒ 同步 `docs/structure_zh.md`（及 `_en.md`）**；**新增 `docs/*_en.md` ⇒ 补 `_zh.md`**（反之亦然）。
 - **MVP 边界**：仅主分支、仅只读问答、不跑引擎、不写回 / 提交。越界能力（设计文档读取、多分支、
@@ -79,7 +81,8 @@ Agent）、`bot-gateway/`（TS 网关 + CardKit）、`index-service/`（CodeGrap
 ## Boundaries
 
 **Never:**
-- 提交密钥 / token（gitleaks pre-commit；密钥走 Secrets Manager / SSM，由 deploy.sh 在 CDK 外创建）。
+- 提交密钥 / token（gitleaks pre-commit；密钥走 Secrets Manager / SSM，**当前需手工在 CDK 外创建**——
+  编排脚本尚未自动建密钥，bot-gateway 启动需 `FEISHU_APP_ID/SECRET` 环境变量）。
 - 手改生成物。
 - 让 MVP 越过只读边界（写回代码、跑引擎、提交）。
 

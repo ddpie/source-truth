@@ -26,7 +26,24 @@ export function sdkEventToImEvent(data: unknown): ImEvent | null {
     } catch { /* non-text content (image/file/post) → leave empty */ }
   }
 
-  const sender = d.sender as { sender_id?: { open_id?: string } } | undefined;
+  const sender = d.sender as
+    | { sender_id?: { open_id?: string }; sender_type?: string }
+    | undefined;
+
+  // mentions[]: each { key:"@_user_N", id:{open_id}, name } — `key` is the inline
+  // placeholder in content.text; id.open_id resolves who was @-mentioned. Used to
+  // gate group answers (was the bot @'d?) and to strip the tokens from the prompt.
+  const rawMentions = Array.isArray(message.mentions) ? message.mentions : [];
+  const mentions = rawMentions
+    .map((m) => {
+      const mm = m as { key?: unknown; name?: unknown; id?: { open_id?: unknown } };
+      return {
+        key: typeof mm.key === "string" ? mm.key : "",
+        open_id: typeof mm.id?.open_id === "string" ? mm.id.open_id : "",
+        name: typeof mm.name === "string" ? mm.name : undefined,
+      };
+    })
+    .filter((m) => m.key || m.open_id);
 
   return {
     event_id: typeof d.event_id === "string" ? d.event_id : "",
@@ -35,7 +52,9 @@ export function sdkEventToImEvent(data: unknown): ImEvent | null {
     content: text,
     message_id: typeof message.message_id === "string" ? message.message_id : "",
     sender_id: sender?.sender_id?.open_id ?? "",
+    sender_type: typeof sender?.sender_type === "string" ? sender.sender_type : "",
     message_type: typeof message.message_type === "string" ? message.message_type : "",
+    mentions,
     thread_id: typeof message.thread_id === "string" ? message.thread_id : undefined,
   };
 }

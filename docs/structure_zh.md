@@ -12,12 +12,14 @@ agent-container/        会话 microVM 内运行的 Claude Code Agent（Python�
   (p1) agent.py         @app.entrypoint 异步流式 handler，启动 Agent 循环
 bot-gateway/            飞书 Bot 长连接事件网关 + CardKit 流式渲染（TypeScript 长驻服务）
   README.md             长连接 / 事件去重 / 会话→runtimeSessionId 映射 / 卡片更新频控
-  src/                  事件消费入口、SigV4 调 AgentCore、会话映射、CardKit、审计日志
+  src/                  事件消费入口、SigV4 调 AgentCore、会话映射、CardKit 渲染、SSE 解析、脱敏日志
 index-service/          常驻 CodeGraph 索引服务 + MCP-over-HTTP 桥
-  README.md             持 clone / git pull / inotify 增量 / CodeGraph / HTTP 桥 / 夜间全量兜底
-  src/                  webhook 接收 + worktree 生命周期 + mcp-proxy 类桥
+  README.md             常驻单写者会话 / CodeGraph / HTTP 桥 / EFS 挂载 / bootstrap
+  http_bridge.py        FastMCP HTTP 桥（包根，非 src/）：暴露 codegraph 工具，路径对齐到 /mnt/repo
+  codegraph_session.py  常驻 codegraph-server 单写者会话（worker 线程 + 私有 loop，健康自愈）
+  bootstrap.sh          EC2 user-data：装依赖 / 挂 EFS / systemd build→bridge
 infra/                  基础设施即代码（MVP 先 agentcore toolkit / boto3，渐进 CDK 化）
-  README.md             IaC 分工：CDK 管稳定层 / deploy.sh 用 boto3 配 AgentCore Runtime
+  README.md             IaC 分工：CDK 管稳定层 / deploy-all.sh 用 boto3 配 AgentCore Runtime
   (p2) lib/             runtime / storage(EFS) / codegraph / gateway 各 stack
 shared/                 跨包共享：结构化日志（hashUserId 脱敏）、MCP 工具 schema、卡片协议类型
 config/                 配置驱动：i18n.json（卡片 / 告警 / 错误文案）、alarm-thresholds.json
@@ -26,7 +28,9 @@ scripts/                运维生命周期
   (p1) lib/             common.sh（格式化 + 依赖检查）、config.sh（.local 配置 + region 解析）
   (p1) test.sh          单一分层测试入口（离线默认 / --full）
   (p1) check-versions.sh 版本钉死防漂移守卫
-  (p1) deploy.sh        编排三组件部署（幂等 = 升级）
+  deploy-all.sh         一键部署 canonical（artifacts→IAM→network→EFS→index-service→镜像→Runtime；幂等）
+  (p1) lib/provision_*.sh + deploy_runtime.py + wait_index_health.sh  deploy-all.sh 的各阶段实现
+  ⚠️ deploy.sh          已废弃兼容垫片（转发到 deploy-all.sh）
   (p2) ops.sh           运维工具（status / logs / reindex / destroy）
   (p2) teardown.sh      有序销毁 + 保留资源清单
 docs/

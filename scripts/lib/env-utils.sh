@@ -17,15 +17,33 @@ update_env() {
 }
 
 # safe_source_env <env_file>
-#   Load KEY=VALUE pairs into the shell (export). Skips comments, blank lines.
-#   No shell expansion on values. Missing file is a no-op (rc 0).
+#   Load KEY=VALUE pairs into the shell (export). Skips comments, blank lines,
+#   whitespace-only lines, and any line whose key isn't a valid identifier —
+#   so an operator's stray indentation / blank line / CRLF save never aborts the
+#   deploy (callers run under `set -euo pipefail`). No shell expansion on values.
+#   Strips surrounding whitespace AND a trailing CR (CRLF-saved configs would
+#   otherwise inject \r into REGION/ARN/bucket values fed to the AWS CLI).
+#   Missing file is a no-op (rc 0).
 safe_source_env() {
-  local env_file="$1"
+  local env_file="$1" line key value
   [[ -f "$env_file" ]] || return 0
-  while IFS='=' read -r key value; do
-    [[ -z "$key" || "$key" =~ ^[[:space:]]*# ]] && continue
-    key="${key%%[[:space:]]}"
-    value="${value#[[:space:]]}"
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%$'\r'}"                       # drop trailing CR (CRLF files)
+    [[ "$line" != *"="* ]] && continue         # no '=' → not a KEY=VALUE line
+    key="${line%%=*}"
+    value="${line#*=}"
+    # Trim leading/trailing whitespace (runs, both ends) from the key.
+    key="${key#"${key%%[![:space:]]*}"}"
+    key="${key%"${key##*[![:space:]]}"}"
+    # Skip blanks, comments, and anything that isn't a valid shell identifier —
+    # never feed `export` a bad name (it would return nonzero and, if it's the
+    # last line, fail the function under set -e).
+    [[ -z "$key" || "$key" == \#* ]] && continue
+    [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+    # Trim a single leading space after '=' (the value side keeps internal
+    # spaces verbatim; machine-written configs have none).
+    value="${value# }"
     export "$key=$value"
   done < "$env_file"
+  return 0
 }

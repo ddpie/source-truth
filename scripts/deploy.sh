@@ -1,202 +1,58 @@
 #!/usr/bin/env bash
-# deploy.sh — One-click idempotent deploy for source-truth (MVP).
+# deploy.sh — DEPRECATED compatibility shim. Use scripts/deploy-all.sh.
 #
-# Orchestrates three components in dependency order:
-#   1. index-service  (常驻 CodeGraph + EFS + MCP-over-HTTP bridge)
-#   2. AgentCore Runtime  (agent-container image → Firecracker microVM)
-#   3. bot-gateway  (TypeScript long-poll + CardKit streaming)
-#
-# Idempotent: resource exists → update; absent → create.
-# Config persists to .local/deploy-config (gitignored); subsequent runs read it.
+# The original deploy.sh had stub (unimplemented) index-service and bot-gateway
+# phases, so running it produced a half-broken deploy. The real, verified,
+# fresh-account-capable orchestrator is scripts/deploy-all.sh (artifacts → IAM →
+# network → EFS → index-service → image build/push → AgentCore runtime; idempotent;
+# --dry-run safe). This shim forwards compatible flags to deploy-all.sh so anyone
+# still invoking deploy.sh lands on the working path, and prints a deprecation note.
 #
 # Usage:
-#   ./scripts/deploy.sh [FLAGS]
+#   ./scripts/deploy.sh [--region <r>] [--repo <path>] [--dry-run] [-h|--help]
+#   (delegates to deploy-all.sh; idempotent = re-run updates in place / 幂等)
 #
-# Flags:
-#   --region <r>         AWS region (default: from deploy-config > env > us-east-1)
-#   --dry-run            Preflight checks + print plan only (no AWS calls)
-#   --only-agent         Only (re)deploy agent-container to AgentCore Runtime
-#   --only-gateway       Only (re)deploy bot-gateway
-#   --only-index         Only (re)deploy index-service
-#   --skip-index         Skip index-service step
-#   --skip-gateway       Skip bot-gateway step
-#   -h, --help           Show this help
-#
-# Idempotent: existing resources are updated in place, not recreated.
-# Secrets go through AWS Secrets Manager / SSM — never baked into images.
+# Flags forwarded as-is: --region, --repo, --dry-run, --skip <phase>.
+# Legacy --only-* / --skip-* flags are mapped to deploy-all.sh's --skip <phase>.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-
 # shellcheck source-path=SCRIPTDIR source=lib/common.sh
 source "$SCRIPT_DIR/lib/common.sh"
-# shellcheck source-path=SCRIPTDIR source=lib/env-utils.sh
-source "$SCRIPT_DIR/lib/env-utils.sh"
 
-CONFIG_DIR="$ROOT/.local"
-CONFIG_FILE="$CONFIG_DIR/deploy-config"
-
-# --- Usage ---
 usage() {
   cat <<'EOF'
-Usage: ./scripts/deploy.sh [FLAGS]
+Usage: ./scripts/deploy.sh [FLAGS]   (DEPRECATED — delegates to deploy-all.sh)
 
-One-click idempotent deploy for source-truth MVP.
+deploy.sh is a compatibility shim. The canonical one-click orchestrator is
+scripts/deploy-all.sh (idempotent = upgrade / 幂等; --dry-run safe).
 
-Orchestrates: index-service → AgentCore Runtime → bot-gateway.
-Idempotent: resource exists → update; absent → create.
+Flags (forwarded to deploy-all.sh):
+  --region <r>     AWS region
+  --repo <path>    Local repo to index + serve (required for a full deploy)
+  --dry-run        Print the plan; make no changes
+  --skip <phase>   Skip a phase: artifacts|iam|network|efs|index-svc|image|runtime
+  -h, --help       Show this help
 
-Flags:
-  --region <r>         AWS region (default: deploy-config > env > us-east-1)
-  --dry-run            Preflight checks + print plan (no AWS calls)
-  --only-agent         Only (re)deploy agent-container
-  --only-gateway       Only (re)deploy bot-gateway
-  --only-index         Only (re)deploy index-service
-  --skip-index         Skip index-service step
-  --skip-gateway       Skip bot-gateway step
-  -h, --help           Show this help
+See scripts/deploy-all.sh --help for the full, current interface.
 EOF
 }
 
-# --- Parse flags ---
-REGION=""
-DRY_RUN=false
-ONLY_AGENT=false
-ONLY_GATEWAY=false
-ONLY_INDEX=false
-SKIP_INDEX=false
-SKIP_GATEWAY=false
-
+FWD=()
 while [[ $# -gt 0 ]]; do
-  case $1 in
-    --region)       REGION="$2"; shift 2 ;;
-    --dry-run)      DRY_RUN=true; shift ;;
-    --only-agent)   ONLY_AGENT=true; shift ;;
-    --only-gateway) ONLY_GATEWAY=true; shift ;;
-    --only-index)   ONLY_INDEX=true; shift ;;
-    --skip-index)   SKIP_INDEX=true; shift ;;
-    --skip-gateway) SKIP_GATEWAY=true; shift ;;
-    -h|--help)      usage; exit 0 ;;
-    *)              say err "Unknown flag: $1"; usage >&2; exit 2 ;;
+  case "$1" in
+    -h|--help) usage; exit 0 ;;
+    --region|--repo|--skip) FWD+=("$1" "$2"); shift 2 ;;
+    --dry-run) FWD+=("$1"); shift ;;
+    # Legacy flag mappings → deploy-all.sh --skip <phase>.
+    --only-agent)   FWD+=(--skip artifacts --skip iam --skip network --skip efs --skip index-svc); shift ;;
+    --only-index)   FWD+=(--skip image --skip runtime); shift ;;
+    --only-gateway) say err "bot-gateway is not part of deploy-all.sh; deploy it separately."; exit 2 ;;
+    --skip-index)   FWD+=(--skip index-svc); shift ;;
+    --skip-gateway) shift ;;  # no gateway phase in deploy-all.sh; no-op
+    *) say err "Unknown flag: $1"; usage >&2; exit 2 ;;
   esac
 done
 
-# --- Load saved config ---
-[[ -d "$CONFIG_DIR" ]] || mkdir -p "$CONFIG_DIR"
-safe_source_env "$CONFIG_FILE"
-
-# --- Resolve region ---
-REGION="${REGION:-${DEPLOY_REGION:-${AWS_DEFAULT_REGION:-us-east-1}}}"
-
-# ============================================================
-# Phase 0: Preflight
-# ============================================================
-say step "Phase 0: Preflight"
-say info "Region: $REGION"
-
-require_cmd aws "install AWS CLI v2" || exit 1
-require_cmd python3 || exit 1
-require_cmd jq || exit 1
-
-# Verify AWS credentials
-if ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text 2>/dev/null); then
-  say ok "AWS credentials valid (account $ACCOUNT_ID)"
-else
-  if [[ "$DRY_RUN" == true ]]; then
-    say warn "AWS credentials not available (dry-run continues without)"
-    ACCOUNT_ID="<unknown>"
-  else
-    say err "AWS credentials not configured. Run 'aws configure' or set AWS_PROFILE."
-    exit 1
-  fi
-fi
-
-# boto3 check
-if python3 -c "import boto3" 2>/dev/null; then
-  say ok "boto3 importable"
-else
-  say err "boto3 not installed. Run 'pip install boto3'."
-  exit 1
-fi
-
-# Persist region
-update_env "$CONFIG_FILE" "DEPLOY_REGION" "$REGION"
-
-say info "Config: $CONFIG_FILE"
-say ok "Preflight passed"
-echo ""
-
-# --- Dry run: stop here ---
-if [[ "$DRY_RUN" == true ]]; then
-  say step "Dry-run plan"
-  echo "  Would deploy (in order):"
-  [[ "$SKIP_INDEX" == false && "$ONLY_AGENT" == false && "$ONLY_GATEWAY" == false ]] && echo "    1. index-service (EFS + CodeGraph + MCP bridge)"
-  [[ "$ONLY_INDEX" == false && "$ONLY_GATEWAY" == false ]] && echo "    2. AgentCore Runtime (agent-container image)"
-  [[ "$SKIP_GATEWAY" == false && "$ONLY_AGENT" == false && "$ONLY_INDEX" == false ]] && echo "    3. bot-gateway (飞书长连接 + CardKit)"
-  echo "  Region: $REGION | Account: $ACCOUNT_ID"
-  say ok "Dry-run complete (no changes made)"
-  exit 0
-fi
-
-# ============================================================
-# Phase 1: index-service
-# ============================================================
-if [[ "$SKIP_INDEX" == false && "$ONLY_AGENT" == false && "$ONLY_GATEWAY" == false ]]; then
-  say step "Phase 1: index-service"
-  # TODO(p1): EFS setup + CodeGraph container + MCP bridge deploy
-  say warn "index-service deploy: not yet implemented (桩·未验证)"
-  echo ""
-fi
-
-# ============================================================
-# Phase 2: AgentCore Runtime (agent-container)
-# ============================================================
-if [[ "$ONLY_INDEX" == false && "$ONLY_GATEWAY" == false ]]; then
-  say step "Phase 2: AgentCore Runtime (agent-container)"
-
-  ECR_REPO="source-truth/agent"
-  ECR_URI="${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com/${ECR_REPO}:latest"
-  ROLE_ARN="${AGENT_RUNTIME_ROLE:-arn:aws:iam::${ACCOUNT_ID}:role/SourceTruthAgentRuntimeRole}"
-
-  # 1) ECR repo (idempotent)
-  aws ecr describe-repositories --repository-names "$ECR_REPO" --region "$REGION" >/dev/null 2>&1 \
-    || aws ecr create-repository --repository-name "$ECR_REPO" --region "$REGION" >/dev/null
-  say info "ECR repo: $ECR_REPO"
-
-  # 2) Build ARM64 image + push
-  say info "building ARM64 image"
-  aws ecr get-login-password --region "$REGION" \
-    | docker login --username AWS --password-stdin "${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com" >/dev/null 2>&1
-  docker build --platform linux/arm64 -t "$ECR_URI" "$ROOT/agent-container"
-  docker push "$ECR_URI"
-
-  # 3) Create-or-update runtime (idempotent), wait READY, persist IDs
-  say info "deploying runtime (create-or-update)"
-  RUNTIME_OUT="$(python3 "$SCRIPT_DIR/lib/deploy_runtime.py" \
-    --region "$REGION" --account "$ACCOUNT_ID" \
-    --role-arn "$ROLE_ARN" --image "$ECR_URI")"
-  echo "$RUNTIME_OUT"
-  _rid="$(printf '%s\n' "$RUNTIME_OUT" | sed -n 's/^AGENT_RUNTIME_ID=//p')"
-  _arn="$(printf '%s\n' "$RUNTIME_OUT" | sed -n 's/^AGENT_RUNTIME_ARN=//p')"
-  [[ -n "$_rid" ]] && update_env "$CONFIG_FILE" "AGENT_RUNTIME_ID" "$_rid"
-  [[ -n "$_arn" ]] && update_env "$CONFIG_FILE" "AGENT_RUNTIME_ARN" "$_arn"
-  update_env "$CONFIG_FILE" "AGENT_RUNTIME_ROLE" "$ROLE_ARN"
-  say ok "AgentCore Runtime deployed: ${_rid:-?}"
-  echo ""
-fi
-
-# ============================================================
-# Phase 3: bot-gateway
-# ============================================================
-if [[ "$SKIP_GATEWAY" == false && "$ONLY_AGENT" == false && "$ONLY_INDEX" == false ]]; then
-  say step "Phase 3: bot-gateway"
-  # TODO(p1): npm install + build + systemd/ECS deploy
-  say warn "bot-gateway deploy: not yet implemented (桩·未验证)"
-  echo ""
-fi
-
-# ============================================================
-# Done
-# ============================================================
-say ok "deploy.sh complete (idempotent)"
+say warn "deploy.sh is DEPRECATED — delegating to deploy-all.sh (the working orchestrator)."
+exec "$SCRIPT_DIR/deploy-all.sh" "${FWD[@]}"

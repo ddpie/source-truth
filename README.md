@@ -63,7 +63,9 @@ worktree、共享记忆、完整审计护栏、Codex 第二引擎、数值模拟
 
 ```bash
 ./scripts/test.sh          # (p1) 离线默认：unit + lint + typecheck
-./scripts/deploy.sh        # (p1) 编排部署 index-service → AgentCore Runtime → bot-gateway
+# 一键部署（全新账号/区域可跑，幂等）：artifacts→IAM→network→EFS→index-service→镜像→Runtime
+./scripts/deploy-all.sh --region <region> --repo <local-repo-path>   # 加 --dry-run 仅打印计划
+# deploy.sh 已废弃，仅作兼容垫片转发到 deploy-all.sh
 ```
 
 > ⚠️ MVP 阶段基础设施先用 `agentcore` starter toolkit + boto3 起步跑通主流程与 POC，待 CodeGraph /

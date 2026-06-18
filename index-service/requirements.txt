@@ -1,6 +1,15 @@
 # index-service dependencies (CodeGraph MCP bridge).
 #
 # Pinned to versions verified locally against codegraph-server 0.18.5.
-# The codegraph-server binary itself is provisioned outside pip (see README).
-
-mcp==1.23.3  # drives codegraph-server MCP over stdio (codegraph_client.py)
+# The codegraph-server binary itself is provisioned outside pip — see
+# index-service/README.md §"codegraph-server 二进制来源（部署前置）" for the
+# ARM aarch64 / glibc>=2.38 / v0.18.5 download + staging requirements.
+#
+# NOTE: the HTTP bridge uses `mcp.server.fastmcp.FastMCP` — the FastMCP class
+# BUNDLED inside the `mcp` package — NOT the unrelated standalone `fastmcp`
+# project. Do not add `fastmcp`; it is never imported. `mcp` pulls starlette /
+# uvicorn / sse-starlette transitively; we pin uvicorn explicitly because the
+# bridge runs the streamable-http (uvicorn) server directly.
+mcp==1.23.3       # drives codegraph-server MCP over stdio + FastMCP HTTP bridge
+uvicorn==0.44.0   # ASGI server backing the streamable-http bridge
+typing_extensions==4.15.0  # explicit shim (some deps resolve against it)

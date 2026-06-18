@@ -12,12 +12,14 @@ agent-container/        Claude Code Agent running inside the session microVM (Py
   (p1) agent.py         @app.entrypoint async streaming handler that drives the agent loop
 bot-gateway/            Feishu Bot long-connection event gateway + CardKit streaming (TypeScript long-running service)
   README.md             Long-connection / event dedup / session→runtimeSessionId map / card update throttling
-  src/                  Event consumer entry, SigV4 call to AgentCore, session map, CardKit, audit log
+  src/                  Event consumer entry, SigV4 call to AgentCore, session map, CardKit render, SSE parse, redacted logging
 index-service/          Standalone CodeGraph index service + MCP-over-HTTP bridge
-  README.md             Hold clone / git pull / inotify incremental / CodeGraph / HTTP bridge / nightly full rebuild
-  src/                  Webhook receiver + worktree lifecycle + mcp-proxy-style bridge
+  README.md             Resident single-writer session / CodeGraph / HTTP bridge / EFS mount / bootstrap
+  http_bridge.py        FastMCP HTTP bridge (package root, not src/): exposes codegraph tools, aligns paths to /mnt/repo
+  codegraph_session.py  Resident codegraph-server single-writer session (worker thread + private loop, health self-heal)
+  bootstrap.sh          EC2 user-data: install deps / mount EFS / systemd build→bridge
 infra/                  Infrastructure as code (MVP starts with agentcore toolkit / boto3, CDK-ified incrementally)
-  README.md             IaC split: CDK owns the stable layer / deploy.sh provisions AgentCore Runtime via boto3
+  README.md             IaC split: CDK owns the stable layer / deploy-all.sh provisions AgentCore Runtime via boto3
   (p2) lib/             runtime / storage(EFS) / codegraph / gateway stacks
 shared/                 Cross-package shared: structured logging (hashUserId), MCP tool schema, card protocol types
 config/                 Config-driven: i18n.json (card / alarm / error copy), alarm-thresholds.json
@@ -26,7 +28,9 @@ scripts/                Operational lifecycle
   (p1) lib/             common.sh (formatting + dep checks), config.sh (.local config + region resolution)
   (p1) test.sh          Single tiered test entrypoint (offline default / --full)
   (p1) check-versions.sh Pinned-version drift guard
-  (p1) deploy.sh        Orchestrate three-component deploy (idempotent = upgrade)
+  deploy-all.sh         Canonical one-click deploy (artifacts→IAM→network→EFS→index-service→image→Runtime; idempotent)
+  (p1) lib/provision_*.sh + deploy_runtime.py + wait_index_health.sh  deploy-all.sh phase implementations
+  ⚠️ deploy.sh          Deprecated compatibility shim (delegates to deploy-all.sh)
   (p2) ops.sh           Ops toolkit (status / logs / reindex / destroy)
   (p2) teardown.sh      Ordered teardown + retained-resource list
 docs/

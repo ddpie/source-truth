@@ -14,6 +14,14 @@ import { isDuplicate } from "./dedup";
 import { getSessionId } from "./session-map";
 import { ackWithReaction } from "./reaction";
 
+/** One @-mention inside a message: `key` is the inline placeholder token in
+ *  content.text (e.g. "@_user_1"); `open_id` is who it resolves to. */
+export interface Mention {
+  key: string;
+  open_id: string;
+  name?: string;
+}
+
 /** Normalized im.message.receive_v1 (subset we use). Matches lark-cli output. */
 export interface ImEvent {
   event_id: string;
@@ -22,7 +30,9 @@ export interface ImEvent {
   content: string;
   message_id: string;
   sender_id: string;
+  sender_type: string;
   message_type: string;
+  mentions: Mention[];
   thread_id?: string;
 }
 
@@ -34,29 +44,66 @@ export interface HandleResult {
   answer?: string;
   sessionId?: string;
   messageId?: string;
-  reason?: "duplicate" | "unsupported_type" | "empty";
+  reason?: "duplicate" | "unsupported_type" | "empty" | "not_mentioned" | "not_a_user";
 }
 
-/** Strip a leading @-mention token (e.g. "@_user_1 ...") from card-rendered text. */
-function stripMention(text: string): string {
-  return text.replace(/^@\S+\s+/, "").trim();
+/** Options that gate WHEN to answer. botOpenId is the bot's own open_id; when
+ *  set, group messages are answered only if the bot was @-mentioned. */
+export interface HandleOptions {
+  botOpenId?: string;
+}
+
+/**
+ * Strip @-mention tokens from the message text. Feishu inlines each mention as a
+ * placeholder ("@_user_N") wherever it appears (not only leading), with the real
+ * id in `mentions[]`. Remove every known placeholder token anywhere in the text,
+ * then fall back to a global non-anchored pattern for any stray "@_user_N".
+ */
+function stripMentions(text: string, mentions: Mention[]): string {
+  let out = text;
+  for (const m of mentions) {
+    if (m.key) out = out.split(m.key).join(" ");
+  }
+  out = out.replace(/@_user_\d+/g, " ");
+  return out.replace(/\s+/g, " ").trim();
 }
 
 export async function handleMessageEvent(
   event: ImEvent,
   deps: { invoke: InvokeFn },
+  options: HandleOptions = {},
 ): Promise<HandleResult> {
   // 1. Dedup — Feishu re-delivers events; event_id is the idempotency key.
   if (isDuplicate(event.event_id)) {
     return { handled: false, reason: "duplicate" };
   }
 
-  // 2. Only text messages are answered in MVP.
+  // 2. Only answer real human users — never another bot / system message (a bot
+  //    answering a bot's plain text in a group is a cross-bot loop/cost path).
+  if (event.sender_type && event.sender_type !== "user") {
+    return { handled: false, reason: "not_a_user" };
+  }
+
+  // 3. Only text messages are answered in MVP.
   if (event.message_type !== "text") {
     return { handled: false, reason: "unsupported_type" };
   }
 
-  const prompt = stripMention(event.content);
+  // 4. In a GROUP, answer only when the bot is @-mentioned (matches the design:
+  //    "策划在群里 @机器人 提问"). Without this the bot replies to every line from
+  //    anyone — unsolicited answers + runaway cost. p2p/private chat needs no @.
+  //    Gate requires the bot's own open_id; if it isn't configured we can't tell
+  //    which mention is the bot, so fall back to "any mention present".
+  if (event.chat_type === "group") {
+    const mentioned = options.botOpenId
+      ? event.mentions.some((m) => m.open_id === options.botOpenId)
+      : event.mentions.length > 0;
+    if (!mentioned) {
+      return { handled: false, reason: "not_mentioned" };
+    }
+  }
+
+  const prompt = stripMentions(event.content, event.mentions);
   if (!prompt) {
     return { handled: false, reason: "empty" };
   }

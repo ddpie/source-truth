@@ -30,10 +30,11 @@ describe("processEventLine", () => {
         data: {
           event_id: "e1",
           chat_id: "oc_1",
-          chat_type: "group",
+          chat_type: "p2p", // p2p needs no @-mention to answer
           content: "where is X",
           message_id: "om_1",
           sender_id: "ou_1",
+          sender_type: "user",
           message_type: "text",
         },
       }),

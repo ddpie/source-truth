@@ -53,4 +53,5 @@ p1 已落地并真实部署到 AWS（东京 ap-northeast-1）：`Dockerfile`（A
 **已验证（真实）：** ① CodeGraph MCP 接入定型为 **方案 A**——`ClaudeAgentOptions.mcp_servers` 原生支持
 `McpHttpServerConfig`（`{type:"http", url, headers?}`，对照真实 SDK 0.2.103 核实），不需 streamablehttp 桥；
 ② Runtime 经 `InvokeAgentRuntime` 真实跑通（`CLAUDE_CODE_USE_BEDROCK=1`，模型 `global.anthropic.claude-sonnet-4-6`）；
-③ EFS 真实挂载 `/mnt/repo`，agent 真读到源码并解释。部署细节见 `scripts/deploy.sh` + `.local/deploy-config`。
+③ EFS 真实挂载 `/mnt/repo`，agent 真读到源码并解释。部署细节见 `scripts/deploy-all.sh`（canonical；
+`deploy.sh` 为已废弃转发垫片）+ `.local/deploy-config`。
