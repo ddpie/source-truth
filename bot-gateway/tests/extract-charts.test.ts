@@ -54,6 +54,29 @@ describe("extractCharts", () => {
     }
   });
 
+  it("PRESERVES prose that merely mentions ```chart (how-to answers) — no destructive backstop", () => {
+    // The residual-fence backstop must be fence-shaped, not a substring match, or
+    // a how-to answer explaining charting loses its body.
+    for (const prose of [
+      "要画图请输出一个 ```chart 围栏，里面写 VChart spec，然后系统会渲染。",
+      "用法：写 ```chart 开头。\n\n示例代码：\n```\nfoo()\n```\n\n完。",
+    ]) {
+      const { text, charts } = extractCharts(prose);
+      expect(charts).toHaveLength(0);
+      expect(text).toContain("```chart"); // the literal mention survives in prose
+    }
+    // The unrelated code block in the 2nd case must stay intact.
+    const { text } = extractCharts("用法：写 ```chart 开头。\n\n示例：\n```\nfoo()\n```\n\n完。");
+    expect(text).toContain("foo()");
+    expect(text).toContain("完");
+  });
+
+  it("does NOT treat ```chartreuse (a language tag) as a chart fence", () => {
+    const { text, charts } = extractCharts("颜色示例：\n```chartreuse\nsome prose\n```\n结束");
+    expect(charts).toHaveLength(0);
+    expect(text).toContain("some prose"); // block prose not deleted
+  });
+
   it("extracts multiple chart blocks", () => {
     const answer = [
       "```chart",
