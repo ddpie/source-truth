@@ -215,10 +215,15 @@ async function runStreamingInvoke(
   // EVERY phase (thinking, analyzing, streaming) without disturbing anything else.
   // The SECONDS counter is the honest signal (monotonic = not frozen); the spinner
   // is decoration; the watchdog says so honestly when no SSE event arrived lately.
-  const SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏";
+  // Progress-dots animation (low-frequency friendly): a 5-slot bar where filled
+  // dots grow ∙∙∙∘∘ then reset, paired with the live seconds counter. Unlike a
+  // spinner it doesn't need high-frequency frames to look alive — the ever-
+  // advancing seconds carry the "still working" signal, and the dots add gentle
+  // motion. So even at our ~2-5 writes/s cadence it never looks frozen/laggy.
+  const DOT_SLOTS = 5;
   const startedAt = Date.now();
   let lastEventAt = Date.now();   // updated on every real onChunk (real progress)
-  let spinFrame = 0;
+  let dotFrame = 0;
   let statusAppended = false;
   let heartbeat: ReturnType<typeof setInterval> | undefined;
   const stopHeartbeat = () => { if (heartbeat) { clearInterval(heartbeat); heartbeat = undefined; } };
@@ -244,14 +249,16 @@ async function runStreamingInvoke(
     // the answer text IS the visible motion — skip the status write this tick. The
     // elapsed counter still advances on the next idle tick (monotonic, honest).
     if (now - lastUpdate < STREAMING_YIELD_MS) return;
-    const spin = SPINNER[spinFrame++ % SPINNER.length];
+    // Growing-dots bar: filled count cycles 1..DOT_SLOTS then wraps.
+    const filled = (dotFrame++ % DOT_SLOTS) + 1;
+    const dots = "●".repeat(filled) + "○".repeat(DOT_SLOTS - filled);
     const sinceEvent = now - lastEventAt;
     const elapsed = formatElapsed(now - startedAt);  // s / Mm Ss / Hh Mm
     const phaseWord = stage === "thinking" ? "正在思考" : "正在分析";
     // Watchdog: >20s with no new event → say so honestly, don't fake progress.
     const text = sinceEvent > 20000
-      ? `${spin} ${phaseWord}（较久，已 ${elapsed}）`
-      : `${spin} ${phaseWord} ${elapsed}`;
+      ? `${dots}　${phaseWord}（较久，已 ${elapsed}）`
+      : `${dots}　${phaseWord} ${elapsed}`;
     lastStatusWrite = now;
     // Latest-wins lane: if a status frame is still queued, this one REPLACES it
     // (stale frames dropped) instead of piling up behind a slow lark-cli spawn —
