@@ -18,27 +18,27 @@ import {
   buildFollowUpElements,
   buildClickedButtonElement,
   formatElapsed,
-  escapeCardMarkdown,
+  buildQuestionElement,
 } from "../src/cardkit-client";
 
-describe("escapeCardMarkdown", () => {
-  it("escapes markdown metacharacters so a user question can't corrupt the card", () => {
-    expect(escapeCardMarkdown("成本**翻倍**了吗")).toBe("成本\\*\\*翻倍\\*\\*了吗");
-    expect(escapeCardMarkdown("用 `code` 写的吗")).toBe("用 \\`code\\` 写的吗");
-    expect(escapeCardMarkdown("a|b|c 表格")).toBe("a\\|b\\|c 表格");
+describe("buildQuestionElement", () => {
+  it("renders the question as a non-markdown plain_text div so metachars can't corrupt the card", () => {
+    // plain_text never interprets markdown → no escaping, ** / ` / | / _ are literal.
+    const el = buildQuestionElement("成本**翻倍**了吗 max_turns") as { tag: string; text: { tag: string; content: string } };
+    expect(el.tag).toBe("div");
+    expect(el.text.tag).toBe("plain_text");
+    expect(el.text.content).toBe("❓ 成本**翻倍**了吗 max_turns"); // verbatim, no backslashes
   });
-  it("collapses newlines (multi-line paste) to a single line so the bold span never splits", () => {
-    expect(escapeCardMarkdown("第一行\n第二行")).toBe("第一行 第二行");
-    expect(escapeCardMarkdown("a\r\n\r\nb")).toBe("a b");
+  it("collapses a multi-line paste to one line", () => {
+    const el = buildQuestionElement("第一行\n第二行") as { text: { content: string } };
+    expect(el.text.content).toBe("❓ 第一行 第二行");
   });
-  it("leaves a plain question untouched", () => {
-    expect(escapeCardMarkdown("怪物攻击力怎么算？")).toBe("怪物攻击力怎么算？");
-  });
-  it("escapes the question echo inside the created card body", () => {
+  it("is the question element inside the created card body (element_id=question)", () => {
     const body = JSON.parse(buildCreateCardBody({ summary: "Q", question: "成本**翻倍**了吗" }));
     const card = JSON.parse(body.data);
     const qEl = card.body.elements.find((e: { element_id?: string }) => e.element_id === "question");
-    expect(qEl.content).toBe("**❓ 成本\\*\\*翻倍\\*\\*了吗**");
+    expect(qEl.tag).toBe("div");
+    expect(qEl.text.content).toBe("❓ 成本**翻倍**了吗");
   });
 });
 

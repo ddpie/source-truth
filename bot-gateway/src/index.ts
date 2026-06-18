@@ -234,7 +234,15 @@ async function runStreamingInvoke(
   let stage: "thinking" | "analyzing" = "thinking";
   let stepsShown = 0; // how many reasoning steps are currently rendered in the panel
   let panelAppended = false;
-  const THROTTLE_MS = 125; // ~8/s content; leaves headroom for ~1/s status under CardKit's 10/s per-card cap.
+  // ~8/s nominal per timer-driven lane (content + panel). NOTE: the nominal per-lane
+  // rates do NOT by themselves bound the CardKit-facing rate — content(~8/s) +
+  // panel(~8/s) + status(~1/s) can nominally sum >10/s. What actually keeps us under
+  // CardKit's 10/s per-card cap is the CardWriter single FIFO chain (card-writer.ts):
+  // each write awaits the prior HTTP call and coalesce() collapses each lane to 1
+  // pending, so the real outbound rate = 1/(Feishu RTT ~50-150ms). In practice that
+  // stays at/under the cap; if Feishu ever speeds up materially, add an explicit
+  // min-inter-write gate in CardWriter rather than relying on RTT.
+  const THROTTLE_MS = 125;
   const STREAM_TIMEOUT_MS = 9 * 60 * 1000; // 9 min (Feishu closes at 10)
   const deadline = Date.now() + STREAM_TIMEOUT_MS;
 
@@ -288,8 +296,11 @@ async function runStreamingInvoke(
     // floor: if the timer hasn't been refreshed for STATUS_FLOOR_MS (~1s), write it
     // anyway even mid-stream — otherwise the elapsed counter visibly FREEZES for the
     // entire (tens-of-seconds) conclusion-streaming phase, since content keeps
-    // refreshing lastUpdate so the yield would never release. ~1/s status + ~8/s
-    // content stays under the cap (the CardWriter serial+coalesce lanes bound it).
+    // refreshing lastUpdate so the yield would never release. The forced write is
+    // quantized to the 200ms heartbeat tick + the 1s floor, so the displayed seconds
+    // advance in ~1.0–1.2s steps (may occasionally skip a digit) — it never freezes,
+    // which is the requirement. The CardWriter serial+coalesce chain is what bounds
+    // the actual CardKit write rate (see THROTTLE_MS note above), not this cadence.
     if (now - lastUpdate < STREAMING_YIELD_MS && now - lastStatusWrite < STATUS_FLOOR_MS) return;
     // Cycle the ellipsis · → ·· → ··· each write. Put it AFTER the seconds so the
     // seconds stay in a FIXED position (the dots changing width before the number
@@ -440,7 +451,14 @@ async function runStreamingInvoke(
   // exceeded" text, NOT the `error_max_turns` subtype token — so the regex must
   // match that human string too, or a turn cap is misclassified as a hard failure
   // (red card, partial discarded). The subtype-token forms remain as a fallback.
-  const turnCapped = isTurnCapError(error);
+  // Gate turn-cap detection to the in-stream (HTTP-200) path. The turn cap is an
+  // agent-loop concept surfaced INSIDE the 200 stream (detectEventError); a non-200
+  // HTTP failure now carries the raw response body in `error` (sigv4 captures it for
+  // the accessDenied hint + logging), and a body that happened to contain "maximum
+  // turns" would otherwise mis-route an HTTP outage into the partial-answer branch
+  // and render the raw error envelope as an "answer". So never treat an HTTP failure
+  // as a turn cap.
+  const turnCapped = !httpFailed && isTurnCapError(error);
   // "Hard failure" = a real outage/denial (discard partial, it's untrustworthy).
   // A turn-cap is handled on its own branch below, NOT as a hard failure.
   const hardFailed = failed && !turnCapped;
@@ -516,7 +534,9 @@ async function runStreamingInvoke(
   // prior turn as context. Use the redacted body — never store secrets, and it's
   // what the user actually saw. Skipped on hard failure (no trustworthy answer).
   if (sentMessageId && !hardFailed) rememberAnswer(sentMessageId, finalText);
-  log({ event: "card_closed", card: cardId, chars: answer.length, charts: charts.length, timedOut, failed, turnCapped, error: error ?? undefined });
+  // Redact `error` before logging: on a non-200 path it now carries the raw backend
+  // response body (sigv4), which could echo a token/header/connection-string.
+  log({ event: "card_closed", card: cardId, chars: answer.length, charts: charts.length, timedOut, failed, turnCapped, error: error ? redactSensitive(error) : undefined });
 }
 
 async function main(): Promise<void> {

@@ -18,18 +18,23 @@ import { feishuApi } from "./feishu-http";
 
 // ── pure request builders (unit-tested) ──────────────────────────────────────
 
-/** Escape a user-controlled string for safe interpolation into a CardKit markdown
- *  element. The question echo is the user's raw text, so stray markdown
- *  metacharacters (asterisks, backticks/fences, pipes, newlines, list/quote
- *  markers) would otherwise corrupt the card's rendering — e.g. an odd `**` leaks
- *  bold into the hr/conclusion below, a backtick opens an inline-code span, a
- *  newline splits the bold span. JSON.stringify keeps it JSON-safe but NOT
- *  markdown-safe. Collapse newlines to spaces, then backslash-escape the markdown
- *  metacharacters. */
-export function escapeCardMarkdown(s: string): string {
-  return s
-    .replace(/\s*[\r\n]+\s*/g, " ") // multi-line paste → single line
-    .replace(/([\\`*_~|#>\[\]])/g, "\\$1");
+/** Build the user-question echo element. The question is the user's RAW text, so
+ *  stray markdown metacharacters (`**`, backticks, pipes, snake_case `_`) must not
+ *  be interpreted — an odd `**` would leak bold into the hr/conclusion below, a
+ *  backtick opens an inline-code span, etc. We render it via a `div` whose inner
+ *  `text` is a `plain_text` tag: plain_text NEVER interprets markdown, so NO
+ *  escaping is needed and nothing can corrupt the card (verified live — a markdown
+ *  element with backslash-escapes renders the literal backslashes in CardKit,
+ *  which is NOT CommonMark, so escaping would make the common case worse). A
+ *  newline collapse keeps a multi-line paste on one line. element_id="question"
+ *  so it survives streaming/finalize. */
+export function buildQuestionElement(question: string): Record<string, unknown> {
+  const oneLine = question.replace(/\s*[\r\n]+\s*/g, " ");
+  return {
+    tag: "div",
+    element_id: "question",
+    text: { tag: "plain_text", content: `❓ ${oneLine}` },
+  };
 }
 
 export function buildCreateCardBody(opts?: { summary?: string; followUp?: boolean; question?: string }): string {
@@ -44,7 +49,7 @@ export function buildCreateCardBody(opts?: { summary?: string; followUp?: boolea
   const elements: unknown[] = [];
   const q = (opts?.question ?? "").trim();
   if (q) {
-    elements.push({ tag: "markdown", content: `**❓ ${escapeCardMarkdown(q)}**`, element_id: "question" });
+    elements.push(buildQuestionElement(q));
     elements.push({ tag: "hr" });
   }
   elements.push({ tag: "markdown", content: "正在分析…", element_id: "conclusion" });
@@ -370,7 +375,7 @@ export async function finalizeCard(
   // body, so it'd be wiped otherwise — must match the streaming layout).
   const q = (question ?? "").trim();
   const questionEls = q
-    ? [{ tag: "markdown", content: `**❓ ${escapeCardMarkdown(q)}**`, element_id: "question" }, { tag: "hr" }]
+    ? [buildQuestionElement(q), { tag: "hr" }]
     : [];
   const card = {
     schema: "2.0",
