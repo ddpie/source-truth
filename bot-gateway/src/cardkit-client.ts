@@ -15,6 +15,7 @@
  */
 
 import { feishuApi } from "./feishu-http";
+import { MAX_FOLLOW_UPS } from "./extract-followups";
 
 // ── pure request builders (unit-tested) ──────────────────────────────────────
 
@@ -161,10 +162,14 @@ function larkApi(method: string, path: string, data: string): Promise<unknown> {
 
 /** Create a streaming card; returns its card_id. summary = chat-list preview. */
 export async function createCard(summary?: string, followUp?: boolean, question?: string): Promise<string> {
-  const resp = (await larkApi("POST", "/open-apis/cardkit/v1/cards", buildCreateCardBody({ summary, followUp, question }))) as {
-    data: { card_id: string };
-  };
-  return resp.data.card_id;
+  const resp = await larkApi("POST", "/open-apis/cardkit/v1/cards", buildCreateCardBody({ summary, followUp, question }));
+  // feishuApi only guarantees code===0 + a parsed object, NOT a `data.card_id`.
+  // Fail LOUD with a self-describing message (this is the first call on the answer
+  // hot path) instead of an opaque "Cannot read properties of undefined" TypeError,
+  // so the card_fallback log names the actual Feishu-side problem.
+  const id = (resp as { data?: { card_id?: string } })?.data?.card_id;
+  if (!id) throw new Error(`createCard: Feishu returned no card_id: ${JSON.stringify(resp).slice(0, 300)}`);
+  return id;
 }
 
 /** Stream the conclusion text (full content + sequence; typewriter续写). */
@@ -399,7 +404,7 @@ export function buildFollowUpElements(followUps: string[]): unknown[] {
   const elements: unknown[] = [{ tag: "hr" }];
   if (followUps.length > 0) {
     elements.push({ tag: "markdown", content: "💡 **继续追问：**" });
-    followUps.slice(0, 3).forEach((q, i) => {
+    followUps.slice(0, MAX_FOLLOW_UPS).forEach((q, i) => {
       const eid = `followup_${i}`;
       elements.push({
         tag: "button",
