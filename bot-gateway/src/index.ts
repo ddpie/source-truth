@@ -136,7 +136,7 @@ async function sendStreamingCard(
   question: string,
   parentMessageId?: string,
   askerOpenId?: string,
-): Promise<{ cardId: string; abort: AbortController; startSeq: number; isFollowUp: boolean; sentMessageId?: string; question: string; statusSeeded: boolean }> {
+): Promise<{ cardId: string; abort: AbortController; startSeq: number; isFollowUp: boolean; sentMessageId?: string; question: string; statusSeeded: boolean; stopButtonSeeded: boolean }> {
   const targetKey = "messageId" in target ? target.messageId : target.chatId;
   // REDACT the user's question before it touches any group-visible / persisted /
   // replayed surface. The question is user-typed and a 策划 could paste a secret
@@ -188,7 +188,23 @@ async function sendStreamingCard(
   const abort = new AbortController();
   abortControllers.set(cardId, abort);
 
-  let startSeq = 1;
+  let nextSeq = 1;
+  // Append the 停止 button at CARD-SEND time so it exists for the ENTIRE life of
+  // the card — including while the turn is still QUEUED behind another invoke, and
+  // during the whole 思考 phase before the first tool call. Previously it was only
+  // appended at the 思考→分析 flip (onChunk, liveSteps>0), so a queued turn and the
+  // early thinking phase had a registered AbortController but NO button to trigger
+  // it — the user couldn't stop, contradicting the design (and the past "停止没反应"
+  // report). The heartbeat is element-level (updates only the `status` element),
+  // so an appended button is never wiped until the finalize full-PUT. Track success
+  // so the onChunk flip / runtime path don't double-append.
+  let stopButtonSeeded = false;
+  try {
+    await appendStopButton(cardId, nextSeq);
+    stopButtonSeeded = true;
+    nextSeq += 1;
+  } catch { /* seed failed → onChunk flip will append it (self-healing) */ }
+
   let statusSeeded = false;
   if (queued) {
     // Honest "排队中" indicator while the turn waits behind another invoke on this
@@ -204,21 +220,24 @@ async function sendStreamingCard(
     // non-queued path relies on exactly this retry-as-append). startSeq advances
     // regardless to keep CardKit's monotonic-sequence contract.
     try {
-      await appendStatusLine(cardId, "⏳ 排队中（正在等待上一个问题分析完成）", 1);
+      await appendStatusLine(cardId, "⏳ 排队中（正在等待上一个问题分析完成）", nextSeq);
       statusSeeded = true;
+      nextSeq += 1;
     } catch { /* seed failed → heartbeat will append on its first tick */ }
-    startSeq = 2;
   }
+  // startSeq = the last sequence CONSUMED by seeds above; the CardWriter's first
+  // write is startSeq+1, contiguous with the seeds (no skipped seq).
+  const startSeq = nextSeq - 1;
   // Return the REDACTED question so finalizeCard re-renders the safe echo (a raw
   // value here would re-leak a secret into the finalized full-PUT card).
-  return { cardId, abort, startSeq, isFollowUp, sentMessageId, question: safeQuestion, statusSeeded };
+  return { cardId, abort, startSeq, isFollowUp, sentMessageId, question: safeQuestion, statusSeeded, stopButtonSeeded };
 }
 
 /** Streaming invoke body: streams the agent's answer onto the pre-created card
  *  and finalizes it. Runs inside the per-session serializer, so at most one body
  *  per runtimeSessionId is live at a time. */
 async function runStreamingInvoke(
-  card: { cardId: string; abort: AbortController; startSeq: number; isFollowUp: boolean; sentMessageId?: string; question: string; statusSeeded: boolean },
+  card: { cardId: string; abort: AbortController; startSeq: number; isFollowUp: boolean; sentMessageId?: string; question: string; statusSeeded: boolean; stopButtonSeeded: boolean },
   sessionId: string,
   prompt: string,
   // A credential PROVIDER, not a snapshot: SignatureV4 re-resolves it on every
@@ -245,6 +264,10 @@ async function runStreamingInvoke(
   let stage: "thinking" | "analyzing" = "thinking";
   let stepsShown = 0; // how many reasoning steps are currently rendered in the panel
   let panelAppended = false;
+  // The stop button is normally seeded at card-send time (so it's clickable while
+  // queued + during thinking); this tracks that so the 思考→分析 flip only appends
+  // it as a self-heal when the seed failed (never a 2nd button).
+  let stopButtonSeeded = card.stopButtonSeeded;
   // ~8/s nominal per timer-driven lane (content + panel). NOTE: the nominal per-lane
   // rates do NOT by themselves bound the CardKit-facing rate — content(~8/s) +
   // panel(~8/s) + status(nominal ~5/s at the 200ms tick, throttled to a ~1/s floor
@@ -358,14 +381,15 @@ async function runStreamingInvoke(
     (textSoFar, liveSteps) => {
       if (timedOut) return;
       if (Date.now() > deadline) { timedOut = true; return; }
-      // Stage 2 (思考→分析): on the first tool call, just append the 停止 button.
-      // We deliberately do NOT full-PUT the header here anymore — that wiped the
-      // status line / panel and is why the timer used to freeze. The phase word
-      // ("正在思考"→"正在分析") now lives in the element-level status line (above),
-      // so the only thing to do at the flip is reveal the stop button.
+      // Stage 2 (思考→分析): on the first tool call, flip the stage word. The 停止
+      // button is normally already seeded at card-send time (so it exists while
+      // queued + during the whole thinking phase). Only append it HERE as a
+      // SELF-HEAL if the send-time seed failed — otherwise we'd render a 2nd button.
       if (stage === "thinking" && liveSteps.length > 0) {
         stage = "analyzing";
-        void writer.write((seq) => appendStopButton(cardId, seq));
+        if (!stopButtonSeeded) {
+          void writer.write(async (seq) => { await appendStopButton(cardId, seq); stopButtonSeeded = true; });
+        }
         return;
       }
       // Live reasoning panel: append once, then update in place as steps grow —
