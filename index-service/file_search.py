@@ -30,6 +30,12 @@ logger = logging.getLogger("file-search")
 # Hard cap so a pathological pattern can't return megabytes or run unbounded.
 MAX_MATCHES = 200
 SEARCH_TIMEOUT_S = 20
+# Cap on TOTAL rows processed (kept + folded-duplicate), independent of
+# max_matches: heavy duplication makes almost every row a fold (which never
+# counts toward max_matches), so without this the post-processing loop would
+# iterate the entire rg/grep output. 10x the match cap leaves ample headroom for
+# legitimate vendored copies while bounding the worst case.
+SCAN_ROW_CAP = MAX_MATCHES * 10
 
 
 def _rg_available() -> bool:
@@ -142,14 +148,28 @@ def run_search(
         # hits were collapsed and can re-search a specific subdir if it needs the
         # individual copies — no invisible recall loss.
         rel = mount_path[len(mount_root):].lstrip("/") if mount_path.startswith(mount_root) else mount_path.lstrip("/")
-        suffix = rel.split("/", 1)[1] if "/" in rel else rel  # drop top-level (copy) dir
+        if "/" in rel:
+            suffix = rel.split("/", 1)[1]  # drop top-level (copy) dir for nested files
+        else:
+            # A repo-ROOT file has no top-level dir to drop. Don't degenerate to a
+            # bare basename (which would collide with a nested file of the same
+            # name, e.g. /Config.cs vs /legacy/Config.cs); mark it as root-anchored
+            # so a root file and a nested file with the same name stay distinct.
+            suffix = "\x00" + rel
         key = (suffix, line_no, text)
         if key in seen:
             duplicates += 1
-            continue
-        seen.add(key)
-        matches.append({"path": mount_path, "line": line_no, "text": text[:300]})
-        if len(matches) >= max_matches:
+        else:
+            seen.add(key)
+            matches.append({"path": mount_path, "line": line_no, "text": text[:300]})
+            if len(matches) >= max_matches:
+                truncated = True
+                break
+        # Scan budget independent of dedup: under heavy duplication nearly every
+        # row is a dup (it never appends, so the max_matches break above can't
+        # fire), which would let the loop run over the ENTIRE rg/grep output. Cap
+        # total ROWS PROCESSED so memory/CPU stay bounded regardless of fold rate.
+        if len(matches) + duplicates >= SCAN_ROW_CAP:
             truncated = True
             break
 

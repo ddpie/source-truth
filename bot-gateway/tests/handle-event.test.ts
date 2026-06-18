@@ -161,29 +161,64 @@ describe("handleMessageEvent", () => {
     expect(out.handled).toBe(true);
   });
 
-  it("in a GROUP, answers a bare reply to one of OUR bot cards (implicit mention)", async () => {
+  it("in a GROUP, answers the ASKER's bare reply to one of OUR bot cards (implicit mention)", async () => {
     let captured = "";
     const invoke = async (_s: string, prompt: string) => { captured = prompt; return "ok"; };
     const out = await handleMessageEvent(
-      evt({ chat_type: "group", content: "那骷髅呢", mentions: [], parent_id: "om_ourcard" }),
+      evt({ chat_type: "group", content: "那骷髅呢", mentions: [], parent_id: "om_ourcard", sender_id: "ou_asker" }),
       { invoke },
-      { botOpenId: "ou_bot", isKnownCard: (pid) => pid === "om_ourcard" },
+      { botOpenId: "ou_bot", isAskerReply: (pid, sid) => pid === "om_ourcard" && sid === "ou_asker" },
     );
     expect(out.handled).toBe(true);
     expect(out.parentId).toBe("om_ourcard");
+    expect(out.senderId).toBe("ou_asker");
     expect(captured).toBe("那骷髅呢");
   });
 
-  it("in a GROUP, still ignores a reply to a message that is NOT our card", async () => {
+  it("in a GROUP, a reply to OUR card by a DIFFERENT member (not the asker) is not auto-answered", async () => {
     let n = 0;
     const invoke = async () => { n++; return "ok"; };
     const out = await handleMessageEvent(
-      evt({ chat_type: "group", content: "收到", mentions: [], parent_id: "om_someoneelse" }),
+      evt({ chat_type: "group", content: "我也想知道", mentions: [], parent_id: "om_ourcard", sender_id: "ou_other" }),
       { invoke },
-      { botOpenId: "ou_bot", isKnownCard: (pid) => pid === "om_ourcard" },
+      { botOpenId: "ou_bot", isAskerReply: (pid, sid) => pid === "om_ourcard" && sid === "ou_asker" },
+    );
+    expect(out.handled).toBe(false);
+    expect(out.reason).toBe("reply_to_unknown_card");
+    expect(n).toBe(0);
+  });
+
+  it("in a GROUP, a reply to an unknown/evicted card reports reply_to_unknown_card (diagnosable, not silent)", async () => {
+    const out = await handleMessageEvent(
+      evt({ chat_type: "group", content: "收到", mentions: [], parent_id: "om_evicted", sender_id: "ou_asker" }),
+      { invoke: async () => "ok" },
+      { botOpenId: "ou_bot", isAskerReply: () => false },
+    );
+    expect(out.handled).toBe(false);
+    expect(out.reason).toBe("reply_to_unknown_card");
+  });
+
+  it("a non-reply non-mention in a GROUP is still a plain not_mentioned (no parent_id)", async () => {
+    const out = await handleMessageEvent(
+      evt({ chat_type: "group", content: "随便聊聊", mentions: [] }),
+      { invoke: async () => "ok" },
+      { botOpenId: "ou_bot", isAskerReply: () => false },
     );
     expect(out.handled).toBe(false);
     expect(out.reason).toBe("not_mentioned");
+  });
+
+  it("FAILS CLOSED on empty/absent sender_type (treated as not-a-user, no cross-bot loop)", async () => {
+    let n = 0;
+    const invoke = async () => { n++; return "ok"; };
+    // p2p so the mention gate can't be the thing rejecting it — only the user gate should.
+    const out = await handleMessageEvent(
+      evt({ chat_type: "p2p", sender_type: "", mentions: [] }),
+      { invoke },
+      { botOpenId: "ou_bot" },
+    );
+    expect(out.handled).toBe(false);
+    expect(out.reason).toBe("not_a_user");
     expect(n).toBe(0);
   });
 });

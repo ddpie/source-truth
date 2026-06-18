@@ -99,6 +99,9 @@ async function streamingCardInvoke(
   // The message_id this turn follows up / replies to, so the registry can chain
   // it to its parent and a later follow-up walks the whole history.
   parentMessageId?: string,
+  // open_id of the asker, stored so a bare reply to this card is auto-answered
+  // only when it comes from the same user (scopes the group reply bypass).
+  askerOpenId?: string,
 ): Promise<void> {
   // Dedup only IM messages (Feishu re-delivers them on restart). Follow-up
   // clicks (chatId target) are deliberate user actions — never dedup them, or a
@@ -113,7 +116,7 @@ async function streamingCardInvoke(
   // a follow-up (or a 2nd message in the same chat) chained behind a 9-minute
   // stream would show NO card and couldn't be 停止'd until it finally began. The
   // abort handle is registered here too, so 停止 cancels even a still-queued turn.
-  const card = await sendStreamingCard(sessionId, target, queued, question ?? prompt, parentMessageId);
+  const card = await sendStreamingCard(sessionId, target, queued, question ?? prompt, parentMessageId, askerOpenId);
 
   return sessionSerializer.serialize(sessionId, () =>
     runStreamingInvoke(card, sessionId, prompt, credentials),
@@ -131,6 +134,7 @@ async function sendStreamingCard(
   queued: boolean,
   question: string,
   parentMessageId?: string,
+  askerOpenId?: string,
 ): Promise<{ cardId: string; abort: AbortController; startSeq: number; isFollowUp: boolean; sentMessageId?: string; question: string; statusSeeded: boolean }> {
   const targetKey = "messageId" in target ? target.messageId : target.chatId;
   // Follow-up cards carry a "↳ 追问" summary marker so the chat history shows
@@ -157,7 +161,7 @@ async function sendStreamingCard(
   // Store the question too, so a follow-up on this card can replay the prior
   // turn (question + answer, filled in at finalize) as stateless context.
   if (sentMessageId) {
-    rememberCard(sentMessageId, cardId, sessionId, question, parentMessageId);
+    rememberCard(sentMessageId, cardId, sessionId, question, parentMessageId, askerOpenId);
   } else {
     // Send accepted but no message_id in the response → the card can't be
     // registered, so a later follow-up/reply can't find it and silently loses
@@ -540,7 +544,7 @@ async function main(): Promise<void> {
       }
     }
     try {
-      await streamingCardInvoke(res.sessionId, prompt, { messageId: res.messageId }, credentials, question, parentId);
+      await streamingCardInvoke(res.sessionId, prompt, { messageId: res.messageId }, credentials, question, parentId, res.senderId);
     } catch (cardErr) {
       // streamingCardInvoke now finalizes the card itself on backend failure
       // (non-200 / stream error), so reaching here means something unexpected
@@ -574,11 +578,23 @@ async function main(): Promise<void> {
       if (event) {
         void handleMessageEvent(event, { invoke }, {
           botOpenId: BOT_OPEN_ID || undefined,
-          // A reply to one of our remembered bot cards counts as an implicit
-          // mention so group reply-follow-ups don't require an extra @.
-          isKnownCard: (pid) => lookupCard(pid) !== undefined,
+          // A reply BY THE ASKER to one of our remembered bot cards counts as an
+          // implicit mention so group reply-follow-ups don't require an extra @
+          // (scoped to the asker: one card can't let every member trigger invokes).
+          isAskerReply: (pid, senderId) => {
+            const e = lookupCard(pid);
+            return !!e && (!e.askerOpenId || e.askerOpenId === senderId);
+          },
         })
-          .then(replyWithCard)
+          .then((res) => {
+            // A reply to a card we no longer know (gateway restart / >500 eviction)
+            // is dropped at the mention gate; log it so the silent stop is
+            // diagnosable rather than indistinguishable from a plain non-mention.
+            if (res && !res.handled && res.reason === "reply_to_unknown_card") {
+              log({ event: "reply_to_unknown_card", chat: hashUserId(event.chat_id) });
+            }
+            return replyWithCard(res);
+          })
           .catch((err) => log({ event: "handle_error", error: String(err) }));
       }
       return {};
@@ -591,10 +607,12 @@ async function main(): Promise<void> {
           token?: string;
           action?: { value?: { action?: string; text?: string; eid?: string; card_id?: string } };
           context?: { open_chat_id?: string; open_message_id?: string };
+          operator?: { open_id?: string; tenant_key?: string };
         };
         const value = d?.action?.value;
         const chatId = d?.context?.open_chat_id ?? "";
         const messageId = d?.context?.open_message_id ?? "";
+        const operatorOpenId = d?.operator?.open_id;
         // Dedup re-delivered callbacks. The IM path dedups on event_id; the
         // callback path had NO idempotency key, so a Feishu re-delivery of a
         // follow_up callback would queue a SECOND invoke on the same session —
@@ -644,7 +662,7 @@ async function main(): Promise<void> {
           }
           // The new follow-up card's PARENT is the card being followed up, so a
           // follow-up-of-this-follow-up keeps walking the chain.
-          void streamingCardInvoke(sessionId, prompt, { chatId }, credentials, value.text, messageId)
+          void streamingCardInvoke(sessionId, prompt, { chatId }, credentials, value.text, messageId, operatorOpenId)
             .catch((e) => log({ event: "follow_up_error", error: String(e) }));
           // Mark the clicked button: disable it + ✓ on the original card, so the
           // user sees which one they picked (best-effort, async).

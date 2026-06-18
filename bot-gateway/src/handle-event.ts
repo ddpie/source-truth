@@ -48,18 +48,23 @@ export interface HandleResult {
   messageId?: string;
   /** message_id this message replied to (for follow-up context replay), if any. */
   parentId?: string;
-  reason?: "duplicate" | "unsupported_type" | "empty" | "not_mentioned" | "not_a_user";
+  /** open_id of the asker, remembered on the card so a later bare reply by the
+   *  same user is auto-answered (scopes the group reply bypass to the asker). */
+  senderId?: string;
+  reason?: "duplicate" | "unsupported_type" | "empty" | "not_mentioned" | "not_a_user" | "reply_to_unknown_card";
 }
 
 /** Options that gate WHEN to answer. botOpenId is the bot's own open_id; when
  *  set, group messages are answered only if the bot was @-mentioned.
- *  isKnownCard(parentId) returns true when a message replies to one of OUR bot
- *  cards — such a reply is unambiguous intent toward the bot, so it counts as an
- *  implicit @-mention (the user replied directly to our answer). Injected as a
- *  predicate so this module stays decoupled from the card registry / testable. */
+ *  isAskerReply(parentId, senderId) returns true when a message replies to one of
+ *  OUR bot cards AND the replier is the user who asked that card's question — such
+ *  a reply is unambiguous intent toward the bot from the conversation owner, so it
+ *  counts as an implicit @-mention (one card can't let every group member trigger
+ *  an invoke, and a bot can't match an asker). Injected as a predicate so this
+ *  module stays decoupled from the card registry / testable. */
 export interface HandleOptions {
   botOpenId?: string;
-  isKnownCard?: (parentId: string) => boolean;
+  isAskerReply?: (parentId: string, senderId: string) => boolean;
 }
 
 /**
@@ -89,7 +94,11 @@ export async function handleMessageEvent(
 
   // 2. Only answer real human users — never another bot / system message (a bot
   //    answering a bot's plain text in a group is a cross-bot loop/cost path).
-  if (event.sender_type && event.sender_type !== "user") {
+  //    FAIL CLOSED: an absent/empty sender_type must NOT be treated as a user
+  //    (the only safe answer is a clear "user"); otherwise an event with a missing
+  //    sender_type slips through and, combined with the card-reply bypass below,
+  //    re-opens the very loop this gate closes.
+  if (event.sender_type !== "user") {
     return { handled: false, reason: "not_a_user" };
   }
 
@@ -107,13 +116,18 @@ export async function handleMessageEvent(
     const mentioned = options.botOpenId
       ? event.mentions.some((m) => m.open_id === options.botOpenId)
       : event.mentions.length > 0;
-    // A reply to one of our own bot cards is addressed to the bot just as
-    // unambiguously as an @-mention — treat it as an implicit mention so
-    // reply-based follow-ups work in groups without forcing the user to also @.
+    // A reply by the original asker to one of our own bot cards is addressed to
+    // the bot just as unambiguously as an @-mention — treat it as an implicit
+    // mention so reply-based follow-ups work in groups without forcing the user
+    // to also @. (Scoped to the asker so one card can't let every group member
+    // trigger an invoke, and a bot reply never matches an asker.)
     const repliesToOurCard =
-      !!event.parent_id && !!options.isKnownCard && options.isKnownCard(event.parent_id);
+      !!event.parent_id && !!options.isAskerReply && options.isAskerReply(event.parent_id, event.sender_id);
     if (!mentioned && !repliesToOurCard) {
-      return { handled: false, reason: "not_mentioned" };
+      // Distinguish "replied to a card we no longer know / not the asker" from a
+      // plain non-mention, so silent drops (restart/eviction) are diagnosable.
+      const reason = event.parent_id ? "reply_to_unknown_card" : "not_mentioned";
+      return { handled: false, reason };
     }
   }
 
@@ -130,5 +144,5 @@ export async function handleMessageEvent(
 
   // 4. Invoke the agent.
   const answer = await deps.invoke(sessionId, prompt);
-  return { handled: true, answer, sessionId, messageId: event.message_id, parentId: event.parent_id };
+  return { handled: true, answer, sessionId, messageId: event.message_id, parentId: event.parent_id, senderId: event.sender_id };
 }
