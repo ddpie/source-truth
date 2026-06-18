@@ -583,7 +583,11 @@ async function main(): Promise<void> {
           // (scoped to the asker: one card can't let every member trigger invokes).
           isAskerReply: (pid, senderId) => {
             const e = lookupCard(pid);
-            return !!e && (!e.askerOpenId || e.askerOpenId === senderId);
+            // Fail CLOSED: only the known asker bypasses the @-gate. If the card's
+            // asker is unknown (askerOpenId empty — e.g. an event/callback that
+            // didn't carry the sender open_id), a bare reply must still @-mention,
+            // so one card can't let any member drive invokes via the empty branch.
+            return !!e && !!e.askerOpenId && !!senderId && e.askerOpenId === senderId;
           },
         })
           .then((res) => {

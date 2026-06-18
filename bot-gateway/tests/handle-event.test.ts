@@ -208,6 +208,24 @@ describe("handleMessageEvent", () => {
     expect(out.reason).toBe("not_mentioned");
   });
 
+  it("a card with an UNKNOWN asker (empty askerOpenId) does NOT auto-answer a bare reply — fail closed", async () => {
+    // Mirror the real index.ts wiring: isAskerReply requires a non-empty stored
+    // askerOpenId AND a non-empty senderId that matches. An empty stored asker
+    // must NOT match any sender (else any member could drive invokes off the card).
+    const realPredicate = (storedAsker: string) => (pid: string, sid: string) =>
+      pid === "om_ourcard" && !!storedAsker && !!sid && storedAsker === sid;
+    let n = 0;
+    const invoke = async () => { n++; return "ok"; };
+    const out = await handleMessageEvent(
+      evt({ chat_type: "group", content: "我也回复一下", mentions: [], parent_id: "om_ourcard", sender_id: "ou_anyone" }),
+      { invoke },
+      { botOpenId: "ou_bot", isAskerReply: realPredicate("") /* asker unknown */ },
+    );
+    expect(out.handled).toBe(false);
+    expect(out.reason).toBe("reply_to_unknown_card");
+    expect(n).toBe(0);
+  });
+
   it("FAILS CLOSED on empty/absent sender_type (treated as not-a-user, no cross-bot loop)", async () => {
     let n = 0;
     const invoke = async () => { n++; return "ok"; };
