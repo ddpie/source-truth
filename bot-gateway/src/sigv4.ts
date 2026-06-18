@@ -81,6 +81,17 @@ export function classifyInvokeOutcome(r: InvokeOutcome): { failed: boolean; http
   return { failed, httpFailed };
 }
 
+/** True when the error is the agentic-loop TURN CAP (partial progress), not a
+ *  backend outage. Matches every shape the cap surfaces as: the SDK's result
+ *  text "Maximum turns exceeded" (what detectEventError returns when `result` is
+ *  set — see parse-stream.test.ts fixture), the "Reached maximum number of turns"
+ *  errors[] phrasing, and the "error_max_turns" subtype fallback. Used so the
+ *  caller shows a "narrow the question" message + the labeled partial answer
+ *  instead of a red "backend down, retry" card. */
+export function isTurnCapError(error: string | null): boolean {
+  return !!error && /error_max_turns|maximum (number of turns|turns exceeded)/i.test(error);
+}
+
 /** Build the (unsigned) InvokeAgentRuntime request. Pure. */
 export function buildInvokeRequest(p: InvokeParams): InvokeRequest {
   if (!p.sessionId || p.sessionId.length < MIN_SESSION_ID_LEN) {
@@ -154,13 +165,27 @@ export async function invokeRuntime(
  *  ends, so mid-stream the newest text block is treated as the (provisional)
  *  conclusion; if another tool_use follows it, it retroactively becomes a
  *  narration and a fresh conclusion block starts. */
+/** Per-invoke latency breakdown for perf analysis (all ms, -1 = never reached). */
+export interface InvokeTiming {
+  signMs: number;       // SigV4 sign + build
+  ttfbMs: number;       // request sent → response headers (first byte)
+  ttftMs: number;       // request sent → first non-empty text block on screen
+  streamMs: number;     // first byte → stream end (the long pole: model+tools)
+  totalMs: number;      // whole invokeRuntimeStreaming call
+  events: number;       // SSE data events parsed
+}
+
 export async function invokeRuntimeStreaming(
   p: InvokeParams,
   opts: SignOptions,
   onChunk: (conclusionSoFar: string, narrations: string[]) => void,
   signal?: AbortSignal,
-): Promise<{ status: number; answer: string; steps: string[]; aborted: boolean; error: string | null }> {
+): Promise<{ status: number; answer: string; steps: string[]; aborted: boolean; error: string | null; timing: InvokeTiming }> {
+  const t0 = Date.now();
+  const timing: InvokeTiming = { signMs: 0, ttfbMs: -1, ttftMs: -1, streamMs: -1, totalMs: 0, events: 0 };
   const signed = await signInvoke(buildInvokeRequest(p), opts);
+  timing.signMs = Date.now() - t0;
+  const tReq = Date.now();
   let res: Response;
   try {
     res = await fetch(`https://${signed.hostname}${signed.path}`, {
@@ -170,12 +195,14 @@ export async function invokeRuntimeStreaming(
       signal,
     });
   } catch (e) {
-    if (signal?.aborted) return { status: 200, answer: "", steps: [], aborted: true, error: null };
+    if (signal?.aborted) return { status: 200, answer: "", steps: [], aborted: true, error: null, timing: { ...timing, totalMs: Date.now() - t0 } };
     throw e;
   }
+  timing.ttfbMs = Date.now() - tReq;
   if (res.status !== 200 || !res.body) {
-    return { status: res.status, answer: await res.text(), steps: [], aborted: false, error: null };
+    return { status: res.status, answer: await res.text(), steps: [], aborted: false, error: null, timing: { ...timing, totalMs: Date.now() - t0 } };
   }
+  const tFirstByte = Date.now();
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buf = "";
@@ -187,7 +214,12 @@ export async function invokeRuntimeStreaming(
   const processEvent = (jsonStr: string): void => {
     let evt: Record<string, unknown>;
     try { evt = JSON.parse(jsonStr); } catch { return; }
+    timing.events++;
     applyEvent(state, evt);
+    // First moment real answer text exists → time-to-first-token (on screen).
+    if (timing.ttftMs < 0 && state.texts.some((t) => t.length > 0)) {
+      timing.ttftMs = Date.now() - tReq;
+    }
   };
 
   let aborted = false;
@@ -223,5 +255,7 @@ export async function invokeRuntimeStreaming(
 
   const answer = texts.length > 0 ? texts[texts.length - 1] : "";
   const steps = texts.slice(0, -1);
-  return { status: res.status, answer, steps, aborted, error: state.error };
+  timing.streamMs = Date.now() - tFirstByte;
+  timing.totalMs = Date.now() - t0;
+  return { status: res.status, answer, steps, aborted, error: state.error, timing };
 }

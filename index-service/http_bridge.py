@@ -205,8 +205,27 @@ def build_bridge(
     @app.custom_route("/health", methods=["GET"])
     async def _health(_req: Request) -> JSONResponse:  # pragma: no cover - thin
         ok = session.healthy
+        # EFS read-latency probe: stat + a small read of the workspace on the
+        # network filesystem. EFS does a metadata round-trip per op, so this is
+        # the disk-speed signal — logged as a perf line and returned so ops can
+        # watch NFS latency without per-query overhead. Best-effort, never fails
+        # /health on a probe error.
+        disk_ms = -1.0
+        try:
+            import os
+            import time as _t
+            t0 = _t.perf_counter()
+            entries = os.listdir(workspace)  # 1 metadata round-trip
+            if entries:
+                p = os.path.join(workspace, entries[0])
+                os.stat(p)                   # stat round-trip
+            disk_ms = round((_t.perf_counter() - t0) * 1000, 1)
+            logger.info(json.dumps({"event": "efs_probe", "perf": True,
+                                    "latency_ms": disk_ms, "entries": len(entries)}))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(json.dumps({"event": "efs_probe_failed", "error": str(exc)}))
         return JSONResponse(
-            {"healthy": ok, "detail": session.health_detail},
+            {"healthy": ok, "detail": session.health_detail, "efs_probe_ms": disk_ms},
             status_code=200 if ok else 503,
         )
 

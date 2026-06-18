@@ -15,11 +15,23 @@ Design notes:
 
 from __future__ import annotations
 
+import json
+import logging
 import os
+import time
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
+
+logger = logging.getLogger("agent")
+
+
+def _perf(event: str, ms: float, **ctx: Any) -> None:
+    """Emit one structured perf-sample log line (same schema as index-service
+    perf.py): {"perf":true,"event":...,"latency_ms":...,...}. grep '"perf":true'
+    | jq to reconstruct the per-request three-stage timing breakdown."""
+    logger.info(json.dumps({"event": event, "perf": True, "latency_ms": round(ms, 1), **ctx}))
 
 # Read-only evidence tools (no Bash/Write/Edit — read-only boundary, MVP).
 READONLY_TOOLS: tuple[str, ...] = ("Read", "Glob", "Grep")
@@ -93,7 +105,14 @@ def load_system_prompt(path: Path | str | None = None) -> str:
     return p.read_text(encoding="utf-8")
 
 
-DEFAULT_MAX_TURNS = 20
+# Agentic-loop ceiling. Must be HIGH ENOUGH for legitimate multi-step evidence
+# gathering — a real "impact analysis" question runs symbol_search → several
+# get_callers → analyze_impact, with model reasoning turns interleaved, which
+# empirically blew past 20 (a normal question hit error_max_turns and the user
+# got a truncated failure card instead of an answer). 60 gives honest queries
+# headroom while still hard-capping a runaway read→grep→read loop. Tune via
+# AGENT_MAX_TURNS.
+DEFAULT_MAX_TURNS = 60
 
 
 def build_options_dict(
@@ -232,5 +251,18 @@ async def run_agent(
     )
 
     qfn = query_fn if query_fn is not None else _default_query_fn()
-    async for message in qfn(prompt=prompt, options=options):
-        yield message
+    # Perf: time-to-first-message (agent loop warmup + first model turn) and total
+    # run (the dominant end-to-end cost — model turns + tool round-trips). Paired
+    # with the gateway's invoke_timing, this localizes "where the 55s went".
+    t0 = time.perf_counter()
+    first_emitted = False
+    n = 0
+    try:
+        async for message in qfn(prompt=prompt, options=options):
+            if not first_emitted:
+                first_emitted = True
+                _perf("agent_first_message", (time.perf_counter() - t0) * 1000)
+            n += 1
+            yield message
+    finally:
+        _perf("agent_run_total", (time.perf_counter() - t0) * 1000, messages=n)

@@ -128,10 +128,12 @@ class CodegraphSession:
                 await session.initialize()
                 self._session = session
                 logger.info(json.dumps({"event": "session_started", "workspace": self._workspace}))
-                # Warm the graph (pays the cold ~20s index cost here) and assert
-                # it is non-empty before declaring the session healthy.
+                # Warm the graph (pays the cold ~20s index/EFS-load cost here) and
+                # assert it is non-empty before declaring the session healthy.
+                warm_t0 = perf_counter()
                 try:
                     result = await session.call_tool("codegraph_symbol_search", {"query": "__warmup__"})
+                    warm_ms = (perf_counter() - warm_t0) * 1000
                     unhealthy, reason = self._classify(result)
                     if unhealthy:
                         self._healthy = False
@@ -141,6 +143,10 @@ class CodegraphSession:
                         self._healthy = True
                         self._health_detail = "ok"
                         logger.info(json.dumps({"event": "warmup_done", "workspace": self._workspace}))
+                    # Perf: warmup is the cold graph-load-from-EFS cost — the single
+                    # biggest one-time latency; logged so it's visible in analysis.
+                    logger.info(perf_entry("codegraph_warmup", warm_ms, workspace=self._workspace,
+                                           healthy=not unhealthy))
                 except Exception as exc:  # noqa: BLE001
                     self._healthy = False
                     self._health_detail = "warmup failed: %s" % str(exc)

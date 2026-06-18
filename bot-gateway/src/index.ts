@@ -24,7 +24,7 @@ import { spawn } from "node:child_process";
 
 import { fromNodeProviderChain } from "@aws-sdk/credential-providers";
 
-import { invokeRuntimeStreaming, classifyInvokeOutcome, type AwsCredentials } from "./sigv4";
+import { invokeRuntimeStreaming, classifyInvokeOutcome, isTurnCapError, type AwsCredentials } from "./sigv4";
 import { createCard, updateContent, closeStreaming, finalizeCard, appendFooter, buildSendCardContent, disableFollowUpButton, updateStage, appendReasoningPanel, updateReasoningPanel, appendCharts, appendStopButton } from "./cardkit-client";
 import { extractCharts } from "./extract-charts";
 import { rememberCard, lookupCard } from "./card-registry";
@@ -133,6 +133,38 @@ async function streamingCardInvoke(
   const STREAM_TIMEOUT_MS = 9 * 60 * 1000; // 9 min (Feishu closes at 10)
   const deadline = Date.now() + STREAM_TIMEOUT_MS;
 
+  // ── "正在分析" 动效 (Claude-Code/Codex 风格: spinner 持续转 + 秒数 + 阶段词) ──
+  // A heartbeat timer animates the header so the card feels alive while the agent
+  // thinks. The SECONDS counter is the honest signal (monotonic = not frozen);
+  // the spinner is decoration. A watchdog degrades the text when NO real SSE
+  // event has arrived for a while, so we never imply progress that isn't there.
+  // The timer ONLY drives the header during the THINKING phase and during
+  // analyzing GAPS — once the conclusion is actively streaming, the typewriter IS
+  // the animation and we don't fight it with full-card PUTs (which re-carry the
+  // body and could race the streamed text). MUST be cleared on every exit path.
+  const SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏";
+  const startedAt = Date.now();
+  let lastEventAt = Date.now();   // updated on every real onChunk (real progress)
+  let spinFrame = 0;
+  let heartbeat: ReturnType<typeof setInterval> | undefined;
+  const stopHeartbeat = () => { if (heartbeat) { clearInterval(heartbeat); heartbeat = undefined; } };
+  heartbeat = setInterval(() => {
+    if (timedOut || Date.now() > deadline) { stopHeartbeat(); return; }
+    // While the conclusion is streaming (analyzing + real text flowing recently),
+    // the typewriter is the animation — skip the header spinner to avoid racing
+    // the body's streamed text with a full-card PUT.
+    const sinceEvent = Date.now() - lastEventAt;
+    if (stage === "analyzing" && lastDisplay !== "正在分析…" && sinceEvent < 1500) return;
+    const elapsed = Math.floor((Date.now() - startedAt) / 1000);
+    const spin = SPINNER[spinFrame++ % SPINNER.length];
+    // Watchdog: >15s with no new event → say so honestly, don't fake progress.
+    const label = sinceEvent > 15000
+      ? `${spin} 仍在思考（较久）${elapsed}s`
+      : `${spin} 正在分析 ${elapsed}s`;
+    seq++;
+    updateStage(cardId, label, "orange", lastDisplay, seq).catch(() => {});
+  }, 800);
+
   // Abort handle for the 停止 button (registered for the lifetime of the stream).
   const abort = new AbortController();
   abortControllers.set(cardId, abort);
@@ -149,9 +181,11 @@ async function streamingCardInvoke(
     (textSoFar, liveSteps) => {
       if (timedOut) return;
       if (Date.now() > deadline) { timedOut = true; return; }
-      // Stage 2 (思考→分析): on the first tool call, flip the header to an
-      // orange "正在分析…" via a one-time full PUT, seed the live reasoning panel,
-      // and add the 停止 button. Carries current text so the body isn't wiped.
+      lastEventAt = Date.now(); // real SSE activity → resets the watchdog
+      // Stage 2 (思考→分析): on the first tool call, add the 停止 button + seed the
+      // live reasoning panel. The header spinner/text is driven by the heartbeat
+      // timer (which reads `stage`), so we no longer push a static "正在分析…"
+      // here — just flip the stage and add the stop button.
       if (stage === "thinking" && liveSteps.length > 0) {
         stage = "analyzing";
         seq++;
@@ -200,9 +234,14 @@ async function streamingCardInvoke(
     abort.signal,
     );
   } finally {
+    stopHeartbeat(); // ALWAYS clear the animation timer — no leak in the always-on process
     abortControllers.delete(cardId);
   }
-  const { status, answer, steps, aborted, error } = result;
+  const { status, answer, steps, aborted, error, timing } = result;
+  // Structured perf line (grep '"perf":true' | jq): one row per invoke with the
+  // latency breakdown — sign / time-to-first-byte / time-to-first-token / stream
+  // duration (the long pole = model + tool turns) / total / SSE event count.
+  log({ perf: true, event: "invoke_timing", card: cardId, ...timing });
 
   // A backend failure must NEVER masquerade as a completed answer — that is the
   // "silent wrong answer when the index is unavailable" mode the code-as-only-
@@ -222,26 +261,43 @@ async function streamingCardInvoke(
   // model access isn't enabled yet) is operator-actionable, not a transient —
   // surface a specific hint instead of the generic "稍后重试".
   const accessDenied = !!error && /accessdenied|don't have access|not authorized to invoke/i.test(error);
+  // Hitting the agentic-loop turn cap is PARTIAL PROGRESS, not a backend outage:
+  // re-asking the same broad question just re-hits the cap, so "retry" is wrong
+  // advice — tell the user to NARROW the question (like the timeout branch), and
+  // surface any partial conclusion (clearly labeled) instead of discarding it.
+  // NOTE: detectEventError (parse-stream.ts) returns the ResultMessage's `result`
+  // field FIRST when present — for a turn cap that is the SDK's "Maximum turns
+  // exceeded" text, NOT the `error_max_turns` subtype token — so the regex must
+  // match that human string too, or a turn cap is misclassified as a hard failure
+  // (red card, partial discarded). The subtype-token forms remain as a fallback.
+  const turnCapped = isTurnCapError(error);
+  // "Hard failure" = a real outage/denial (discard partial, it's untrustworthy).
+  // A turn-cap is handled on its own branch below, NOT as a hard failure.
+  const hardFailed = failed && !turnCapped;
 
   // 3. Final update + close streaming. Pull any ```chart blocks out of the
   //    answer first so the conclusion text is clean (charts render separately).
-  const rawFinal = failed
+  const rawFinal = hardFailed
     ? (accessDenied
         ? "⚠️ 模型访问未开通：请在 AWS Bedrock 控制台为该模型开通 Model access（global.* 跨区域推理需在相关区域分别开通），开通后即可正常回答。"
         : "⚠️ 查询失败（后端不可用或取证中断），请稍后重试；若持续失败请转研发。")
+    : turnCapped
+      ? (answer
+          ? answer + "\n\n*（分析步骤较多，未在限定步数内完成；以上为已得到的部分结论，建议把问题缩小后再问，例如只问某一个符号 / 某一处影响）*"
+          : "⚠️ 这个问题分析步骤较多，未在限定步数内得出结论。请把问题缩小（如只问某一个符号 / 某一处影响）后重试。")
     : aborted
       ? (answer ? answer + "\n\n*（已停止，以上为已生成内容）*" : "⏹ 已停止。")
       : timedOut && !answer
         ? "⏱ 分析超时，请缩小问题范围后重试。"
         : (answer || "(无内容)");
-  // On failure, suppress any partial chart/answer fragments — they're not a
-  // trustworthy conclusion. Only parse charts out of a genuine answer.
-  const { text: textNoCharts, charts } = failed ? { text: rawFinal, charts: [] } : extractCharts(rawFinal);
+  // On HARD failure, suppress any partial chart/answer fragments — not trustworthy.
+  // A turn-capped partial IS shown (labeled incomplete), so parse its charts too.
+  const { text: textNoCharts, charts } = hardFailed ? { text: rawFinal, charts: [] } : extractCharts(rawFinal);
   // Strip the "💡 你可能还想问" trailer from the rendered body — those questions
   // become clickable footer buttons below, so leaving them in the prose shows
   // them twice (and clutters the card the prompt was rewritten to keep clean).
   // The full text (with trailer) is still used for extractFollowUps further down.
-  const finalText = redactSensitive(failed ? textNoCharts : stripFollowUps(textNoCharts));
+  const finalText = redactSensitive(hardFailed ? textNoCharts : stripFollowUps(textNoCharts));
   // Best-effort, independently guarded: if updateContent throws (transient
   // CardKit/lark-cli error, or a sequence rejection racing the last fire-and-
   // forget onChunk update), closeStreaming and finalizeCard MUST still run —
@@ -256,10 +312,10 @@ async function streamingCardInvoke(
   //    collapsed. The full-card PUT rebuilds the body (conclusion + panel), which
   //    also drops the now-irrelevant 停止 button.
   seq++;
-  try { await finalizeCard(cardId, finalText, redactSteps(steps), seq, isFollowUp, aborted, failed); } catch { /* best-effort */ }
-  // 5. Data charts + follow-ups: only on a real answer (skip both on failure —
-  //    a failed query has no conclusion to chart or follow up on).
-  if (!failed && charts.length > 0) {
+  try { await finalizeCard(cardId, finalText, redactSteps(steps), seq, isFollowUp, aborted, hardFailed); } catch { /* best-effort */ }
+  // 5. Data charts + follow-ups: skip on HARD failure (no trustworthy conclusion).
+  //    A turn-capped partial keeps its charts/follow-ups (labeled incomplete).
+  if (!hardFailed && charts.length > 0) {
     // Charts are pulled from the UNredacted answer (extractCharts ran on rawFinal),
     // so scrub every string leaf of each spec before it hits the group-visible
     // card — same secret/path safety net as the conclusion and reasoning panel.
@@ -267,13 +323,13 @@ async function streamingCardInvoke(
     seq++;
     try { await appendCharts(cardId, safeCharts, seq); } catch (e) { log({ event: "chart_error", error: String(e) }); }
   }
-  if (!failed) {
+  if (!hardFailed) {
     seq++;
     // Extract from the UNstripped text (finalText had the trailer removed above).
     const followUps = extractFollowUps(redactSensitive(textNoCharts));
     try { await appendFooter(cardId, seq, followUps); } catch { /* best-effort */ }
   }
-  log({ event: "card_closed", card: cardId, chars: answer.length, charts: charts.length, timedOut, failed, error: error ?? undefined });
+  log({ event: "card_closed", card: cardId, chars: answer.length, charts: charts.length, timedOut, failed, turnCapped, error: error ?? undefined });
 }
 
 async function main(): Promise<void> {
