@@ -60,8 +60,8 @@ export function decideFinalize(i: FinalizeInputs): FinalizeDecision {
  *  PURE (no redaction here — caller redacts the final string). */
 export function hardFailureMessage(accessDenied: boolean): string {
   return accessDenied
-    ? "⚠️ 模型访问未开通：请在 AWS Bedrock 控制台为该模型开通 Model access（global.* 跨区域推理需在相关区域分别开通），开通后即可正常回答。"
-    : "⚠️ 查询失败（后端不可用或取证中断），请稍后重试；若持续失败请转研发。";
+    ? "模型访问未开通：请在 AWS Bedrock 控制台为该模型开通 Model access（global.* 跨区域推理需在相关区域分别开通），开通后即可正常回答。"
+    : "查询失败（后端不可用或取证中断），请稍后重试；若持续失败请转研发。";
 }
 
 /** Shape the VISIBLE body (evidence already split off) for the non-hard-failure
@@ -74,13 +74,13 @@ export function shapeBody(
   if (d.turnCapped) {
     return body
       ? body + "\n\n*（分析步骤较多，未在限定步数内完成；以上为已得到的部分结论，建议把问题缩小后再问，例如只问某一个符号 / 某一处影响）*"
-      : "⚠️ 这个问题分析步骤较多，未在限定步数内得出结论。请把问题缩小（如只问某一个符号 / 某一处影响）后重试。";
+      : "这个问题分析步骤较多，未在限定步数内得出结论。请把问题缩小（如只问某一个符号 / 某一处影响）后重试。";
   }
   if (d.aborted) {
-    return body ? body + "\n\n*（已停止，以上为已生成内容）*" : "⏹ 已停止。";
+    return body ? body + "\n\n*（已停止，以上为已生成内容）*" : "已停止。";
   }
   if (d.timedOut && !body) {
-    return "⏱ 分析超时，请缩小问题范围后重试。";
+    return "分析超时，请缩小问题范围后重试。";
   }
   return body || "(无内容)";
 }
