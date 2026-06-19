@@ -95,7 +95,20 @@ export class CardWriter {
    *  whose slot is mid-execution still completes (harmless — finalize's full PUT
    *  runs after it on the FIFO chain and overwrites). */
   dropLanes(...lanes: string[]): void {
-    for (const lane of lanes) this.latestByLane.delete(lane);
+    // Clear BOTH the pending frame AND the queued-slot marker. Dropping only
+    // latestByLane (the old behavior) was safe ONLY because the sole caller clears
+    // the heartbeat first, so no coalesce() could follow. But that left the
+    // invariant dependent on caller timing: if a coalesce() ever lands after
+    // dropLanes while laneQueued still held the lane, its slot would early-return
+    // on the next enqueue... actually re-use the stale slot and repaint a finalized
+    // card. Deleting laneQueued too makes "this lane is dropped" a LOCAL guarantee:
+    // a later coalesce() schedules a fresh slot (harmless) rather than reviving a
+    // stale one. A slot already mid-execution is unaffected (its latestByLane.get
+    // already returned, and on a dropped lane returns undefined → no-op).
+    for (const lane of lanes) {
+      this.latestByLane.delete(lane);
+      this.laneQueued.delete(lane);
+    }
   }
 
   /** Current high-water sequence (for tests / diagnostics). */
