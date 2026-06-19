@@ -67,7 +67,14 @@ export function extractCharts(answer: string): { text: string; charts: ChartSpec
   // block and stops at the matching closing fence. `(?![A-Za-z0-9])` so
   // "```chartreuse" prose isn't caught either.
   if (/^[ \t]*```chart(?![A-Za-z0-9])/m.test(text)) {
-    text = text.replace(/^[ \t]*```chart(?![A-Za-z0-9])[\s\S]*?^[ \t]*```[ \t]*$/gm, "");
+    // BOUNDED gap (not `[\s\S]*?`): an UNBOUNDED lazy gap is O(n²) when the text has
+    // many line-start "```chart" opens with no matching close — each open scans to
+    // end-of-string (measured: 4000 unclosed opens ≈ 1s, blocking the single shared
+    // event loop → a process-wide stall for every concurrent session). A real chart
+    // spec is a few KB; cap the gap so the match stays linear, mirroring
+    // strip-toolcall-leak.ts. An over-long block just isn't stripped here (it was
+    // already dropped from `charts` by the MAX_CHART_SPEC_BYTES guard above).
+    text = text.replace(/^[ \t]*```chart(?![A-Za-z0-9])[\s\S]{0,8000}?^[ \t]*```[ \t]*$/gm, "");
   }
   // Collapse the blank lines left where blocks were removed.
   return { text: text.replace(/\n{3,}/g, "\n\n").trim(), charts };

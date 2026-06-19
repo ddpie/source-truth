@@ -105,4 +105,22 @@ describe("normalizeBlocks — must NOT touch well-formed / protected content", (
     expect(normalizeBlocks("")).toBe("");
     expect(normalizeBlocks("普通一句话答案。")).toBe("普通一句话答案。");
   });
+
+  it("does NOT corrupt prose that literally contains the fence-placeholder token", () => {
+    // REGRESSION: the internal code-fence placeholder used to be ` FENCE<n> `, so an
+    // answer that literally discussed `FENCE0` (an identifier / regex example) collided
+    // with it — the literal got OVERWRITTEN by a real code block's content. The
+    // NUL-delimited sentinel can't be forged by prose.
+    const input = "聊到 FENCE0 这个标识符。\n```js\nconst x=1;\n```\n结束";
+    const out = normalizeBlocks(input);
+    expect(out).toContain("聊到 FENCE0 这个标识符。"); // literal preserved
+    expect(out).toContain("```js\nconst x=1;\n```");   // real fence round-trips
+    expect(out).not.toContain("\x00");                 // no sentinel leak
+  });
+
+  it("does NOT delete prose mentioning FENCE<n> when there is no such fence (OOB)", () => {
+    // REGRESSION: an out-of-range index hit `fences[n] ?? ""` → the literal "FENCE9"
+    // was silently DELETED, dropping a token from the rendered answer.
+    expect(normalizeBlocks("正则里写 FENCE9 会怎样？")).toBe("正则里写 FENCE9 会怎样？");
+  });
 });

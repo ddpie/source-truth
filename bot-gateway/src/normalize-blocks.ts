@@ -24,6 +24,15 @@
  * It only ADDS separators; never merges or drops content. PURE.
  */
 
+// NUL-delimited fence placeholder. NUL (U+0000) never appears in card answer text,
+// so a placeholder can't be forged by — or collide with — prose that literally
+// contains the word "FENCE" followed by digits (an identifier, a regex example, a
+// echoed config line). Stash writes `\x00FENCE<n>\x00`; restore matches ONLY that
+// exact shape.
+const FENCE_OPEN = "\x00FENCE";
+const FENCE_CLOSE = "\x00";
+const FENCE_RESTORE_RE = /\x00FENCE(\d+)\x00/g;
+
 const FENCE_RE = /```[\s\S]*?```/g;
 // Trailing UNCLOSED fence (open ``` to end-of-string) — streaming partials and a
 // model that forgets the closing fence both produce these; their content must be
@@ -45,10 +54,18 @@ export function normalizeBlocks(text: string): string {
 
   // Protect fenced code blocks (paired first, then a trailing unclosed one): swap
   // them out, normalize, swap back. A fence can contain ###/--- that stay literal.
+  // The placeholder MUST be a token that can't occur in real answer text, or it
+  // collides with the prose: a code-QA answer that literally discusses `FENCE0`
+  // (an identifier, a regex example, a回显ed config line) was being either
+  // OVERWRITTEN with a code block's content or — when the referenced index was out
+  // of range — silently DELETED (`?? ""`), dropping a token from the rendered
+  // answer (cross-review CONFIRMED). Wrap the index in NUL bytes (U+0000): the
+  // gateway never emits NUL in card text, so the sentinel is unforgeable by prose,
+  // and the restore regex matches ONLY our own placeholders.
   const fences: string[] = [];
   const stash = (m: string): string => {
     fences.push(m);
-    return ` FENCE${fences.length - 1} `;
+    return `${FENCE_OPEN}${fences.length - 1}${FENCE_CLOSE}`;
   };
   let work = text.replace(FENCE_RE, stash).replace(UNCLOSED_FENCE_RE, stash);
 
@@ -57,7 +74,7 @@ export function normalizeBlocks(text: string): string {
   // a heading).
   const out: string[] = [];
   for (const line of work.split("\n")) {
-    const isFence = line.includes(" FENCE");
+    const isFence = line.includes(FENCE_OPEN);
     const isTable = isTableLine(line);
     let repaired = line;
 
@@ -89,11 +106,11 @@ export function normalizeBlocks(text: string): string {
   }
   work = out.join("\n");
 
-  // Restore fences BEFORE the whitespace tidy — the tidy strips a trailing space
-  // before a newline, which would otherwise mangle a ` FENCEn ` placeholder sitting
-  // on its own line (leading/trailing spaces) and leave it unrestored. Tolerate any
-  // surrounding whitespace on the placeholder just in case.
-  work = work.replace(/ ?FENCE(\d+) ?/g, (_m, i: string) => fences[Number(i)] ?? "");
+  // Restore fences. The placeholder is the NUL-delimited sentinel (\x00FENCE<n>\x00) —
+  // match ONLY that exact shape, and on an out-of-range index keep the matched text
+  // verbatim (`?? m`) instead of deleting it. (The old ` FENCEn `/`?? ""` form collided
+  // with prose containing a literal "FENCE<n>" and silently dropped it — cross-review.)
+  work = work.replace(FENCE_RESTORE_RE, (m, i: string) => fences[Number(i)] ?? m);
 
   // Tidy: trailing spaces before newline, and collapse >2 newlines the inserts made.
   work = work.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n");
