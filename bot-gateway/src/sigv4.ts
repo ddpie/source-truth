@@ -15,7 +15,7 @@ import { Sha256 } from "@aws-crypto/sha256-js";
 import { SignatureV4 } from "@aws-sdk/signature-v4";
 import { HttpRequest } from "@smithy/protocol-http";
 
-import { newStreamState, applyEvent } from "./parse-stream";
+import { newStreamState, applyEvent, splitTexts } from "./parse-stream";
 
 const SERVICE = "bedrock-agentcore";
 const SESSION_HEADER = "X-Amzn-Bedrock-AgentCore-Runtime-Session-Id";
@@ -340,8 +340,16 @@ export async function invokeRuntimeStreaming(
       : "stream truncated before completion (no terminal result event)";
   }
 
-  const answer = texts.length > 0 ? texts[texts.length - 1] : "";
-  const steps = texts.slice(0, -1);
+  // Derive conclusion/narrations through splitTexts — the SAME classifier
+  // parseAgentStream uses — instead of a hand-written texts[last]. splitTexts drops
+  // empty/whitespace-only blocks BEFORE picking the conclusion; the raw texts[last]
+  // here let a trailing empty block (model opened a final text block but never filled
+  // it, or a whitespace-only block after a tool_use) STEAL the conclusion slot →
+  // blank card while the real answer sat in narrations. That HIGH regression was fixed
+  // in splitTexts but this live path bypassed it (the test only covered
+  // parseAgentStream), so it still shipped (cross-review HIGH). Now both paths share
+  // one classifier — the file-header "single source of truth" is real again.
+  const { conclusion: answer, narrations: steps } = splitTexts(texts, state.error);
   timing.streamMs = Date.now() - tFirstByte;
   timing.totalMs = Date.now() - t0;
   timing.chars = answer.length;

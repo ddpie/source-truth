@@ -90,6 +90,28 @@ describe("parseAgentStream error detection", () => {
       'data: {"error": "second", "error_type": "LateError"}\n';
     expect(parseAgentStream(sse).error).toBe("EarlyError: first");
   });
+
+  it("flags a stream error that carries `error` but NO error_type (cross-review)", () => {
+    // error_type is optional; requiring it silently dropped this error → later
+    // mis-reported as a truncation, or swallowed entirely.
+    const sse =
+      'data: {"content": [{"text": "正在分析…"}]}\n' +
+      'data: {"error": "backend exploded"}\n';
+    expect(parseAgentStream(sse).error).toBe("backend exploded");
+  });
+
+  it("a trailing whitespace-only text block does NOT steal the conclusion slot (HIGH)", () => {
+    // The same regression splitTexts fixes — now also exercised through the full
+    // parse so the live (sigv4) path, which routes through splitTexts, is covered.
+    const sse =
+      'data: {"content": [{"text": "真正的最终答案"}]}\n' +
+      'data: {"content": [{"name": "codegraph_read_file", "input": {}}]}\n' +
+      'data: {"content": [{"text": "   "}]}\n' +
+      'data: {"num_turns": 5, "stop_reason": "end_turn"}\n';
+    const { conclusion, narrations } = parseAgentStream(sse);
+    expect(conclusion).toBe("真正的最终答案");
+    expect(narrations).toEqual([]); // the blank block is dropped, not promoted
+  });
 });
 
 describe("stream completion flag (sawResult) — truncation detection", () => {
@@ -274,5 +296,39 @@ describe("tool-call accounting (perf: few-deep-turns vs many-round-trips)", () =
     applyEvent(st, { content: [{ name: "Read", input: {} }] });
     expect(st.toolCalls).toBe(1);
     expect(st.toolCallsByName).toEqual({ Read: 1 });
+  });
+
+  it("counts a tool_use whose serialized form OMITS the input key (cross-review)", () => {
+    // Gating on `\"input\" in item` missed a tool_use without an input key → the tool
+    // went uncounted AND the surrounding text blocks merged (garbled answer).
+    const st = newStreamState();
+    applyEvent(st, { content: [{ text: "narration" }] });
+    applyEvent(st, { content: [{ name: "weirdtool" }] }); // no input key
+    applyEvent(st, { content: [{ text: "答案" }] });
+    expect(st.toolCalls).toBe(1);
+    expect(st.toolCallsByName).toEqual({ weirdtool: 1 });
+    // The tool boundary kept the two text blocks separate (not "n...答案" merged).
+    expect(st.texts).toEqual(["narration", "答案"]);
+  });
+
+  it("does NOT treat a tool_result (tool_use_id, no role) as a fresh tool call", () => {
+    const st = newStreamState();
+    applyEvent(st, { content: [{ text: "narration" }] });
+    applyEvent(st, { content: [{ tool_use_id: "t1", name: "ignored", content: "result text" }] });
+    expect(st.toolCalls).toBe(0); // tool_use_id present → it's a result, not a call
+  });
+});
+
+describe("sawResult — bare-key result:null must not satisfy the terminal guard", () => {
+  it("does NOT set sawResult on a non-terminal event carrying result:null (cross-review)", () => {
+    const st = newStreamState();
+    applyEvent(st, { result: null }); // no num_turns / is_error / stop_reason
+    expect(st.sawResult).toBe(false);
+  });
+
+  it("still sets sawResult on a real terminal result string", () => {
+    const st = newStreamState();
+    applyEvent(st, { result: "done", num_turns: 3 });
+    expect(st.sawResult).toBe(true);
   });
 });

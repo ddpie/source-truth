@@ -87,8 +87,15 @@ function countTool(state: StreamState, name: unknown): void {
  */
 export function detectEventError(evt: Record<string, unknown>): string | null {
   if (Array.isArray(evt.content)) return null; // per-tool result item, not a stream error
-  if (typeof evt.error === "string" && evt.error && typeof evt.error_type === "string") {
-    return `${evt.error_type}: ${evt.error}`;
+  if (typeof evt.error === "string" && evt.error) {
+    // error_type is OPTIONAL: a stream-level error event may carry only `error`
+    // (no error_type). Requiring error_type meant such an error was SILENTLY dropped
+    // here and only later mis-attributed as "stream truncated" by the truncation
+    // guard — or, if a normal result happened to follow, swallowed entirely
+    // (a partial answer shown as 回答完成). Flag it either way (cross-review).
+    return typeof evt.error_type === "string" && evt.error_type
+      ? `${evt.error_type}: ${evt.error}`
+      : evt.error;
   }
   if (evt.is_error === true) {
     if (typeof evt.result === "string" && evt.result) return evt.result;
@@ -116,8 +123,13 @@ export function applyEvent(state: StreamState, evt: Record<string, unknown>): vo
   // so it's correctly ignored). detectEventError already flags the is_error:true
   // variant; this also catches the is_error:false success ResultMessage.
   if (!Array.isArray(evt.content) &&
-      (typeof evt.num_turns === "number" || "result" in evt ||
+      (typeof evt.num_turns === "number" || evt.result != null ||
        typeof evt.is_error === "boolean" || typeof evt.stop_reason === "string")) {
+    // `evt.result != null` (not a bare `"result" in evt`): a non-terminal event that
+    // happens to carry result:null/undefined must NOT be mistaken for the terminal
+    // ResultMessage and prematurely satisfy the truncation guard — which would let a
+    // later-truncated stream render as a finished answer. Matches the type-checked
+    // strictness of the other three predicates (cross-review).
     state.sawResult = true;
   }
   // Partial-message path: when the agent runs with include_partial_messages, the
@@ -203,8 +215,15 @@ export function applyContentItem(state: StreamState, item: Record<string, unknow
       // earlier chunk and corrupts the output).
       state.texts[state.texts.length - 1] += item.text;
     }
-  } else if (typeof item.name === "string" && "input" in item) {
-    // tool_use: the preceding text block is now a finished narration.
+  } else if (typeof item.name === "string" && item.name && item.tool_use_id === undefined) {
+    // tool_use: the preceding text block is now a finished narration. Gate on `name`
+    // (a tool_use block always has it) and NOT requiring `input` — a serialized
+    // tool_use that omits an empty `input` key would otherwise slip the gate, so the
+    // tool went UNcounted (skewing the perf-comparison toolCalls) AND the narration
+    // before it MERGED into the next text block (garbled answer). Exclude a
+    // tool_result (it carries tool_use_id + content, no semantic name role here) so
+    // we don't treat a result as a fresh tool call (cross-review). Matches the
+    // partial-message path, which gates on block type alone, not on input.
     state.sawToolAfterLastText = true;
     countTool(state, item.name);
   }
