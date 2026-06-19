@@ -49,14 +49,21 @@ const PREAMBLE_OPENERS: RegExp[] = [
 // answer) is EXCLUDED here; only meta-statements like "现在整理答案" / "数值已核实，给出
 // 结论" / "可以给出答案了" qualify. A standalone leading sentence is stripped only if it
 // matches one of these AND the whole sentence is the preamble (ends at 。/！/newline).
+// Each entry must be able to match the WHOLE first-sentence body (terminator
+// already stripped by the caller), so they end with a tolerant tail
+// `[了啦呢吧，,：: ]{0,4}` that mops up trailing particles/punctuation. The caller
+// requires mm.index===0 AND mm[0].length===sentenceBody.length (a FULL match), so
+// these never strip a sentence that merely BEGINS with the phrase and continues
+// with real content (e.g. "整理答案的逻辑在 Foo.java").
+const TAIL = "[了啦呢吧，,：:。\\s]{0,4}";
 const STANDALONE_PREAMBLE_OPENERS: RegExp[] = [
-  /^(好的?[，,。.\s]*)?(我)?(现在)?(来|开始)?(整理|汇总|总结)(一下)?(答案|结论|回答)/,
-  /^让我(来)?(整理|汇总|总结)/,
-  /^可以(给出|开始|提供|整理)(完整|最终|对比)?(的)?(答案|结论)/,
-  /^.{0,40}(已|都).{0,8}(核实|确认|取到|读到|查到|拿到|读完|查完|读清楚|查清楚|弄清楚).{0,30}(给出|得出|整理|呈现|说明)?.{0,12}(答案|结论|对比|说明)/,
-  /^.{0,30}(直接|下面|以下就?)给出(完整|最终|对比)?(的)?(答案|结论)/,
-  /^(let me|i'?ll)\s+(now\s+)?(compile|summarize|put together|organize)\s+(the\s+)?(answer|findings?|results?)/i,
-  /^(all|the)\s+(key\s+)?(logic|info|information|evidence|details?|values?)\s+(is|are|has been|have been)\s+(read|gathered|confirmed|verified|clear)/i,
+  new RegExp(`^(好的?[，,。.\\s]*)?(我)?(现在)?(来|开始)?(整理|汇总|总结)(一下)?(答案|结论|回答)${TAIL}$`),
+  new RegExp(`^让我(来)?(整理|汇总|总结)(一下)?(答案|结论|回答)?${TAIL}$`),
+  new RegExp(`^可以(给出|开始|提供|整理)(完整|最终|对比)?(的)?(答案|结论)${TAIL}$`),
+  new RegExp(`^.{0,40}(已|都).{0,8}(核实|确认|取到|读到|查到|拿到|读完|查完|读清楚|查清楚|弄清楚)[，,]?.{0,30}(给出|得出|整理|呈现|说明).{0,12}(答案|结论|对比|说明)${TAIL}$`),
+  new RegExp(`^.{0,30}(直接|下面|以下就?)给出(完整|最终|对比)?(的)?(答案|结论)${TAIL}$`),
+  /^(let me|i'?ll)\s+(now\s+)?(compile|summarize|put together|organize)\s+(the\s+)?(answer|findings?|results?)\s*[.:]?$/i,
+  /^(all|the)\s+(key\s+)?(logic|info|information|evidence|details?|values?)\s+(is|are|has been|have been)\s+(read|gathered|confirmed|verified|clear)\s*[.:]?$/i,
 ];
 
 // A preamble is a SHORT lead-in, not a paragraph of real answer. If the segment
@@ -89,16 +96,25 @@ export function stripPreamble(body: string): string {
   // Strategy 2 — preamble as a standalone LEADING SENTENCE, no separator (observed:
   // "数值已从代码逐一核实，直接给出对比结论。\n**匕首**的基础伤害…"). Only fire when the
   // FIRST sentence (up to the first 。/！/.\n) is ENTIRELY a recognized preamble and
-  // real content follows — so a real answer whose first sentence merely starts with
-  // a stripped word is never truncated mid-sentence. Conservative by construction:
-  // the whole sentence must match an opener AND be short AND have a real tail.
+  // real content follows. CRITICAL: the opener must match the WHOLE sentence body
+  // (terminator stripped), not just a PREFIX — otherwise a real answer whose first
+  // sentence merely BEGINS with a meta-phrase ("整理答案的逻辑在 Foo.java。") would be
+  // wrongly discarded. We strip the trailing 。/！/! and test a $-anchored full match.
   const sentMatch = body.match(/^\s*([^\n。！.!]{1,}[。！!]|[^\n]{1,}\n)/);
   if (sentMatch) {
     const firstSentence = sentMatch[0].trim();
+    // Sentence body without its terminating punctuation, for a full-match test.
+    const sentenceBody = firstSentence.replace(/[。！!]\s*$/, "").trim();
     const tail = body.slice(sentMatch[0].length).trim();
     const isStandalonePreamble =
-      firstSentence.length > 0 && firstSentence.length <= MAX_PREAMBLE_LEN &&
-      STANDALONE_PREAMBLE_OPENERS.some((re) => re.test(firstSentence));
+      sentenceBody.length > 0 && sentenceBody.length <= MAX_PREAMBLE_LEN &&
+      STANDALONE_PREAMBLE_OPENERS.some((re) => {
+        const mm = re.exec(sentenceBody);
+        // Require the opener to consume the ENTIRE sentence body (a full preamble),
+        // not just lead it — so "整理答案的逻辑在 Foo.java" (continues with real
+        // content) is NOT eligible, but "整理一下答案" / "数值已核实，直接给出对比结论" is.
+        return mm !== null && mm.index === 0 && mm[0].length === sentenceBody.length;
+      });
     if (tail.length > 0 && isStandalonePreamble) return tail;
   }
 
