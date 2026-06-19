@@ -375,6 +375,23 @@ describe("stripPreamble", () => {
       .toBe("暴击率 = 敏捷 / 4。");
   });
 
+  it("strips '我已经掌握了X的全貌。下面直接说明它在玩法里的作用。' (掌握…全貌 + 说明…作用)", () => {
+    expect(stripPreamble("我已经掌握了天气系统的全貌。下面直接说明它在玩法里的作用。\n\n天气影响移动速度。"))
+      .toBe("天气影响移动速度。");
+    expect(stripPreamble("我已经掌握了天气系统的全貌。\n\n天气影响移速。")).toBe("天气影响移速。");
+    expect(stripPreamble("下面直接说明它在玩法里的作用。\n\n天气影响移速。")).toBe("天气影响移速。");
+  });
+
+  it("does NOT over-strip real sentences with 全貌 / 说明…作用 that continue", () => {
+    for (const real of [
+      "天气系统的全貌可以在 WeatherManager.cs 看到。",
+      "已经知道全貌的玩家其实不多，多数人没探索完。",
+      "下面这段代码说明它在初始化里的作用，注意第3行。",
+    ]) {
+      expect(stripPreamble(real)).toBe(real);
+    }
+  });
+
   it("does NOT over-strip a real sentence containing 逻辑了 mid-clause", () => {
     for (const real of [
       "查清玩家摔落伤害的逻辑后，会缓存到 FallCache。",
