@@ -60,18 +60,39 @@ LOCK=/data/.codegraph/.writer.lock
 
 mkdir -p "$INDEX_HOME/.codegraph" /opt/idx/bin "$APP"
 
-# --- base packages (retry: apt mirrors can flap on fresh hosts) ---
-for i in 1 2 3; do apt-get update -y && break || sleep 10; done
-apt-get install -y python3-pip python3-venv unzip curl
+# retry a network-dependent command with backoff. On a FRESH account the instance
+# can boot in the private subnet BEFORE the NAT gateway's default route has fully
+# converged into the private route table — so the first apt/curl/S3 calls may fail
+# with no route to host for tens of seconds. A thin "3×10s on apt-get update only"
+# left every other network op (apt install, the awscli download, S3 copies)
+# unguarded, so a fresh deploy intermittently died here and surfaced as a confusing
+# 15-min index-build health-gate timeout instead of a network error. ~6×20s ≈ 2min
+# covers realistic NAT-route convergence. (cross-review HIGH)
+retry_net() {
+  local n=0 max=6
+  until "$@"; do
+    n=$((n + 1))
+    if [ "$n" -ge "$max" ]; then
+      echo "BOOTSTRAP_FAILED: network command failed after ${max} attempts: $*" >&2
+      return 1
+    fi
+    echo "retry_net: attempt ${n}/${max} failed, sleeping 20s: $*" >&2
+    sleep 20
+  done
+}
+
+# --- base packages (retry: apt mirrors flap AND the NAT route may not be up yet) ---
+retry_net apt-get update -y
+retry_net apt-get install -y python3-pip python3-venv unzip curl
 # awscli v2 (Ubuntu 24.04 has no apt awscli)
 if ! command -v aws >/dev/null; then
-  curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip" -o /tmp/awscliv2.zip
+  retry_net curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip" -o /tmp/awscliv2.zip
   (cd /tmp && unzip -q -o awscliv2.zip && ./aws/install --update)
 fi
 export PATH=/usr/local/bin:$PATH
 
 # --- artifacts from S3 ---
-aws s3 cp "s3://$BUCKET/bin/codegraph-server" "$BIN" --region "$REGION"
+retry_net aws s3 cp "s3://$BUCKET/bin/codegraph-server" "$BIN" --region "$REGION"
 chmod +x "$BIN"
 ln -sf "$BIN" /usr/local/bin/codegraph-server
 # SMOKE-TEST the binary NOW (fail loud + early) instead of letting a wrong-arch /
@@ -79,13 +100,13 @@ ln -sf "$BIN" /usr/local/bin/codegraph-server
 # health-gate timeout. A bad binary can't exec → `--version` fails → we exit with a
 # greppable marker the SSM health probe / journalctl can pinpoint.
 "$BIN" --version >/dev/null 2>&1 || { echo "BOOTSTRAP_FAILED: codegraph-server binary not executable (wrong arch/glibc or truncated S3 object)"; exit 1; }
-aws s3 cp "s3://$BUCKET/index-service.tar.gz" /tmp/idx.tar.gz --region "$REGION"
+retry_net aws s3 cp "s3://$BUCKET/index-service.tar.gz" /tmp/idx.tar.gz --region "$REGION"
 tar xzf /tmp/idx.tar.gz -C "$APP"
 # Install from the shipped requirements.txt — the SINGLE source of truth for
 # deps — not a hand-typed list (which had drifted: it installed the unrelated
 # standalone `fastmcp`, never imported, while the bridge uses the FastMCP class
 # bundled in `mcp`). `mcp` pulls starlette/sse-starlette transitively.
-pip3 install --break-system-packages -q --ignore-installed -r "$APP/requirements.txt"
+retry_net pip3 install --break-system-packages -q --ignore-installed -r "$APP/requirements.txt"
 # Verify the RESOLVED dependency set is self-consistent. Top-level deps are ==-pinned,
 # but mcp's transitive closure (starlette/pydantic/anyio/httpx) is not — a breaking
 # transitive major resolved on a fresh install months later would otherwise only
@@ -130,7 +151,7 @@ require_disk_headroom() {
 mkdir -p "$LOCAL_REPO_ROOT"
 # Re-extract if: never extracted, empty tree, or the staged snapshot changed.
 if [ ! -d "$LOCAL_WORKSPACE" ] || [ -z "$(ls -A "$LOCAL_WORKSPACE" 2>/dev/null)" ] || [ "$HAVE_SIG" != "$WANT_SIG" ]; then
-  aws s3 cp "s3://$BUCKET/${REPO_SUBDIR}.tar.gz" /tmp/repo.tar.gz --region "$REGION"
+  retry_net aws s3 cp "s3://$BUCKET/${REPO_SUBDIR}.tar.gz" /tmp/repo.tar.gz --region "$REGION"
   require_disk_headroom                     # fail loud if /data can't hold the extract + graph
   rm -rf "$LOCAL_WORKSPACE"                 # drop the stale snapshot so the new one is clean
   tar xzf /tmp/repo.tar.gz -C "$LOCAL_REPO_ROOT"
