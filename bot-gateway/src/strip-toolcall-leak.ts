@@ -19,19 +19,31 @@
  * retry" message instead of the stripped scraps). PURE.
  */
 
-// Matches a whole <function_calls>…</function_calls> block, a bare
-// <invoke …>…</invoke> block, or a stray <parameter …>…</parameter> / orphan tag.
-// Tolerant of the markdown bolding Feishu sometimes wraps around them (**</invoke>**).
-const TOOLCALL_BLOCK = /\**<\/?(?:function_calls|antml:function_calls)\b[^>]*>\**/gi;
-const INVOKE_BLOCK = /\**<invoke\b[\s\S]*?<\/invoke>\**/gi;
-const PARAM_BLOCK = /\**<\/?parameter\b[^>]*>\**/gi;
-const ORPHAN_INVOKE_OPEN = /\**<invoke\b[^>]*>\**/gi; // an unclosed <invoke …> (truncated stream)
+// CRITICAL: Anthropic/Claude models serialize tool calls with an `antml:` namespace
+// prefix on EVERY tag (<invoke>, <parameter>, <function_calls>) — that
+// is the dominant real leak shape. Every pattern therefore tolerates an OPTIONAL
+// `(?:antml:)?` prefix; matching only the bare form let the real shape pass through
+// entirely unstripped. Also tolerant of the markdown bolding Feishu sometimes wraps
+// around them (**</invoke>**).
+// ReDoS NOTE: the closed-block matcher bounds the gap with `[\s\S]{0,8000}?` (not the
+// unbounded `[\s\S]*?`) so N unclosed `<invoke` opens can't each scan to end-of-string
+// (O(n^2) event-loop stall). A genuinely-unclosed open is then mopped up by the orphan
+// pattern; 8000 chars comfortably covers a real tool-call block.
+const TOOLCALL_BLOCK = /\**<\/?(?:antml:)?function_calls\b[^>]*>\**/gi;
+const INVOKE_BLOCK = /\**<(?:antml:)?invoke\b[\s\S]{0,8000}?<\/(?:antml:)?invoke>\**/gi;
+const PARAM_BLOCK = /\**<\/?(?:antml:)?parameter\b[^>]*>\**/gi;
+const ORPHAN_INVOKE_OPEN = /\**<(?:antml:)?invoke\b[^>\n]{0,400}>\**/gi; // unclosed <invoke …> (truncated)
+
+/** True if `text` contains any (prefixed or bare) tool-call markup. */
+function hasToolCallMarkup(text: string): boolean {
+  return /<(?:antml:)?invoke\b/i.test(text) || /(?:antml:)?function_calls/i.test(text);
+}
 
 /** Remove leaked tool-call markup from `text`. Returns the cleaned text (trimmed). */
 export function stripToolCallLeak(text: string): string {
-  if (!text || (!text.includes("<invoke") && !text.includes("function_calls"))) return text;
+  if (!text || !hasToolCallMarkup(text)) return text;
   let out = text
-    .replace(INVOKE_BLOCK, "")        // whole <invoke>…</invoke>
+    .replace(INVOKE_BLOCK, "")        // whole <invoke>…</invoke> (bounded gap)
     .replace(ORPHAN_INVOKE_OPEN, "")  // …then any unclosed <invoke …>
     .replace(PARAM_BLOCK, "")         // stray <parameter> tags
     .replace(TOOLCALL_BLOCK, "");     // <function_calls> wrappers
@@ -42,15 +54,17 @@ export function stripToolCallLeak(text: string): string {
 
 /**
  * True when the answer is DOMINATED by leaked tool-call markup — i.e. once the markup
- * is stripped, little real prose remains. The caller uses this to replace the answer
- * with a clean failure message rather than showing the scraps. Threshold-based:
- * fires when >=2 invoke/function_calls markers AND the stripped remainder is short.
+ * is stripped, little real prose survives. The caller replaces such a body with a
+ * clean failure message rather than showing the scraps. RATIO-based (not an absolute
+ * floor): fires when >=2 markup markers AND the stripped remainder is either tiny
+ * (<80 chars) OR less than 35% of the original — so a leak padded with filler prose
+ * still triggers. Marker count is antml-tolerant (a wrapper-less antml leak must count).
  */
 export function isToolCallLeakDominant(text: string): boolean {
   if (!text) return false;
-  const markers = (text.match(/<invoke\b/gi) || []).length + (text.match(/function_calls/gi) || []).length;
+  const markers = (text.match(/<(?:antml:)?invoke\b/gi) || []).length
+    + (text.match(/(?:antml:)?function_calls/gi) || []).length;
   if (markers < 2) return false;
   const stripped = stripToolCallLeak(text);
-  // If almost nothing survives the strip, the "answer" was essentially all markup.
-  return stripped.length < 80;
+  return stripped.length < 80 || stripped.length < 0.35 * text.length;
 }

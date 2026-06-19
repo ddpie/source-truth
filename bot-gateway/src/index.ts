@@ -577,12 +577,19 @@ async function runStreamingInvoke(
   // the stray block(s). Skip on hard failure (already a fixed message). The operator
   // log carries the signal for real root-causing.
   if (!hardFailed) {
-    if (isToolCallLeakDominant(bodyNoEvidence)) {
+    // Assess dominance over BOTH body AND evidence: a leak can land after the
+    // 供研发复核 heading (→ evidence partition), so checking the body alone would
+    // miss an evidence-only leak. If dominant, the whole turn produced no real
+    // answer → clean failure message + suppress charts/evidence.
+    if (isToolCallLeakDominant(bodyNoEvidence + "\n" + evidence)) {
       log({ event: "toolcall_leak_dominant", card: cardId, chars: bodyNoEvidence.length });
       bodyNoEvidence = "⚠️ 这次没能得出可靠答案（取证过程未正常完成）。请再问一次试试；若反复如此，把问题发给研发排查。";
       charts = []; evidence = "";
     } else {
+      // Strip stray markup from BOTH partitions so neither the body nor the folded
+      // 供研发复核 panel shows raw tool-call XML.
       bodyNoEvidence = stripToolCallLeak(bodyNoEvidence);
+      evidence = stripToolCallLeak(evidence);
     }
   }
   // Clarification: when the agent判定 the question is ambiguous it emits a

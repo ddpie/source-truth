@@ -1,12 +1,13 @@
 """Read STRUCTURED tabular/binary config files as text, for the read_table MCP tool.
 
 The agent's read_file decodes everything as UTF-8 text, so a binary config file
-(Excel .xlsx/.xls, SQLite .db) comes back as garbage and the agent (correctly)
+(Excel .xlsx, SQLite .db) comes back as garbage and the agent (correctly)
 can't use it. But game-dev config tables — the planners' actual numbers — very
 often live in EXACTLY those formats. This module parses them SERVER-SIDE (where
 the read-only local repo copy lives) into compact text the agent can reason over:
   - .csv / .tsv          → normalized text rows (stdlib csv, handles quoting/delims)
-  - .xlsx / .xlsm / .xls → each sheet rendered as a header + rows block (openpyxl)
+  - .xlsx / .xlsm / .xltx / .xltm → each sheet rendered as a header + rows block (openpyxl;
+                          the legacy binary .xls is NOT supported — re-save as .xlsx)
   - .db / .sqlite/.sqlite3 → schema + a bounded SELECT * per table (stdlib sqlite3)
 
 Strictly READ-ONLY: SQLite is opened in immutable/read-only mode; nothing is ever
@@ -36,6 +37,15 @@ MAX_COLS = 64             # columns kept (wide sheets are usually padding beyond
 MAX_CELL = 200            # chars per cell
 MAX_TABLES = 40           # SQLite tables enumerated
 MAX_OUTPUT_CHARS = 120_000  # hard ceiling on the whole returned text
+# ON-DISK size ceiling, checked BEFORE parsing. The render-time caps above bound the
+# RETURNED string, not the PARSE footprint: openpyxl (read_only) still eagerly loads
+# the whole sharedStrings.xml, and an .xlsx is a ZIP — a few-KB zip-bomb whose
+# sharedStrings decompresses to GBs would OOM the resident index process (a
+# cross-session DoS) before any render cap applies. A real config table is well under
+# this; reject larger files loudly rather than risk the OOM. Also bounds the zip-bomb
+# decompression via the declared-uncompressed-size sum (see _check_zip_inflate).
+MAX_FILE_BYTES = 64 * 1024 * 1024     # 64 MiB on-disk ceiling for a config table
+MAX_UNCOMPRESSED_BYTES = 512 * 1024 * 1024  # 512 MiB total inflate ceiling (zip-bomb guard)
 
 # Extensions we know how to parse. read_file already handles plain text; this tool
 # is for the structured/binary ones it can't.
@@ -78,6 +88,28 @@ def _read_csv(local_path: str, *, delimiter: str) -> tuple[str, bool]:
     return _rows_to_text(rows, label="sheet")
 
 
+def _check_zip_inflate(local_path: str) -> None:
+    """Reject an .xlsx (OOXML = a ZIP) whose entries inflate past the ceiling.
+
+    The on-disk MAX_FILE_BYTES check bounds the COMPRESSED size; a zip-bomb is a
+    few-KB file whose sharedStrings.xml decompresses to GBs. openpyxl(read_only)
+    eagerly loads sharedStrings, so check the declared uncompressed sizes from the
+    central directory BEFORE handing the path to openpyxl. We read sizes from the
+    directory (no decompression) so this itself can't be bombed."""
+    import zipfile  # noqa: PLC0415
+
+    try:
+        with zipfile.ZipFile(local_path) as zf:
+            total = sum(zi.file_size for zi in zf.infolist())
+    except zipfile.BadZipFile as exc:
+        raise ValueError("not a valid .xlsx workbook (corrupt or not OOXML)") from exc
+    if total > MAX_UNCOMPRESSED_BYTES:
+        raise ValueError(
+            f"workbook contents exceed the {MAX_UNCOMPRESSED_BYTES // (1024 * 1024)} MiB "
+            f"decompression limit (possible zip-bomb); refusing to parse"
+        )
+
+
 def _read_excel(local_path: str) -> tuple[str, bool]:
     # Lazy import so the module loads even where openpyxl is absent (it's installed
     # on the index host via requirements.txt; this keeps unit tests / local dev
@@ -90,6 +122,7 @@ def _read_excel(local_path: str) -> tuple[str, bool]:
 
     # read_only + data_only: stream rows without loading the whole workbook, and
     # return computed values rather than formula strings (planners want the numbers).
+    _check_zip_inflate(local_path)  # zip-bomb guard: reject if entries inflate past the ceiling
     wb = openpyxl.load_workbook(local_path, read_only=True, data_only=True)
     try:
         blocks, truncated = [], False
@@ -147,6 +180,15 @@ def read_table(requested: str, *, local_root: str, mount_root: str) -> dict[str,
     local_path = path_align.to_local_path(requested, local_root=local_root, mount_root=mount_root)
     if not os.path.isfile(local_path):
         raise ValueError(f"not a readable file: {requested!r}")
+    # Size ceiling BEFORE parsing: bounds the parse footprint (openpyxl/sqlite load
+    # far more than the rendered output) and is a cheap first-line DoS guard.
+    size = os.path.getsize(local_path)
+    if size > MAX_FILE_BYTES:
+        raise ValueError(
+            f"file is {size // (1024 * 1024)} MiB, over the "
+            f"{MAX_FILE_BYTES // (1024 * 1024)} MiB read_table limit; "
+            f"a config table should be far smaller"
+        )
     ext = os.path.splitext(local_path)[1].lower()
 
     if ext in EXCEL_EXT:
@@ -163,8 +205,9 @@ def read_table(requested: str, *, local_root: str, mount_root: str) -> dict[str,
         content, truncated = _read_csv(local_path, delimiter=",")
     else:
         raise ValueError(
-            f"read_table does not handle '{ext}' files (supported: .xlsx/.xls family, "
-            f".csv, .tsv, .db/.sqlite). For plain-text files use read_file."
+            f"read_table does not handle '{ext}' files (supported: .xlsx/.xlsm/.xltx/.xltm, "
+            f".csv, .tsv, .db/.sqlite/.sqlite3). The legacy binary .xls is NOT supported "
+            f"(re-save as .xlsx). For plain-text files use read_file."
         )
 
     if len(content) > MAX_OUTPUT_CHARS:
