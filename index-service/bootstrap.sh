@@ -14,42 +14,42 @@
 #     oneshot while the bridge is live (closes the `systemctl restart index-build`
 #     footgun), and (c) the bridge's in-process restart join-guard. Concurrent
 #     writers corrupt RocksDB → 0-node graph (the #1 failure we hit). graph.db
-#     lives on LOCAL disk, so this is per-instance — the deploy provisions exactly
-#     ONE index-service instance (provision_index_service.sh reuses an existing
-#     one). Running a second instance against the same EFS is unsupported in the
-#     MVP (would need an EFS-resident or DynamoDB lock for HA).
+#     and the repo copy both live on LOCAL disk, so this is per-instance — the
+#     deploy provisions exactly ONE index-service instance
+#     (provision_index_service.sh reuses an existing one). Horizontal scale-out
+#     (multiple instances) is unsupported in the MVP; each instance would just
+#     hold its own independent local copy + graph (no shared state to corrupt).
 #   - PATH baked into the unit (codegraph-server lives in /usr/local/bin; systemd
 #     has no login PATH — a bare "codegraph-server" spawn fails otherwise).
+#   - NO EFS: index-service is self-contained on LOCAL disk. The repo is extracted
+#     from the S3 tarball to /data/repo/<subdir>; codegraph indexes it and the
+#     bridge reads/greps/globs it there. The agent microVM mounts no filesystem
+#     and reads code over the HTTP bridge (read_file/glob_files/search_files), so
+#     there is no shared EFS to populate. graph.db + repo copy both live on the
+#     single root volume (size it via provision_index_service's root volume).
 #
 # Inputs via environment (deploy-all.sh writes /etc/index-service.env first):
-#   BUCKET, REGION, EFS_ID, REPO_SUBDIR (e.g. code-5x), MAX_FILES
+#   BUCKET, REGION, REPO_SUBDIR (e.g. code-5x), MAX_FILES
 set -euxo pipefail
 exec > /var/log/index-svc-bootstrap.log 2>&1
 
 # shellcheck disable=SC1091
 source /etc/index-service.env
 
-# REPO_SUBDIR MUST be non-empty before any path is built from it: WORKSPACE and
-# LOCAL_WORKSPACE are "$REPO_ROOT/$REPO_SUBDIR", and the freshness re-extract does
-# `rm -rf "$WORKSPACE"`. set -u does NOT catch an empty-but-set var, so an empty
-# REPO_SUBDIR would make those paths the repo ROOT and `rm -rf` would wipe the whole
-# tree. The :? form errors on unset OR empty — abort loudly before building paths.
+# REPO_SUBDIR MUST be non-empty before any path is built from it: LOCAL_WORKSPACE
+# is "$LOCAL_REPO_ROOT/$REPO_SUBDIR", and the freshness re-extract does
+# `rm -rf "$LOCAL_WORKSPACE"`. set -u does NOT catch an empty-but-set var, so an
+# empty REPO_SUBDIR would make that path the repo ROOT and `rm -rf` would wipe the
+# whole tree. The :? form errors on unset OR empty — abort loudly before building paths.
 : "${REPO_SUBDIR:?BOOTSTRAP_FAILED: REPO_SUBDIR must be set and non-empty}"
 
 export DEBIAN_FRONTEND=noninteractive
-INDEX_HOME=/data                       # codegraph graph.db lives here (LOCAL disk, never EFS)
+INDEX_HOME=/data                       # codegraph graph.db lives here (LOCAL disk)
 APP=/opt/idx/app
 BIN=/opt/idx/bin/codegraph-server
-# We mount the EFS *filesystem root* at /mnt/efs; the repo tree lives under the
-# access-point root /repo, i.e. /mnt/efs/repo/<subdir>. The runtime mounts the
-# /repo access point at /mnt/repo, so its matching path is /mnt/repo/<subdir>
-# (that's the --mount-root passed to the bridge below).
-EFS_MNT=/mnt/efs
-REPO_ROOT="$EFS_MNT/repo"
-WORKSPACE="$REPO_ROOT/$REPO_SUBDIR"
 LOCK=/data/.codegraph/.writer.lock
 
-mkdir -p "$INDEX_HOME/.codegraph" /opt/idx/bin "$APP" "$EFS_MNT"
+mkdir -p "$INDEX_HOME/.codegraph" /opt/idx/bin "$APP"
 
 # --- base packages (retry: apt mirrors can flap on fresh hosts) ---
 for i in 1 2 3; do apt-get update -y && break || sleep 10; done
@@ -73,94 +73,49 @@ tar xzf /tmp/idx.tar.gz -C "$APP"
 # bundled in `mcp`). `mcp` pulls starlette/sse-starlette transitively.
 pip3 install --break-system-packages -q --ignore-installed -r "$APP/requirements.txt"
 
-# --- mount EFS (access-point root) read-write so the build can land the repo ---
-# CRITICAL: the mount MUST succeed. If it silently failed we'd extract + index
-# the repo onto the local root disk instead of EFS; the runtime (which mounts
-# the same EFS at /mnt/repo) would then see nothing → 0-node graph → garbage.
-# So: retry the initial mount (EFS targets accept connections a few seconds
-# after reaching 'available'), then HARD-FAIL the bootstrap if it isn't mounted.
-EFS_DNS="${EFS_ID}.efs.${REGION}.amazonaws.com"
-grep -q "$EFS_MNT" /etc/fstab || \
-  echo "${EFS_DNS}:/ $EFS_MNT nfs4 nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2,_netdev 0 0" >> /etc/fstab
-if ! mountpoint -q "$EFS_MNT"; then
-  for attempt in $(seq 1 10); do
-    mount "$EFS_MNT" && break
-    echo "EFS mount attempt $attempt failed; retrying in 6s ..."
-    sleep 6
-  done
-fi
-if ! mountpoint -q "$EFS_MNT"; then
-  echo "BOOTSTRAP_FAILED: EFS ($EFS_DNS) not mounted at $EFS_MNT after retries"
-  exit 1
-fi
-
-# --- ensure the repo is on EFS (deploy stages <repo>.tar.gz in S3) ---
-# Extract under the access-point root /repo so the path matches what the runtime
-# sees at /mnt/repo/<subdir>.
+# --- extract the repo to LOCAL disk (deploy stages <repo>.tar.gz in S3) ------
+# NO EFS: the repo lives only on LOCAL disk at /data/repo/<subdir>. codegraph
+# indexes it, and the bridge reads/greps/globs it there; the agent reads code
+# over the HTTP bridge, so there is no shared filesystem to populate. The path
+# is rewritten to the agent's /mnt/repo/<subdir> namespace by path_align (the
+# --mount-root passed to the bridge), so agent-visible paths are unchanged.
 #
-# FRESHNESS: EFS PERSISTS across instance replacement, but the local EBS copy is
-# fresh per instance. A plain `[ ! -d "$WORKSPACE" ]` guard would SKIP re-extract
-# when EFS still holds an OLD snapshot, while the fresh instance extracts the NEW
-# snapshot locally → codegraph (EFS) and file-search (local) would serve DIFFERENT
-# code (silent drift; --refresh-index would not actually refresh the indexed code).
-# So we stamp the deploy's ARTIFACT_SIG (S3 ETags of the staged tarballs, passed in
-# the env) under $WORKSPACE and RE-EXTRACT whenever the stamp differs (or is
-# missing, or the dir is empty). Both copies are derived from the SAME downloaded
-# /tmp/repo.tar.gz, so they can never diverge.
-SIG_STAMP="$REPO_ROOT/.artifact_sig"
+# FRESHNESS: the local copy is fresh per instance, but a reused instance may hold
+# an OLD snapshot. We stamp the deploy's ARTIFACT_SIG (S3 ETag of the staged
+# tarball, passed in the env) under the repo root and RE-EXTRACT whenever the
+# stamp differs (or is missing, or the dir is empty).
+LOCAL_REPO_ROOT=/data/repo
+LOCAL_WORKSPACE="$LOCAL_REPO_ROOT/$REPO_SUBDIR"
+WORKSPACE="$LOCAL_WORKSPACE"               # codegraph indexes the local copy
+SIG_STAMP="$LOCAL_REPO_ROOT/.artifact_sig"
 WANT_SIG="${ARTIFACT_SIG:-unset}"
 HAVE_SIG="$(cat "$SIG_STAMP" 2>/dev/null || echo none)"
 # DISK-FULL GUARD: graph.db (RocksDB) does NOT fail cleanly on ENOSPC — a partial
 # write yields a corrupt/truncated graph that the 64KiB floor can't catch (it's
 # well over 64KiB). The local repo copy + graph.db + the downloaded tarball all
 # live on the single root volume under /data, so check headroom BEFORE extracting
-# and fail LOUDLY (same style as the EFS-mount guard) rather than silently
-# corrupting. Budget ≈ 5× the tarball (tarball + EFS tree + local tree + graph.db
-# growth); /data free space must exceed it.
+# and fail LOUDLY rather than silently corrupting. Budget ≈ 4× the tarball
+# (tarball + local tree + graph.db growth); /data free space must exceed it.
 require_disk_headroom() {
   local tarball_kb avail_kb need_kb
   tarball_kb="$(du -k /tmp/repo.tar.gz 2>/dev/null | cut -f1 || echo 0)"
   avail_kb="$(df -Pk /data | awk 'NR==2{print $4}')"
-  need_kb=$(( tarball_kb * 5 + 1048576 ))   # 5x tarball + 1GiB base headroom
+  need_kb=$(( tarball_kb * 4 + 1048576 ))   # 4x tarball + 1GiB base headroom
   if [ "${avail_kb:-0}" -lt "$need_kb" ]; then
     echo "BOOTSTRAP_FAILED: insufficient /data space: avail=${avail_kb}KiB need>=${need_kb}KiB (tarball ${tarball_kb}KiB). Grow the root volume."
     exit 1
   fi
 }
-# Re-extract EFS if: never extracted, empty tree, or the staged snapshot changed.
-if [ ! -d "$WORKSPACE" ] || [ -z "$(ls -A "$WORKSPACE" 2>/dev/null)" ] || [ "$HAVE_SIG" != "$WANT_SIG" ]; then
-  mkdir -p "$REPO_ROOT"
+mkdir -p "$LOCAL_REPO_ROOT"
+# Re-extract if: never extracted, empty tree, or the staged snapshot changed.
+if [ ! -d "$LOCAL_WORKSPACE" ] || [ -z "$(ls -A "$LOCAL_WORKSPACE" 2>/dev/null)" ] || [ "$HAVE_SIG" != "$WANT_SIG" ]; then
   aws s3 cp "s3://$BUCKET/${REPO_SUBDIR}.tar.gz" /tmp/repo.tar.gz --region "$REGION"
-  require_disk_headroom                     # fail loud if /data can't hold the extracts + graph
-  rm -rf "$WORKSPACE"                       # drop the stale snapshot so the new one is clean
-  tar xzf /tmp/repo.tar.gz -C "$REPO_ROOT"
+  require_disk_headroom                     # fail loud if /data can't hold the extract + graph
+  rm -rf "$LOCAL_WORKSPACE"                 # drop the stale snapshot so the new one is clean
+  tar xzf /tmp/repo.tar.gz -C "$LOCAL_REPO_ROOT"
   echo "$WANT_SIG" > "$SIG_STAMP"           # stamp AFTER a successful extract
 fi
-
-# --- ALSO extract the repo to LOCAL disk for fast file search ---------------
-# Grep over the EFS/NFS copy is catastrophically slow: a single whole-repo grep
-# measured 47s on NFS vs 0.21s on local disk (225x — NFS pays a network round-
-# trip per file open for 18k files). The agent's builtin Grep hits /mnt/repo
-# (EFS) and dominated end-to-end latency (~20s per broad grep). So we keep a
-# LOCAL-disk copy here and expose a fast search tool (http_bridge codegraph_
-# search_files) that greps it. It is derived from the SAME /tmp/repo.tar.gz the
-# EFS copy came from (re-downloaded above on a sig change), so the two can never
-# drift. Extracting from the already-local tarball costs no NFS I/O.
-LOCAL_REPO_ROOT=/data/repo
-LOCAL_WORKSPACE="$LOCAL_REPO_ROOT/$REPO_SUBDIR"
-LOCAL_SIG_STAMP="$LOCAL_REPO_ROOT/.artifact_sig"
-LOCAL_HAVE_SIG="$(cat "$LOCAL_SIG_STAMP" 2>/dev/null || echo none)"
-mkdir -p "$LOCAL_REPO_ROOT"
-if [ ! -d "$LOCAL_WORKSPACE" ] || [ -z "$(ls -A "$LOCAL_WORKSPACE" 2>/dev/null)" ] || [ "$LOCAL_HAVE_SIG" != "$WANT_SIG" ]; then
-  if [ ! -f /tmp/repo.tar.gz ]; then
-    aws s3 cp "s3://$BUCKET/${REPO_SUBDIR}.tar.gz" /tmp/repo.tar.gz --region "$REGION"
-  fi
-  require_disk_headroom                     # same guard before the local extract
-  rm -rf "$LOCAL_WORKSPACE"
-  tar xzf /tmp/repo.tar.gz -C "$LOCAL_REPO_ROOT"
-  echo "$WANT_SIG" > "$LOCAL_SIG_STAMP"
-fi
-# Reclaim the downloaded tarball now that BOTH copies are extracted — it is a dead
+# Reclaim the downloaded tarball now that the copy is extracted — it is a dead
 # ~18MB+ file on the size-constrained root volume otherwise (a re-run re-downloads
 # it cheaply when a sig change requires re-extract).
 rm -f /tmp/repo.tar.gz
@@ -173,22 +128,17 @@ cat > /etc/systemd/system/index-build.service <<UNIT
 Description=CodeGraph index build (single-writer, runs to completion before serve)
 After=network-online.target remote-fs.target
 Wants=network-online.target
-# Hard requirement on the EFS mount (not just After= ordering): on a REBOOT the
-# user-data bootstrap does NOT re-run, so its mount hard-fail guard is absent.
-# RequiresMountsFor makes systemd fail this unit if /mnt/efs isn't mounted,
-# rather than indexing an empty local dir into a 0-node graph.
-RequiresMountsFor=$EFS_MNT
 [Service]
 Type=oneshot
 RemainAfterExit=yes
 Environment=HOME=$INDEX_HOME
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
-# Belt-and-suspenders: refuse to build unless EFS is actually mounted AND the
-# workspace exists AND is NON-EMPTY — so a late/failed mount or a partial/empty
-# extract fails loudly instead of building a 0-node graph that would then serve
-# wrong "not found" answers (Requires=index-build keeps the bridge from serving a
-# failed build). `test -d` alone only proves the dir exists, not that it has code.
-ExecStartPre=/usr/bin/mountpoint -q $EFS_MNT
+# Belt-and-suspenders: refuse to build unless the LOCAL workspace exists AND is
+# NON-EMPTY — so a partial/empty extract fails loudly instead of building a 0-node
+# graph that would then serve wrong "not found" answers (Requires=index-build
+# keeps the bridge from serving a failed build). `test -d` alone only proves the
+# dir exists, not that it has code. On a REBOOT the user-data bootstrap does NOT
+# re-run, but the local copy persists on the root volume, so this check still holds.
 ExecStartPre=/bin/bash -c '[ -n "\$(ls -A $WORKSPACE 2>/dev/null)" ] || { echo "FATAL: $WORKSPACE is empty — refusing to build a 0-node graph"; exit 1; }'
 # flock guarantees only ONE codegraph process writes graph.db at a time.
 ExecStart=/usr/bin/flock $LOCK $BIN --graph-only --workspace $WORKSPACE \\
@@ -206,9 +156,6 @@ cat > /etc/systemd/system/index-bridge.service <<UNIT
 Description=CodeGraph MCP HTTP bridge (resident single session)
 After=index-build.service
 Requires=index-build.service
-# Also bind the bridge to the EFS mount: if /mnt/efs drops, don't keep serving
-# (or restart-loop) against a vanished workspace.
-RequiresMountsFor=$EFS_MNT
 [Service]
 Environment=HOME=$INDEX_HOME
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
