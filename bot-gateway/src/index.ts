@@ -34,6 +34,7 @@ import { extractFollowUps, stripFollowUps } from "./extract-followups";
 import { splitEvidence } from "./extract-evidence";
 import { stripPreamble } from "./strip-preamble";
 import { stripToolCallLeak, isToolCallLeakDominant } from "./strip-toolcall-leak";
+import { normalizeBlocks } from "./normalize-blocks";
 import { extractClarification } from "./extract-clarify";
 import { handleMessageEvent, type InvokeFn } from "./handle-event";
 import { sdkEventToImEvent } from "./sdk-event";
@@ -474,7 +475,9 @@ async function runStreamingInvoke(
         // Drop a planning preamble ("现在我整理答案…" + ---) that leaked into the
         // conclusion block so the typewriter shows 结论先行 from the first line. Marker-
         // keyed + conservative: no-op until the preamble's `---` has streamed.
-        display = redactSensitive(stripPreamble(body.length > 0 ? body : textSoFar));
+        // normalizeBlocks (additive newlines only) also repairs jammed ###/---/>
+        // live so the typewriter doesn't briefly show literal markers mid-paragraph.
+        display = normalizeBlocks(redactSensitive(stripPreamble(body.length > 0 ? body : textSoFar)));
       }
       // Latest-wins lane: each content update carries the FULL text so far, so a
       // queued-but-not-yet-sent frame is stale and is replaced — the typewriter
@@ -617,8 +620,14 @@ async function runStreamingInvoke(
     evidence = "";
     charts = [];
   }
-  const finalText = redactSensitive(bodyNoEvidence);
-  const finalEvidence = redactSensitive(evidence);
+  // normalizeBlocks repairs block markers (### / --- / >) the model jammed mid-prose
+  // without a preceding blank line — lark_md only renders them at line start, else
+  // the reader sees literal "###"/"---" inside a paragraph. Runs AFTER stripPreamble
+  // (which keys off inline `---`) and after redaction (additive newlines only, so it
+  // can't move a secret across the redaction boundary). Clarify body is a single
+  // prompt line — no blocks — so it's a harmless no-op there.
+  const finalText = normalizeBlocks(redactSensitive(bodyNoEvidence));
+  const finalEvidence = normalizeBlocks(redactSensitive(evidence));
   // Finalize writes go through the SAME serial writer, so they're ordered AFTER
   // every streaming write drained (FIFO) and carry strictly-higher sequences —
   // no stale rejection. Each is independently guarded inside writer.write (a
