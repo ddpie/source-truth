@@ -25,7 +25,7 @@ const warned = new Set<string>();
 /** Load config/i18n.json and select the locale (LOCALE env, default zh). Idempotent;
  *  call once at startup, but lazy-loads on first t() too. Exposed for tests. */
 export function initI18n(localeOverride?: string): void {
-  const locale = localeOverride ?? process.env.LOCALE ?? "zh";
+  const requested = localeOverride ?? process.env.LOCALE ?? "zh";
   // config/ is a sibling of bot-gateway/ at the repo root.
   const path = resolve(__dirname, "..", "..", "config", "i18n.json");
   let parsed: Record<string, unknown>;
@@ -34,6 +34,13 @@ export function initI18n(localeOverride?: string): void {
   } catch (e) {
     throw new Error(`i18n: cannot load ${path}: ${String(e)}`);
   }
+  // Validate the requested locale against the DECLARED allow-list (_meta.locales),
+  // NOT against `locale in parsed`. Otherwise a stray LOCALE=_meta would select the
+  // metadata object itself as the "bundle" → every t() misses → raw keys leak into
+  // every card. Unknown/unlisted locale falls back to zh.
+  const meta = parsed["_meta"] as { locales?: string[] } | undefined;
+  const allowed = meta?.locales ?? ["zh"];
+  const locale = allowed.includes(requested) ? requested : "zh";
   const locales = parsed as Record<string, Bundle>;
   const chosen = locales[locale] ?? locales["zh"];
   if (!chosen) throw new Error(`i18n: no 'zh' bundle in ${path}`);

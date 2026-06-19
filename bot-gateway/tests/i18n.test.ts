@@ -73,4 +73,13 @@ describe("i18n", () => {
     expect(missingInEn).toEqual([]);
     expect(missingInZh).toEqual([]);
   });
+
+  // HARDENING: locale is validated against _meta.locales, NOT `locale in parsed`.
+  // A stray LOCALE=_meta must NOT select the metadata object as a bundle (which
+  // would make every t() miss and leak raw keys); it falls back to zh.
+  it.each(["_meta", "fr", "EN", "zh-CN"])("falls back to zh for unlisted locale %s", (loc) => {
+    initI18n(loc);
+    expect(currentLocale()).toBe("zh");
+    expect(t("card.title.done")).toBe("回答完成");
+  });
 });
