@@ -36,7 +36,7 @@ export interface ChartSpec {
 // through makes Feishu reject the append → the chart silently fails to render. We
 // drop an unknown type here instead (clean drop; the prose table the model also
 // emits is the fallback). Lowercased before checking.
-const ALLOWED_CHART_TYPES = new Set(["bar", "line", "pie"]);
+export const ALLOWED_CHART_TYPES = new Set(["bar", "line", "pie"]);
 // A chart spec is real config-table numbers, not prose — a few KB at most. A
 // pathological multi-thousand-point array would (a) likely exceed Feishu's per-card
 // body size (rejected append) and (b) cost a redactDeep walk over every leaf on the
