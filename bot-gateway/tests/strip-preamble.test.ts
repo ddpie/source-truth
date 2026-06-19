@@ -170,6 +170,17 @@ describe("stripPreamble", () => {
     expect(stripPreamble(body)).toBe(body);
   });
 
+  it("strips a '…都核对完了，可以下结论了。' announce (E2E concurrency case)", () => {
+    // Live capture under concurrent load (warm VM, old prompt): the readiness sentence
+    // ended in 可以下结论了 (not 给出结论) so the 作答/回答 pattern missed it. Added 下结论.
+    const body = "我已经把天气状态在整个代码里的使用方都核对完了，可以下结论了。\n\n**结论：天气系统不影响战斗。**";
+    expect(stripPreamble(body)).toBe("**结论：天气系统不影响战斗。**");
+  });
+
+  it("does NOT over-strip a real answer that legitimately contains 下结论", () => {
+    expect(stripPreamble("下结论的逻辑写在 ConclusionBuilder.cs:10。")).toBe("下结论的逻辑写在 ConclusionBuilder.cs:10。");
+  });
+
   it("strips the 6th E2E case: '所有信息都齐了，来整理答案。' + inline ---", () => {
     const body = "所有信息都齐了，来整理答案。---角色的负重上限完全由力量决定。";
     expect(stripPreamble(body)).toBe("角色的负重上限完全由力量决定。");
