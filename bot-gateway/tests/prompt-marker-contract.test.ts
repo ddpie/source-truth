@@ -33,4 +33,11 @@ describe("agent↔gateway marker contract (system.md must emit the literals the 
     // The prompt must tell the agent to use the --- divider; the parsers split on it.
     expect(md).toContain("---");
   });
+
+  it("emits the clarification marker the gateway's extract-clarify.ts keys on", () => {
+    // The clarify-on-ambiguity feature: the gateway renders option buttons by
+    // keying on this literal. A prompt reword that drops it would silently disable
+    // button-based clarification (the block would render as raw prose).
+    expect(md).toContain("需要你确认");
+  });
 });

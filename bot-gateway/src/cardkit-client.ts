@@ -16,6 +16,7 @@
 
 import { feishuApi } from "./feishu-http";
 import { MAX_FOLLOW_UPS } from "./extract-followups";
+import { MAX_CLARIFY_OPTIONS } from "./extract-clarify";
 
 // ── pure request builders (unit-tested) ──────────────────────────────────────
 
@@ -186,16 +187,20 @@ export async function closeStreaming(cardId: string, sequence: number): Promise<
  *  history still shows a finished follow-up card as a follow-up. When an
  *  elapsedLabel is given (e.g. "用时 67s"), it's appended so the user sees the
  *  total time the answer took. */
-export function finalizeTitle(followUp?: boolean, aborted?: boolean, failed?: boolean, elapsedLabel?: string, turnCapped?: boolean): string {
+export function finalizeTitle(followUp?: boolean, aborted?: boolean, failed?: boolean, elapsedLabel?: string, turnCapped?: boolean, clarify?: boolean): string {
   // turnCapped is a PARTIAL result (hit the step cap) — its header must NOT read
   // as a confident green "回答完成" while the body says "未完成". Distinct signal.
+  // clarify is NOT an answer — the agent is asking the user to disambiguate — so
+  // its header must say so, not "回答完成".
   const base = failed ? "⚠️ 查询失败"
     : aborted ? "⏹ 已停止"
     : turnCapped ? "⚠️ 部分结论（步数受限）"
+    : clarify ? "❓ 请选择你想问的"
     : followUp ? "↳ 追问 · 已回答"
     : "回答完成";
-  // Show elapsed except on a hard failure (where "time" is meaningless/misleading).
-  return elapsedLabel && !failed ? `${base} · 用时 ${elapsedLabel}` : base;
+  // Show elapsed except on a hard failure (where "time" is meaningless/misleading)
+  // and on a clarify (it's a question back to the user, elapsed is noise).
+  return elapsedLabel && !failed && !clarify ? `${base} · 用时 ${elapsedLabel}` : base;
 }
 
 /** A "⏹ 停止" button shown during streaming. value.card_id lets the click
@@ -368,6 +373,7 @@ export async function finalizeCard(
   question?: string,
   elapsedLabel?: string,
   turnCapped?: boolean,
+  clarify?: boolean,
 ): Promise<void> {
   const panel = buildReasoningPanel(steps, false);
   const evidencePanel = buildEvidencePanel(evidence ?? "");
@@ -381,8 +387,8 @@ export async function finalizeCard(
     schema: "2.0",
     config: { update_multi: true },
     header: {
-      title: { tag: "plain_text", content: finalizeTitle(followUp, aborted, failed, elapsedLabel, turnCapped) },
-      template: failed ? "red" : aborted ? "grey" : turnCapped ? "orange" : "green",
+      title: { tag: "plain_text", content: finalizeTitle(followUp, aborted, failed, elapsedLabel, turnCapped, clarify) },
+      template: failed ? "red" : aborted ? "grey" : turnCapped ? "orange" : clarify ? "blue" : "green",
     },
     body: {
       elements: [
@@ -426,6 +432,31 @@ export function buildFollowUpElements(followUps: string[]): unknown[] {
   return elements;
 }
 
+/** Build the clarify OPTION buttons (one per clarified option). The "what's
+ *  ambiguous" prompt is rendered in the card BODY (finalText), not here, so it
+ *  isn't shown twice. Clicking an option reuses the SAME `follow_up` callback
+ *  action (so the click re-asks that clarified question WITH context replay) — no
+ *  new callback path needed. The buttons are `primary` so they read as the main
+ *  call-to-action, since the card has no other answer. */
+export function buildClarifyElements(_question: string, options: string[]): unknown[] {
+  const elements: unknown[] = [];
+  options.slice(0, MAX_CLARIFY_OPTIONS).forEach((q, i) => {
+    const eid = `clarify_${i}`;
+    elements.push({
+      tag: "button",
+      element_id: eid,
+      text: { tag: "plain_text", content: q },
+      type: "primary",
+      size: "small",
+      width: "fill",
+      // Reuse the follow_up action: clicking re-asks `q` as a new turn with the
+      // prior context replayed (the callback resolves the parent card → chain).
+      value: { action: "follow_up", text: q, eid },
+    });
+  });
+  return elements;
+}
+
 /** A disabled button marked as already-clicked (✓ prefix). Used to update the
  *  pressed follow-up button in place after a click. Returns a JSON string
  *  (the update-element API takes `element` as a serialized string). */
@@ -448,6 +479,18 @@ export function buildClickedButtonElement(elementId: string, question: string): 
 export async function appendFooter(cardId: string, sequence: number, followUps: string[]): Promise<void> {
   const elements = buildFollowUpElements(followUps);
 
+  await larkApi("POST", `/open-apis/cardkit/v1/cards/${cardId}/elements`, JSON.stringify({
+    type: "append",
+    sequence,
+    elements: JSON.stringify(elements),
+  }));
+}
+
+/** Append the clarification block (prompt + option buttons) to a card. Used in
+ *  place of appendFooter when the agent asked the user to disambiguate. A leading
+ *  hr separates it from the (minimal) body, mirroring appendFooter's layout. */
+export async function appendClarify(cardId: string, sequence: number, question: string, options: string[]): Promise<void> {
+  const elements = [{ tag: "hr" }, ...buildClarifyElements(question, options)];
   await larkApi("POST", `/open-apis/cardkit/v1/cards/${cardId}/elements`, JSON.stringify({
     type: "append",
     sequence,

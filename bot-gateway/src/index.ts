@@ -24,7 +24,7 @@ import { fromNodeProviderChain } from "@aws-sdk/credential-providers";
 
 import { invokeRuntimeStreaming, classifyInvokeOutcome, isTurnCapError, type AwsCredentials } from "./sigv4";
 import { decideFinalize, hardFailureMessage, shapeBody } from "./finalize-decision";
-import { createCard, updateContent, closeStreaming, finalizeCard, appendFooter, buildSendCardContent, disableFollowUpButton, appendReasoningPanel, updateReasoningPanel, appendOneChart, MAX_CHARTS, appendStopButton, appendStatusLine, updateStatusLine, formatElapsed } from "./cardkit-client";
+import { createCard, updateContent, closeStreaming, finalizeCard, appendFooter, appendClarify, buildSendCardContent, disableFollowUpButton, appendReasoningPanel, updateReasoningPanel, appendOneChart, MAX_CHARTS, appendStopButton, appendStatusLine, updateStatusLine, formatElapsed } from "./cardkit-client";
 import { extractCharts } from "./extract-charts";
 import { rememberCard, rememberAnswer, lookupCard, collectChain } from "./card-registry";
 import { composeFollowUpPrompt } from "./followup-context";
@@ -33,6 +33,7 @@ import { redactSensitive, redactSteps, redactDeep } from "./redact";
 import { extractFollowUps, stripFollowUps } from "./extract-followups";
 import { splitEvidence } from "./extract-evidence";
 import { stripPreamble } from "./strip-preamble";
+import { extractClarification } from "./extract-clarify";
 import { handleMessageEvent, type InvokeFn } from "./handle-event";
 import { sdkEventToImEvent } from "./sdk-event";
 import { sendReply } from "./reply";
@@ -564,6 +565,21 @@ async function runStreamingInvoke(
     // split off, so the note isn't hidden inside the collapsed panel.
     bodyNoEvidence = shapeBody(stripPreamble(body), { turnCapped, aborted, timedOut });
   }
+  // Clarification: when the agent判定 the question is ambiguous it emits a
+  // "🔀 需要你确认 + options" block INSTEAD of an answer. Detect it on the raw answer
+  // (before redaction — the options are business questions, no secrets). If present,
+  // the card shows the disambiguation prompt + one-tap option buttons (rendered in
+  // the footer section below) and suppresses charts/evidence/follow-ups (there's no
+  // answer yet). Only on a clean run — a hard failure / abort / turn-cap is not a
+  // clarification. The buttons reuse the follow_up callback so a click re-asks the
+  // chosen clarified question WITH context replay.
+  const clarify = (!hardFailed && !aborted && !turnCapped) ? extractClarification(answer) : null;
+  if (clarify) {
+    // The body becomes just the disambiguation prompt; the options are buttons.
+    bodyNoEvidence = `🤔 ${clarify.question}`;
+    evidence = "";
+    charts = [];
+  }
   const finalText = redactSensitive(bodyNoEvidence);
   const finalEvidence = redactSensitive(evidence);
   // Finalize writes go through the SAME serial writer, so they're ordered AFTER
@@ -590,12 +606,15 @@ async function runStreamingInvoke(
   // present whenever real evidence-gathering happened. Skipped on hard failure (no
   // trustworthy work) and when zero tools ran (nothing to show).
   let panelSteps = steps;
-  if (panelSteps.length === 0 && !hardFailed && (timing.toolCalls ?? 0) > 0) {
+  if (panelSteps.length === 0 && !hardFailed && !clarify && (timing.toolCalls ?? 0) > 0) {
     panelSteps = ["已检索并查阅了相关代码，据此得出上面的结论（点开「供研发复核」可看精确出处）。"];
   }
+  // A clarification is a question back to the user, not an answer — don't show a
+  // "已检索…据此得出结论" panel (no conclusion was reached).
+  if (clarify) panelSteps = [];
   // Show total elapsed in the finalized header ("回答完成 · 用时 67s").
   const elapsedLabel = formatElapsed(Date.now() - startedAt);
-  await writer.write((seq) => finalizeCard(cardId, finalText, redactSteps(panelSteps), seq, isFollowUp, aborted, hardFailed, finalEvidence, question, elapsedLabel, turnCapped));
+  await writer.write((seq) => finalizeCard(cardId, finalText, redactSteps(panelSteps), seq, isFollowUp, aborted, hardFailed, finalEvidence, question, elapsedLabel, turnCapped, !!clarify));
   // 5. Data charts + follow-ups: skip on HARD failure (no trustworthy conclusion).
   //    A turn-capped partial keeps its charts/follow-ups (labeled incomplete).
   if (keepCharts && charts.length > 0) {
@@ -614,7 +633,13 @@ async function runStreamingInvoke(
         .catch((e) => log({ event: "chart_error", index: i, error: String(e) })));
     });
   }
-  if (keepFooter) {
+  if (clarify) {
+    // Disambiguation: render the option buttons (the prompt is already in the body).
+    // No follow-ups — the user picks an option to continue. Reuses the follow_up
+    // callback so a click re-asks the chosen clarified question with context replay.
+    log({ event: "clarify_shown", card: cardId, options: clarify.options.length });
+    await writer.write((seq) => appendClarify(cardId, seq, clarify.question, clarify.options));
+  } else if (keepFooter) {
     // Extract follow-ups from the RAW answer (still carries the "💡 你可能还想问"
     // trailer that stripFollowUps removed from the rendered body).
     const followUps = extractFollowUps(redactSensitive(answer));
@@ -622,8 +647,10 @@ async function runStreamingInvoke(
   }
   // Remember the (redacted) answer so a follow-up on THIS card can replay the
   // prior turn as context. Use the redacted body — never store secrets, and it's
-  // what the user actually saw. Skipped on hard failure (no trustworthy answer).
-  if (sentMessageId && remember) rememberAnswer(sentMessageId, finalText);
+  // what the user actually saw. Skipped on hard failure (no trustworthy answer)
+  // and on a clarification (the prompt-back-to-user is not an answer to replay; the
+  // chosen option's NEW card will carry the real Q&A as context instead).
+  if (sentMessageId && remember && !clarify) rememberAnswer(sentMessageId, finalText);
   // Redact `error` before logging: on a non-200 path it now carries the raw backend
   // response body (sigv4), which could echo a token/header/connection-string.
   log({ event: "card_closed", card: cardId, chars: answer.length, charts: charts.length, timedOut, failed, turnCapped, error: error ? redactSensitive(error) : undefined });
