@@ -72,7 +72,7 @@ describe("buildCreateCardBody", () => {
     // print_frequency_ms + print_step must be paired (else CardKit code 11311).
     expect(card.config.streaming_config.print_frequency_ms).toBeDefined();
     expect(card.config.streaming_config.print_step).toBeDefined();
-    expect(card.header.title.content).toBe("正在思考…");
+    expect(card.header.title.content).toBe("正在分析…");
     expect(
       card.body.elements.some((e: { element_id?: string }) => e.element_id === "conclusion"),
     ).toBe(true);
@@ -153,7 +153,7 @@ describe("follow-up card header", () => {
   it("uses the normal header for a fresh question", () => {
     const body = JSON.parse(buildCreateCardBody({ summary: "Q" }));
     const card = JSON.parse(body.data);
-    expect(card.header.title.content).toBe("正在思考…");
+    expect(card.header.title.content).toBe("正在分析…");
   });
 
   it("finalizeTitle keeps the follow-up marker on the completed card", () => {
