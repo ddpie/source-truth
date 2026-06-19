@@ -194,7 +194,10 @@ async function sendStreamingCard(
     // diagnosable vs a normal eviction.
     log({ event: "card_sent_no_message_id", target: hashUserId(targetKey), card: cardId });
   }
-  log({ event: "card_sent", target: hashUserId(targetKey), card: cardId, hasMessageId: !!sentMessageId });
+  // sentMessageId is the BOT's OWN card message_id (the bot's public message in the
+  // chat — not PII, unlike the asker's id which stays hashed). Logging it lets ops
+  // correlate a card_id to the actual Feishu message for read-back/diagnosis.
+  log({ event: "card_sent", target: hashUserId(targetKey), card: cardId, messageId: sentMessageId ?? null, hasMessageId: !!sentMessageId });
 
   // Remove the "processing" reaction now that the card is visible.
   if ("messageId" in target) removeReaction(target.messageId);
