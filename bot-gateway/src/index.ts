@@ -666,7 +666,12 @@ async function runStreamingInvoke(
   // business-language step (no tool names → no leak) so the 分析过程 panel is always
   // present whenever real evidence-gathering happened. Skipped on hard failure (no
   // trustworthy work) and when zero tools ran (nothing to show).
-  let panelSteps = steps;
+  // redactSteps strips leaked tool-call markup + secrets and DROPS pure-markup
+  // steps, so apply it FIRST and base the "panel empty → synthesize a step"
+  // fallback on the CLEANED count. Otherwise N pure-markup narration steps would
+  // pass the length check, then get dropped at render time → an empty panel even
+  // though tools ran (the exact MCP-init-race shape).
+  let panelSteps = redactSteps(steps);
   if (panelSteps.length === 0 && !hardFailed && !clarify && (timing.toolCalls ?? 0) > 0) {
     panelSteps = ["已检索并查阅了相关代码，据此得出上面的结论（点开「供研发复核」可看精确出处）。"];
   }
@@ -675,6 +680,8 @@ async function runStreamingInvoke(
   if (clarify) panelSteps = [];
   // Show total elapsed in the finalized header ("回答完成 · 用时 67s").
   const elapsedLabel = formatElapsed(Date.now() - startedAt);
+  // panelSteps is already cleaned (redactSteps above); finalizeCard re-redacts which
+  // is idempotent (no markup/secret left to strip).
   await writer.write((seq) => finalizeCard(cardId, finalText, redactSteps(panelSteps), seq, isFollowUp, aborted, hardFailed, finalEvidence, question, elapsedLabel, turnCapped, !!clarify));
   // 5. Data charts + follow-ups: skip on HARD failure (no trustworthy conclusion).
   //    A turn-capped partial keeps its charts/follow-ups (labeled incomplete).
