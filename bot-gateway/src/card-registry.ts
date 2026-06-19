@@ -85,11 +85,20 @@ export function rememberCard(
 export function collectChain(messageId: string): ChainTurn[] {
   const turns: ChainTurn[] = [];
   const seen = new Set<string>();
+  // Touch recency on READ, not just write: re-insert every entry this walk visits
+  // (oldest→newest) so an ACTIVELY-referenced conversation's early ancestors survive
+  // insertion-order eviction. Without this, a long multi-turn thread whose turn-1 is
+  // old + buried under 500 newer unrelated cards gets its foundational early turns
+  // evicted → collectChain hits the gap and silently truncates mid-conversation
+  // (cross-review MEDIUM-HIGH: the deferred-composer's context guarantee would
+  // otherwise fail under load). Collect the visited ids first, then bump them.
+  const visited: string[] = [];
   let id: string | undefined = messageId;
   while (id && !seen.has(id) && turns.length < MAX_CHAIN_TURNS) {
     seen.add(id);
     const e = registry.get(id);
     if (!e) break;
+    visited.push(id);
     // Require a SETTLED answer for the turn to count. A turn with a question but
     // no answer = the card is still streaming (answer stored only at finalize) or
     // it hard-failed (answer never stored). Replaying a bare question the agent
@@ -97,6 +106,14 @@ export function collectChain(messageId: string): ChainTurn[] {
     // skip it (but keep walking to its finalized ancestors via parentMessageId).
     if (e.answer) turns.unshift({ question: e.question, answer: e.answer });
     id = e.parentMessageId;
+  }
+  // Re-insert visited entries oldest-visited→newest so the chain head (the card
+  // just acted on) lands at the tail = most-recent recency. Pure recency bump; the
+  // entry objects are reused unchanged.
+  for (let i = visited.length - 1; i >= 0; i--) {
+    const k = visited[i];
+    const e = registry.get(k);
+    if (e) { registry.delete(k); registry.set(k, e); }
   }
   // Trim from the OLDEST end if over the char budget (keep the most recent turns,
   // which are the most relevant to the current follow-up).

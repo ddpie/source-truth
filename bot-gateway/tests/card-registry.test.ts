@@ -99,4 +99,28 @@ describe("collectChain (multi-turn follow-up history)", () => {
     const chain = collectChain("a");
     expect(chain.length).toBeLessThanOrEqual(2); // terminates, no infinite walk
   });
+
+  // REGRESSION (MEDIUM-HIGH): recency must be bumped on READ. An old conversation
+  // that is still actively referenced must survive eviction even when many newer
+  // unrelated cards arrive — else its early turns evict and the chain truncates.
+  it("collectChain bumps recency so an active old chain survives eviction", () => {
+    // Build a 2-turn chain at the very start: root r1 ← child r2.
+    rememberCard("r1", "c1", "s", "Q1", undefined); rememberAnswer("r1", "A1");
+    rememberCard("r2", "c2", "s", "Q2", "r1"); rememberAnswer("r2", "A2");
+    // Flood with newer unrelated cards, RE-WALKING the chain each step so it stays hot.
+    for (let i = 0; i < 600; i++) {
+      rememberCard("x" + i, "cx", "s", "Qx", undefined);
+      if (i % 50 === 0) collectChain("r2"); // active reference bumps r1+r2 recency
+    }
+    const chain = collectChain("r2");
+    // Both original turns must still be present (not evicted out from under the chain).
+    expect(chain.map((t) => t.answer)).toEqual(["A1", "A2"]);
+  });
+
+  it("a STALE (never re-walked) old chain IS evicted under flood (control)", () => {
+    rememberCard("g1", "c1", "s", "Q1", undefined); rememberAnswer("g1", "A1");
+    rememberCard("g2", "c2", "s", "Q2", "g1"); rememberAnswer("g2", "A2");
+    for (let i = 0; i < 600; i++) rememberCard("y" + i, "cy", "s", "Qy", undefined); // no re-walk
+    expect(collectChain("g2")).toEqual([]); // evicted — confirms the bump is what saves the active one
+  });
 });
