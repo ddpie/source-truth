@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -281,3 +282,67 @@ def test_reap_orphan_unverified_when_kill_fails(monkeypatch):
 
     monkeypatch.setattr(cs.os, "kill", _eperm)
     assert sess._reap_orphan_servers() is False  # found-but-unkillable → unverified
+
+
+def test_acquire_restart_lock_is_cooperative_not_executor_bound():
+    # F1 regression: _acquire_restart_lock must NOT submit a blocking acquire() to the
+    # default executor (that parked one pool thread per waiter → a restart storm
+    # exhausted the pool → the holder's own join/reap couldn't get a thread → whole-
+    # bridge deadlock). It now polls a non-blocking try-acquire with asyncio.sleep, so
+    # a contended acquire must SUCCEED on a loop whose default executor has ZERO
+    # threads available — proving it never depends on the executor.
+    import asyncio
+    from concurrent.futures import ThreadPoolExecutor
+
+    import codegraph_session as cs
+
+    sess = cs.CodegraphSession("/data/repo/ws")
+
+    async def scenario() -> bool:
+        loop = asyncio.get_running_loop()
+        # Saturate the loop's executor: 1 worker, permanently occupied. If
+        # _acquire_restart_lock used run_in_executor(acquire), it would hang here.
+        pool = ThreadPoolExecutor(max_workers=1)
+        loop.set_default_executor(pool)
+        blocker = threading.Event()
+        loop.run_in_executor(pool, blocker.wait)  # occupies the sole pool thread
+        await asyncio.sleep(0)  # let it get scheduled
+        # The restart lock starts free → must acquire promptly despite no free thread.
+        await asyncio.wait_for(sess._acquire_restart_lock(), timeout=2.0)
+        held = sess._restart_lock.locked()
+        sess._restart_lock.release()
+        blocker.set()
+        pool.shutdown(wait=False)
+        return held
+
+    assert asyncio.run(scenario()) is True
+
+
+def test_acquire_restart_lock_waits_for_a_held_lock():
+    # The non-blocking poll must still SERIALIZE: while the lock is held, a second
+    # acquire must block (cooperatively) until release — preserving the single-writer
+    # restart mutual-exclusion the lock exists for.
+    import asyncio
+
+    import codegraph_session as cs
+
+    sess = cs.CodegraphSession("/data/repo/ws")
+
+    async def scenario() -> tuple[bool, bool]:
+        sess._restart_lock.acquire()  # pre-hold it
+        # A waiter must NOT acquire within a short window while it's held.
+        timed_out = False
+        try:
+            await asyncio.wait_for(sess._acquire_restart_lock(), timeout=0.3)
+        except asyncio.TimeoutError:
+            timed_out = True
+        # Release, then the next acquire succeeds.
+        sess._restart_lock.release()
+        await asyncio.wait_for(sess._acquire_restart_lock(), timeout=1.0)
+        got_after_release = sess._restart_lock.locked()
+        sess._restart_lock.release()
+        return timed_out, got_after_release
+
+    timed_out, got_after_release = asyncio.run(scenario())
+    assert timed_out is True            # blocked while held
+    assert got_after_release is True    # acquired once free

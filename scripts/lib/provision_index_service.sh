@@ -160,6 +160,14 @@ if [[ "$EXISTING" != "None" && -n "$EXISTING" ]]; then
     log err "reuse: instance $EXISTING has no private IP yet"; exit 1
   fi
   SG="$(Q describe-instances --instance-ids "$EXISTING" --query 'Reservations[0].Instances[0].SecurityGroups[0].GroupId' --output text)"
+  # If the operator asked for a DIFFERENT instance type than the reused instance
+  # actually runs, the reuse path silently ignores --instance-type (no relaunch), so
+  # they'd think the machine changed when it didn't. WARN with the actionable flag
+  # rather than silently honor the stale type (cross-review).
+  RUNNING_TYPE="$(Q describe-instances --instance-ids "$EXISTING" --query 'Reservations[0].Instances[0].InstanceType' --output text 2>/dev/null || echo "")"
+  if [[ -n "$RUNNING_TYPE" && "$RUNNING_TYPE" != "None" && "$RUNNING_TYPE" != "$ITYPE" ]]; then
+    log warn "reused instance $EXISTING runs $RUNNING_TYPE, not the requested $ITYPE; instance-type change needs --refresh-index to relaunch"
+  fi
   # Repair the :8080 ingress on the reused instance's SG too — otherwise a
   # missing/dropped rule on a running instance would never be re-added (the
   # reuse path exits before the fresh-instance reconcile below).
