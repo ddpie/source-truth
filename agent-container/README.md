@@ -6,7 +6,9 @@
 
 在 AgentCore Runtime 的 Firecracker microVM 内，用 **Claude Code Agent SDK**（`claude_agent_sdk`）+
 **bedrock-agentcore** runtime（`@app.entrypoint` 异步流式 handler）跑一个 agent 循环：理解策划的问题 →
-调远程 CodeGraph MCP 定位代码 → 读 EFS 上的最新主分支源码与配置表 → 生成结构化答案并逐步 `yield`。
+调远程 CodeGraph MCP 定位代码 → 经 index-service 的文件工具（`codegraph_read_file` / `codegraph_glob_files` /
+`codegraph_search_files`）读最新主分支源码与配置表 → 生成结构化答案并逐步 `yield`。microVM 本身不挂任何
+文件系统，所有代码都经 index-service 的 MCP-over-HTTP 桥读取。
 
 模型走 Bedrock 计费（`CLAUDE_CODE_USE_BEDROCK=1`）。MVP 单引擎 Claude Code（Codex 第二引擎后置）。
 
@@ -15,24 +17,26 @@
 | 项 | 约定 |
 |----|------|
 | 入参 payload | `{ "prompt": <问题文本>, "session": <会话上下文> }`（由 bot-gateway 注入） |
-| CodeGraph | 远程 MCP-over-HTTP 端点（由 index-service 暴露），通过 env / option 注入 |
-| 代码与配置 | EFS 只读挂载在 `/mnt/repo`（最新主分支） |
+| CodeGraph + 文件读取 | 远程 MCP-over-HTTP 端点（由 index-service 暴露），通过 env / option 注入；定位与读文件（`codegraph_read_file` / `codegraph_glob_files` / `codegraph_search_files`）都走此桥 |
+| 代码与配置 | 经 index-service 文件工具读取（**仓库副本只在 index-service 本地磁盘**；microVM 不挂文件系统）；路径为仓库相对（如 `Assets/Scripts/Foo.cs`） |
 | 临时文件 | Session Storage 可写挂载在 `/mnt/workspace`（per-session 隔离） |
 | 出参 | 流式 `yield` AssistantMessage / ResultMessage，由网关渲染回 CardKit |
 
 ## 取证原则（代码为唯一依据）
 
-- 答案必须基于 `/mnt/repo` 的真实代码 + CodeGraph 取证；
+- 答案必须基于 index-service 服务的真实代码 + CodeGraph 取证；
 - 代码与文档 / 记忆冲突时**以代码为准**，并标注差异与文档时间；
 - 低置信度时建议「转研发」。
 
 ## 约束
 
 - **ARM64-only** 容器；基础镜像与 Claude Agent SDK / lark-cli 版本钉死（pin，`claude-agent-sdk==0.2.103`）。
-- **只读边界**：MVP 仅问答，不跑引擎、不写回、不提交。
+- **只读边界**：MVP 仅问答，不跑引擎、不写回、不提交。agent 内建 `Read`/`Glob`/`Grep` 全部禁用
+  （`tools=[]`，不设 `cwd`），读文件只能经 index-service 的 `codegraph_*` 工具。
 - **模型 ID 按区域**：东京 ap-northeast-1 **不认 `us.anthropic.*`**（US cross-region），用
   `global.anthropic.claude-sonnet-4-6`（全球路由，资源最足）；`apac.*`/`jp.*` 亦可。
-- **VPC 出站**：挂 EFS 须 `networkMode=VPC`，而 VPC 内的 microVM 无公网 IP，出站（Bedrock/CLI）**须经 NAT Gateway**。
+- **VPC 出站**：Runtime 须 `networkMode=VPC`（为在 VPC 内经 HTTP `:8080` 访问 index-service），而 VPC 内的
+  microVM 无公网 IP，出站（Bedrock/CLI）**须经 NAT Gateway**。
 
 ## 参考惯例
 
@@ -53,5 +57,5 @@ p1 已落地并真实部署到 AWS（东京 ap-northeast-1）：`Dockerfile`（A
 **已验证（真实）：** ① CodeGraph MCP 接入定型为 **方案 A**——`ClaudeAgentOptions.mcp_servers` 原生支持
 `McpHttpServerConfig`（`{type:"http", url, headers?}`，对照真实 SDK 0.2.103 核实），不需 streamablehttp 桥；
 ② Runtime 经 `InvokeAgentRuntime` 真实跑通（`CLAUDE_CODE_USE_BEDROCK=1`，模型 `global.anthropic.claude-sonnet-4-6`）；
-③ EFS 真实挂载 `/mnt/repo`，agent 真读到源码并解释。部署细节见 `scripts/deploy-all.sh`（canonical；
+③ agent 经 index-service 的文件工具真读到源码并解释（无 EFS、microVM 不挂任何文件系统）。部署细节见 `scripts/deploy-all.sh`（canonical；
 `deploy.sh` 为已废弃转发垫片）+ `.local/deploy-config`。

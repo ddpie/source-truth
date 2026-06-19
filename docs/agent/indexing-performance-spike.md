@@ -1,5 +1,11 @@
 # Spike:全仓扫描 vs CodeGraph 索引 — 代码检索性能基准
 
+> ⚠️ **存储前提已变更（历史记录，勿删）**：本 spike 以「会话容器只读挂载 EFS、在 EFS 上 grep」为对照前提；
+> 该 EFS 挂载方案**已被移除**——现行架构下仓库副本只存在 index-service 本地磁盘，会话 microVM 不挂文件系统，
+> 全部读文件经 index-service 的 MCP-over-HTTP 桥。**核心结论不变且更被强化**：「先用 CodeGraph 定位、再点名
+> 读文件」远优于让 Agent 逐文件全仓 grep——下文 EFS 数字是「为何不能逐文件遍历」的实测佐证，无需重做。
+> 当前真相以 [`architecture.md`](architecture.md) 为准。
+
 > 技术调研报告（Technical Spike）。结构遵循 Microsoft Engineering Playbook 的 Technical Spike 模板
 > （Goal → Method → Evidence → Conclusions → Next Steps），并入技术报告通用骨架（含 Limitations）。
 

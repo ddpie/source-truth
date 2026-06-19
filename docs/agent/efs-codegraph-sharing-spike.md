@@ -1,5 +1,11 @@
 # Spike：AgentCore Runtime 共享 CodeGraph 索引 + 只读挂载客户 EFS 的可行性
 
+> ⚠️ **已被取代（历史记录，勿删）**：本 spike 论证的「会话容器只读挂载客户 EFS 读源码」方案**已被移除**。
+> 现行架构不再使用 EFS、也无 `/mnt/repo` 共享挂载：仓库副本只存在 index-service 本地磁盘，会话 microVM
+> 不挂任何文件系统，全部源码经 index-service 的 MCP-over-HTTP 桥读取（`codegraph_read_file` /
+> `codegraph_glob_files` / `codegraph_search_files`）。本文保留作设计历史；当前真相以
+> [`architecture.md`](architecture.md) 为准。
+
 > 技术调研报告（Technical Spike）。结构遵循 Microsoft Engineering Playbook 的 Technical Spike 模板
 > （Goal → Method → Evidence → Conclusions → Next Steps），并入技术报告通用骨架（含 Limitations）。
 

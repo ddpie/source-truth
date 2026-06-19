@@ -9,11 +9,13 @@ docs live in `docs/` (中文为主，结构文档双语 `_en`/`_zh`)。
 source-truth 是「代码为唯一依据」的飞书游戏研发代码问答助手。端到端：策划在飞书 @机器人 →
 **bot-gateway**（TypeScript 长驻网关，长连接事件订阅，按会话路由）→ **AgentCore Runtime**
 （Firecracker microVM，会话隔离）→ microVM 内的 **agent-container**（Python，Claude Code Agent SDK，
-`CLAUDE_CODE_USE_BEDROCK=1`）→ 通过 **index-service**（常驻 CodeGraph，MCP-over-HTTP）定位代码 +
-只读挂载 **EFS** `/mnt/repo` 读最新主分支源码与配置表 → **CardKit 流式卡片**回传。
+`CLAUDE_CODE_USE_BEDROCK=1`）→ 通过 **index-service**（常驻 CodeGraph，MCP-over-HTTP）既定位代码、
+又经其文件工具（`codegraph_read_file` / `codegraph_glob_files` / `codegraph_search_files`）读最新主分支
+源码与配置表（仓库副本只在 index-service 本地磁盘，会话 microVM 不挂任何文件系统）→ **CardKit 流式卡片**回传。
 
-核心架构特征：AI 引擎在 microVM **内**自主运行（不是容器外的远程 MCP 客户端），并新增飞书 Bot 网关、
-独立 CodeGraph 索引服务、EFS 共享代码仓三个有状态组件。架构心智模型见 `docs/agent/architecture.md`。
+核心架构特征：AI 引擎在 microVM **内**自主运行（不是容器外的远程 MCP 客户端），并新增飞书 Bot 网关与
+独立 CodeGraph 索引服务两个有状态组件——后者既持有唯一一份代码仓本地副本、又把定位 + 读文件全部经
+HTTP 桥暴露（无 EFS、无共享挂载）。架构心智模型见 `docs/agent/architecture.md`。
 
 语言：Python（`agent-container/`）、TypeScript / Node 20（`bot-gateway/`、未来 `infra/` CDK）、
 Bash（`scripts/`）。会话容器 ARM64-only。
@@ -28,7 +30,7 @@ Bash（`scripts/`）。会话容器 ARM64-only。
 # 各组件依赖见其 README（agent-container: uv；bot-gateway: npm）。
 ./scripts/test.sh           # 已实现。离线默认：lint + unit + typecheck（pre-push 跑这个）
 ./scripts/test.sh --full    # 已实现。加 smoke / e2e（需 Docker / AWS；smoke/e2e 目前为占位）
-# 一键部署（已实现、全新账号/区域可跑、幂等）：artifacts→IAM→network→EFS→index-service→镜像→Runtime
+# 一键部署（已实现、全新账号/区域可跑、幂等）：artifacts→IAM→network→index-service→镜像→Runtime
 ./scripts/deploy-all.sh --region <r> --repo <path>   # 加 --dry-run 仅打印计划；deploy.sh 已废弃→转发垫片
 ```
 
@@ -67,7 +69,7 @@ Agent）、`bot-gateway/`（TS 网关 + CardKit）、`index-service/`（CodeGrap
 
 ## Critical constraints（细节随 p1 落到 docs/agent/invariants.md）
 
-- **代码为唯一依据**：答案必须基于 EFS 上最新主分支真实代码 + CodeGraph 取证；代码与文档 / 记忆
+- **代码为唯一依据**：答案必须基于 index-service 服务的最新主分支真实代码 + CodeGraph 取证；代码与文档 / 记忆
   冲突时以代码为准，并标注差异与文档时间；低置信度转研发。
 - **会话容器 ARM64-only**；基础镜像、Claude Agent SDK、`@anthropic-ai/claude-code` CLI（agent
   microVM 内 SDK spawn 的子进程）版本钉死（pin），漂移由 `scripts/check-versions.sh`（已实现，

@@ -100,14 +100,18 @@ Java、Kotlin、Swift、Ruby 等主流语言），AI 通过 `codegraph_impact`�
 graph LR
     PUSH[git push] -->|"webhook"| SVC["索引服务（常驻）"]
     SVC --> PULL["git pull ~1s"]
-    PULL --> WT["EFS worktree: main/dev/release"]
+    PULL --> WT["索引服务本地副本: main/dev/release"]
     WT -->|"inotify"| IDX["CodeGraph增量 ~3s"]
-    IDX -->|"MCP over HTTP"| VM["会话容器"]
-    VM -->|"只读挂载·读最新代码"| WT
+    IDX -->|"MCP over HTTP（定位+读文件）"| VM["会话容器"]
+    WT -->|"经 HTTP 桥读文件工具"| VM
 ```
 
-- 会话容器与索引服务共享同一份代码：EFS 卷只读挂载到会话容器，索引服务可写挂载同一卷、监听变更构建
-  索引——一份代码，无副本同步问题；索引查询由索引服务侧代理以 HTTP 形式暴露给会话容器
+> 实现备注：原方案设想用共享 EFS 卷把同一份代码同时挂给索引服务与会话容器；落地时改为
+> **代码只存在索引服务本地磁盘**，会话容器不挂任何文件系统，定位与读文件都经索引服务的 MCP-over-HTTP 桥
+> （`codegraph_read_file` / `codegraph_glob_files` / `codegraph_search_files` + 定位类），无 EFS、无共享挂载。
+
+- 会话容器与索引服务不共享挂载：索引服务在本地磁盘持唯一一份代码副本、监听变更构建索引——一份代码，
+  无副本同步问题；定位查询与文件读取都由索引服务侧以 HTTP 形式暴露给会话容器
 - AI 通过索引定位文件后，读取的是代码最新版本（非索引快照）
 - 夜间 CI 做全量重建兜底
 
@@ -128,9 +132,9 @@ AI 输出格式不固定（有时纯文字、有时带代码块、有时有表�
 - **per-session 独占**：Agent 产生的临时文件——microVM 级隔离，用户间互不可见
 
 **为什么这么设计**：代码和索引是项目级资源，所有人查的是同一个项目，复制 N 份既浪费存储也导致更新
-不同步。对话和临时文件是个人工作状态，必须隔离。落地方式：共享代码与索引放在 EFS 卷，只读挂载到每个
-会话容器；Session Storage 由 AgentCore 按 session 自动分配独占空间，两者通过不同挂载点区分（如
-/mnt/repo vs /mnt/workspace），无需额外开发。
+不同步。对话和临时文件是个人工作状态，必须隔离。落地方式：共享代码与索引放在索引服务本地磁盘，经其
+MCP-over-HTTP 桥（定位 + 读文件工具）服务给所有会话容器，会话容器本身不挂任何文件系统；per-session 临时
+文件走 AgentCore Session Storage（`/mnt/workspace`，按 session 自动分配独占空间），无需额外开发。
 
 |  | 共享存储 | 会话存储 |
 |-|-|-|
@@ -176,8 +180,8 @@ AI 输出格式不固定（有时纯文字、有时带代码块、有时有表�
 | CodeGraph 对项目语言栈的索引召回 | 用项目真实模块实测调用图召回率：Unity 风格 C#（事件/委托、partial、MonoBehaviour 消息函数）与 Lua 元表继承等动态模式属静态分析盲区，实际召回可能显著低于官方基准 | §3.1 |
 | push→索引可用端到端时延 | webhook → git pull → 增量索引完成的端到端耗时，按项目真实仓库规模实测；同时实测首次全量索引耗时（社区在 13 万文件仓库上约 1 小时量级） | §3.1 |
 | MCP stdio→HTTP 桥 | CodeGraph 原生仅支持 stdio 通信；索引服务侧需加一层 stdio 转 streamable HTTP 的代理（mcp-proxy 类组件），验证桥接稳定性、并发能力，及工具返回的文件路径与容器挂载路径的对齐 | §3.1 |
-| EFS 同卷并发挂载 | 索引服务可写、会话容器只读挂载同一 EFS 卷；写入后容器侧能否秒级读到；inotify 在 NFS 文件系统上能否可靠触发增量索引 | §3.1 / §3.3 |
-| EFS 读取性能 | EFS 每文件操作有毫秒级网络往返：按项目真实仓库规模实测「索引定位 + 点名读取」主路径与全仓搜索兜底两种模式的实际延迟，确认是否需要优化 | §3.1 / §3.3 |
+| 本地副本增量索引 | 索引服务在本地磁盘持唯一一份代码副本；`git pull` 后 inotify 能否可靠触发增量索引（post-MVP） | §3.1 / §3.3 |
+| 经 HTTP 桥读文件性能 | 会话容器经索引服务 MCP-over-HTTP 桥读文件：按项目真实仓库规模实测「索引定位 + 点名读取」主路径与全仓文本检索兜底两种模式的实际延迟，确认是否需要优化 | §3.1 / §3.3 |
 | 多分支 worktree + 多索引实例 | 每分支独立 worktree + 常驻 CodeGraph 实例的资源占用；分支增删时索引实例的生命周期管理 | §2.2 / §3.1 |
 
 **飞书交互**
@@ -192,7 +196,7 @@ AI 输出格式不固定（有时纯文字、有时带代码块、有时有表�
 
 | 依赖 | 状态 | 备注 |
 |-|-|-|
-| AgentCore Runtime | GA | Firecracker 隔离，EFS 挂载 |
+| AgentCore Runtime | GA | Firecracker 隔离，VPC 模式（经 HTTP 访问索引服务；不挂任何文件系统） |
 | AgentCore Session Storage | Preview | 会话级独占存储，14 天空闲过期；Preview 阶段，正式商用前需复核可用性 |
 | Claude Code Agent SDK | GA | 官方容器化方案 |
 | Codex CLI | GA | headless 模式 |
