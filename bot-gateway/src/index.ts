@@ -281,9 +281,14 @@ async function sendStreamingCard(
   // on the first-render path, so the spawn cost delayed every answer's first
   // paint. Returns the sent message_id for the follow-up registry.
   const cardContent = buildSendCardContent(cardId);
+  // Idempotency key for the send: cardId is unique per logical card (freshly created
+  // just above) yet STABLE across a transport retry of THIS same send — so if
+  // feishuApi re-sends after a 429/timeout that the backend already committed, Feishu
+  // dedupes within its 1h window and we don't post a duplicate card (cross-review H1).
+  const sendUuid = `card-${cardId}`;
   const sentMessageId = "messageId" in target
-    ? await imReply(target.messageId, "interactive", cardContent)
-    : await imSendToChat(target.chatId, "interactive", cardContent);
+    ? await imReply(target.messageId, "interactive", cardContent, sendUuid)
+    : await imSendToChat(target.chatId, "interactive", cardContent, sendUuid);
   // Record message_id → card_id so a follow-up click (which only carries
   // open_message_id) can find this card and disable the clicked button. Remember
   // the sessionId too, so a follow-up on THIS card resumes the same warm session

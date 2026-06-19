@@ -59,6 +59,20 @@ describe("handleMessageEvent", () => {
     expect(second.reason).toBe("duplicate");
   });
 
+  it("does NOT dedup two distinct messages that both lack an event_id", async () => {
+    // REGRESSION: a missing event_id normalizes to "" upstream; deduping on "" made
+    // ALL no-event_id messages share one key, so the 2nd distinct such message was
+    // mis-dropped as a duplicate. With the empty-id skip, both are handled (the unique
+    // message_id / msg: guard still provides idempotency downstream).
+    let n = 0;
+    const invoke = async () => { n++; return "ok"; };
+    const a = await handleMessageEvent(evt({ event_id: "", message_id: "om_a" }), { invoke });
+    const b = await handleMessageEvent(evt({ event_id: "", message_id: "om_b" }), { invoke });
+    expect(n).toBe(2);
+    expect(a.handled).toBe(true);
+    expect(b.handled).toBe(true);
+  });
+
   it("routes same chat+thread to the same session id", async () => {
     const seen: string[] = [];
     const invoke = async (sessionId: string) => {

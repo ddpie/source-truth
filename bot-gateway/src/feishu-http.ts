@@ -127,7 +127,19 @@ export async function feishuApi(
       });
       status = res.status;
       const ra = res.headers?.get?.("retry-after");
-      if (ra) retryAfterMs = (Number(ra) || 0) * 1000;
+      if (ra) {
+        // Retry-After is either delta-seconds ("120") or an HTTP-date ("Wed, 21 Oct
+        // 2015 07:28:00 GMT"). Number() handles the former; fall back to Date.parse
+        // for the latter, else (NaN) the server's requested wait was being IGNORED
+        // (→ tiny default backoff → hammering a limiter that asked us to wait).
+        const secs = Number(ra);
+        if (Number.isFinite(secs)) {
+          retryAfterMs = secs * 1000;
+        } else {
+          const at = Date.parse(ra);
+          if (Number.isFinite(at)) retryAfterMs = Math.max(0, at - Date.now());
+        }
+      }
       json = (await res.json().catch(() => null)) as { code?: number; msg?: string } | null;
     } finally {
       clearTimeout(timer);
@@ -145,7 +157,13 @@ export async function feishuApi(
     if (throttled) {
       if (rateRetries < MAX_RATE_RETRIES) {
         rateRetries++;
-        const backoff = retryAfterMs || (150 * rateRetries + Math.floor(Math.random() * 100));
+        // EXPONENTIAL backoff with FULL jitter, honoring Retry-After when present.
+        // The old (150*n + 0-100ms) was sub-second and near-synchronous, so several
+        // writers tripping 429 together retried in lock-step → a mini retry storm.
+        // Full jitter (random in [0, base]) decorrelates concurrent retriers; the
+        // exponential base (250·2^(n-1)) gives a limiter real room to recover.
+        const expBase = 250 * 2 ** (rateRetries - 1); // 250, 500, 1000ms
+        const backoff = retryAfterMs || Math.floor(Math.random() * expBase);
         await new Promise((r) => setTimeout(r, backoff));
         continue;
       }
@@ -170,23 +188,39 @@ export async function feishuApi(
 
 interface SentMessage { data?: { message_id?: string } }
 
+// Feishu's `uuid` is a client idempotency key on im send/reply: a request carrying
+// the same uuid succeeds AT MOST ONCE within a 1-hour window (≤50 chars). We pass it
+// so that if feishuApi's token/throttle retry re-sends a POST that the server had
+// ALREADY committed (a 429/timeout AFTER the backend processed it), Feishu drops the
+// duplicate instead of posting a second message/card into the chat (cross-review H1).
+// The caller supplies a uuid that is STABLE for one logical send (so retries dedupe)
+// but DISTINCT across different sends (so a new answer isn't suppressed as a dup).
+const UUID_MAX = 50;
+function clampUuid(uuid?: string): string | undefined {
+  if (!uuid) return undefined;
+  return uuid.length > UUID_MAX ? uuid.slice(0, UUID_MAX) : uuid;
+}
+
 /** Reply to a message. msgType e.g. "interactive" (card) or "text". `content` is
- *  the already-JSON-stringified content payload Feishu expects. Returns the new
- *  message_id (for the card registry), or undefined. */
-export async function imReply(messageId: string, msgType: string, content: string): Promise<string | undefined> {
+ *  the already-JSON-stringified content payload Feishu expects. `uuid` (optional) is
+ *  the idempotency key (see clampUuid). Returns the new message_id, or undefined. */
+export async function imReply(messageId: string, msgType: string, content: string, uuid?: string): Promise<string | undefined> {
   const res = (await feishuApi("POST", `/open-apis/im/v1/messages/${messageId}/reply`, {
     msg_type: msgType,
     content,
+    uuid: clampUuid(uuid),
   })) as SentMessage;
   return res?.data?.message_id;
 }
 
-/** Send a message to a chat. Returns the new message_id, or undefined. */
-export async function imSendToChat(chatId: string, msgType: string, content: string): Promise<string | undefined> {
+/** Send a message to a chat. `uuid` (optional) is the idempotency key. Returns the
+ *  new message_id, or undefined. */
+export async function imSendToChat(chatId: string, msgType: string, content: string, uuid?: string): Promise<string | undefined> {
   const res = (await feishuApi("POST", "/open-apis/im/v1/messages?receive_id_type=chat_id", {
     receive_id: chatId,
     msg_type: msgType,
     content,
+    uuid: clampUuid(uuid),
   })) as SentMessage;
   return res?.data?.message_id;
 }

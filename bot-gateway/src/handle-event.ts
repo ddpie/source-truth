@@ -92,8 +92,14 @@ export async function handleMessageEvent(
   deps: { invoke: InvokeFn },
   options: HandleOptions = {},
 ): Promise<HandleResult> {
-  // 1. Dedup — Feishu re-delivers events; event_id is the idempotency key.
-  if (isDuplicate(event.event_id)) {
+  // 1. Dedup — Feishu re-delivers events; event_id is the idempotency key. Guard on
+  //    a NON-EMPTY event_id only: a missing event_id normalizes to "" (sdk-event.ts),
+  //    and deduping on "" would make ALL no-event_id messages share one key — the
+  //    second distinct such message would be mis-dropped as a "duplicate" and the user
+  //    gets no answer. When event_id is absent, skip this gate and rely on the
+  //    per-message `msg:<messageId>` guard downstream (message_id is unique per
+  //    message), so idempotency still holds (cross-review CONFIRMED).
+  if (event.event_id && isDuplicate(event.event_id)) {
     return { handled: false, reason: "duplicate" };
   }
 

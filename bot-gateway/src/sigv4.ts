@@ -19,6 +19,11 @@ import { newStreamState, applyEvent } from "./parse-stream";
 
 const SERVICE = "bedrock-agentcore";
 const SESSION_HEADER = "X-Amzn-Bedrock-AgentCore-Runtime-Session-Id";
+// Ceiling on the SSE line-assembly buffer. A real event is a few KB; this only trips
+// on a stream that never emits a line break (broken/hostile upstream) — a resident-
+// process OOM guard, not a per-event limit (the cap only applies while NO newline is
+// present, so a legitimate large multi-KB event still assembles).
+const MAX_SSE_BUFFER_BYTES = 8 * 1024 * 1024; // 8 MiB
 
 export interface InvokeRequest {
   method: "POST";
@@ -239,9 +244,10 @@ export async function invokeRuntimeStreaming(
   const texts = state.texts;
   let lastTextLen = 0;          // total text chars seen, to detect token growth
   let lastBlockCount = 0;       // number of text blocks, to detect a NEW conclusion block
+  let parseFailures = 0;        // data: lines that looked like JSON but didn't parse
   const processEvent = (jsonStr: string): void => {
     let evt: Record<string, unknown>;
-    try { evt = JSON.parse(jsonStr); } catch { return; }
+    try { evt = JSON.parse(jsonStr); } catch { parseFailures++; return; }
     timing.events++;
     applyEvent(state, evt);
     const totalLen = state.texts.reduce((n, t) => n + t.length, 0);
@@ -273,6 +279,16 @@ export async function invokeRuntimeStreaming(
       const { done, value } = await reader.read();
       if (done) break;
       buf += decoder.decode(value, { stream: true });
+      // DoS guard: a well-formed SSE stream delimits every event with a newline, so
+      // `buf` between newlines is one event (≤ a few KB). A stream that never sends a
+      // newline (broken/hostile upstream) would otherwise grow `buf` unbounded → OOM
+      // in this resident process. Cap it: if we've buffered far more than any real
+      // event without a line break, treat the stream as malformed and stop.
+      if (buf.length > MAX_SSE_BUFFER_BYTES && buf.indexOf("\n") < 0) {
+        if (state.error === null) state.error = "stream malformed (no line break within buffer cap)";
+        void reader.cancel().catch(() => {});
+        break;
+      }
       let nl: number;
       while ((nl = buf.indexOf("\n")) >= 0) {
         const line = buf.slice(0, nl).trim();
@@ -314,7 +330,14 @@ export async function invokeRuntimeStreaming(
   // an explicit failure card and does NOT persist the half-answer as context,
   // rather than silently presenting a half-sentence as a finished 回答完成.
   if (!aborted && state.error === null && !state.sawResult) {
-    state.error = "stream truncated before completion (no terminal result event)";
+    // Include the parse-failure count: if we DROPPED data: lines that looked like JSON
+    // (e.g. the upstream switched to multi-line `data:` frames or compressed framing),
+    // that's the likely cause of the missing terminal event — make it diagnosable
+    // instead of a bare "truncated" (the parser assumes one compact JSON per data:
+    // line; a sustained nonzero count flags that assumption breaking).
+    state.error = parseFailures > 0
+      ? `stream truncated before completion (no terminal result; ${parseFailures} unparseable data lines — check SSE framing)`
+      : "stream truncated before completion (no terminal result event)";
   }
 
   const answer = texts.length > 0 ? texts[texts.length - 1] : "";
