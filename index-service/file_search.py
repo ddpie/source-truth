@@ -9,8 +9,9 @@ and exposes this as an MCP tool; the agent's builtin Grep is disabled so all
 content search goes through here.
 
 `run_search` is pure-ish (shells out to ripgrep/grep over a given root) and
-returns structured matches with paths rewritten into the agent's /mnt/repo space,
-so results are indistinguishable from the old Grep except far faster.
+returns structured matches with paths rewritten into the agent's namespace
+(repo-relative by default), so results are indistinguishable from the old Grep
+except far faster.
 """
 
 from __future__ import annotations
@@ -81,8 +82,8 @@ def build_command(pattern: str, root: str, *, glob: str | None, max_matches: int
 
 
 def _to_mount(path: str, *, local_root: str, mount_root: str) -> str | None:
-    """Rewrite a local-disk path into the agent's /mnt/repo space, or None if it
-    escapes the repo root (don't leak an out-of-repo path)."""
+    """Rewrite a local-disk path into the agent's namespace (repo-relative by
+    default), or None if it escapes the repo root (don't leak an out-of-repo path)."""
     try:
         return path_align.to_container_path(path, index_root=local_root, mount_root=mount_root)
     except ValueError:
@@ -98,9 +99,10 @@ def run_search(
     max_matches: int = MAX_MATCHES,
 ) -> dict[str, Any]:
     """Search the LOCAL repo copy for `pattern`. Returns
-    {"matches": [{"path", "line", "text"}], "truncated": bool} with paths in
-    /mnt/repo space. Never raises for a no-match (returns empty matches); raises
-    only on a genuine execution failure so the bridge reports it honestly."""
+    {"matches": [{"path", "line", "text"}], "truncated": bool} with paths in the
+    agent's namespace (repo-relative by default). Never raises for a no-match
+    (returns empty matches); raises only on a genuine execution failure so the
+    bridge reports it honestly."""
     if not pattern or not pattern.strip():
         raise ValueError("search pattern must be non-empty")
     t0 = perf_counter()

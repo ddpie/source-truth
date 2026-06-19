@@ -121,6 +121,15 @@ def test_glob_files_escape_raises(repo):
         file_read.glob_files("../../*", local_root=str(repo), mount_root=MOUNT)
 
 
+def test_glob_files_rejects_absolute_after_mount_strip(repo):
+    # Defense-in-depth: with a legacy non-empty mount_root, "/mnt/repo//etc/passwd"
+    # strips to an ABSOLUTE "/etc/passwd" that would absolute-reset os.path.join.
+    # The post-strip is-absolute guard must reject it (not rely solely on the
+    # per-hit realpath backstop).
+    with pytest.raises(ValueError):
+        file_read.glob_files(f"{MOUNT}//etc/passwd", local_root=str(repo), mount_root=MOUNT)
+
+
 def test_glob_files_drops_symlink_escape(repo, tmp_path):
     # A symlinked match whose target is outside the repo is dropped, not leaked.
     outside = tmp_path / "evil.cs"

@@ -53,7 +53,7 @@ mkdir -p "$INDEX_HOME/.codegraph" /opt/idx/bin "$APP"
 
 # --- base packages (retry: apt mirrors can flap on fresh hosts) ---
 for i in 1 2 3; do apt-get update -y && break || sleep 10; done
-apt-get install -y nfs-common python3-pip python3-venv unzip curl
+apt-get install -y python3-pip python3-venv unzip curl
 # awscli v2 (Ubuntu 24.04 has no apt awscli)
 if ! command -v aws >/dev/null; then
   curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip" -o /tmp/awscliv2.zip
@@ -76,9 +76,9 @@ pip3 install --break-system-packages -q --ignore-installed -r "$APP/requirements
 # --- extract the repo to LOCAL disk (deploy stages <repo>.tar.gz in S3) ------
 # NO EFS: the repo lives only on LOCAL disk at /data/repo/<subdir>. codegraph
 # indexes it, and the bridge reads/greps/globs it there; the agent reads code
-# over the HTTP bridge, so there is no shared filesystem to populate. The path
-# is rewritten to the agent's /mnt/repo/<subdir> namespace by path_align (the
-# --mount-root passed to the bridge), so agent-visible paths are unchanged.
+# over the HTTP bridge, so there is no shared filesystem to populate. The bridge
+# rewrites paths to REPO-RELATIVE form via path_align (--mount-root "" below), so
+# the agent sees plain repo-relative paths like Assets/Foo.cs (no mount prefix).
 #
 # FRESHNESS: the local copy is fresh per instance, but a reused instance may hold
 # an OLD snapshot. We stamp the deploy's ARTIFACT_SIG (S3 ETag of the staged

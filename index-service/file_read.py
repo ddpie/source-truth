@@ -5,10 +5,10 @@ the EFS mount (/mnt/repo). To remove EFS entirely, the agent now reads code over
 HTTP through index-service, which already keeps a LOCAL copy of the repo
 (/data/repo/<subdir>, the same copy file_search.py greps). These two functions
 back the ``read_file`` and ``glob_files`` MCP tools — they take an agent-supplied
-path (mount-space or repo-relative), confine it to the local copy via
-``path_align.to_local_path`` (lexical + realpath symlink-escape guard), and return
-content / matches with paths rewritten back into the agent's /mnt/repo space so
-results are indistinguishable from the old builtin tools.
+path (repo-relative, or a legacy /mnt/repo prefix), confine it to the local copy
+via ``path_align.to_local_path`` (lexical + realpath symlink-escape guard), and
+return content / matches with paths in the agent's namespace (repo-relative by
+default) so results are indistinguishable from the old builtin tools.
 
 Pure-ish: all disk access is confined under ``local_root``; nothing writes.
 """
@@ -45,9 +45,10 @@ def read_file(
 ) -> dict[str, Any]:
     """Read a single file from the LOCAL repo copy.
 
-    ``requested`` is an agent-space path (``/mnt/repo/...`` or repo-relative);
-    it is confined to ``local_root`` before opening. Returns
-    {"path", "content", "lines", "truncated"} with ``path`` in /mnt/repo space.
+    ``requested`` is an agent-space path (repo-relative, or a legacy ``/mnt/repo/...``
+    prefix); it is confined to ``local_root`` before opening. Returns
+    {"path", "content", "lines", "truncated"} with ``path`` in the agent's namespace
+    (repo-relative by default).
     ``offset`` (0-based line) + ``limit`` page large files. Raises ValueError on
     a bad/escaping path or a path that isn't a regular file (so the bridge can
     report a clean error rather than leak a stack trace)."""
@@ -97,10 +98,10 @@ def glob_files(
     """List files in the LOCAL repo copy matching a glob ``pattern``.
 
     ``pattern`` is interpreted relative to the repo root (e.g. ``**/*.cs``,
-    ``Config/*.json``); an absolute /mnt/repo-prefixed pattern is also accepted
-    and rebased. Returns {"paths": [...], "truncated": bool} with paths in
-    /mnt/repo space, sorted, deduped. Hidden/.git/node_modules entries are
-    excluded to match file_search's view. Raises ValueError on an empty pattern
+    ``Config/*.json``); a legacy /mnt/repo-prefixed pattern is also accepted and
+    rebased. Returns {"paths": [...], "truncated": bool} with paths in the agent's
+    namespace (repo-relative by default), sorted, deduped. Hidden/.git/node_modules
+    entries are excluded to match file_search's view. Raises ValueError on an empty pattern
     or one that escapes the repo root."""
     if not pattern or not pattern.strip():
         raise ValueError("glob pattern must be non-empty")
@@ -114,6 +115,16 @@ def glob_files(
         rel_pattern = pattern[len(norm_mount) + 1:]
     elif os.path.isabs(pattern):
         raise ValueError(f"absolute glob pattern outside repo: {pattern!r}")
+    # Re-check is-absolute on the POST-strip pattern, not just the raw one: with a
+    # legacy non-empty mount_root, "/mnt/repo//etc/passwd" strips to "/etc/passwd"
+    # (still absolute), which would survive the ../ checks below and then hit
+    # os.path.join(real_root, "/etc/passwd") — Python DISCARDS real_root on an
+    # absolute second arg (the classic absolute-reset), making disk_pattern
+    # "/etc/passwd". The per-hit realpath confinement still drops the out-of-repo
+    # match, but reject it here so the lexical guard (the advertised first layer)
+    # actually holds and never reaches outside the repo.
+    if os.path.isabs(rel_pattern):
+        raise ValueError(f"glob pattern escapes repo root (absolute after rebase): {pattern!r}")
     if rel_pattern.startswith("../") or "/../" in rel_pattern or rel_pattern == "..":
         raise ValueError(f"glob pattern escapes repo root: {pattern!r}")
 
