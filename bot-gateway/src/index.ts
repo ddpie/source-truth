@@ -104,6 +104,13 @@ async function streamingCardInvoke(
   // open_id of the asker, stored so a bare reply to this card is auto-answered
   // only when it comes from the same user (scopes the group reply bypass).
   askerOpenId?: string,
+  // OPTIONAL deferred prompt composer. When provided, it is invoked at the START
+  // of the serialized turn (i.e. AFTER any in-flight parent turn on this session
+  // has finalized) to (re)build the prompt — so a reply to a STILL-STREAMING parent
+  // replays the parent's NOW-settled answer instead of a chain missing the most
+  // relevant (immediate) turn. Falls back to the eager `prompt` if it returns
+  // empty. Pure-ish: it reads the card registry, no side effects.
+  composePrompt?: () => string,
 ): Promise<void> {
   // Dedup only IM messages (Feishu re-delivers them on restart). Follow-up
   // clicks (chatId target) are deliberate user actions — never dedup them, or a
@@ -120,9 +127,14 @@ async function streamingCardInvoke(
   // abort handle is registered here too, so 停止 cancels even a still-queued turn.
   const card = await sendStreamingCard(sessionId, target, queued, question ?? prompt, parentMessageId, askerOpenId);
 
-  return sessionSerializer.serialize(sessionId, () =>
-    runStreamingInvoke(card, sessionId, prompt, credentials),
-  );
+  return sessionSerializer.serialize(sessionId, () => {
+    // Recompute the prompt HERE (turn start) if a composer was given: by now the
+    // parent turn ahead of us in the serializer has finalized and stored its
+    // answer, so collectChain sees the immediate parent turn (the freshness gap a
+    // reply-to-a-still-streaming-parent otherwise had).
+    const finalPrompt = composePrompt ? (composePrompt() || prompt) : prompt;
+    return runStreamingInvoke(card, sessionId, finalPrompt, credentials);
+  });
 }
 
 /** Create + send the streaming card, register its abort handle, and (when the
@@ -647,14 +659,28 @@ async function main(): Promise<void> {
           prompt = composeFollowUpPrompt(question, chain);
           log({ event: "reply_context_replayed", turns: chain.length });
         } else {
+          // Parent not finalized yet (reply to a still-streaming card). The eager
+          // prompt is bare; the composePrompt below will recompute at turn start —
+          // by then the parent has finalized (it runs FIRST on this shared session).
           log({ event: "reply_context_pending", reason: "parent_not_yet_finalized" });
         }
       } else {
         log({ event: "reply_context_missing", reason: "parent_not_in_registry" });
       }
     }
+    // Defer prompt composition to turn-start so a reply to a still-streaming parent
+    // replays the parent's NOW-settled answer (the parent runs first on this shared
+    // session). Re-collects the chain at invoke time; falls back to the eager prompt.
+    const composePrompt = parentId
+      ? () => {
+          const chain = collectChain(parentId!);
+          if (chain.length === 0) return prompt; // still nothing — keep eager (bare)
+          log({ event: "reply_context_replayed_deferred", turns: chain.length });
+          return composeFollowUpPrompt(question, chain);
+        }
+      : undefined;
     try {
-      await streamingCardInvoke(sessionId, prompt, { messageId: res.messageId }, credentials, question, parentId, res.senderId);
+      await streamingCardInvoke(sessionId, prompt, { messageId: res.messageId }, credentials, question, parentId, res.senderId, composePrompt);
     } catch (cardErr) {
       // streamingCardInvoke now finalizes the card itself on backend failure
       // (non-200 / stream error), so reaching here means something unexpected
