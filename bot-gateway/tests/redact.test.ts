@@ -288,13 +288,31 @@ describe("redactDeep (chart specs)", () => {
     expect(redactDeep(spec)).toEqual(spec);
   });
 
-  it("scrubs secrets/paths in object KEYS, not just values (VChart renders keys)", () => {
+  it("PRESERVES object keys so chart field bindings survive (xField/yField must keep matching data keys)", () => {
+    // A VChart spec binds series via xField/yField VALUES that name the data-record
+    // KEYS. Redacting keys would desync them → axes render but no bars/lines (tooltip
+    // still shows data) — the observed "empty plot" bug. Keys must pass through verbatim;
+    // only string VALUES are scrubbed (the real leak surface).
     const spec = {
-      data: { values: [{ "appSecret=Xj3kLmN0pQrStUvWxYz12345678": 42, "/mnt/repo/config/Hero.json": 1 }] },
+      type: "bar",
+      data: { values: [{ "等级": "Lv1", "攻击": 100 }, { "等级": "Lv2", "攻击": 150 }] },
+      xField: "等级",
+      yField: "攻击",
     };
-    const out = redactDeep(spec) as { data: { values: Array<Record<string, number>> } };
-    const keys = Object.keys(out.data.values[0]);
-    expect(keys.some((k) => k.includes("Xj3kLmN0pQrStUvWxYz12345678"))).toBe(false);
-    expect(keys.some((k) => k.includes("/mnt/repo/"))).toBe(false);
+    const out = redactDeep(spec) as typeof spec;
+    // Keys preserved exactly → xField/yField still match.
+    expect(Object.keys(out.data.values[0])).toEqual(["等级", "攻击"]);
+    expect(out.xField).toBe("等级");
+    expect(out.yField).toBe("攻击");
+    expect(out.data.values[0]["等级"]).toBe("Lv1"); // still bound
+    expect(out.data.values[0]["攻击"]).toBe(100);
+  });
+
+  it("still scrubs a secret/path that appears as a string VALUE in chart data", () => {
+    const spec = { data: { values: [{ name: "/mnt/repo/Hero.cs", secret: "appSecret=Xj3kLmN0pQrStUvWxYz12345678" }] } };
+    const out = redactDeep(spec) as { data: { values: Array<Record<string, string>> } };
+    expect(out.data.values[0].name).not.toContain("/mnt/repo/");      // value scrubbed
+    expect(out.data.values[0].secret).not.toContain("Xj3kLmN0pQrStUvWxYz12345678");
+    expect(Object.keys(out.data.values[0])).toEqual(["name", "secret"]); // keys intact
   });
 });
