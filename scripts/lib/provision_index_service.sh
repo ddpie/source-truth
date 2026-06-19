@@ -5,7 +5,7 @@
 # instance's private IP on stdout (the only stdout line; logs go to stderr).
 #
 # Security: index-svc SG accepts 8080 from the VPC; the runtime reaches it over
-# the private network. The instance also gets 2049 egress to EFS via its SG.
+# the private network. No EFS (the repo copy is local to this instance).
 #
 # refresh (7th arg, "true"/"false", default false): when true, a reused instance
 # whose bootstrapped artifacts are STALE (S3 tarballs re-staged since it booted)
@@ -85,14 +85,16 @@ reconcile_index_sg_ingress() { # <sg>
 #     deploy is never a SILENT no-op (the operator is told their changes aren't
 #     live and how to apply them).
 CURRENT_SIG="$(artifact_signature)"
-# SINGLE-WRITER (shared EFS) GUARD: an instance still in a TRANSIENT shutdown state
-# (stopping / shutting-down) may STILL have EFS mounted and could be mid rm-rf/tar
-# of the shared /mnt/efs/repo tree. The reuse filter below only sees running/pending,
-# so without this a fresh launch could overlap that peer and race its EFS extract →
-# torn tree → 0-node graph. Wait for any such peer to fully terminate first.
+# SINGLE-INSTANCE GUARD: keep exactly one index-service alive at a time. An
+# instance still in a TRANSIENT shutdown state (stopping / shutting-down) isn't
+# seen by the reuse filter below (which only matches running/pending), so without
+# this a fresh launch could briefly run alongside a draining peer. Each instance
+# holds its OWN local repo copy + graph now (no shared EFS), so this is no longer
+# a corruption risk — just hygiene to avoid two paid instances. Wait for any such
+# peer to fully terminate first.
 DRAINING="$(Q describe-instances --filters "Name=tag:Name,Values=source-truth-index-service" "Name=instance-state-name,Values=stopping,shutting-down,stopped" --query 'Reservations[0].Instances[0].InstanceId' --output text 2>/dev/null)"
 if [[ "$DRAINING" != "None" && -n "$DRAINING" ]]; then
-  log warn "an index-service instance ($DRAINING) is still draining (stopping/shutting-down); waiting for it to terminate before launching, to avoid a shared-EFS extract race"
+  log warn "an index-service instance ($DRAINING) is still draining (stopping/shutting-down); waiting for it to terminate before launching, to avoid running two paid instances"
   Q wait instance-terminated --instance-ids "$DRAINING" 2>/dev/null || true
 fi
 EXISTING="$(Q describe-instances --filters "Name=tag:Name,Values=source-truth-index-service" "Name=instance-state-name,Values=running,pending" --query 'Reservations[0].Instances[0].InstanceId' --output text 2>/dev/null)"
@@ -139,9 +141,6 @@ fi
 # otherwise find the tagged SG and skip the rule, leaving the runtime unable to
 # reach the bridge. Same crash-safe pattern as provision_network.sh mk_rt.
 reconcile_index_sg_ingress "$SG"
-# Let the EFS SG accept NFS from this SG (defensive; CIDR rule already covers it).
-authorize_ingress "EFS :2049 from $SG on $EFS_SG" \
-  --group-id "$EFS_SG" --protocol tcp --port 2049 --source-group "$SG"
 
 # Latest Ubuntu 24.04 ARM AMI (Canonical owner id 099720109477).
 AMI="$(Q describe-images --owners 099720109477 \
@@ -155,7 +154,6 @@ UD="$(cat <<EOF
 cat > /etc/index-service.env <<ENV
 BUCKET=$BUCKET
 REGION=$REGION
-EFS_ID=$EFS_ID
 REPO_SUBDIR=$REPO_SUBDIR
 MAX_FILES=$MAX_FILES
 ARTIFACT_SIG=$CURRENT_SIG

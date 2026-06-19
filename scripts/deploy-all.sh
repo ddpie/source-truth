@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # deploy-all.sh — one-click, idempotent, region/account-agnostic deploy of the
-# full source-truth backend: S3 artifacts → VPC/EFS/index-service EC2 →
-# AgentCore runtime (VPC + EFS + CodeGraph MCP).
+# full source-truth backend: S3 artifacts → VPC/index-service EC2 →
+# AgentCore runtime (VPC + CodeGraph MCP).
 #
 # Everything is parameterized — no hardcoded account/region/resource IDs — so a
 # fresh AWS account in any region works:
@@ -14,9 +14,12 @@
 # Phases (each skippable with --skip-<phase>):
 #   1 artifacts  : build/stage codegraph-server bin + index-service code + repo → S3
 #   2 network    : VPC, public+private subnet, IGW, NAT, route tables (or reuse)
-#   3 efs        : EFS + access point (/repo, uid/gid 1000) + mount target
-#   4 index-svc  : security groups + ARM EC2 (Ubuntu 24.04) running bootstrap.sh
-#   5 runtime    : AgentCore runtime in VPC mode, EFS mounted, CODEGRAPH_MCP_URL set
+#   3 index-svc  : security groups + ARM EC2 (Ubuntu 24.04) running bootstrap.sh
+#   4 runtime    : AgentCore runtime in VPC mode, CODEGRAPH_MCP_URL set
+#
+# NO EFS: the agent microVM mounts no filesystem; it reads all source code over
+# the index-service HTTP bridge (read_file/glob_files/search_files/codegraph_*).
+# The index-service keeps the only repo copy, on its local disk.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -33,7 +36,7 @@ mkdir -p "$CONFIG_DIR"
 # --- defaults / flags ---
 REGION=""
 REPO_PATH=""
-REPO_SUBDIR=""           # name the repo lives under inside EFS (defaults to basename)
+REPO_SUBDIR=""           # name the repo lives under on the index host (defaults to basename)
 # These three honor a persist-and-read-back contract (flag > persisted > default)
 # so a flagless reconcile re-run does NOT silently revert an operator's earlier
 # choice (deploy_runtime.py updates the runtime IN PLACE, so a reverted MODEL would
@@ -57,11 +60,11 @@ Required (first run):
   --repo <path>       Local path to the code repo to index + serve
 
 Options:
-  --repo-subdir <n>   Name under EFS /repo to place it (default: basename of --repo)
+  --repo-subdir <n>   Name to place the repo under on the index host (default: basename of --repo)
   --instance-type <t> index-service EC2 type, ARM (default: t4g.large)
   --max-files <n>     codegraph max files to index (default: 10000)
   --model <id>        Bedrock model id for the agent runtime
-  --skip <phase>      Skip a phase: artifacts|iam|network|efs|index-svc|image|runtime (repeatable)
+  --skip <phase>      Skip a phase: artifacts|iam|network|index-svc|image|runtime (repeatable)
   --refresh-index     Replace the running index-service instance if this run staged
                       newer index-service code / repo to S3 (reuse can't re-bootstrap).
                       Without it, a stale reuse only WARNs (never silently serves old code).
@@ -162,7 +165,7 @@ preflight_model_access() {
 # fresh account first use can need a service-linked role / activation. If it isn't
 # reachable in this region, Phase 5 would later abort with a raw boto3 traceback.
 # Probe it up-front and WARN actionably (non-blocking, like the model-access probe)
-# so the operator learns the region/enablement gap before the long EFS/build phases.
+# so the operator learns the region/enablement gap before the long index/build phases.
 preflight_agentcore() {
   command -v aws >/dev/null || return 0
   if timeout 20 aws bedrock-agentcore-control list-agent-runtimes --region "$REGION" --max-results 1 >/dev/null 2>&1; then
@@ -274,20 +277,7 @@ if skip network; then say warn "skip network"; else
 fi
 
 # ============================================================
-# Phase 3: EFS + access point + mount target
-# ============================================================
-if skip efs; then say warn "skip efs"; else
-  say step "Phase 3: EFS"
-  if [[ "$DRY_RUN" == true ]]; then
-    say info "[dry-run] provision_efs.sh (EFS + access point /repo + mount target)"
-  else
-    "$SCRIPT_DIR/lib/provision_efs.sh" "$REGION" "$CONFIG_FILE"
-    safe_source_env "$CONFIG_FILE"
-  fi
-fi
-
-# ============================================================
-# Phase 4: index-service EC2 (ARM, Ubuntu 24.04, bootstrap.sh)
+# Phase 3: index-service EC2 (ARM, Ubuntu 24.04, bootstrap.sh)
 # ============================================================
 if skip index-svc; then say warn "skip index-svc"; elif [[ "$DRY_RUN" == true ]]; then
   say step "Phase 4: index-service EC2"
@@ -354,11 +344,11 @@ else
 fi
 
 # ============================================================
-# Phase 5: AgentCore runtime (VPC + EFS + CodeGraph MCP)
+# Phase 5: AgentCore runtime (VPC + CodeGraph MCP)
 # ============================================================
 if skip runtime; then say warn "skip runtime"; elif [[ "$DRY_RUN" == true ]]; then
   say step "Phase 5: AgentCore runtime"
-  say info "[dry-run] deploy_runtime.py (VPC + EFS access point + CODEGRAPH_MCP_URL → index-service)"
+  say info "[dry-run] deploy_runtime.py (VPC + CODEGRAPH_MCP_URL → index-service; no EFS mount)"
 else
   say step "Phase 5: AgentCore runtime"
   # Use the image built+pushed in Phase 4b (persisted to config); fall back to
@@ -366,14 +356,13 @@ else
   ECR_URI="${ECR_IMAGE:-${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com/source-truth/agent:latest}"
   # Guard required cross-phase state with actionable messages (consistent with
   # RUNTIME_SG below) rather than a bare set -u "unbound variable".
-  EFS_AP="${EFS_ACCESS_POINT:?EFS_ACCESS_POINT not set — run the efs phase first}"
-  EFS_AP_ARN="arn:aws:elasticfilesystem:${REGION}:${ACCOUNT}:access-point/${EFS_AP}"
   ROLE_ARN="${AGENT_RUNTIME_ROLE:-arn:aws:iam::${ACCOUNT}:role/SourceTruthAgentRuntimeRole}"
   SUBNET="${PRIVATE_SUBNET:?PRIVATE_SUBNET not set — run the network phase first}"
   IDX_IP="${INDEX_SERVICE_IP:?INDEX_SERVICE_IP not set — run the index-svc phase first}"
   # Runtime joins the VPC with the index-service SG: it has default egress-all
-  # (reaches the bridge on :8080), and both the EFS SG and index SG accept
-  # inbound from the VPC CIDR — which covers this SG's members.
+  # (reaches the bridge on :8080), and the index SG accepts inbound from the VPC
+  # CIDR — which covers this SG's members. No EFS: the agent reads all code over
+  # that HTTP bridge, so the microVM mounts no filesystem.
   RUNTIME_SG="${INDEX_SERVICE_SG:?INDEX_SERVICE_SG not set — run the index-svc phase first}"
   if [[ "$DRY_RUN" == true ]]; then
     say info "[dry-run] deploy_runtime.py → AgentCore runtime (model=$MODEL, sg=$RUNTIME_SG, CODEGRAPH_MCP_URL=${IDX_IP}:8080)"
@@ -386,7 +375,6 @@ else
       --region "$REGION" --account "$ACCOUNT" \
       --role-arn "$ROLE_ARN" --image "$ECR_URI" --model "$MODEL" \
       --subnets "$SUBNET" --security-groups "$RUNTIME_SG" \
-      --efs-access-point-arn "$EFS_AP_ARN" \
       --codegraph-mcp-url "http://${IDX_IP}:8080/mcp")"
     RT_ARN="$(printf '%s\n' "$RT_OUT" | sed -n 's/^AGENT_RUNTIME_ARN=//p')"
     RT_ID="$(printf '%s\n' "$RT_OUT" | sed -n 's/^AGENT_RUNTIME_ID=//p')"

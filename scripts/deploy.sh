@@ -4,7 +4,7 @@
 # The original deploy.sh had stub (unimplemented) index-service and bot-gateway
 # phases, so running it produced a half-broken deploy. The real, verified,
 # fresh-account-capable orchestrator is scripts/deploy-all.sh (artifacts → IAM →
-# network → EFS → index-service → image build/push → AgentCore runtime; idempotent;
+# network → index-service → image build/push → AgentCore runtime; idempotent;
 # --dry-run safe). This shim forwards compatible flags to deploy-all.sh so anyone
 # still invoking deploy.sh lands on the working path, and prints a deprecation note.
 #
@@ -31,7 +31,7 @@ Flags (forwarded to deploy-all.sh):
   --region <r>     AWS region
   --repo <path>    Local repo to index + serve (required for a full deploy)
   --dry-run        Print the plan; make no changes
-  --skip <phase>   Skip a phase: artifacts|iam|network|efs|index-svc|image|runtime
+  --skip <phase>   Skip a phase: artifacts|iam|network|index-svc|image|runtime
   -h, --help       Show this help
 
 See scripts/deploy-all.sh --help for the full, current interface.
@@ -45,7 +45,7 @@ while [[ $# -gt 0 ]]; do
     --region|--repo|--skip) FWD+=("$1" "$2"); shift 2 ;;
     --dry-run) FWD+=("$1"); shift ;;
     # Legacy flag mappings → deploy-all.sh --skip <phase>.
-    --only-agent)   FWD+=(--skip artifacts --skip iam --skip network --skip efs --skip index-svc); shift ;;
+    --only-agent)   FWD+=(--skip artifacts --skip iam --skip network --skip index-svc); shift ;;
     --only-index)   FWD+=(--skip image --skip runtime); shift ;;
     --only-gateway) say err "bot-gateway is not part of deploy-all.sh; deploy it separately."; exit 2 ;;
     --skip-index)   FWD+=(--skip index-svc); shift ;;
