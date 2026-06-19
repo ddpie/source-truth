@@ -152,11 +152,11 @@ BOOT_B64="$(base64 -w0 "$ROOT/index-service/bootstrap.sh")"
 UD="$(cat <<EOF
 #!/bin/bash
 cat > /etc/index-service.env <<ENV
-BUCKET=$BUCKET
-REGION=$REGION
-REPO_SUBDIR=$REPO_SUBDIR
-MAX_FILES=$MAX_FILES
-ARTIFACT_SIG=$CURRENT_SIG
+BUCKET='$BUCKET'
+REGION='$REGION'
+REPO_SUBDIR='$REPO_SUBDIR'
+MAX_FILES='$MAX_FILES'
+ARTIFACT_SIG='$CURRENT_SIG'
 ENV
 echo "$BOOT_B64" | base64 -d > /opt/bootstrap.sh
 bash /opt/bootstrap.sh
