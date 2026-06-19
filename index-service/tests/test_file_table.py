@@ -38,6 +38,19 @@ def test_read_csv(repo):
     assert out["truncated"] is False
 
 
+def test_csv_wide_row_clipped_at_read(repo):
+    # A pathological one-line CSV with a huge number of columns must NOT materialize
+    # the full row (memory DoS) — it's clipped to MAX_COLS+1 at read time.
+    p = repo / "Config" / "wide.csv"
+    p.write_text(",".join(str(i) for i in range(100000)))  # 100k columns, one row
+    out = file_table.read_table("Config/wide.csv", local_root=str(repo), mount_root=MOUNT)
+    assert out["kind"] == "csv"
+    # The rendered row has at most MAX_COLS cells (clip happens in _rows_to_text after
+    # the read-time clip to MAX_COLS+1) — never 100k.
+    first_line = [ln for ln in out["content"].splitlines() if "|" in ln][0]
+    assert first_line.count("|") <= file_table.MAX_COLS
+
+
 def test_read_tsv(repo):
     out = file_table.read_table("Config/skills.tsv", local_root=str(repo), mount_root=MOUNT)
     assert out["kind"] == "tsv"

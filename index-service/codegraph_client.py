@@ -13,6 +13,7 @@ Requires the ``mcp`` package and the ``codegraph-server`` binary on PATH.
 from __future__ import annotations
 
 import asyncio
+import os
 from typing import Any
 
 from mcp import ClientSession, StdioServerParameters
@@ -20,8 +21,26 @@ from mcp.client.stdio import stdio_client
 
 DEFAULT_EXCLUDES = ("node_modules", ".venv", ".git")
 
+# SINGLE-WRITER TRIPWIRE (machine-enforced, not just a comment). This module spawns a
+# FRESH codegraph-server per call — and `--graph-only` is a SCOPE flag, not read-only,
+# so every spawn WRITES graph.db. The live serving path uses the resident
+# CodegraphSession exclusively and must NEVER reach here: a spawn from inside the
+# running bridge would be a SECOND concurrent writer on the same graph.db → silent
+# 0-node corruption (the project's #1 invariant). The bridge's flock lives in
+# http_bridge.main(), which does NOT catch an in-process second spawn — so guard the
+# spawn primitive itself. Allowed only when explicitly opted in (tests set this); the
+# bridge never does. Fail LOUD rather than risk corruption.
+def _assert_spawn_allowed() -> None:
+    if os.environ.get("CODEGRAPH_ALLOW_PERCALL_SPAWN") != "1":
+        raise RuntimeError(
+            "codegraph_client spawns a per-call codegraph-server (a graph.db WRITER); "
+            "it must not run on the resident serving path (would be a 2nd writer → "
+            "graph.db corruption). Set CODEGRAPH_ALLOW_PERCALL_SPAWN=1 only in tests."
+        )
+
 
 def _server_params(workspace: str, *, graph_only: bool) -> StdioServerParameters:
+    _assert_spawn_allowed()
     args = ["--mcp", "--workspace", workspace]
     if graph_only:
         args.append("--graph-only")

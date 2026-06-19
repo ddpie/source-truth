@@ -82,10 +82,19 @@ def _read_csv(local_path: str, *, delimiter: str) -> tuple[str, bool]:
     with open(local_path, encoding="utf-8", errors="replace", newline="") as fh:
         reader = csv.reader(fh, delimiter=delimiter)
         rows = []
-        for i, row in enumerate(reader):
-            rows.append(row)
-            if i >= MAX_ROWS:  # +1 read so we can flag truncation
-                break
+        try:
+            for i, row in enumerate(reader):
+                # Clip columns AT READ TIME: a pathological CSV that's one physical
+                # line with millions of tiny fields would otherwise materialize a
+                # huge list per row before _rows_to_text clips it → memory DoS in the
+                # resident index process. Keep only MAX_COLS+1 (the +1 flags "wide").
+                rows.append(row[:MAX_COLS + 1])
+                if i >= MAX_ROWS:  # +1 read so we can flag truncation
+                    break
+        except csv.Error as e:
+            # An over-long single field trips csv.field_size_limit (default 128KB) and
+            # raises — surface a clean error, not a raw csv.Error traceback.
+            raise ValueError(f"CSV parse error (likely an over-long field): {e}") from e
     return _rows_to_text(rows, label="sheet")
 
 

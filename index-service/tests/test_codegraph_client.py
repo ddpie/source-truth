@@ -23,6 +23,8 @@ pytest.importorskip("mcp")
 if shutil.which("codegraph-server") is None:
     pytest.skip("codegraph-server not on PATH", allow_module_level=True)
 
+import os
+os.environ["CODEGRAPH_ALLOW_PERCALL_SPAWN"] = "1"  # opt in: this is a test that intentionally spawns
 import codegraph_client  # noqa: E402
 
 REPO_ROOT = SVC_DIR.parent
