@@ -85,20 +85,29 @@ reconcile_index_sg_ingress() { # <sg>
 #     deploy is never a SILENT no-op (the operator is told their changes aren't
 #     live and how to apply them).
 CURRENT_SIG="$(artifact_signature)"
-# RECONCILE a stale blue-green leftover: INDEX_OLD_INSTANCE is the previous instance
-# recorded during a --refresh-index, normally terminated LAST by deploy-all after the
-# new one is healthy + DNS cut over. But if that refresh FAILED the health gate,
-# deploy-all exits before the terminate, leaving INDEX_OLD_INSTANCE set and (possibly)
-# two instances running. On ANY subsequent run, garbage-collect it: if it's still
-# alive and is NOT the instance we're about to keep, terminate it; then clear the
-# marker so it can't leak a paid instance or confuse the next refresh. Best-effort.
+# RECONCILE a stale blue-green leftover — CAREFULLY. INDEX_OLD_INSTANCE is the prior
+# instance recorded during a --refresh-index, normally terminated LAST by deploy-all
+# after the new one is healthy + DNS cut over. If that refresh FAILED the health gate,
+# deploy-all exits before the terminate, leaving the marker set. CRITICAL: on a failed
+# refresh the recorded instance is the OLD one that is STILL SERVING (DNS still points
+# at it) — so we must NOT blindly terminate it (that re-introduces the very
+# terminate-first outage blue-green exists to prevent). Only GC it when it's safe:
+# i.e. it is NOT the instance the stable DNS name currently resolves to (so a healthy
+# replacement is already serving). Otherwise leave it running (it's the live host) and
+# let a normal --refresh-index replace it via the make-before-break path. Best-effort.
 if [[ -n "${INDEX_OLD_INSTANCE:-}" ]]; then
   st="$(Q describe-instances --instance-ids "$INDEX_OLD_INSTANCE" --query 'Reservations[0].Instances[0].State.Name' --output text 2>/dev/null || echo "")"
-  if [[ "$st" == "running" || "$st" == "pending" || "$st" == "stopping" ]]; then
-    log warn "reconcile: terminating stale blue-green leftover index instance $INDEX_OLD_INSTANCE (state=$st)"
+  old_ip="$(Q describe-instances --instance-ids "$INDEX_OLD_INSTANCE" --query 'Reservations[0].Instances[0].PrivateIpAddress' --output text 2>/dev/null || echo "")"
+  dns_ip="$(aws route53 list-resource-record-sets --hosted-zone-id "${INDEX_DNS_ZONE_ID:-}" --query "ResourceRecordSets[?Name=='${INDEX_DNS_NAME:-none}.'].ResourceRecords[0].Value | [0]" --output text 2>/dev/null || echo "")"
+  if [[ ( "$st" == "running" || "$st" == "pending" || "$st" == "stopping" ) && -n "$old_ip" && "$old_ip" != "$dns_ip" ]]; then
+    log warn "reconcile: terminating stale blue-green leftover $INDEX_OLD_INSTANCE ($old_ip, state=$st; DNS points elsewhere at ${dns_ip:-?} so it's safe)"
     Q terminate-instances --instance-ids "$INDEX_OLD_INSTANCE" >/dev/null 2>&1 || true
+    update_env "$CONFIG" INDEX_OLD_INSTANCE ""
+  elif [[ "$st" != "running" && "$st" != "pending" && "$st" != "stopping" ]]; then
+    update_env "$CONFIG" INDEX_OLD_INSTANCE ""  # already gone — just clear the marker
+  else
+    log info "reconcile: leftover $INDEX_OLD_INSTANCE is the LIVE host DNS still points at ($old_ip) — leaving it; a --refresh-index will replace it safely"
   fi
-  update_env "$CONFIG" INDEX_OLD_INSTANCE ""
 fi
 # SINGLE-INSTANCE GUARD: keep exactly one index-service alive at a time. An
 # instance still in a TRANSIENT shutdown state (stopping / shutting-down) isn't
