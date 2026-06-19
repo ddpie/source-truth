@@ -239,7 +239,46 @@ def build_bridge(
 
         app.add_tool(codegraph_search_files, name="codegraph_search_files",
                      description="Fast regex text search over the repo (local-disk; replaces grep).")
-        logger.info(json.dumps({"event": "search_tool_enabled", "local_workspace": local_workspace}))
+
+        # read_file / glob_files over the SAME local copy — these replace the
+        # agent's builtin Read/Glob so the agent microVM needs NO filesystem mount
+        # (EFS removal): all code access is over this HTTP bridge. Both confine the
+        # agent-supplied path to the local repo via path_align.to_local_path
+        # (lexical + realpath symlink-escape guard) before touching disk.
+        import file_read
+
+        async def codegraph_read_file(path: str, offset: int = 0, limit: int | None = None) -> str:
+            """Read a source/config file's contents by its path (the /mnt/repo-aligned
+            path codegraph/search returns). Optional `offset` (0-based line) + `limit`
+            page large files. Use this instead of a shell `cat` or builtin Read."""
+            try:
+                return file_read.read_to_json(
+                    path, local_root=local_workspace, mount_root=mount_root, offset=offset, limit=limit,
+                )
+            except ValueError as exc:
+                return json.dumps({"error": "cannot read file", "detail": str(exc)})
+            except Exception as exc:  # noqa: BLE001 - isolate one query's failure
+                logger.error(json.dumps({"event": "read_error", "error": str(exc)}))
+                return json.dumps({"error": "read failed", "detail": str(exc)})
+
+        async def codegraph_glob_files(pattern: str) -> str:
+            """List files matching a glob `pattern` (e.g. "**/*.cs", "Config/*.json"),
+            interpreted relative to the repo root. Returns /mnt/repo-aligned paths.
+            Use this instead of a shell `ls`/`find` or builtin Glob."""
+            try:
+                return file_read.glob_to_json(pattern, local_root=local_workspace, mount_root=mount_root)
+            except ValueError as exc:
+                return json.dumps({"error": "bad glob pattern", "detail": str(exc)})
+            except Exception as exc:  # noqa: BLE001 - isolate one query's failure
+                logger.error(json.dumps({"event": "glob_error", "error": str(exc)}))
+                return json.dumps({"error": "glob failed", "detail": str(exc)})
+
+        app.add_tool(codegraph_read_file, name="codegraph_read_file",
+                     description="Read a file's contents by path (local-disk; replaces builtin Read).")
+        app.add_tool(codegraph_glob_files, name="codegraph_glob_files",
+                     description="List files matching a glob pattern (local-disk; replaces builtin Glob).")
+        logger.info(json.dumps({"event": "search_tool_enabled", "local_workspace": local_workspace,
+                                "file_tools": ["codegraph_read_file", "codegraph_glob_files"]}))
     else:
         logger.warning(json.dumps({"event": "search_tool_disabled",
                                    "reason": "no local_workspace", "given": local_workspace}))

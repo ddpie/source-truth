@@ -14,6 +14,7 @@ and absolute forms, and refusing paths that escape the repo root.
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -126,3 +127,84 @@ def test_format_location_missing_line_omits_suffix():
 def test_format_location_rejects_missing_file():
     with pytest.raises((KeyError, ValueError)):
         path_align.format_location({"line": 5}, index_root=INDEX_ROOT, mount_root=MOUNT)
+
+
+# --- to_local_path: inverse mapping (agent-space path -> local on-disk path) -
+# Backs read_file/glob_files (EFS removal). Untrusted input surface, so it must
+# confine to local_root via BOTH a lexical guard AND a realpath symlink check.
+def test_to_local_strips_mount_prefix(tmp_path):
+    root = tmp_path / "repo"
+    (root / "Assets").mkdir(parents=True)
+    f = root / "Assets" / "Foo.cs"
+    f.write_text("x")
+    got = path_align.to_local_path(f"{MOUNT}/Assets/Foo.cs", local_root=str(root), mount_root=MOUNT)
+    assert got == os.path.realpath(str(f))
+
+
+def test_to_local_accepts_relative(tmp_path):
+    root = tmp_path / "repo"
+    (root / "a").mkdir(parents=True)
+    (root / "a" / "b.json").write_text("{}")
+    got = path_align.to_local_path("a/b.json", local_root=str(root), mount_root=MOUNT)
+    assert got == os.path.realpath(str(root / "a" / "b.json"))
+
+
+def test_to_local_bare_dot_returns_root(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    got = path_align.to_local_path(".", local_root=str(root), mount_root=MOUNT)
+    assert got == os.path.realpath(str(root))
+
+
+def test_to_local_already_local_is_idempotent(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "x.cs").write_bytes(b"y")
+    p = os.path.realpath(str(root / "x.cs"))
+    assert path_align.to_local_path(p, local_root=str(root), mount_root=MOUNT) == p
+
+
+def test_to_local_rejects_relative_escape(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    with pytest.raises(ValueError):
+        path_align.to_local_path("../../etc/passwd", local_root=str(root), mount_root=MOUNT)
+
+
+def test_to_local_rejects_absolute_outside(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    with pytest.raises(ValueError):
+        path_align.to_local_path("/etc/passwd", local_root=str(root), mount_root=MOUNT)
+
+
+def test_to_local_empty_rejected(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    with pytest.raises(ValueError):
+        path_align.to_local_path("", local_root=str(root), mount_root=MOUNT)
+
+
+def test_to_local_rejects_symlink_escape(tmp_path):
+    # A symlink INSIDE the repo whose target is OUTSIDE it passes the lexical
+    # guard but MUST be caught by the realpath re-check (R3 in the design memory).
+    root = tmp_path / "repo"
+    root.mkdir()
+    outside = tmp_path / "secret.txt"
+    outside.write_text("TOPSECRET")
+    link = root / "escape"
+    os.symlink(str(outside), str(link))
+    with pytest.raises(ValueError):
+        path_align.to_local_path(f"{MOUNT}/escape", local_root=str(root), mount_root=MOUNT)
+
+
+def test_to_local_allows_symlink_within_repo(tmp_path):
+    # A symlink that stays INSIDE the repo is fine — only escapes are rejected.
+    root = tmp_path / "repo"
+    (root / "real").mkdir(parents=True)
+    target = root / "real" / "data.json"
+    target.write_text("{}")
+    link = root / "alias.json"
+    os.symlink(str(target), str(link))
+    got = path_align.to_local_path(f"{MOUNT}/alias.json", local_root=str(root), mount_root=MOUNT)
+    assert got == os.path.realpath(str(target))
