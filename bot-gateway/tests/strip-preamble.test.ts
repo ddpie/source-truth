@@ -382,6 +382,11 @@ describe("stripPreamble", () => {
     expect(stripPreamble("下面直接说明它在玩法里的作用。\n\n天气影响移速。")).toBe("天气影响移速。");
   });
 
+  it("strips '已经查清了X的全部影响点。下面分类说明。' (影响点 result-noun variant)", () => {
+    expect(stripPreamble("已经查清了天气系统在视觉和实际玩法层面的全部影响点。下面分类说明。\n\n天气影响移速。"))
+      .toBe("天气影响移速。");
+  });
+
   it("does NOT over-strip real sentences with 全貌 / 说明…作用 that continue", () => {
     for (const real of [
       "天气系统的全貌可以在 WeatherManager.cs 看到。",
