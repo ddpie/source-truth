@@ -24,7 +24,7 @@ import { fromNodeProviderChain } from "@aws-sdk/credential-providers";
 
 import { invokeRuntimeStreaming, classifyInvokeOutcome, isTurnCapError, type AwsCredentials } from "./sigv4";
 import { decideFinalize, hardFailureMessage, shapeBody } from "./finalize-decision";
-import { createCard, updateContent, closeStreaming, finalizeCard, appendFooter, appendClarify, buildSendCardContent, disableFollowUpButton, appendReasoningPanel, updateReasoningPanel, appendOneChart, MAX_CHARTS, appendStopButton, appendStatusLine, updateStatusLine, formatElapsed } from "./cardkit-client";
+import { createCard, updateContent, closeStreaming, finalizeCard, appendFooter, appendClarify, buildSendCardContent, disableFollowUpButton, appendReasoningPanel, updateReasoningPanel, appendOneChart, MAX_CHARTS, appendStopButton, appendStatusLine, updateStatusLine, formatElapsed, type ActionButton } from "./cardkit-client";
 import { extractCharts } from "./extract-charts";
 import { rememberCard, rememberAnswer, lookupCard, collectChain } from "./card-registry";
 import { composeFollowUpPrompt } from "./followup-context";
@@ -597,6 +597,7 @@ async function runStreamingInvoke(
   // turn produced no real answer → show the clean failure message; otherwise just strip
   // the stray block(s). Skip on hard failure (already a fixed message). The operator
   // log carries the signal for real root-causing.
+  let leakFailed = false;
   if (!hardFailed) {
     // Assess dominance over BOTH body AND evidence: a leak can land after the
     // 供研发复核 heading (→ evidence partition), so checking the body alone would
@@ -605,7 +606,7 @@ async function runStreamingInvoke(
     if (isToolCallLeakDominant(bodyNoEvidence + "\n" + evidence)) {
       log({ event: "toolcall_leak_dominant", card: cardId, chars: bodyNoEvidence.length });
       bodyNoEvidence = "这次没能得出可靠答案（取证过程未正常完成）。请再问一次试试；若反复如此，把问题发给研发排查。";
-      charts = []; evidence = "";
+      charts = []; evidence = ""; leakFailed = true;
     } else {
       // Strip stray markup from BOTH partitions so neither the body nor the folded
       // 供研发复核 panel shows raw tool-call XML.
@@ -701,6 +702,20 @@ async function runStreamingInvoke(
         .catch((e) => log({ event: "chart_error", index: i, error: String(e) })));
     });
   }
+  // Outcome ACTION buttons (recovery affordances, shown above follow-up suggestions):
+  //  - retry : the turn yielded NO usable answer (hard failure / dominant tool-call
+  //            leak / aborted-with-no-body). Re-ask the ORIGINAL question fresh — a
+  //            cold-VM MCP-init failure usually clears on a now-warm retry.
+  //  - narrow: the turn was step-capped (partial). Re-ask focused on one point so it
+  //            can finish within the cap.
+  // `question` here is the redacted user question (safe to echo + re-ask).
+  const actions: ActionButton[] = [];
+  const noAnswer = hardFailed || leakFailed || (aborted && bodyNoEvidence.trim().length <= 12);
+  if (noAnswer && !clarify) {
+    actions.push({ kind: "retry", text: question, label: "重新试一次" });
+  } else if (turnCapped && !clarify) {
+    actions.push({ kind: "narrow", text: `只聚焦其中一个最关键的点，简要回答：${question}`, label: "缩小范围再问一次" });
+  }
   if (clarify) {
     // Disambiguation: render the option buttons (the prompt is already in the body).
     // No follow-ups — the user picks an option to continue. Reuses the follow_up
@@ -711,7 +726,11 @@ async function runStreamingInvoke(
     // Extract follow-ups from the RAW answer (still carries the "💡 你可能还想问"
     // trailer that stripFollowUps removed from the rendered body).
     const followUps = extractFollowUps(redactSensitive(answer));
-    await writer.write((seq) => appendFooter(cardId, seq, followUps));
+    await writer.write((seq) => appendFooter(cardId, seq, followUps, actions));
+  } else if (actions.length > 0) {
+    // hardFailed/leakFailed → keepFooter is false, but the retry button is exactly
+    // what the user needs here. Append a footer carrying ONLY the action button(s).
+    await writer.write((seq) => appendFooter(cardId, seq, [], actions));
   }
   // Remember the (redacted) answer so a follow-up on THIS card can replay the
   // prior turn as context. Use the redacted body — never store secrets, and it's
@@ -864,7 +883,7 @@ async function main(): Promise<void> {
           header?: { event_id?: string };
           event_id?: string;
           token?: string;
-          action?: { value?: { action?: string; text?: string; eid?: string; card_id?: string } };
+          action?: { value?: { action?: string; text?: string; eid?: string; card_id?: string; fresh?: boolean } };
           context?: { open_chat_id?: string; open_message_id?: string };
           operator?: { open_id?: string; tenant_key?: string };
         };
@@ -904,14 +923,17 @@ async function main(): Promise<void> {
           // session if the card isn't in the registry (evicted / pre-restart).
           const entry = lookupCard(messageId);
           const sessionId = entry?.sessionId ?? getSessionId(chatId);
-          // Replay the WHOLE prior conversation chain (this card + all its
-          // ancestors) as explicit context, so multiple follow-ups build the full
-          // history — not just the last turn. Stateless: the context travels IN
-          // the prompt, not a sticky microVM (the SDK doesn't carry history across
-          // invokes; reusing the sessionId only pins the microVM).
-          const chain = collectChain(messageId);
-          const prompt = composeFollowUpPrompt(value.text, chain);
-          if (chain.length === 0) {
+          // A "重新试一次" (retry) button sets value.fresh: the prior turn FAILED
+          // (no usable answer), so there's no useful context to carry — and
+          // replaying the failure message as context would poison the retry. Re-ask
+          // the question FRESH (no chain). Otherwise replay the WHOLE prior chain
+          // (this card + ancestors) so multi-turn follow-ups build full history.
+          const fresh = value.fresh === true;
+          const chain = fresh ? [] : collectChain(messageId);
+          const prompt = fresh ? value.text : composeFollowUpPrompt(value.text, chain);
+          if (fresh) {
+            log({ event: "retry_clicked", chatId: hashUserId(chatId) });
+          } else if (chain.length === 0) {
             // No prior context (card evicted past the 500-cap or wiped by a gateway
             // restart) → can't continue the thread. Log it (operator-visible)
             // rather than silently answering context-free.

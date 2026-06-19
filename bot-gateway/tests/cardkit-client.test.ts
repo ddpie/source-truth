@@ -192,6 +192,36 @@ describe("follow-up buttons (clickable, with element_id)", () => {
     expect(buttons[0].value.text).toBe("Q1");
     expect(buttons[1].element_id).toBe("followup_1");
   });
+
+  it("renders a retry ACTION button (fresh=true) before follow-ups", () => {
+    const els = buildFollowUpElements([], [{ kind: "retry", text: "负重上限怎么算？", label: "重新试一次" }]);
+    const buttons = els.filter((e) => (e as { tag: string }).tag === "button") as Array<{
+      element_id: string; type: string;
+      value: { action: string; text: string; fresh?: boolean };
+    }>;
+    expect(buttons).toHaveLength(1);
+    expect(buttons[0].element_id).toBe("action_retry_0");
+    expect(buttons[0].type).toBe("primary");
+    expect(buttons[0].value.action).toBe("follow_up"); // reuses follow_up callback
+    expect(buttons[0].value.text).toBe("负重上限怎么算？");
+    expect(buttons[0].value.fresh).toBe(true); // retry re-asks fresh (no context replay)
+  });
+
+  it("narrow ACTION button is NOT fresh (keeps context) and leads the list", () => {
+    const els = buildFollowUpElements(["Q1"], [{ kind: "narrow", text: "只聚焦一点：X？", label: "缩小范围再问一次" }]);
+    const buttons = els.filter((e) => (e as { tag: string }).tag === "button") as Array<{
+      element_id: string; value: { fresh?: boolean; text: string };
+    }>;
+    expect(buttons[0].element_id).toBe("action_narrow_0"); // action first
+    expect(buttons[0].value.fresh).toBe(false); // narrow keeps context (not fresh)
+    expect(buttons[1].element_id).toBe("followup_0");   // then the suggestion
+  });
+
+  it("omits the 'reply to continue' hint when an action button is present", () => {
+    const els = buildFollowUpElements([], [{ kind: "retry", text: "x", label: "重新试一次" }]);
+    const md = els.filter((e) => (e as { tag: string }).tag === "markdown") as Array<{ content: string }>;
+    expect(md.every((m) => !m.content.includes("回复本条消息"))).toBe(true);
+  });
 });
 
 describe("buildClickedButton", () => {

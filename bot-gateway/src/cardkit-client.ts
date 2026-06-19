@@ -403,11 +403,39 @@ export async function finalizeCard(
   await larkApi("PUT", `/open-apis/cardkit/v1/cards/${cardId}`, body);
 }
 
-/** Build the footer elements: a divider + clickable follow-up buttons. Each
- *  button gets a stable element_id (followup_N) echoed in its value so the
- *  click callback can disable exactly the button that was pressed. */
-export function buildFollowUpElements(followUps: string[]): unknown[] {
+/** An outcome-driven ACTION button (vs an answer-derived follow-up suggestion).
+ *  - retry  : re-ask the ORIGINAL question fresh (no context replay — the failed
+ *             turn has nothing useful to carry; a retry usually lands on a now-warm
+ *             VM and succeeds). Shown when the turn failed / leaked / no answer.
+ *  - narrow : re-ask a NARROWED version (prepend a "只聚焦其中一点" hint) so a
+ *             step-capped run can finish. Shown on turnCapped. */
+export interface ActionButton {
+  kind: "retry" | "narrow";
+  text: string;   // the question to re-ask (raw user question; narrow prepends a hint)
+  label: string;  // the button caption
+}
+
+/** Build the footer elements: a divider + outcome ACTION buttons (retry/narrow,
+ *  shown first) + clickable follow-up suggestions. Each gets a stable element_id
+ *  echoed in its value so the click callback can disable exactly the one pressed. */
+export function buildFollowUpElements(followUps: string[], actions: ActionButton[] = []): unknown[] {
   const elements: unknown[] = [{ tag: "hr" }];
+  // Outcome action buttons first (the user's most likely next move on a failed /
+  // capped turn). They reuse the follow_up callback path (re-ask value.text); the
+  // action kind lets the callback decide whether to replay context.
+  actions.forEach((a, i) => {
+    const eid = `action_${a.kind}_${i}`;
+    elements.push({
+      tag: "button",
+      element_id: eid,
+      text: { tag: "plain_text", content: a.label },
+      // primary so the recovery action stands out from grey follow-up suggestions.
+      type: "primary",
+      size: "small",
+      width: "fill",
+      value: { action: "follow_up", text: a.text, eid, fresh: a.kind === "retry" },
+    });
+  });
   if (followUps.length > 0) {
     elements.push({ tag: "markdown", content: "**继续追问：**" });
     followUps.slice(0, MAX_FOLLOW_UPS).forEach((q, i) => {
@@ -422,11 +450,10 @@ export function buildFollowUpElements(followUps: string[]): unknown[] {
         value: { action: "follow_up", text: q, eid },
       });
     });
-  } else {
-    // No suggested follow-ups. Tell the user HOW to continue with context: reply
-    // to this card (or @ the bot referencing it). A bare "继续追问即可，上下文会
-    //延续" was misleading — context only carries when the message replies to a
-    // prior card, not for any new message.
+  } else if (actions.length === 0) {
+    // No suggested follow-ups AND no action buttons. Tell the user HOW to continue
+    // with context: reply to this card. A bare "继续追问即可" was misleading —
+    // context only carries when the message replies to a prior card.
     elements.push({ tag: "markdown", content: "想继续追问，**回复本条消息**即可（会带上本轮的上下文）。" });
   }
   return elements;
@@ -476,8 +503,8 @@ export function buildClickedButtonElement(elementId: string, question: string): 
 /** After close streaming: append follow-up question buttons (clickable!).
  *  Each button carries the question in its value; when clicked, the card
  *  callback handler feeds it back as a new user message. */
-export async function appendFooter(cardId: string, sequence: number, followUps: string[]): Promise<void> {
-  const elements = buildFollowUpElements(followUps);
+export async function appendFooter(cardId: string, sequence: number, followUps: string[], actions: ActionButton[] = []): Promise<void> {
+  const elements = buildFollowUpElements(followUps, actions);
 
   await larkApi("POST", `/open-apis/cardkit/v1/cards/${cardId}/elements`, JSON.stringify({
     type: "append",
