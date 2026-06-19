@@ -346,6 +346,19 @@ def test_message_has_tool_use_detects_real_dispatch():
     assert agent_lib._message_has_tool_use(_MsgWith("not-a-list")) is False
 
 
+def test_message_has_tool_use_detects_a_NO_INPUT_tool_call():
+    # A real no-argument tool call has input=None/{} — keying on id+name (not input)
+    # must still detect it, else it's silently dropped from leak detection + latency.
+    class _NoInputToolUse:
+        def __init__(self):
+            self.id = "t9"
+            self.name = "codegraph_list"
+            self.input = None  # no-arg tool
+    assert agent_lib._message_has_tool_use(_MsgWith([_NoInputToolUse()])) is True
+    # A tool_result block (tool_use_id + content, NO name) is NOT a tool_use.
+    assert agent_lib._message_has_tool_use(_MsgWith([_ToolResultBlock("t9")])) is False
+
+
 def test_message_text_has_toolcall_markup_matches_bare_and_antml():
     assert agent_lib._message_text_has_toolcall_markup(_MsgWith([_TextBlock("先搜一下\n<invoke name=\"codegraph_search_files\">")])) is True
     # antml: namespace prefix (the dominant real Claude shape)
