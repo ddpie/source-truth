@@ -91,12 +91,12 @@ const STANDALONE_PREAMBLE_OPENERS: RegExp[] = [
   // sentence that ENDS on the bare completion verb (no result content). Often the
   // FIRST of a 2-sentence preamble (paired with "下面分类说明。" below; the iterative
   // 2-pass strip handles the pair). FULL-match guard + 160 cap keep it safe.
-  new RegExp(`^(我)?(现在)?(已经|已)?(把|将)?.{0,40}(都|全部|逐一|一一)?(查清|核对|核实|确认|查证|梳理|搞清|弄清|核查|查完|读完|看完|捋|过)(完|完毕|清楚|好|了一遍|一遍)?了${TAIL}$`),
+  new RegExp(`^(我)?(现在)?(已经|已)?(把|将)?.{0,40}(都|全部|逐一|一一)?(查清楚|查清|查明|核对|核实|确认|查证|梳理|搞清楚|搞清|弄清楚|弄清|核查|查完|读完|看完|捋|过)(完|完毕|清楚|好|了一遍|一遍)?了${TAIL}$`),
   // "下面分类说明。" / "下面是结论。" / "下面逐类讲。" — a bare "下面/接下来 + 呈现动词"
   // announce with NO readiness lead-in (often the SECOND sentence of a 2-sentence
   // preamble). Kept tight: requires a 下面/接下来/这就/下面就 opener so it can't match a
   // real sentence that merely starts with 说明/讲.
-  new RegExp(`^(下面|接下来|这就|下面就|那么)(我)?(就)?(来|开始|先)?(分类|逐类|逐一|依次|分别)?(说明|讲|讲讲|讲解|展开|道来|是结论|给结论|说结论|列出来)(一下)?${TAIL}$`),
+  new RegExp(`^(下面|接下来|这就|下面就|那么)(我)?(就)?(来|开始|先|直接)?(分类|逐类|逐一|依次|分别)?(说明|讲|讲讲|讲解|展开|道来|是结论|给结论|说结论|说答案|给答案|回答|列出来)(一下)?${TAIL}$`),
   /^(let me|i'?ll)\s+(now\s+)?(compile|summarize|put together|organize)\s+(the\s+)?(answer|findings?|results?)\s*[.:]?$/i,
   /^now\s+(let me|i'?ll)\s+(compile|summarize|put together|organize|give|provide)\b.{0,30}$/i,
   /^(i\s+)?(now\s+)?have\s+(enough|all\s+the)\s+(info|information|evidence)\b.{0,40}$/i,
