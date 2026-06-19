@@ -49,6 +49,16 @@ const STANDALONE_PREAMBLE_OPENERS: RegExp[] = [
   // 答案/结论). The .{0,48} lead-in + FULL-sentence match + 160-char cap keep it from
   // matching a real answer sentence. Result noun set incl. 对比表/表格/清单/列表/对比.
   new RegExp(`^.{0,48}(都|也|已|已经)?(读到|读完|取到|取得|拿到|查到|获取|收集|核实|确认)了?[，,]?.{0,16}(可以|现在|来|这就|开始)?(整理|汇总|给出|得出|呈现|列出|做)(成|出|一下)?(完整|对比)?(的)?(对比表|表格|清单|列表|对比|答案|结论|回答)${TAIL}$`),
+  // "现在我有完整的数据，来整理所有怪物的完整信息" / "数据齐全，来整理一下结果" — readiness
+  // (有/拿到/掌握 + 数据/信息) + a 来/现在 + 整理/汇总 announce that ends in a
+  // PROCESS-OUTPUT noun (信息/内容/输出/结果/数据/资料), NOT just 答案/结论. Observed live.
+  // The .{0,20} after 整理 absorbs an object phrase ("所有怪物的完整"). FULL-match +
+  // 160-char cap keep it from eating a real answer sentence.
+  new RegExp(`^(现在)?(我)?(已经)?(有|拿到|掌握|取得|获取|收集)了?(完整|全部|所有|相关|足够|关键)?(的)?(数据|信息|内容|资料|证据)?[，,]?.{0,8}(现在|来|这就|开始)?(整理|汇总|输出|给出|呈现|列出)(一下)?.{0,20}(信息|内容|输出|结果|数据|资料|答案|结论|回答)${TAIL}$`),
+  // "已经掌握全部怪物生命值数据，现在整理输出" — readiness + announce ending in the
+  // bare verb 输出/作答 (no trailing noun). The lead-in absorbs the object; the
+  // announce verb itself is the terminator.
+  new RegExp(`^(现在)?(我)?(已经)?(有|拿到|掌握|取得|获取|收集|读到|查到|核实|确认)了?.{0,30}(数据|信息|内容|资料|证据|代码|逻辑)[，,]?.{0,8}(现在|来|这就|开始)?(整理|汇总|给出|呈现)?(并)?(输出|作答|回答)(一下)?${TAIL}$`),
   /^(let me|i'?ll)\s+(now\s+)?(compile|summarize|put together|organize)\s+(the\s+)?(answer|findings?|results?)\s*[.:]?$/i,
   /^now\s+(let me|i'?ll)\s+(compile|summarize|put together|organize|give|provide)\b.{0,30}$/i,
   /^(i\s+)?(now\s+)?have\s+(enough|all\s+the)\s+(info|information|evidence)\b.{0,40}$/i,
