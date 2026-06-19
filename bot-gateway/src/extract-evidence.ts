@@ -25,13 +25,31 @@ export interface SplitEvidence {
 // ("📎 依据" / "> 依据"), never mid-sentence. Anchored to a line start + a
 // line-end lookahead so prose mentions ("判断的依据：…", "代码为唯一依据") never match.
 //
-// A HEADING-STYLE trailing suffix after the token is tolerated — a parenthetical
-// like "供研发复核（仅研发看）" or a "供研发复核 - 以下为出处" dash-note — so a decorated
-// heading is still recognized and the evidence is folded into the panel instead of
-// LEAKING the raw `> file:line` block into the user-facing conclusion. The suffix
-// is restricted to (parenthetical | dash-led note) so a normal prose sentence
-// containing 依据 mid-line ("我判断的依据是 X 因为 Y") still does NOT match.
-const EVIDENCE_MARKER = /(?:^|\n)[ \t>#*_]*(?:🔍\s*)?(?:📎\s*)?\*{0,2}\s*(?:供研发复核|依据)\s*\*{0,2}[：:]?(?:[ \t]*[（(][^\n]*[)）]|[ \t]*[-–—][^\n]*)?[ \t]*(?=\n|$)/;
+// Two heading forms, deliberately asymmetric to avoid the "依据 is a common word"
+// false-positive trap:
+//   A) the load-bearing literal 供研发复核 — the prompt's mandated heading. A
+//      DECORATED form ("供研发复核（仅研发看）" / "供研发复核 - 以下为出处") is tolerated so a
+//      slightly-decorated heading still folds into the panel instead of leaking the
+//      raw `> file:line` block into the conclusion. 供研发复核 is a distinctive
+//      4-char term that essentially never starts a prose line, so the bounded
+//      suffix is safe here.
+//   B) the lenient 依据 fallback — heading-ONLY, NO suffix allowed. 依据 ("根据/依据…")
+//      is an extremely common Chinese word, so "依据 - 玩家等级…" / "依据（见上文）" are
+//      ordinary prose lines, NOT headings; allowing a dash/paren suffix after 依据
+//      would fold the genuine conclusion lines below them into the collapsed panel
+//      (a reverse leak). So 依据 matches only as a bare "📎 依据" / "> 依据[：]" line.
+// Both are line-anchored (start-of-line decorations + line-end lookahead).
+const NOTE = "[^\\n，。；！？、]{0,24}"; // short, punctuation-free heading note
+const DECO = "[ \\t>#*_]*(?:🔍\\s*)?(?:📎\\s*)?\\*{0,2}\\s*";
+const EVIDENCE_MARKER = new RegExp(
+  "(?:^|\\n)(?:" +
+    // A) 供研发复核 with an optional decorated note
+    DECO + "供研发复核\\s*\\*{0,2}[：:]?(?:[ \\t]*[（(]" + NOTE + "[)）]|[ \\t]*[-–—][ \\t]*" + NOTE + ")?" +
+    "|" +
+    // B) 依据 bare heading only (no suffix)
+    DECO + "依据\\s*\\*{0,2}[：:]?" +
+  ")[ \\t]*(?=\\n|$)",
+);
 
 export function splitEvidence(answer: string): SplitEvidence {
   const m = EVIDENCE_MARKER.exec(answer);
