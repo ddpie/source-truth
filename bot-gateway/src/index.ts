@@ -138,6 +138,16 @@ async function streamingCardInvoke(
     // reply-to-a-still-streaming-parent otherwise had).
     const finalPrompt = composePrompt ? (composePrompt() || prompt) : prompt;
     return runStreamingInvoke(card, sessionId, finalPrompt, credentials);
+  }).finally(() => {
+    // Backstop cleanup: the AbortController is registered at card-send (line ~209)
+    // so 停止 works while the turn is still QUEUED, but runStreamingInvoke's own
+    // try/finally only covers its streaming body — its setup (heartbeat/composer)
+    // runs before that try, and the serializer could in principle drop the task
+    // before the body's finally runs. Deleting here guarantees the map entry is
+    // removed on EVERY terminal path (resolve, throw, or never-bodied), so
+    // abortControllers can't slowly leak entries in the resident gateway. Idempotent
+    // with the body's own delete (a 2nd delete of an absent key is a no-op).
+    abortControllers.delete(card.cardId);
   });
 }
 
