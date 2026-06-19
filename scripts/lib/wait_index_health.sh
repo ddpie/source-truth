@@ -6,7 +6,7 @@
 #
 # The poll timer starts when the deploy host begins polling, but the instance
 # still has to finish a LONG serial bootstrap BEFORE the graph build even starts:
-# apt installs, awscli, EFS mount retries, two repo downloads + extracts, pip, then
+# apt installs, awscli, a repo download + extract, pip, then
 # the cold codegraph build, then the bridge's own ~20s cold warmup. On a large repo
 # / fresh account this can exceed the old 480s. So the default is 900s and it is
 # overridable via INDEX_HEALTH_TIMEOUT_SECS. A timeout is NOT necessarily a failure

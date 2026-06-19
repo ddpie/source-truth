@@ -3,11 +3,15 @@
 codegraph-server speaks MCP over stdio only and its socket can't cross a
 Firecracker microVM. This bridge wraps the stdio client (codegraph_client) in a
 FastMCP streamable-HTTP server so session containers can query CodeGraph over
-HTTP. Tool results have their file paths rewritten into the container mount
-space (/mnt/repo) via path_align before returning.
+HTTP. It also serves the repo's file content (read_file/glob_files) and text
+search (search_files) off the LOCAL repo copy, so the agent microVM needs NO
+filesystem mount — all code access is over HTTP. Tool results have their file
+paths rewritten into the agent's mount-aligned space (/mnt/repo) via path_align
+before returning.
 
 Run as a resident service:
-    python -m http_bridge --workspace /mnt/efs/repo --host 0.0.0.0 --port 8080
+    python -m http_bridge --workspace /data/repo/<subdir> --host 0.0.0.0 --port 8080 \
+        --local-workspace /data/repo/<subdir>
 """
 
 from __future__ import annotations
@@ -137,10 +141,11 @@ def build_bridge(
 ) -> FastMCP:
     """Build (but don't run) the FastMCP HTTP bridge for a CodeGraph workspace.
 
-    ``workspace`` is the index-service-side repo path codegraph-server indexes;
-    its returned paths are rewritten from there onto ``mount_root``.
-    ``local_workspace`` (if given) is a LOCAL-disk copy of the same repo used by
-    the fast file-search tool (grep over EFS is ~225x slower — see file_search).
+    ``workspace`` is the index-service-side repo path codegraph-server indexes
+    (a LOCAL-disk copy); its returned paths are rewritten from there onto
+    ``mount_root`` (the agent's /mnt/repo-aligned namespace). ``local_workspace``
+    is the LOCAL-disk repo copy the file tools (read_file/glob_files/search_files)
+    read; post-EFS-removal it's the SAME path as ``workspace``.
     """
     # ONE resident codegraph-server process holds the graph in memory for its
     # whole lifetime. Spawning per-query instead re-scans the repo every call
@@ -295,39 +300,42 @@ def build_bridge(
     async def _health(_req: Request) -> JSONResponse:  # pragma: no cover - thin
         ok = session.healthy
         detail = session.health_detail
-        # EFS read probe — NOW A HEALTH GATE, not just telemetry. The agent reads
-        # source from /mnt/repo (EFS) AFTER we hand it EFS-aligned paths, so if EFS
-        # drops while serving, codegraph still answers from its IN-MEMORY graph
-        # (session.healthy stays true) but every agent file read fails — the user
-        # gets a broken answer while /health lied 200. So a probe FAILURE (or
-        # latency above the ceiling) flips /health to unhealthy. A consecutive-fail
-        # counter avoids flapping on a single slow NFS round-trip.
+        # LOCAL repo read probe — A HEALTH GATE, not just telemetry. The agent reads
+        # source over THIS bridge (read_file/glob_files/search_files) off the local
+        # repo copy. codegraph answers from its IN-MEMORY graph (session.healthy
+        # stays true) even if the on-disk copy becomes unreadable (disk fault, the
+        # extract dir got wiped) — but then every agent file read fails and the user
+        # gets a broken answer while /health lied 200. So a probe FAILURE flips
+        # /health to unhealthy. A consecutive-fail counter avoids flapping on a
+        # single transient error. Probes local_workspace if given, else the indexed
+        # workspace (same local path post-EFS-removal).
+        probe_root = local_workspace or workspace
         disk_ms = -1.0
         probe_ok = True
         try:
             import os
             import time as _t
             t0 = _t.perf_counter()
-            entries = os.listdir(workspace)  # 1 metadata round-trip
+            entries = os.listdir(probe_root)  # 1 metadata read
             if entries:
-                p = os.path.join(workspace, entries[0])
-                os.stat(p)                   # stat round-trip
+                p = os.path.join(probe_root, entries[0])
+                os.stat(p)                    # stat read
             disk_ms = round((_t.perf_counter() - t0) * 1000, 1)
-            logger.info(json.dumps({"event": "efs_probe", "perf": True,
+            logger.info(json.dumps({"event": "repo_probe", "perf": True,
                                     "latency_ms": disk_ms, "entries": len(entries)}))
         except Exception as exc:  # noqa: BLE001
             probe_ok = False
-            logger.warning(json.dumps({"event": "efs_probe_failed", "error": str(exc)}))
+            logger.warning(json.dumps({"event": "repo_probe_failed", "error": str(exc)}))
         # Track consecutive failures on the app object (survives across requests).
-        fails = getattr(app, "_efs_probe_fails", 0)
+        fails = getattr(app, "_repo_probe_fails", 0)
         fails = 0 if probe_ok else fails + 1
-        app._efs_probe_fails = fails  # type: ignore[attr-defined]
-        efs_down = fails >= 2  # two strikes → treat EFS as down (avoid single-blip flap)
-        if efs_down:
+        app._repo_probe_fails = fails  # type: ignore[attr-defined]
+        repo_down = fails >= 2  # two strikes → treat repo as unreadable (avoid single-blip flap)
+        if repo_down:
             ok = False
-            detail = f"efs unreadable ({fails} consecutive probe failures): {detail}"
+            detail = f"repo copy unreadable ({fails} consecutive probe failures): {detail}"
         return JSONResponse(
-            {"healthy": ok, "detail": detail, "efs_probe_ms": disk_ms},
+            {"healthy": ok, "detail": detail, "repo_probe_ms": disk_ms},
             status_code=200 if ok else 503,
         )
 
