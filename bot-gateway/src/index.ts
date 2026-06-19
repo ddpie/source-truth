@@ -323,6 +323,19 @@ async function runStreamingInvoke(
   const FEISHU_STREAM_HARD_LIMIT_MS = 10 * 60 * 1000; // Feishu force-closes a streaming card at 10 min
   const STREAM_TIMEOUT_MS = FEISHU_STREAM_HARD_LIMIT_MS - 60 * 1000; // 1-min margin to finalize gracefully
   const deadline = Date.now() + STREAM_TIMEOUT_MS;
+  // The deadline must ACTIVELY abort the invoke, not just set a flag. A flag-only
+  // timeout (the old onChunk `if (Date.now() > deadline)` check) only fires when a
+  // chunk arrives — a run that streams nothing but never sends the terminal result
+  // would keep the fetch/socket open until Feishu's 10-min hard close, leaking the
+  // connection and delaying finalize past the 1-min margin (caught in cross-review).
+  // So arm a real timer: set timedOut FIRST (so the result is classified as a
+  // timeout, not a user 停止), then abort() to cancel the socket. Cleared in finally
+  // on every normal exit. unref() so it can't keep the process alive on its own.
+  const timeoutTimer = setTimeout(() => {
+    timedOut = true;
+    abort.abort();
+  }, STREAM_TIMEOUT_MS);
+  timeoutTimer.unref?.();
 
   // ── 始终生效的"正在分析"动效 (Claude-Code/Codex 风格: spinner + 秒数 + 阶段词) ──
   // The animation/timer is a DEDICATED body element (element_id="status") updated
@@ -418,8 +431,10 @@ async function runStreamingInvoke(
     { runtimeArn: RUNTIME_ARN, region: REGION, sessionId, prompt },
     { region: REGION, credentials },
     (textSoFar, liveSteps) => {
+      // The timeoutTimer (armed above) is what enforces the deadline — it sets
+      // timedOut + aborts the socket. Here we just stop processing further chunks
+      // once that's happened (the abort may have a few in-flight chunks behind it).
       if (timedOut) return;
-      if (Date.now() > deadline) { timedOut = true; return; }
       // Stage 2 (思考→分析): on the first tool call, flip the stage word. The 停止
       // button is normally already seeded at card-send time (so it exists while
       // queued + during the whole thinking phase). Only append it HERE as a
@@ -560,8 +575,14 @@ async function runStreamingInvoke(
     // / card frozen" symptom). finalize uses one-shot write() which lands next.
     writer.dropLanes("status", "content", "evidence");
     abortControllers.delete(cardId);
+    clearTimeout(timeoutTimer); // stop the deadline timer on every exit path
   }
-  const { status, answer, steps, aborted, error, timing } = result;
+  // A timeout aborts the controller too (to cancel the socket), so sigv4 reports
+  // aborted=true. Distinguish it from a USER 停止: if we set timedOut, treat it as a
+  // timeout (its own message), NOT as an abort — else a 9-min timeout would render
+  // "已停止" instead of the timeout/narrow-it guidance.
+  const { status, answer, steps, aborted: rawAborted, error, timing } = result;
+  const aborted = rawAborted && !timedOut;
   // Structured perf line (grep '"perf":true' | jq): one row per invoke with the
   // latency breakdown — sign / time-to-first-byte / time-to-first-token / stream
   // duration (the long pole = model + tool turns) / total / SSE event count.

@@ -299,4 +299,23 @@ describe("stripPreamble", () => {
     const real = "下面整理的逻辑都写在 InventoryManager.cs 里，包括扩容规则。";
     expect(stripPreamble(real)).toBe(real);
   });
+
+  // Observed live: readiness + 整理成结论 / 直接回答 (verb+成/出 or a 直接 prefix with
+  // no 现在/来). The result-noun is now optional, guarded by FULL-sentence match.
+  it("strips '…的完整逻辑，下面整理成结论。' and '两块都查到了，下面直接回答。'", () => {
+    expect(stripPreamble("我已经掌握了武器耐久从消耗到修复的完整逻辑，下面整理成结论。\n\n武器耐久内部叫 condition。"))
+      .toBe("武器耐久内部叫 condition。");
+    expect(stripPreamble("两块都查到了，下面直接回答。\n\n结论：金币掉落不在配置表里。"))
+      .toBe("结论：金币掉落不在配置表里。");
+  });
+
+  it("does NOT over-strip real sentences beginning with 下面直接 / 直接回答 / 回答 that continue", () => {
+    for (const real of [
+      "下面直接说重点：伤害 = 攻击 × 系数。",
+      "直接回答你的问题需要先看 DamageCalc.cs 的逻辑。",
+      "回答这个问题要分三步，下面逐一说明。",
+    ]) {
+      expect(stripPreamble(real)).toBe(real);
+    }
+  });
 });
