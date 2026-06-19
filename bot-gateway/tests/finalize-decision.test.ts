@@ -72,6 +72,19 @@ describe("shapeBody", () => {
   it("empty body → (无内容) placeholder", () => {
     expect(shapeBody("", flags)).toBe("(无内容)");
   });
+  it("WHITESPACE-only body → (无内容) placeholder, NOT a blank green card", () => {
+    // A whitespace-only body is truthy; truthiness would render an effectively
+    // blank card under 回答完成. trim() must treat it as no-body.
+    expect(shapeBody("  \n\t ", flags)).toBe("(无内容)");
+  });
+  it("turn cap with WHITESPACE-only body uses the standalone message (no disclaimer on nothing)", () => {
+    const out = shapeBody("  \n ", { ...flags, turnCapped: true });
+    expect(out).toContain("未在限定步数内得出结论");
+    expect(out).not.toContain("未在限定步数内完成"); // not the withBody variant
+  });
+  it("aborted with WHITESPACE-only body is just the standalone 已停止", () => {
+    expect(shapeBody("   ", { ...flags, aborted: true })).toBe("已停止。");
+  });
   it("turn cap WITH partial body appends the narrow-it disclaimer (kept visible, not folded)", () => {
     const out = shapeBody("部分结论", { ...flags, turnCapped: true });
     expect(out).toContain("部分结论");

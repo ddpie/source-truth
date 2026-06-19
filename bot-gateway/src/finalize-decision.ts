@@ -71,14 +71,21 @@ export function shapeBody(
   body: string,
   d: { turnCapped: boolean; aborted: boolean; timedOut: boolean },
 ): string {
+  // Use trim() — NOT truthiness — for the "has body?" test. A whitespace-only body
+  // ("  \n ") is truthy, so `body || placeholder` would render an effectively BLANK
+  // card under a green "回答完成" header (the forbidden "looks complete but isn't"
+  // shape), and the withBody disclaimers would append to nothing. stripPreamble /
+  // splitEvidence can legitimately reduce a conclusion to whitespace (e.g. the whole
+  // block was a preamble + ---), so this is reachable on a clean run, not just errors.
+  const hasBody = body.trim().length > 0;
   if (d.turnCapped) {
-    return body ? body + t("msg.turnCapped.withBody") : t("msg.turnCapped.noBody");
+    return hasBody ? body + t("msg.turnCapped.withBody") : t("msg.turnCapped.noBody");
   }
   if (d.aborted) {
-    return body ? body + t("msg.aborted.withBody") : t("msg.aborted.noBody");
+    return hasBody ? body + t("msg.aborted.withBody") : t("msg.aborted.noBody");
   }
-  if (d.timedOut && !body) {
+  if (d.timedOut && !hasBody) {
     return t("msg.timeout");
   }
-  return body || t("msg.empty");
+  return hasBody ? body : t("msg.empty");
 }
