@@ -24,7 +24,7 @@ import { fromNodeProviderChain } from "@aws-sdk/credential-providers";
 
 import { invokeRuntimeStreaming, classifyInvokeOutcome, isTurnCapError, type AwsCredentials } from "./sigv4";
 import { decideFinalize, hardFailureMessage, shapeBody } from "./finalize-decision";
-import { createCard, updateContent, closeStreaming, finalizeCard, appendFooter, appendClarify, buildSendCardContent, disableFollowUpButton, appendReasoningPanel, updateReasoningPanel, appendOneChart, MAX_CHARTS, appendStopButton, appendStatusLine, updateStatusLine, formatElapsed, type ActionButton } from "./cardkit-client";
+import { createCard, updateContent, closeStreaming, finalizeCard, appendFooter, appendClarify, buildSendCardContent, disableFollowUpButton, appendReasoningPanel, updateReasoningPanel, appendEvidencePanel, updateEvidencePanel, appendOneChart, MAX_CHARTS, appendStopButton, appendStatusLine, updateStatusLine, formatElapsed, type ActionButton } from "./cardkit-client";
 import { extractCharts } from "./extract-charts";
 import { rememberCard, rememberAnswer, lookupCard, collectChain } from "./card-registry";
 import { composeFollowUpPrompt } from "./followup-context";
@@ -295,6 +295,11 @@ async function runStreamingInvoke(
   let stage: "thinking" | "analyzing" = "thinking";
   let stepsShown = 0; // how many reasoning steps are currently rendered in the panel
   let panelAppended = false;
+  // Live "供研发复核" (dev-review) panel: appended once when evidence first streams,
+  // updated in place as more citations arrive. evidenceShownLen tracks the rendered
+  // length so we only push when it actually grew (throttled on the same lastPanelUpdate).
+  let evidenceAppended = false;
+  let evidenceShownLen = 0;
   // The stop button is normally seeded at card-send time (so it's clickable while
   // queued + during thinking); this tracks that so the 思考→分析 flip only appends
   // it as a self-heal when the seed failed (never a 2nd button).
@@ -493,8 +498,11 @@ async function runStreamingInvoke(
       // unclosed fence is fragile; the chart fence streams briefly then renders at
       // finalize, same as before).
       let display = "正在分析…";
+      let liveEvidence = "";
       if (textSoFar.length > 0) {
-        const { body } = splitEvidence(stripFollowUps(textSoFar));
+        const split = splitEvidence(stripFollowUps(textSoFar));
+        const body = split.body;
+        liveEvidence = split.evidence;
         // Drop a planning preamble ("现在我整理答案…" + ---) that leaked into the
         // conclusion block so the typewriter shows 结论先行 from the first line. Marker-
         // keyed + conservative: no-op until the preamble's `---` has streamed.
@@ -511,6 +519,32 @@ async function runStreamingInvoke(
       // queued-but-not-yet-sent frame is stale and is replaced — the typewriter
       // shows the newest text without a backlog stalling behind a slow spawn.
       writer.coalesce("content", (seq) => updateContent(cardId, display, seq));
+      // LIVE 供研发复核 panel: once the evidence section starts streaming, render it
+      // (folded) so the dev can watch citations form, instead of only at finalize.
+      // Redact + strip-leak the same as the body. Throttle on lastPanelUpdate; only
+      // push when the CLEAN evidence grew. Append-vs-update decided at run-time
+      // (mirror the reasoning panel): evidenceAppended flips only on a successful
+      // append, and evidenceShownLen advances only after the write lands, so a failed
+      // append self-heals on the next tick and never strands an update on a missing
+      // element. finalizeCard re-renders the same element_id="evidence", so no
+      // re-layout at stream end.
+      const safeEvidence = liveEvidence.trim()
+        ? stripToolCallLeak(redactSensitive(liveEvidence)).trim()
+        : "";
+      if (safeEvidence && safeEvidence.length > evidenceShownLen
+          && Date.now() - lastPanelUpdate >= THROTTLE_MS) {
+        lastPanelUpdate = Date.now();
+        const targetLen = safeEvidence.length;
+        void writer.write(async (seq) => {
+          if (!evidenceAppended) {
+            await appendEvidencePanel(cardId, safeEvidence, seq);
+            evidenceAppended = true;
+          } else {
+            await updateEvidencePanel(cardId, safeEvidence, seq);
+          }
+          evidenceShownLen = targetLen;
+        });
+      }
     },
     abort.signal,
     );

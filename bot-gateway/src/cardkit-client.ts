@@ -256,7 +256,7 @@ export function buildReasoningPanel(steps: string[], expanded: boolean): unknown
 
 /** Append the live reasoning panel (expanded) to the card — once, when the first
  *  step appears. APPENDED (after the conclusion), NOT inserted before it, so the
- *  layout matches finalizeCard's order [conclusion, evidence, reasoning]. If the
+ *  layout matches finalizeCard's order [conclusion, reasoning, evidence]. If the
  *  panel sat above the conclusion during streaming and below it at finalize, the
  *  whole card would visibly re-layout at stream-end (the 分析过程 / 供研发复核
  *  jumping position) — confusing the reader. Keeping the answer first and the
@@ -359,6 +359,31 @@ export function buildEvidencePanel(evidence: string): unknown {
   };
 }
 
+/** Append the live "供研发复核" panel (folded) ONCE, when evidence first appears
+ *  mid-stream. Same element_id="evidence" as finalizeCard's panel + same layout
+ *  order (below the conclusion), so it does NOT re-layout at finalize — it just
+ *  stops being touched. Folded from the start (the non-technical reader isn't
+ *  distracted; a dev can expand it live to follow the citations forming). */
+export async function appendEvidencePanel(cardId: string, evidence: string, sequence: number): Promise<void> {
+  const panel = buildEvidencePanel(evidence);
+  if (!panel) return;
+  await larkApi("POST", `/open-apis/cardkit/v1/cards/${cardId}/elements`, JSON.stringify({
+    type: "append",
+    sequence,
+    elements: JSON.stringify([panel]),
+  }));
+}
+
+/** Update the live evidence panel in place as more citations stream in. */
+export async function updateEvidencePanel(cardId: string, evidence: string, sequence: number): Promise<void> {
+  const panel = buildEvidencePanel(evidence);
+  if (!panel) return;
+  await larkApi("PUT", `/open-apis/cardkit/v1/cards/${cardId}/elements/evidence`, JSON.stringify({
+    element: JSON.stringify(panel),
+    sequence,
+  }));
+}
+
 /** After close streaming: update header to "完成" (green) via full card PUT.
  *  PUT body = { card: { type, data }, sequence } — full replace, must carry body.
  *  `evidence` (optional) renders as a folded "供研发复核" panel below the answer. */
@@ -392,11 +417,14 @@ export async function finalizeCard(
       template: failed ? "red" : aborted ? "grey" : turnCapped ? "orange" : clarify ? "blue" : "green",
     },
     body: {
+      // Order MUST match the live-stream append order so the full-PUT doesn't visibly
+      // reorder panels at finalize: conclusion, then reasoning (appended first, during
+      // tool calls), then evidence (appended later, when the 供研发复核 section streams).
       elements: [
         ...questionEls,
         { tag: "markdown", content: conclusion, element_id: "conclusion" },
-        ...(evidencePanel ? [evidencePanel] : []),
         ...(panel ? [panel] : []),
+        ...(evidencePanel ? [evidencePanel] : []),
       ],
     },
   };

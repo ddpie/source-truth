@@ -12,6 +12,7 @@ import {
   buildCloseStreamingBody,
   buildSendCardContent,
   buildReasoningPanel,
+  buildEvidencePanel,
   buildStopButton,
   finalizeTitle,
   buildFollowUpElements,
@@ -140,6 +141,23 @@ describe("buildReasoningPanel", () => {
 
   it("returns null when there are no steps", () => {
     expect(buildReasoningPanel([], true)).toBeNull();
+  });
+});
+
+describe("buildEvidencePanel (供研发复核, live + finalize)", () => {
+  it("builds a FOLDED panel (element_id=evidence) with the citations", () => {
+    const panel = buildEvidencePanel("FormulaHelper.cs:75 MaxEncumbrance") as {
+      tag: string; expanded: boolean; element_id: string; elements: Array<{ content: string }>;
+    };
+    expect(panel.tag).toBe("collapsible_panel");
+    expect(panel.expanded).toBe(false); // dev-review folded by default
+    expect(panel.element_id).toBe("evidence");
+    expect(panel.elements[0].content).toContain("FormulaHelper.cs:75");
+  });
+
+  it("returns null when there is no evidence (so live append/update no-ops)", () => {
+    expect(buildEvidencePanel("")).toBeNull();
+    expect(buildEvidencePanel("   ")).toBeNull();
   });
 });
 
