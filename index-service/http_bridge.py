@@ -215,14 +215,45 @@ def build_bridge(
                 logger.info(json.dumps({"event": "tool_no_match", "tool": tool_name, "detail": str(exc)}))
                 return json.dumps({"error": f"{tool_name}: symbol not found", "detail": str(exc)})
             except Exception as exc:  # noqa: BLE001 - isolate one query's failure
+                # Generic detail only — str(exc) on an internal/transport error can
+                # carry host paths/frames that must not reach the group-visible card.
                 logger.error(json.dumps({"event": "tool_error", "tool": tool_name, "error": str(exc)}))
-                return json.dumps({"error": f"{tool_name} failed", "detail": str(exc)})
+                return json.dumps({"error": f"{tool_name} failed", "detail": "internal error (see service logs)"})
 
         _tool.__name__ = tool_name
         return _tool
 
+    # All six tools are READ-ONLY, IDEMPOTENT, and CLOSED-DOMAIN (they only query the
+    # local repo copy / in-memory graph — no writes, no external/open-world calls). The
+    # MCP spec's tool annotations default to the pessimistic (destructive, non-idempotent,
+    # open-world) when unset, so we set them explicitly: this is both honest metadata and
+    # lets a client safely auto-approve these evidence calls. (Annotations are advisory —
+    # the actual read-only guarantee is enforced by the closed allowlist + agent-side
+    # disallowed_tools, not by these hints.)
+    from mcp.types import ToolAnnotations
+    READONLY_ANNOT = ToolAnnotations(readOnlyHint=True, destructiveHint=False,
+                                     idempotentHint=True, openWorldHint=False)
+
+    # Action-oriented descriptions so the model picks the right graph tool (the bare
+    # f"CodeGraph {name}" gave it nothing to disambiguate on). Per Anthropic "writing
+    # tools for agents": the description is the primary tool-selection signal.
+    GRAPH_TOOL_DESC = {
+        "codegraph_symbol_search": "Find a class/function/method by name or concept. "
+            "YOUR STARTING POINT when you don't yet know where code lives. `query` is a "
+            "symbol name or natural-language description; returns ranked matches with "
+            "repo-relative file:line locations.",
+        "codegraph_get_callers": "Find everything that calls a given symbol (reverse call "
+            "graph) — use for 'who uses X' / usage + impact. `query` is the symbol name "
+            "(resolved to the top match); returns the callers with repo-relative locations.",
+        "codegraph_analyze_impact": "Predict the blast radius of changing a symbol — what "
+            "depends on it. `query` is the symbol name (resolved to the top match). NOTE: "
+            "static call graph only; cross-check dynamic/reflection/config-driven uses with "
+            "codegraph_search_files.",
+    }
     for name in EXPOSED_TOOLS:
-        app.add_tool(_make_tool(name), name=name, description=f"CodeGraph {name} (read-only).")
+        app.add_tool(_make_tool(name), name=name,
+                     description=GRAPH_TOOL_DESC.get(name, f"CodeGraph {name} (read-only)."),
+                     annotations=READONLY_ANNOT)
 
     # Fast file-content search over the LOCAL repo copy (replaces the agent's
     # builtin Grep, which hit EFS/NFS at ~20-47s per whole-repo search; local is
@@ -239,13 +270,18 @@ def build_bridge(
                     pattern, local_root=local_workspace, mount_root=mount_root, glob=glob,
                 )
             except ValueError as exc:
+                # ValueError only echoes the agent-supplied pattern (no host path) → safe to return.
                 return json.dumps({"error": "bad search pattern", "detail": str(exc)})
             except Exception as exc:  # noqa: BLE001 - isolate one query's failure
+                # str(exc) on an OSError/RuntimeError can embed an absolute HOST path
+                # (/data/repo/...) — log it for the operator, but NEVER return it to the
+                # model (it reaches the group-visible card). Generic detail only.
                 logger.error(json.dumps({"event": "search_error", "error": str(exc)}))
-                return json.dumps({"error": "search failed", "detail": str(exc)})
+                return json.dumps({"error": "search failed", "detail": "internal error (see service logs)"})
 
         app.add_tool(codegraph_search_files, name="codegraph_search_files",
-                     description="Fast regex text search over the repo (local-disk; replaces grep).")
+                     description=(codegraph_search_files.__doc__ or "").strip(),
+                     annotations=READONLY_ANNOT)
 
         # read_file / glob_files over the SAME local copy — these replace the
         # agent's builtin Read/Glob so the agent microVM needs NO filesystem mount
@@ -264,10 +300,13 @@ def build_bridge(
                     path, local_root=local_workspace, mount_root=mount_root, offset=offset, limit=limit,
                 )
             except ValueError as exc:
+                # ValueError echoes only the agent-supplied path (no host path) → safe.
                 return json.dumps({"error": "cannot read file", "detail": str(exc)})
             except Exception as exc:  # noqa: BLE001 - isolate one query's failure
+                # An OSError from open() serializes the absolute HOST path (/data/repo/...);
+                # log it but return a generic detail so it can't leak into the group card.
                 logger.error(json.dumps({"event": "read_error", "error": str(exc)}))
-                return json.dumps({"error": "read failed", "detail": str(exc)})
+                return json.dumps({"error": "read failed", "detail": "internal error (see service logs)"})
 
         async def codegraph_glob_files(pattern: str) -> str:
             """List files matching a glob `pattern` (e.g. "**/*.cs", "Config/*.json"),
@@ -280,12 +319,18 @@ def build_bridge(
                 return json.dumps({"error": "bad glob pattern", "detail": str(exc)})
             except Exception as exc:  # noqa: BLE001 - isolate one query's failure
                 logger.error(json.dumps({"event": "glob_error", "error": str(exc)}))
-                return json.dumps({"error": "glob failed", "detail": str(exc)})
+                return json.dumps({"error": "glob failed", "detail": "internal error (see service logs)"})
 
+        # Ship the FULL docstrings as the tool description (FastMCP uses `description or
+        # __doc__`, so passing a terse description= DROPS the docstring the model needs to
+        # disambiguate the tools). Per Anthropic "writing tools for agents": the description
+        # is the primary signal the model uses to pick + call a tool correctly.
         app.add_tool(codegraph_read_file, name="codegraph_read_file",
-                     description="Read a file's contents by path (local-disk; replaces builtin Read).")
+                     description=(codegraph_read_file.__doc__ or "").strip(),
+                     annotations=READONLY_ANNOT)
         app.add_tool(codegraph_glob_files, name="codegraph_glob_files",
-                     description="List files matching a glob pattern (local-disk; replaces builtin Glob).")
+                     description=(codegraph_glob_files.__doc__ or "").strip(),
+                     annotations=READONLY_ANNOT)
         logger.info(json.dumps({"event": "search_tool_enabled", "local_workspace": local_workspace,
                                 "file_tools": ["codegraph_read_file", "codegraph_glob_files"]}))
     else:

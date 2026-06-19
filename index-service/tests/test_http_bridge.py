@@ -64,6 +64,50 @@ async def _run_bridge_and_query(query: str, port: int):
     return await _run_bridge_and_call("codegraph_symbol_search", query, port)
 
 
+async def _list_full_tools(port: int):
+    """Start the bridge and return the FULL tool objects (name+description+annotations)
+    over a real MCP client, so we can assert the best-practice metadata the model sees."""
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamablehttp_client
+
+    app = http_bridge.build_bridge(workspace=REPO_ROOT, host="127.0.0.1", port=port,
+                                   local_workspace=REPO_ROOT)
+    server = asyncio.create_task(app.run_streamable_http_async())
+    try:
+        await asyncio.sleep(3)
+        async with streamablehttp_client(f"http://127.0.0.1:{port}/mcp") as (r, w, _):
+            async with ClientSession(r, w) as session:
+                await session.initialize()
+                return (await session.list_tools()).tools
+    finally:
+        server.cancel()
+        await app.codegraph_session.stop()  # type: ignore[attr-defined]
+
+
+def test_tools_carry_readonly_annotations_and_rich_descriptions():
+    # MCP best practice (spec tool annotations + Anthropic "writing tools for agents"):
+    # read-only tools should declare readOnlyHint/idempotentHint/openWorldHint (else
+    # clients default to destructive/non-idempotent/open-world), and the description —
+    # the model's primary tool-selection signal — must be substantive, not a bare name.
+    tools = asyncio.run(_list_full_tools(8916))
+    by_name = {t.name: t for t in tools}
+    # All six evidence tools must be present and read-only-annotated.
+    expected = {"codegraph_symbol_search", "codegraph_get_callers", "codegraph_analyze_impact",
+                "codegraph_search_files", "codegraph_read_file", "codegraph_glob_files"}
+    assert expected <= set(by_name), f"missing tools: {expected - set(by_name)}"
+    for name in expected:
+        t = by_name[name]
+        ann = t.annotations
+        assert ann is not None, f"{name}: no annotations (defaults to destructive/open-world)"
+        assert ann.readOnlyHint is True, f"{name}: not marked readOnlyHint"
+        assert ann.idempotentHint is True, f"{name}: not marked idempotentHint"
+        assert ann.openWorldHint is False, f"{name}: should be closed-domain"
+        # Description must be substantive (not the old bare "CodeGraph <name> (read-only).").
+        desc = t.description or ""
+        assert len(desc) >= 40, f"{name}: thin description ({len(desc)} chars): {desc!r}"
+        assert name not in desc or len(desc) >= 60, f"{name}: description looks like the bare-name stub"
+
+
 def test_bridge_exposes_codegraph_tools_over_http():
     tools, text = asyncio.run(_run_bridge_and_query("to_container_path", 8911))
     assert "codegraph_symbol_search" in tools
