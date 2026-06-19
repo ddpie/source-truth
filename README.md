@@ -31,19 +31,7 @@
 
 三个有状态组件，从飞书一路串到代码：飞书客户端 → 网关 → 会话隔离的 microVM → 唯一代码副本。
 
-```
-                ┌────────────────────────────────────────────────┐
-   飞书客户端 ──┤  bot-gateway   单 WSClient 消费事件 + CardKit 渲染 │
-                └───────────────┬────────────────────────────────┘
-                                │ InvokeAgentRuntime（按 runtimeSessionId 路由 + SigV4 签名）
-                ┌───────────────▼────────────────────────────────┐
-   会话隔离 ────┤  AgentCore microVM   Claude Code Agent（推理+编排）│  Firecracker，每会话独立
-                └───────────────┬────────────────────────────────┘
-                                │ MCP-over-HTTP（只读：先定位、再读文件）
-                ┌───────────────▼────────────────────────────────┐
-   唯一代码副本─┤  index-service   CodeGraph 图 + 文件桥（本地磁盘） │  最新主分支源码 + 配置表
-                └─────────────────────────────────────────────────┘
-```
+![source-truth 架构：飞书客户端 → bot-gateway → AgentCore microVM → index-service，答案流式回填](docs/assets/architecture.svg)
 
 > **会话 microVM 不挂任何文件系统**：没有 EFS、没有共享挂载。所有源码、配置表都经
 > index-service 的 HTTP 桥读取（`codegraph_read_file` / `glob_files` / `search_files`），
