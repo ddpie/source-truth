@@ -27,8 +27,15 @@ export const MAX_FOLLOW_UPS = 3;
 // a CJK list often indents with 　 rather than ASCII space, and without it the
 // marker wouldn't match → buttons silently lost AND the raw trailer leaks into the
 // body. \t and ASCII space cover the rest.
-const MARKER_RE = /(?:^|\n)[ \t　]*(?:💡[ \t　]*)?你可能还想问/;
-const STRIP_RE = /(?:\n[ \t　]*(?:-{3,}|\*{3,}|_{3,})[ \t　]*)?\n?[ \t　]*(?:💡[ \t　]*)?你可能还想问[\s\S]*$/;
+// The marker must be (essentially) the WHOLE line — the phrase, an optional
+// trailing "："/"…"/whitespace, then line-end. Line-START anchoring alone is NOT
+// enough: a real answer line that merely BEGINS with the phrase ("你可能还想问的
+// 逻辑在 Config.cs:10 定义") would otherwise truncate the answer + turn real prose
+// into fake buttons (cross-review HIGH). The line-END lookahead closes that —
+// mirroring extract-evidence.ts. A heading line "💡 你可能还想问：" still matches.
+const MARKER_TAIL = "[ \\t　]*[：:…。\\.]*[ \\t　]*(?=\\n|$)";
+const MARKER_RE = new RegExp(`(?:^|\\n)[ \\t　]*(?:💡[ \\t　]*)?你可能还想问${MARKER_TAIL}`);
+const STRIP_RE = new RegExp(`(?:\\n[ \\t　]*(?:-{3,}|\\*{3,}|_{3,})[ \\t　]*)?\\n?[ \\t　]*(?:💡[ \\t　]*)?你可能还想问${MARKER_TAIL}[\\s\\S]*$`);
 
 export function extractFollowUps(answer: string): string[] {
   // Find the marker only when it LEADS A LINE (not in mid-prose).

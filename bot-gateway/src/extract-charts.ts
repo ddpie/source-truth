@@ -31,12 +31,29 @@ export interface ChartSpec {
   [key: string]: unknown;
 }
 
+// Only these VChart types are known-good in a Feishu card. The model occasionally
+// emits an unsupported/misspelled type ("scatter"/"sankey"/"barr"); passing it
+// through makes Feishu reject the append → the chart silently fails to render. We
+// drop an unknown type here instead (clean drop; the prose table the model also
+// emits is the fallback). Lowercased before checking.
+const ALLOWED_CHART_TYPES = new Set(["bar", "line", "pie"]);
+// A chart spec is real config-table numbers, not prose — a few KB at most. A
+// pathological multi-thousand-point array would (a) likely exceed Feishu's per-card
+// body size (rejected append) and (b) cost a redactDeep walk over every leaf on the
+// finalize hot path. Bound the raw block so an oversized spec is dropped cleanly.
+const MAX_CHART_SPEC_BYTES = 20_000;
+
 export function extractCharts(answer: string): { text: string; charts: ChartSpec[] } {
   const charts: ChartSpec[] = [];
   let text = answer.replace(CHART_BLOCK, (_full, body: string) => {
+    const trimmed = body.trim();
+    if (trimmed.length > MAX_CHART_SPEC_BYTES) return ""; // oversized → drop, still strip from prose
     try {
-      const spec = JSON.parse(body.trim()) as ChartSpec;
-      if (spec && typeof spec.type === "string") charts.push(spec);
+      const spec = JSON.parse(trimmed) as ChartSpec;
+      if (spec && typeof spec.type === "string"
+          && ALLOWED_CHART_TYPES.has(spec.type.toLowerCase())) {
+        charts.push(spec);
+      }
     } catch { /* invalid JSON → drop the block, don't render a broken chart */ }
     return ""; // strip the block from the prose regardless
   });

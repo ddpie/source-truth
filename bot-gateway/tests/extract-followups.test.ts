@@ -107,4 +107,20 @@ describe("stripFollowUps", () => {
     // The whole thing is real answer text — strip must be a no-op.
     expect(stripFollowUps(answer)).toBe(answer);
   });
+
+  // REGRESSION (HIGH): a line that LEADS with the phrase but continues with real
+  // prose must NOT hijack — the marker must be (essentially) the whole line. Before
+  // the line-END anchor, "你可能还想问的逻辑在 Config.cs:10 定义" truncated the answer
+  // and turned real prose lines into fake buttons.
+  it("does NOT hijack a line that merely BEGINS with the phrase then continues", () => {
+    const answer = "用户问代码里哪里写了字符串。\n你可能还想问的逻辑在 Config.cs:10 定义。\n继续看下文。";
+    expect(stripFollowUps(answer)).toBe(answer);   // no truncation
+    expect(extractFollowUps(answer)).toEqual([]);  // no fake buttons
+  });
+
+  // A bare heading line (no colon) and the 💡 heading still work.
+  it("still matches a bare '你可能还想问' heading line and the 💡 heading", () => {
+    expect(extractFollowUps("结论。\n你可能还想问\n- 问题A？")).toEqual(["问题A？"]);
+    expect(extractFollowUps("结论。\n💡 你可能还想问：\n- 问题B？")).toEqual(["问题B？"]);
+  });
 });

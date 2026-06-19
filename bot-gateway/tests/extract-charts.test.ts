@@ -30,6 +30,29 @@ describe("extractCharts", () => {
     expect(text).toBe("就是一段普通回答，没有图。");
   });
 
+  it("drops an UNSUPPORTED chart type (allow-list: bar/line/pie) but still strips the fence", () => {
+    for (const bad of ["scatter", "area", "sankey", "barr", "gauge"]) {
+      const { text, charts } = extractCharts(`见图：\n\`\`\`chart\n{"type":"${bad}"}\n\`\`\`\n完。`);
+      expect(charts).toHaveLength(0);            // unsupported → dropped, not a broken card element
+      expect(text).not.toContain("```chart");    // fence still stripped from prose
+      expect(text).toContain("完。");
+    }
+  });
+
+  it("accepts the allow-listed types case-insensitively", () => {
+    expect(extractCharts('```chart\n{"type":"BAR"}\n```').charts).toHaveLength(1);
+    expect(extractCharts('```chart\n{"type":"Line"}\n```').charts).toHaveLength(1);
+  });
+
+  it("drops an OVERSIZED chart spec (>20KB) cleanly, no broken card element", () => {
+    const huge = JSON.stringify({ type: "bar", data: { values: Array.from({ length: 5000 }, (_, i) => ({ x: i, y: i })) } });
+    expect(huge.length).toBeGreaterThan(20_000);
+    const { text, charts } = extractCharts("图：\n```chart\n" + huge + "\n```\n尾。");
+    expect(charts).toHaveLength(0);            // oversized → dropped
+    expect(text).not.toContain("```chart");    // fence still stripped
+    expect(text).toContain("尾。");
+  });
+
   it("ignores a chart block with invalid JSON (keeps it out of charts AND out of prose)", () => {
     const answer = "见图：\n```chart\n{not valid json}\n```\n完。";
     const { text, charts } = extractCharts(answer);
@@ -42,8 +65,8 @@ describe("extractCharts", () => {
     const variants = [
       '答案\n```chart\n{"type":"line"}```',                 // no newline before closing fence
       "答案\n  ```chart\n  {\"type\":\"pie\"}\n  ```",         // indented
-      '答案\n```chart json\n{"type":"area"}\n```',          // extra language token
-      '答案\n```chart {"type":"scatter"}```',               // compact single-line
+      '答案\n```chart json\n{"type":"bar"}\n```',           // extra language token
+      '答案\n```chart {"type":"pie"}```',                   // compact single-line
     ];
     for (const v of variants) {
       const { text, charts } = extractCharts(v);
