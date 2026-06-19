@@ -406,8 +406,12 @@ async function runStreamingInvoke(
   // and the live seconds counter carries the honest "still working" signal, so it
   // reads as professional/calm and never looks frozen at the low write cadence.
   const ELLIPSIS = ["·", "··", "···"];
-  const startedAt = Date.now();
-  let frame = 0;
+  // MONOTONIC base for the elapsed display + spinner: Date.now() is wall-clock, so an
+  // NTP/VM clock step backward mid-stream would make elapsed go negative → the timer
+  // visibly JUMPS back to 0s then climbs again (a dim#1「计时晃」violation).
+  // performance.now() is monotonic — elapsed only ever increases. (Date.now() stays
+  // for throttle deltas + the deadline, where a one-tick skew is harmless.)
+  const monoStart = performance.now();
   // If the queued path already created the status element, the heartbeat must
   // UPDATE it in place (so "排队中" → "正在分析" on the same element), not append a
   // second one.
@@ -450,8 +454,14 @@ async function runStreamingInvoke(
     // Cycle the ellipsis · → ·· → ··· each write. Put it AFTER the seconds so the
     // seconds stay in a FIXED position (the dots changing width before the number
     // made the number jitter left/right). seconds is the live "still working" signal.
-    const dots = ELLIPSIS[frame++ % ELLIPSIS.length];
-    const elapsed = formatElapsed(now - startedAt);  // s / Mm Ss / Hh Mm
+    // Derive BOTH the spinner phase and the elapsed seconds from the SAME monotonic
+    // elapsed value. The spinner was `frame++` at schedule-time, so a coalesce-DROPPED
+    // tick (RTT > cadence) advanced the counter without rendering → the visible dots
+    // skipped a phase (·→···). Time-derived: a dropped frame just means the next
+    // rendered dot reflects true elapsed time, no desync (dim#1「不晃」).
+    const elapsedMs = performance.now() - monoStart;
+    const dots = ELLIPSIS[Math.floor(elapsedMs / STATUS_WRITE_MS) % ELLIPSIS.length];
+    const elapsed = formatElapsed(elapsedMs);  // s / Mm Ss / Hh Mm
     const phaseWord = stage === "thinking" ? "正在思考" : "正在分析";
     const text = `${phaseWord} ${elapsed}${dots}`;
     lastStatusWrite = now;
@@ -827,8 +837,9 @@ async function runStreamingInvoke(
   // A clarification is a question back to the user, not an answer — don't show a
   // "已检索…据此得出结论" panel (no conclusion was reached).
   if (clarify) panelSteps = [];
-  // Show total elapsed in the finalized header ("回答完成 · 用时 67s").
-  const elapsedLabel = formatElapsed(Date.now() - startedAt);
+  // Show total elapsed in the finalized header ("回答完成 · 用时 67s"). Monotonic base
+  // (same as the live timer) so the final 用时 can't be skewed by a clock step.
+  const elapsedLabel = formatElapsed(performance.now() - monoStart);
   // panelSteps is already cleaned (redactSteps above); finalizeCard re-redacts which
   // is idempotent (no markup/secret left to strip).
   await writer.write((seq) => finalizeCard(cardId, finalText, redactSteps(panelSteps), seq, isFollowUp, aborted, hardFailed, finalEvidence, question, elapsedLabel, turnCapped, !!clarify));
