@@ -130,4 +130,29 @@ describe("stripPreamble", () => {
     const body = "整理一下答案。\n暴击倍率是 1.5 倍。";
     expect(stripPreamble(body)).toBe("暴击倍率是 1.5 倍。");
   });
+
+  // --- round-2: strategy-1 (separator path) over-strip + markdown table ------
+  it("does NOT strip a real first sentence (begins with 整理答案) even WITH a --- separator", () => {
+    const body = "整理答案的逻辑在 Foo.java。\n---\n它做了排序。";
+    expect(stripPreamble(body)).toBe(body);
+  });
+
+  it("does NOT strip '可以给出完整答案，但…' WITH a --- separator", () => {
+    const body = "可以给出完整答案，但需要补充测试数据。\n---\n详见下。";
+    expect(stripPreamble(body)).toBe(body);
+  });
+
+  it("does NOT chop a markdown TABLE whose first line begins with a preamble prefix", () => {
+    // The inline `-{3,}` fallback must NEVER land on a `|---|` table separator —
+    // the agent uses tables in answers; chopping there would halve the answer.
+    const body = "可以给出对比数据如下：\n| 名称 | 伤害 |\n|---|---|\n| 匕首 | 3.5 |";
+    expect(stripPreamble(body)).toBe(body);
+  });
+
+  it("does NOT match a --- adjacent to a table pipe as the cut point", () => {
+    const body = "整理一下答案如下：\n| A | B |\n| --- | --- |\n| 1 | 2 |";
+    // The head '整理一下答案如下' is a preamble-ish prefix, but the only `---` is in a
+    // table separator (pipe-adjacent), so nothing is stripped.
+    expect(stripPreamble(body)).toBe(body);
+  });
 });
