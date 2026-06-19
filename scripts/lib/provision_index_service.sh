@@ -85,6 +85,21 @@ reconcile_index_sg_ingress() { # <sg>
 #     deploy is never a SILENT no-op (the operator is told their changes aren't
 #     live and how to apply them).
 CURRENT_SIG="$(artifact_signature)"
+# RECONCILE a stale blue-green leftover: INDEX_OLD_INSTANCE is the previous instance
+# recorded during a --refresh-index, normally terminated LAST by deploy-all after the
+# new one is healthy + DNS cut over. But if that refresh FAILED the health gate,
+# deploy-all exits before the terminate, leaving INDEX_OLD_INSTANCE set and (possibly)
+# two instances running. On ANY subsequent run, garbage-collect it: if it's still
+# alive and is NOT the instance we're about to keep, terminate it; then clear the
+# marker so it can't leak a paid instance or confuse the next refresh. Best-effort.
+if [[ -n "${INDEX_OLD_INSTANCE:-}" ]]; then
+  st="$(Q describe-instances --instance-ids "$INDEX_OLD_INSTANCE" --query 'Reservations[0].Instances[0].State.Name' --output text 2>/dev/null || echo "")"
+  if [[ "$st" == "running" || "$st" == "pending" || "$st" == "stopping" ]]; then
+    log warn "reconcile: terminating stale blue-green leftover index instance $INDEX_OLD_INSTANCE (state=$st)"
+    Q terminate-instances --instance-ids "$INDEX_OLD_INSTANCE" >/dev/null 2>&1 || true
+  fi
+  update_env "$CONFIG" INDEX_OLD_INSTANCE ""
+fi
 # SINGLE-INSTANCE GUARD: keep exactly one index-service alive at a time. An
 # instance still in a TRANSIENT shutdown state (stopping / shutting-down) isn't
 # seen by the reuse filter below (which only matches running/pending), so without
@@ -97,7 +112,15 @@ if [[ "$DRAINING" != "None" && -n "$DRAINING" ]]; then
   log warn "an index-service instance ($DRAINING) is still draining (stopping/shutting-down); waiting for it to terminate before launching, to avoid running two paid instances"
   Q wait instance-terminated --instance-ids "$DRAINING" 2>/dev/null || true
 fi
-EXISTING="$(Q describe-instances --filters "Name=tag:Name,Values=source-truth-index-service" "Name=instance-state-name,Values=running,pending" --query 'Reservations[0].Instances[0].InstanceId' --output text 2>/dev/null)"
+# DETERMINISTIC selection: if two index instances are briefly running (blue-green
+# overlap, or a stale leftover the reconcile above didn't catch), a blind
+# Reservations[0].Instances[0] could pick the WRONG (old-artifact) one. Prefer the
+# instance whose ArtifactSig matches CURRENT_SIG (the correct/current build); only if
+# none match, fall back to any running/pending one (the genuine "needs refresh" case).
+EXISTING="$(Q describe-instances --filters "Name=tag:Name,Values=source-truth-index-service" "Name=tag:ArtifactSig,Values=$CURRENT_SIG" "Name=instance-state-name,Values=running,pending" --query 'Reservations[0].Instances[0].InstanceId' --output text 2>/dev/null)"
+if [[ "$EXISTING" == "None" || -z "$EXISTING" ]]; then
+  EXISTING="$(Q describe-instances --filters "Name=tag:Name,Values=source-truth-index-service" "Name=instance-state-name,Values=running,pending" --query 'Reservations[0].Instances[0].InstanceId' --output text 2>/dev/null)"
+fi
 if [[ "$EXISTING" != "None" && -n "$EXISTING" ]]; then
   BOOTED_SIG="$(Q describe-instances --instance-ids "$EXISTING" --query "Reservations[0].Instances[0].Tags[?Key=='ArtifactSig'].Value | [0]" --output text 2>/dev/null)"
   if [[ "$BOOTED_SIG" != "$CURRENT_SIG" ]]; then
