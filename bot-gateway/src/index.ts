@@ -337,7 +337,12 @@ async function runStreamingInvoke(
   // class of "two fire-and-forget writes race → the lower-seq one is stale-
   // rejected and dropped" bugs (status wiping the stop button, double stop button,
   // and the 分析过程 panel never appearing — the last one caught in live self-test).
-  const writer = new CardWriter(card.startSeq);
+  // onError surfaces a SWALLOWED card-write failure (the chain stays alive best-
+  // effort, but a dropped write — esp. a failed finalize after token/throttle
+  // retries — must be diagnosable, not silent). Coalesced status/content drops are
+  // benign (next frame carries the full value), so they're logged at low signal.
+  const writer = new CardWriter(card.startSeq, (label, err) =>
+    log({ event: "card_write_dropped", card: cardId, op: label, error: redactSensitive(String(err)).slice(0, 200) }));
   let lastUpdate = 0;
   let lastPanelUpdate = 0;
   let timedOut = false;

@@ -76,11 +76,23 @@ export interface FeishuApiOptions {
   timeoutMs?: number;
 }
 
+// Feishu app-level codes (HTTP 200 body, code!=0) that mean "the tenant_access_token
+// is invalid/expired" — Feishu signals token expiry FAR more often this way than via
+// an HTTP 401, so refreshing only on HTTP 401 would leave a stale token wedging every
+// write until the cache TTL. Treat these like a 401: invalidate + retry once.
+const TOKEN_EXPIRY_CODES = new Set([99991663, 99991661, 99991664, 99991665, 99991677]);
+// App-level throttle codes (HTTP 200 body) — retry with backoff, same as HTTP 429.
+const THROTTLE_CODES = new Set([99991400, 1254607, 1254290, 1254291]);
+
 /**
  * Call a Feishu OpenAPI endpoint in-process. `path` starts with `/open-apis/...`.
  * `body` is a JSON-serializable object (or undefined for GET). Returns the parsed
  * JSON. Throws on transport error, non-2xx, or a non-zero Feishu `code` — same
- * contract the lark-cli wrapper enforced. Retries ONCE on a 401 (stale token).
+ * contract the lark-cli wrapper enforced. Resilience:
+ *   - stale token (HTTP 401 OR app-level token-expiry code) → invalidate + retry once;
+ *   - rate limit (HTTP 429 OR app-level throttle code) → bounded backoff retry
+ *     (CardKit caps ~10 writes/s/card; a bursty turn can trip this, and a dropped
+ *     FINALIZE write would leave a visibly broken card — so don't just drop it).
  */
 export async function feishuApi(
   method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE",
@@ -89,11 +101,17 @@ export async function feishuApi(
   opts: FeishuApiOptions = {},
 ): Promise<unknown> {
   const timeoutMs = opts.timeoutMs ?? 15000;
-  const attempt = async (): Promise<unknown> => {
+  const MAX_RATE_RETRIES = 3;
+  let tokenRetried = false;
+  let rateRetries = 0;
+  for (;;) {
     const token = await getTenantToken();
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), timeoutMs);
     if (typeof timer.unref === "function") timer.unref();
+    let status: number;
+    let retryAfterMs = 0;
+    let json: { code?: number; msg?: string } | null;
     try {
       const res = await fetch(`${BASE}${path}`, {
         method,
@@ -103,31 +121,48 @@ export async function feishuApi(
         },
         body: body === undefined ? undefined : JSON.stringify(body),
         signal: ctrl.signal,
+      }).catch((e: unknown) => {
+        // Make a timeout/network abort self-describing (which write hung).
+        throw new Error(`feishu ${method} ${path} transport error: ${String((e as Error)?.message ?? e)}`);
       });
-      const status = res.status;
-      const json = (await res.json().catch(() => null)) as { code?: number; msg?: string } | null;
-      if (status === 401) {
-        invalidateToken();
-        const err = new Error(`feishu ${method} ${path} 401`) as Error & { _retry?: boolean };
-        err._retry = true;
-        throw err;
-      }
-      if (status < 200 || status >= 300) {
-        throw new Error(`feishu ${method} ${path} HTTP ${status}: ${json?.msg ?? ""}`);
-      }
-      if (json && json.code !== undefined && json.code !== 0) {
-        throw new Error(`feishu ${method} ${path} code ${json.code}: ${json.msg ?? ""}`);
-      }
-      return json;
+      status = res.status;
+      const ra = res.headers?.get?.("retry-after");
+      if (ra) retryAfterMs = (Number(ra) || 0) * 1000;
+      json = (await res.json().catch(() => null)) as { code?: number; msg?: string } | null;
     } finally {
       clearTimeout(timer);
     }
-  };
-  try {
-    return await attempt();
-  } catch (e) {
-    if ((e as { _retry?: boolean })._retry) return attempt(); // one retry after token refresh
-    throw e;
+
+    const code = json?.code;
+    const tokenExpired = status === 401 || (code !== undefined && TOKEN_EXPIRY_CODES.has(code));
+    const throttled = status === 429 || (code !== undefined && THROTTLE_CODES.has(code));
+
+    if (tokenExpired) {
+      invalidateToken();
+      if (!tokenRetried) { tokenRetried = true; continue; }
+      throw new Error(`feishu ${method} ${path} token-expired (status ${status} code ${code}) after refresh`);
+    }
+    if (throttled) {
+      if (rateRetries < MAX_RATE_RETRIES) {
+        rateRetries++;
+        const backoff = retryAfterMs || (150 * rateRetries + Math.floor(Math.random() * 100));
+        await new Promise((r) => setTimeout(r, backoff));
+        continue;
+      }
+      throw new Error(`feishu ${method} ${path} rate-limited (status ${status} code ${code}) after ${rateRetries} retries`);
+    }
+    if (status < 200 || status >= 300) {
+      throw new Error(`feishu ${method} ${path} HTTP ${status}: ${json?.msg ?? ""}`);
+    }
+    if (code !== undefined && code !== 0) {
+      throw new Error(`feishu ${method} ${path} code ${code}: ${json?.msg ?? ""}`);
+    }
+    // A 2xx whose body didn't parse (empty/HTML/truncated) must NOT be treated as a
+    // successful write — a finalize that actually failed at the edge would look ok.
+    if (json === null) {
+      throw new Error(`feishu ${method} ${path} HTTP ${status} but response body was empty/unparseable`);
+    }
+    return json;
   }
 }
 
