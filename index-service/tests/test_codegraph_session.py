@@ -145,6 +145,25 @@ def test_needs_restart_when_thread_dead_or_wedged():
     assert sess._needs_restart() is True
 
 
+def test_liveness_tolerates_a_single_transient_blip():
+    # A single bad probe must NOT exit the worker (no full cold restart over a
+    # transient GC pause / a heavy query that held the lock past the probe timeout).
+    n, should_exit = CodegraphSession._record_probe(0, bad=True)
+    assert (n, should_exit) == (1, False)  # 1 failure < threshold(2) → stay alive
+    # A good probe immediately after clears the streak.
+    n, should_exit = CodegraphSession._record_probe(n, bad=False)
+    assert (n, should_exit) == (0, False)
+
+
+def test_liveness_exits_after_consecutive_failures():
+    # Sustained failure (a real subprocess death) fails every probe → exit once the
+    # streak reaches the threshold, so /health tracks reality within ~10s.
+    n, should_exit = CodegraphSession._record_probe(0, bad=True)
+    assert should_exit is False
+    n, should_exit = CodegraphSession._record_probe(n, bad=True)
+    assert (n, should_exit) == (2, True)  # 2 consecutive → worker exits → restart
+
+
 def test_reap_orphan_servers_kills_only_own_children(monkeypatch):
     # _reap_orphan_servers must SIGKILL codegraph-server children of THIS pid found
     # by pgrep, and never raise. Mock pgrep output + os.kill.
