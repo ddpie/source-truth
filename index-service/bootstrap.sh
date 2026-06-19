@@ -11,12 +11,14 @@
 #     `flock $LOCK`. The build uses `flock -n` (fail-fast): if the bridge is up it
 #     refuses immediately rather than opening a second concurrent writer. This is
 #     OS-enforced mutual exclusion, backed by THREE layers:
-#       (a) flock $LOCK held by BOTH units (the actual guarantee);
-#       (b) systemd policy: index-build has `Conflicts=index-bridge` + `Before=`,
-#           and index-bridge has `After=/Requires= index-build` — so a manual
-#           `systemctl start/restart index-build` STOPS the bridge first, runs the
-#           build, then `Requires=` brings the bridge back (closes the
-#           `systemctl restart index-build` footgun the flock also guards);
+#       (a) flock $LOCK held by BOTH units (the ACTUAL guarantee): a `systemctl
+#           restart index-build` while the bridge holds the lock makes the build's
+#           `flock -n` fail fast — a clean failure, never a second concurrent writer;
+#       (b) systemd ordering: index-build `Before=index-bridge`, index-bridge
+#           `After=/Requires= index-build` — so on boot/reconcile the build runs
+#           first. (Deliberately NO `Conflicts=` — with the bridge's Requires= it
+#           forms a contradictory transaction systemd silently drops on reboot,
+#           bricking the service; the flock is the real guard, see the unit below.)
 #       (c) the bridge's in-process restart join-guard (refuses to spawn a second
 #           worker until the old one's subprocess is confirmed dead).
 #     Concurrent writers corrupt RocksDB -> 0-node graph (the #1 failure we hit);
@@ -135,11 +137,16 @@ cat > /etc/systemd/system/index-build.service <<UNIT
 Description=CodeGraph index build (single-writer, runs to completion before serve)
 After=network-online.target remote-fs.target
 Wants=network-online.target
-# Single-writer policy at the systemd layer: starting/restarting the build STOPS
-# the bridge first (Conflicts), and the build is ordered Before the bridge so on
-# boot it completes before serve. Combined with the flock backstop below, a
-# second concurrent writer on graph.db is impossible by BOTH policy and OS lock.
-Conflicts=index-bridge.service
+# Order the build BEFORE the bridge so on boot/reconcile the build completes first.
+# NOTE: deliberately NO `Conflicts=index-bridge` — it looks like it would close the
+# `systemctl restart index-build` footgun, but combined with the bridge's
+# Requires=index-build + WantedBy=multi-user.target it forms a contradictory
+# start+stop transaction that systemd SILENTLY drops on every reboot (empirically
+# reproduced on systemd 255 / Ubuntu 24.04: after the first reboot neither unit
+# starts). The single-writer guarantee does NOT need it: the flock below is the
+# real, OS-enforced guard — a `systemctl restart index-build` while the bridge holds
+# the lock just makes the build's `flock -n` fail fast (clean failure), never a
+# second concurrent writer. Before= alone gives the boot ordering we want.
 Before=index-bridge.service
 [Service]
 Type=oneshot
