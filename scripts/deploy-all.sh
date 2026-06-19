@@ -44,7 +44,7 @@ MAX_FILES=""
 MODEL=""
 DEFAULT_INSTANCE_TYPE="t4g.large"
 DEFAULT_MAX_FILES="10000"
-DEFAULT_MODEL="global.anthropic.claude-opus-4-8"
+DEFAULT_MODEL="global.anthropic.claude-sonnet-4-6"
 REFRESH_INDEX=false       # --refresh-index: replace a running index instance if its artifacts are stale
 declare -A SKIP=()
 
