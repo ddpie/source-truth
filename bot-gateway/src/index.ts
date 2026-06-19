@@ -518,8 +518,13 @@ async function runStreamingInvoke(
       let display = "正在分析…";
       let liveEvidence = "";
       if (textSoFar.length > 0) {
-        const split = splitEvidence(stripFollowUps(textSoFar));
-        const body = split.body;
+        // Split evidence FIRST, then strip follow-ups from the BODY only. The reverse
+        // order (stripFollowUps then splitEvidence) silently LOSES the evidence block
+        // when the model emits the 你可能还想问 trailer BEFORE 供研发复核 — stripFollowUps'
+        // greedy `…[\s\S]*$` would eat the evidence too (cross-review HIGH). Splitting
+        // evidence off first confines each extractor to its own partition.
+        const split = splitEvidence(textSoFar);
+        const body = stripFollowUps(split.body);
         liveEvidence = split.evidence;
         // Drop a planning preamble ("现在我整理答案…" + ---) that leaked into the
         // conclusion block so the typewriter shows 结论先行 from the first line. Marker-
@@ -651,7 +656,12 @@ async function runStreamingInvoke(
   } else {
     const ex = extractCharts(answer);
     charts = ex.charts;
-    const { body, evidence: ev } = splitEvidence(stripFollowUps(ex.text));
+    // Split evidence FIRST, then strip follow-ups from the body only — see the live
+    // path above: the reverse order loses the evidence block when 你可能还想问 precedes
+    // 供研发复核 (stripFollowUps' greedy tail-eat). Confine each extractor to its partition.
+    const split = splitEvidence(ex.text);
+    const body = stripFollowUps(split.body);
+    const ev = split.evidence;
     evidence = ev;
     // Drop a planning preamble ("现在我整理答案…" + ---) that the model wrote into
     // the conclusion block, so the finalized body leads with the answer (结论先行).
