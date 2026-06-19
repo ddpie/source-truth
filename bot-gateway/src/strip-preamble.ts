@@ -44,6 +44,11 @@ const STANDALONE_PREAMBLE_OPENERS: RegExp[] = [
   new RegExp(`^.{0,40}(已|都)(经)?.{0,8}(取到|取得|获取|收集|拿到|有|够)了?(足够|所有|相关|关键)?(的)?(信息|证据|内容|数据)?[，,]?.{0,12}(可以|现在|来|这就)?(作答|回答|给出|整理|说明)(答案|结论)?(了|啦)?${TAIL}$`),
   // "(所有)信息都齐了，(来)整理答案" — readiness phrased as "data is all here" + announce.
   new RegExp(`^(所有|相关|关键)?(的)?(信息|证据|内容|数据|资料)(都|也|已)?(齐|够|到位|到齐|备齐)了?[，,]?.{0,12}(可以|现在|来|这就)?(整理|给出|得出|作答|回答|说明)(一下)?(完整|对比)?(的)?(答案|结论|回答)?(了|啦)?${TAIL}$`),
+  // "所有X(数值)都已读到/取到，来整理成(完整)对比表/列表/答案" — readiness ending in
+  // an announce-to-PRESENT verb + a result noun that can be a TABLE/LIST (not just
+  // 答案/结论). The .{0,48} lead-in + FULL-sentence match + 160-char cap keep it from
+  // matching a real answer sentence. Result noun set incl. 对比表/表格/清单/列表/对比.
+  new RegExp(`^.{0,48}(都|也|已|已经)?(读到|读完|取到|取得|拿到|查到|获取|收集|核实|确认)了?[，,]?.{0,16}(可以|现在|来|这就|开始)?(整理|汇总|给出|得出|呈现|列出|做)(成|出|一下)?(完整|对比)?(的)?(对比表|表格|清单|列表|对比|答案|结论|回答)${TAIL}$`),
   /^(let me|i'?ll)\s+(now\s+)?(compile|summarize|put together|organize)\s+(the\s+)?(answer|findings?|results?)\s*[.:]?$/i,
   /^now\s+(let me|i'?ll)\s+(compile|summarize|put together|organize|give|provide)\b.{0,30}$/i,
   /^(i\s+)?(now\s+)?have\s+(enough|all\s+the)\s+(info|information|evidence)\b.{0,40}$/i,
