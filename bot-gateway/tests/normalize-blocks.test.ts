@@ -44,6 +44,15 @@ describe("normalizeBlocks — must NOT touch well-formed / protected content", (
     expect(normalizeBlocks(input)).toBe(input);
   });
 
+  // REGRESSION (observed live): a heading jammed onto a table's LAST row
+  // ("| 1 | 2 |## 三、…") was skipped because the line contains a pipe → the ## stayed
+  // jammed. A heading is never a table cell, so it must split out even on a table line.
+  it("splits a heading jammed onto a table row's trailing pipe", () => {
+    const out = normalizeBlocks("| 状态 | 速度 |\n| 行走 | 1.0 |## 三、外部加成");
+    expect(out).toMatch(/\|\n\n## 三、外部加成/); // heading split onto its own line
+    expect(out).not.toContain("|## 三"); // no longer jammed on the pipe
+  });
+
   it("never breaks a SPACE-PADDED table separator row (| --- | --- |)", () => {
     const input = "结果：\n| 名称 | 值 |\n| --- | --- |\n| A | 1 |";
     // Every line here is a table line or prose with no jammed marker → untouched.
