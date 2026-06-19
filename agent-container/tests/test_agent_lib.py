@@ -350,8 +350,32 @@ def test_message_text_has_toolcall_markup_matches_bare_and_antml():
     # antml: namespace prefix (the dominant real Claude shape)
     assert agent_lib._message_text_has_toolcall_markup(_MsgWith([_TextBlock("<" + "antml:invoke name=\"x\">")])) is True
     assert agent_lib._message_text_has_toolcall_markup(_MsgWith([_TextBlock("function" + "_calls")])) is True
-    # A clean answer that merely mentions the word invoke is NOT markup.
+    # Haiku 4.5 shape: <attempt_{toolname}> ... </attempt_{toolname}>
+    assert agent_lib._message_text_has_toolcall_markup(_MsgWith([_TextBlock("先查\n<attempt_codegraph_symbol_search>\n{}")])) is True
+    # A clean answer that merely mentions the word invoke/attempt is NOT markup.
     assert agent_lib._message_text_has_toolcall_markup(_MsgWith([_TextBlock("这个函数会 invoke 回调")])) is False
+    assert agent_lib._message_text_has_toolcall_markup(_MsgWith([_TextBlock("第一次 attempt 失败后重试")])) is False
+
+
+def test_run_agent_retries_on_haiku_attempt_leak():
+    # Haiku's <attempt_tool> leak shape must also trigger the retry.
+    calls = {"n": 0}
+
+    async def fake_query(prompt, options):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            yield _MsgWith([_TextBlock("先定位\n<attempt_codegraph_symbol_search>\n{\"pattern\":\"负重\"}\n</attempt_codegraph_symbol_search>")])
+            yield _ResultMsg(num_turns=1)
+        else:
+            yield _MsgWith([_ToolUseBlock("t1", "codegraph_symbol_search")])
+            yield _MsgWith([_TextBlock("负重上限 = 力量 × 1.5。")])
+            yield _ResultMsg(num_turns=3)
+
+    msgs = _collect(agent_lib.run_agent({"prompt": "负重上限"}, query_fn=fake_query))
+    assert calls["n"] == 2, "haiku attempt-leak must retry once"
+    texts = [getattr(b, "text", "") for m in msgs for b in getattr(m, "content", []) or [] if hasattr(b, "text")]
+    assert any(s.startswith("负重上限 =") for s in texts)
+    assert not any("attempt_" in s for s in texts), "failed haiku attempt must be discarded"
 
 
 def _collect(agen):
