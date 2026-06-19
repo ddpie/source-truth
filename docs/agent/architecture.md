@@ -71,7 +71,7 @@ structure）描述系统*是什么*；本文描述*一次提问如何穿过系�
 - **MVP（当前）**：用 `agentcore` starter toolkit / boto3 直接配 AgentCore Runtime + 手工建 index-service，
   先跑通主流程与 POC 性能基准。CodeGraph 召回率、经 HTTP 桥读文件的延迟是主要待验证点——验证前不固化 IaC，
   避免返工。「为何必须建索引而非让 Agent 逐文件 grep」已有实测基准，见
-  [`indexing-performance-spike.md`](indexing-performance-spike.md)（全仓冷扫 grep 达 265s，索引后查询恒 1–5ms）。
+  [`indexing-performance-spike.md`](indexing-performance-spike.md)（全仓冷扫 grep 本地盘约 127s、已废弃 EFS 方案最坏 265s，索引后查询恒 1–5ms）。
 - **post-MVP（p2，渐进）**：CDK 管**稳定层**——会话容器镜像（DockerImageAsset，`Platform.LINUX_ARM64`）、
   AgentCore 执行 IAM 角色、index-service 常驻计算（含其本地仓库副本卷）、网关基础设施；
   而 **AgentCore Runtime 本身**（其 env、idle timeout、网络模式、请求头 allowlist）由 `scripts/deploy-all.sh`

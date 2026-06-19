@@ -21,8 +21,10 @@ index-service/          常驻 CodeGraph 索引服务 + MCP-over-HTTP 桥
   http_bridge.py        FastMCP HTTP 桥（包根，非 src/）：暴露 codegraph 定位 + 读文件工具，路径对齐为仓库相对
   codegraph_session.py  常驻 codegraph-server 单写者会话（worker 线程 + 私有 loop，健康自愈，带超时）
   file_search.py        本地副本 ripgrep/grep 检索工具（逐文件遍历比远程慢 ~225x，故走本地副本；命中按内容去重；MCP 暴露）
+  file_read.py          本地副本按行/按点读文件工具（read_file，路径对齐为仓库相对；MCP 暴露）
+  file_table.py         结构化配置表读取（Excel/CSV/TSV/SQLite → 文本，read_table；只读、带 DoS 上限；MCP 暴露）
   path_align.py         索引路径 ↔ 仓库相对路径词法对齐（拒越界；mount_root 默认空，遗留 /mnt/repo 仍兼容）
-  codegraph_client.py   codegraph-server 客户端封装
+  codegraph_client.py   codegraph-server 客户端封装（休眠：仅测试用，单写者 tripwire 守护，绝不上常驻服务路径）
   perf.py               结构化耗时日志
   bootstrap.sh          EC2 user-data：装依赖 / 解包仓库到本地 /data/repo / 快照 stamp 重解压 / systemd build→bridge
   tests/                pytest（由 scripts/test.sh 调用）
@@ -30,7 +32,7 @@ infra/                  基础设施即代码（MVP 先 agentcore toolkit / boto
   README.md             IaC 分工：CDK 管稳定层 / deploy-all.sh 用 boto3 配 AgentCore Runtime
   (p2) lib/             runtime / codegraph(index-service) / gateway 各 stack
 shared/                 跨包共享：结构化日志（hashUserId 脱敏）、MCP 工具 schema、卡片协议类型
-config/                 配置驱动：i18n.json（卡片 / 告警 / 错误文案）、alarm-thresholds.json
+config/                 配置驱动：i18n.json（卡片 / 告警 / 错误文案）、(p1) alarm-thresholds.json（阈值待落地）
 scripts/                运维生命周期
   check-invariants.sh   快速结构 lint（AGENTS / CLAUDE / structure / 双语配对 / 顶层目录存在性）
   lib/                  common.sh（格式化 + 依赖检查）、env-utils.sh（.env / deploy-config 共享 helper）

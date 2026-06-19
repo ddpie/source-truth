@@ -21,8 +21,10 @@ index-service/          Standalone CodeGraph index service + MCP-over-HTTP bridg
   http_bridge.py        FastMCP HTTP bridge (package root, not src/): exposes codegraph locate + read-file tools, aligns paths to repo-relative
   codegraph_session.py  Resident codegraph-server single-writer session (worker thread + private loop, health self-heal, timeouts)
   file_search.py        Local-copy ripgrep/grep search tool (per-file traversal is ~225x slower remote, so served from local copy; content-dedups hits; MCP-exposed)
+  file_read.py          Local-copy by-line/by-point file reader (read_file, paths aligned to repo-relative; MCP-exposed)
+  file_table.py         Structured config-table reader (Excel/CSV/TSV/SQLite → text, read_table; read-only, DoS-bounded; MCP-exposed)
   path_align.py         Index path ↔ repo-relative lexical alignment (rejects escapes; mount_root defaults to "", legacy /mnt/repo still accepted)
-  codegraph_client.py   codegraph-server client wrapper
+  codegraph_client.py   codegraph-server client wrapper (dormant: tests only, single-writer tripwire-guarded, never on the resident serving path)
   perf.py               Structured latency logging
   bootstrap.sh          EC2 user-data: install deps / extract repo to local /data/repo / snapshot-stamp re-extract / systemd build→bridge
   tests/                pytest (invoked by scripts/test.sh)
@@ -30,7 +32,7 @@ infra/                  Infrastructure as code (MVP starts with agentcore toolki
   README.md             IaC split: CDK owns the stable layer / deploy-all.sh provisions AgentCore Runtime via boto3
   (p2) lib/             runtime / codegraph(index-service) / gateway stacks
 shared/                 Cross-package shared: structured logging (hashUserId), MCP tool schema, card protocol types
-config/                 Config-driven: i18n.json (card / alarm / error copy), alarm-thresholds.json
+config/                 Config-driven: i18n.json (card / alarm / error copy), (p1) alarm-thresholds.json (thresholds TBD)
 scripts/                Operational lifecycle
   check-invariants.sh   Fast structural lint (AGENTS / CLAUDE / structure / bilingual pairing / top-level dir existence)
   lib/                  common.sh (formatting + dep checks), env-utils.sh (.env / deploy-config shared helper)

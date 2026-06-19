@@ -11,11 +11,13 @@
 # Idempotent: every resource is "describe-or-create". Re-running reconciles.
 # State persists to .local/deploy-config (gitignored); later runs read it back.
 #
-# Phases (each skippable with --skip-<phase>):
+# Phases (each skippable with --skip <phase>):
 #   1 artifacts  : build/stage codegraph-server bin + index-service code + repo → S3
-#   2 network    : VPC, public+private subnet, IGW, NAT, route tables (or reuse)
-#   3 index-svc  : security groups + ARM EC2 (Ubuntu 24.04) running bootstrap.sh
-#   4 runtime    : AgentCore runtime in VPC mode, CODEGRAPH_MCP_URL set
+#   2 iam        : execution + index-service instance roles/policies (describe-or-create)
+#   3 network    : VPC, public+private subnet, IGW, NAT, route tables (or reuse)
+#   4 index-svc  : security groups + ARM EC2 (Ubuntu 24.04) running bootstrap.sh
+#   5 image      : build the agent container (ARM64) and push to ECR
+#   6 runtime    : AgentCore runtime in VPC mode, CODEGRAPH_MCP_URL set
 #
 # NO EFS: the agent microVM mounts no filesystem; it reads all source code over
 # the index-service HTTP bridge (read_file/glob_files/search_files/codegraph_*).
