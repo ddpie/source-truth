@@ -69,6 +69,38 @@ function log(obj: Record<string, unknown>): void {
 // click (card.action.trigger) can abort that specific invoke.
 const abortControllers = new Map<string, AbortController>();
 
+// GRACEFUL SHUTDOWN (module scope so the SIGTERM/SIGINT handlers can be registered
+// at the very TOP of main(), before the async startup awaits — a SIGTERM arriving
+// DURING startup must still exit cleanly). Without graceful shutdown a SIGTERM
+// (every deploy / supervisor bounce / docker stop) kills the process instantly and
+// abandons every in-flight stream — its heartbeat stops and finalizeCard never
+// runs, so the card is stuck on "正在分析…" FOREVER. Instead: abort all in-flight
+// invokes (each hits its own abort path → finalizes its card to "已停止"), give the
+// finalize writes a brief bounded window to land, then exit. wsRef is set once the
+// WSClient exists; the stop is best-effort (not in the SDK's public types).
+let wsRef: { stop?: () => void } | undefined;
+let shuttingDown = false;
+function gracefulShutdown(sig: string): void {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  log({ event: "shutdown_begin", signal: sig, inflight: abortControllers.size });
+  try { wsRef?.stop?.(); } catch { /* no-op if absent — abort-all below is load-bearing */ }
+  for (const ctrl of abortControllers.values()) {
+    try { ctrl.abort(); } catch { /* each invoke finalizes its own card on abort */ }
+  }
+  // Bounded drain: give the abort-path finalize writes ~3s to reach CardKit, then
+  // exit regardless (never hang a deploy on a wedged finalize).
+  const deadline = Date.now() + 3000;
+  const waitDrain = (): void => {
+    if (abortControllers.size === 0 || Date.now() > deadline) {
+      log({ event: "shutdown_done", drained: abortControllers.size === 0 });
+      process.exit(0);
+    }
+    setTimeout(waitDrain, 150);
+  };
+  waitDrain();
+}
+
 // Serialize invokes per runtimeSessionId so two turns never run concurrently on
 // the same warm microVM (which would corrupt its one SDK conversation). See
 // serialize-session.ts for the why; it's a tested module so the critical
@@ -132,8 +164,14 @@ async function streamingCardInvoke(
   // card/session work so a re-delivery creates no duplicate card.
   if ("messageId" in target && isDuplicate(`msg:${target.messageId}`)) return;
 
-  const queued = sessionSerializer.isBusy(sessionId);
-  if (queued) log({ event: "session_busy_queued", session: sessionId });
+  // "排队中" shows when this turn won't start streaming immediately — either the
+  // SAME session is mid-turn (serializer busy) OR the GLOBAL invoke gate is
+  // saturated (all slots held by other sessions). Without the gate check, a turn
+  // queued purely by global concurrency showed a frozen "正在分析" with no moving
+  // timer (cross-review: the queued flag only covered same-session busy).
+  const gateSaturated = invokeGate.stats.available === 0;
+  const queued = sessionSerializer.isBusy(sessionId) || gateSaturated;
+  if (queued) log({ event: "turn_queued", session: sessionId, reason: sessionSerializer.isBusy(sessionId) ? "session_busy" : "gate_saturated", gateWaiting: invokeGate.stats.waiting });
 
   // Create + send the card NOW, not when the serialized turn starts. Without this
   // a follow-up (or a 2nd message in the same chat) chained behind a 9-minute
@@ -845,6 +883,10 @@ async function runStreamingInvoke(
 }
 
 async function main(): Promise<void> {
+  // Register shutdown handlers FIRST — before any await — so a SIGTERM during the
+  // async startup window (SDK import, i18n load, credential setup) still exits cleanly.
+  process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
+  process.on("SIGINT", () => gracefulShutdown("SIGINT"));
   if (!RUNTIME_ARN) throw new Error("RUNTIME_ARN env is required");
   // Load card copy (config/i18n.json) at startup so a missing/broken bundle fails
   // loudly here, not mid-answer. LOCALE env selects the locale (default zh).
@@ -1124,45 +1166,15 @@ async function main(): Promise<void> {
       process.exit(1);
     },
   });
+  wsRef = ws as unknown as { stop?: () => void }; // let gracefulShutdown best-effort stop intake
   ws.start({ eventDispatcher: dispatcher });
   // NOTE: start() resolves before the connection is established; this marks only
   // "start() invoked". The real "connected + receiving events" signal is the
   // sdk_wsclient_connected log from onReady above.
   log({ event: "sdk_wsclient_started" });
 
-  // GRACEFUL SHUTDOWN. Without this, a SIGTERM (every deploy / supervisor bounce /
-  // docker stop) kills the process instantly and abandons every in-flight stream —
-  // its heartbeat stops and finalizeCard never runs, so the card is stuck on
-  // "正在分析…" FOREVER (a user-visible wedge on every routine restart). Instead:
-  // abort all in-flight invokes (each hits its own abort path → finalizes its card
-  // to a "已停止" state), give the finalize writes a brief bounded window to land,
-  // then exit. Idempotent + bounded so a stuck finalize can't block shutdown.
-  let shuttingDown = false;
-  const gracefulShutdown = (sig: string) => {
-    if (shuttingDown) return;
-    shuttingDown = true;
-    const inflight = abortControllers.size;
-    log({ event: "shutdown_begin", signal: sig, inflight });
-    // Best-effort: ask the WSClient to stop accepting new events if the SDK exposes
-    // a stop/close (not in its public types) — abort-all below is the load-bearing part.
-    try { (ws as unknown as { stop?: () => void }).stop?.(); } catch { /* no-op if absent */ }
-    for (const ctrl of abortControllers.values()) {
-      try { ctrl.abort(); } catch { /* each invoke finalizes its own card on abort */ }
-    }
-    // Bounded drain: give the abort-path finalize writes ~3s to reach CardKit, then
-    // exit regardless (never hang a deploy on a wedged finalize).
-    const deadline = Date.now() + 3000;
-    const waitDrain = () => {
-      if (abortControllers.size === 0 || Date.now() > deadline) {
-        log({ event: "shutdown_done", drained: abortControllers.size === 0 });
-        process.exit(0);
-      }
-      setTimeout(waitDrain, 150);
-    };
-    waitDrain();
-  };
-  process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
-  process.on("SIGINT", () => gracefulShutdown("SIGINT"));
+  // (SIGTERM/SIGINT handlers were registered at the top of main(); gracefulShutdown
+  // is module-scoped and uses wsRef set below.)
 }
 
 if (require.main === module) {

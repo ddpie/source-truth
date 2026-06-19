@@ -117,4 +117,27 @@ describe("CardWriter.coalesce (latest-wins lane)", () => {
     await tick(15);
     expect(seen).toEqual([1, 2]); // ran once per drained slot
   });
+
+  it("dropLanes drops a PENDING frame so it never repaints (e.g. post-finalize)", async () => {
+    const w = new CardWriter();
+    const seen: string[] = [];
+    const blocker = w.write(async () => { await tick(20); }); // occupy the chain
+    w.coalesce("status", async () => { seen.push("stale"); }); // queued behind blocker
+    w.dropLanes("status");                                      // drop before it runs
+    await blocker;
+    await tick(30);
+    expect(seen).toEqual([]); // the dropped frame never executed
+  });
+
+  it("after dropLanes, a NEW coalesce on the same lane still works (slot marker cleared)", async () => {
+    const w = new CardWriter();
+    const seen: string[] = [];
+    const blocker = w.write(async () => { await tick(20); });
+    w.coalesce("status", async () => { seen.push("stale"); });
+    w.dropLanes("status");
+    w.coalesce("status", async () => { seen.push("fresh"); }); // must schedule a fresh slot
+    await blocker;
+    await tick(30);
+    expect(seen).toEqual(["fresh"]); // stale dropped, fresh ran (laneQueued was cleared)
+  });
 });
