@@ -8,7 +8,7 @@
 agent-container/        会话 microVM 内运行的 Claude Code Agent（Python）
   README.md             职责 + 对外契约（输入 goal/session、index-service MCP 端点：定位 + 读文件）
   prompts/              系统 prompt + 高频问题清单 + 问答规范（代码为准 / 标差异 / 转研发）
-  Dockerfile            ARM64 基础镜像 sha256 锁定；pin Claude Agent SDK + @anthropic-ai/claude-code
+  Dockerfile            ARM64 基础镜像 sha256 锁定；pin Claude Agent SDK（claude-agent-sdk）；@anthropic-ai/claude-code 按运维决定跟 @latest（不 pin）
   agent.py              @app.entrypoint 异步流式 handler，启动 Agent 循环
   agent_lib.py          SDK-free 只读问答 Agent 主逻辑（agent.py 的可测试内核：选项构建 / 取证循环）
   requirements.txt + requirements.lock  钉死的 Python 依赖（lock = pip freeze 全传递）
@@ -20,7 +20,7 @@ index-service/          常驻 CodeGraph 索引服务 + MCP-over-HTTP 桥
   README.md             常驻单写者会话 / CodeGraph / HTTP 桥（定位 + 读文件） / 本地仓库副本 / bootstrap
   http_bridge.py        FastMCP HTTP 桥（包根，非 src/）：暴露 codegraph 定位 + 读文件工具，路径对齐为仓库相对
   codegraph_session.py  常驻 codegraph-server 单写者会话（worker 线程 + 私有 loop，健康自愈，带超时）
-  file_search.py        本地副本 ripgrep/grep 检索工具（逐文件遍历比远程慢 ~225x，故走本地副本；命中按内容去重；MCP 暴露）
+  file_search.py        本地副本 ripgrep/grep 检索工具（全仓搜索远程 EFS/NFS 比本地副本慢 ~225x：远程 20–47s vs 本地 0.2s，故内置 Grep 禁用、改走本地副本；命中按内容去重；MCP 暴露）
   file_read.py          本地副本按行/按点读文件工具（read_file，路径对齐为仓库相对；MCP 暴露）
   file_table.py         结构化配置表读取（Excel/CSV/TSV/SQLite → 文本，read_table；只读、带 DoS 上限；MCP 暴露）
   path_align.py         索引路径 ↔ 仓库相对路径词法对齐（拒越界；mount_root 默认空，遗留 /mnt/repo 仍兼容）
