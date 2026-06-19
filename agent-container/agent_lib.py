@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -320,17 +321,92 @@ async def run_agent(
     # emits a `tool_latency` perf line per call. This is what localizes "10 Grep
     # calls on EFS" vs "model thinking" — the dominant cost in live self-test.
     pending: dict[str, tuple[str, float]] = {}  # tool_use_id → (name, start)
-    try:
-        async for message in qfn(prompt=prompt, options=options):
+    # MCP-INIT-RACE detection (root cause of the "raw <invoke> XML in the card"
+    # bug): on a COLD microVM the claude-code subprocess can finish the model's
+    # FIRST turn before the CodeGraph MCP server's HTTP handshake registers the
+    # tools. The model — still seeing the tool DESCRIPTIONS in the system prompt —
+    # emits tool-call XML as TEXT, and since no tools are registered there's nothing
+    # to dispatch, so the run ends at num_turns<=1 with NO tool_use ever seen. That
+    # first (failed) attempt DOES establish the MCP connection, so a single retry
+    # lands on a now-warm connection and succeeds. We watch these signals on the
+    # stream and, iff it ends in that exact shape, transparently re-run ONCE.
+    saw_tool_use = False
+    saw_markup_text = False
+    last_num_turns: int | None = None
+
+    async def _drive(p: str) -> AsyncIterator[Any]:
+        nonlocal first_emitted, n, saw_tool_use, saw_markup_text, last_num_turns
+        async for message in qfn(prompt=p, options=options):
             if not first_emitted:
                 first_emitted = True
                 _perf("agent_first_message", (time.perf_counter() - t0) * 1000)
             n += 1
             _track_tool_latency(message, pending)
             _maybe_log_result(message)
+            if _message_has_tool_use(message):
+                saw_tool_use = True
+            if _message_text_has_toolcall_markup(message):
+                saw_markup_text = True
+            nt = getattr(message, "num_turns", None)
+            if isinstance(nt, int):
+                last_num_turns = nt
             yield message
+
+    try:
+        async for message in _drive(prompt):
+            yield message
+        # Leak shape: no tool ever executed, the model emitted tool-call markup as
+        # text, and the loop ended in <=1 turn. Retry ONCE on the now-warm MCP conn.
+        if (not saw_tool_use) and saw_markup_text and (last_num_turns is None or last_num_turns <= 1):
+            _perf("mcp_init_race_retry", (time.perf_counter() - t0) * 1000,
+                  num_turns=last_num_turns)
+            logger.warning(json.dumps({"event": "mcp_init_race_retry",
+                                       "detail": "tools not registered on cold start; retrying once"}))
+            saw_tool_use = False
+            saw_markup_text = False
+            last_num_turns = None
+            async for message in _drive(prompt):
+                yield message
     finally:
         _perf("agent_run_total", (time.perf_counter() - t0) * 1000, messages=n)
+
+
+# Matches the tool-call markup the model emits as TEXT when MCP tools aren't
+# registered — Claude serializes with an `antml:` namespace prefix, so tolerate it.
+_TOOLCALL_MARKUP_RE = re.compile(r"<(?:antml:)?invoke\b|(?:antml:)?function_calls\b", re.IGNORECASE)
+
+
+def _message_has_tool_use(message: Any) -> bool:
+    """True if the message carries a REAL tool_use block (a tool was actually
+    dispatched). Duck-typed: a tool_use block has id + name + input."""
+    try:
+        content = getattr(message, "content", None)
+        if not isinstance(content, (list, tuple)):
+            return False
+        for block in content:
+            if (getattr(block, "id", None) is not None
+                    and getattr(block, "name", None) is not None
+                    and getattr(block, "input", None) is not None):
+                return True
+    except Exception:  # noqa: BLE001 - detection must never break the stream
+        return False
+    return False
+
+
+def _message_text_has_toolcall_markup(message: Any) -> bool:
+    """True if the message's TEXT content contains tool-call markup (the model
+    emitting <invoke>/<function_calls> as prose because no tools were registered).
+    Duck-typed over both content-block lists and a bare ``.text`` attribute."""
+    try:
+        content = getattr(message, "content", None)
+        blocks = content if isinstance(content, (list, tuple)) else [message]
+        for block in blocks:
+            text = getattr(block, "text", None)
+            if isinstance(text, str) and _TOOLCALL_MARKUP_RE.search(text):
+                return True
+    except Exception:  # noqa: BLE001 - detection must never break the stream
+        return False
+    return False
 
 
 def _track_tool_latency(message: Any, pending: dict[str, tuple[str, float]]) -> None:
