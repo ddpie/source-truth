@@ -15,6 +15,7 @@ import {
   buildStopButton,
   finalizeTitle,
   buildFollowUpElements,
+  buildClarifyElements,
   buildClickedButtonElement,
   formatElapsed,
   buildQuestionElement,
@@ -201,6 +202,41 @@ describe("buildClickedButton", () => {
     expect(el.disabled).toBe(true);
     expect(el.text.content).toContain("战斗伤害怎么算？");
     expect(el.text.content).toContain("✓");
+  });
+});
+
+describe("buildClarifyElements", () => {
+  it("renders one primary button per option, reusing the follow_up action", () => {
+    const els = buildClarifyElements("指哪种攻击力？", [
+      "武器基础攻击力怎么算？",
+      "角色总攻击力怎么算？",
+    ]) as Array<{ tag: string; element_id: string; type: string; value: { action: string; text: string; eid: string } }>;
+    expect(els).toHaveLength(2); // buttons only — the prompt is rendered in the card body
+    expect(els[0].tag).toBe("button");
+    expect(els[0].type).toBe("primary");
+    expect(els[0].element_id).toBe("clarify_0");
+    // Clicking reuses the follow_up callback so the chosen option re-asks WITH context.
+    expect(els[0].value.action).toBe("follow_up");
+    expect(els[0].value.text).toBe("武器基础攻击力怎么算？");
+    expect(els[1].element_id).toBe("clarify_1");
+  });
+
+  it("caps at MAX_CLARIFY_OPTIONS (4)", () => {
+    const els = buildClarifyElements("?", ["a", "b", "c", "d", "e", "f"]);
+    expect(els.length).toBe(4);
+  });
+});
+
+describe("finalizeTitle clarify branch", () => {
+  it("uses a 请选择 header (not 回答完成) and no 用时 for a clarification", () => {
+    const t = finalizeTitle(false, false, false, "1m 7s", false, true);
+    expect(t).toContain("请选择");
+    expect(t).not.toContain("回答完成");
+    expect(t).not.toContain("用时"); // elapsed is noise on a question-back-to-user
+  });
+
+  it("a normal answer is unaffected by the clarify flag default", () => {
+    expect(finalizeTitle(false, false, false, "1m 7s")).toBe("回答完成 · 用时 1m 7s");
   });
 });
 
