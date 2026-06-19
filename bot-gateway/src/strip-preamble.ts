@@ -79,6 +79,14 @@ const STANDALONE_PREAMBLE_OPENERS: RegExp[] = [
   // keep it from eating a real sentence (a real answer never ENDS its first sentence
   // on a bare "下面整理" — that's purely a transition).
   new RegExp(`^.{0,60}[，,。]?(现在|来|这就|接下来|下面|稍后)(就)?(我)?(来|开始)?(整理|汇总|梳理|归纳)(一下)?${TAIL}$`),
+  // "已核对完整的XX逻辑，结论清楚了。" / "都查清了，结论很明确。" — a readiness/取证
+  // verb (核对/核实/确认/查清/梳理/搞清) FOLLOWED by a COMPLETION announce
+  // (结论清楚/清楚了/明确了/明白了/有结论了) with no result content after it. This is
+  // purely a "I'm done investigating" transition — a real answer's first sentence never
+  // ENDS by announcing the conclusion is now clear; it just STATES the conclusion. The
+  // FULL-sentence match + 160-char cap keep it from eating a real sentence that merely
+  // contains 结论/清楚 mid-clause ("结论清楚了之后会缓存…" continues → not a full match).
+  new RegExp(`^.{0,48}(核对|核实|确认|查清|查证|梳理|搞清|弄清|核查|对照)(完|完毕|清楚|好)?了?.{0,20}[，,]?(结论|答案|逻辑|情况|机制)?(已)?(清楚|明确|明了|明白|清晰|有了结论|出来了|清楚了)了?${TAIL}$`),
   /^(let me|i'?ll)\s+(now\s+)?(compile|summarize|put together|organize)\s+(the\s+)?(answer|findings?|results?)\s*[.:]?$/i,
   /^now\s+(let me|i'?ll)\s+(compile|summarize|put together|organize|give|provide)\b.{0,30}$/i,
   /^(i\s+)?(now\s+)?have\s+(enough|all\s+the)\s+(info|information|evidence)\b.{0,40}$/i,
