@@ -93,6 +93,24 @@ def test_read_file_paging_offset_limit(repo):
     assert out["truncated"] is True  # more lines remain after the window
 
 
+def test_read_file_nonpositive_limit_reads_all_not_zero(repo):
+    # REGRESSION: limit<=0 used to collapse end→start → empty content AND
+    # truncated=True, so the agent thought the file was cut off and needlessly paged.
+    # A non-positive limit means "no caller cap" (like None), reading the whole file.
+    for bad in (0, -1):
+        out = file_read.read_file("src/A.cs", local_root=str(repo), mount_root=MOUNT, limit=bad)
+        assert out["content"].splitlines() == ["line1", "line2", "line3"]
+        assert out["truncated"] is False
+
+
+def test_glob_normalizes_backslashes_like_read_file(repo):
+    # REGRESSION: a Windows-style backslash glob pattern (Unity/.NET repos) used to
+    # stay a single backslash literal → 0 hits, while read_file normalized it. Both
+    # now go through _normalize_seps so the same path works in glob and read.
+    g = file_read.glob_files("src\\*.cs", local_root=str(repo), mount_root="")
+    assert g["paths"] == ["src/A.cs"]
+
+
 def test_read_file_missing_file_raises(repo):
     with pytest.raises(ValueError):
         file_read.read_file("src/Nope.cs", local_root=str(repo), mount_root=MOUNT)
