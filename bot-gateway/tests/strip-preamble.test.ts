@@ -337,4 +337,25 @@ describe("stripPreamble", () => {
       expect(stripPreamble(real)).toBe(real);
     }
   });
+
+  // Observed live: a TWO-sentence preamble — "已经把X都查清了。下面分类说明。" then the
+  // answer. Each sentence is independently a full preamble; the iterative 2-pass
+  // strip removes both.
+  it("strips a TWO-sentence preamble ('…都查清了。下面分类说明。')", () => {
+    expect(stripPreamble("已经把智力的各处作用都查清了。下面分类说明。\n\n智力是六维属性之一。"))
+      .toBe("智力是六维属性之一。");
+    expect(stripPreamble("我已经把幸运在代码里起作用的地方都核对完了。下面是结论。\n\n幸运是一项基础属性。"))
+      .toBe("幸运是一项基础属性。");
+  });
+
+  it("does NOT over-strip a real answer that opens with content then '…，下面分别说明'", () => {
+    const real = "智力影响法力上限、施法成功率和商人价格三类，下面分别说明。";
+    expect(stripPreamble(real)).toBe(real);
+  });
+
+  it("2-pass strip is bounded — never chews a 3rd (real) sentence", () => {
+    // Two preamble sentences + a real answer sentence: only the two preambles go.
+    const out = stripPreamble("已经把数据都查清了。下面是结论。法术消耗和等级无关。");
+    expect(out).toBe("法术消耗和等级无关。");
+  });
 });

@@ -87,6 +87,16 @@ const STANDALONE_PREAMBLE_OPENERS: RegExp[] = [
   // FULL-sentence match + 160-char cap keep it from eating a real sentence that merely
   // contains 结论/清楚 mid-clause ("结论清楚了之后会缓存…" continues → not a full match).
   new RegExp(`^.{0,48}(核对|核实|确认|查清|查证|梳理|搞清|弄清|核查|对照)(完|完毕|清楚|好)?了?.{0,20}[，,]?(结论|答案|逻辑|情况|机制)?(已)?(清楚|明确|明了|明白|清晰|有了结论|出来了|清楚了)了?${TAIL}$`),
+  // "已经把XX都查清了。" / "我已经把…核对完了。" — a "把…(都)<取证动词>(完/清)了" readiness
+  // sentence that ENDS on the bare completion verb (no result content). Often the
+  // FIRST of a 2-sentence preamble (paired with "下面分类说明。" below; the iterative
+  // 2-pass strip handles the pair). FULL-match guard + 160 cap keep it safe.
+  new RegExp(`^(我)?(现在)?(已经|已)?(把|将)?.{0,40}(都|全部|逐一|一一)?(查清|核对|核实|确认|查证|梳理|搞清|弄清|核查|查完|读完|看完|捋|过)(完|完毕|清楚|好|了一遍|一遍)?了${TAIL}$`),
+  // "下面分类说明。" / "下面是结论。" / "下面逐类讲。" — a bare "下面/接下来 + 呈现动词"
+  // announce with NO readiness lead-in (often the SECOND sentence of a 2-sentence
+  // preamble). Kept tight: requires a 下面/接下来/这就/下面就 opener so it can't match a
+  // real sentence that merely starts with 说明/讲.
+  new RegExp(`^(下面|接下来|这就|下面就|那么)(我)?(就)?(来|开始|先)?(分类|逐类|逐一|依次|分别)?(说明|讲|讲讲|讲解|展开|道来|是结论|给结论|说结论|列出来)(一下)?${TAIL}$`),
   /^(let me|i'?ll)\s+(now\s+)?(compile|summarize|put together|organize)\s+(the\s+)?(answer|findings?|results?)\s*[.:]?$/i,
   /^now\s+(let me|i'?ll)\s+(compile|summarize|put together|organize|give|provide)\b.{0,30}$/i,
   /^(i\s+)?(now\s+)?have\s+(enough|all\s+the)\s+(info|information|evidence)\b.{0,40}$/i,
@@ -116,6 +126,24 @@ function isFullPreamble(text: string): boolean {
 }
 
 export function stripPreamble(body: string): string {
+  if (!body) return body;
+  // The model sometimes emits a TWO-sentence preamble ("已经把X都查清了。下面分类
+  // 说明。" then the answer) — each sentence is independently a full preamble. Strip
+  // ITERATIVELY (bounded to 2 passes so a pathological input can't loop, and so we
+  // never chew into a real answer — 2 transition sentences is the observed max).
+  // Each pass must make progress (shorter) or we stop.
+  let out = body;
+  for (let i = 0; i < 2; i++) {
+    const next = stripPreambleOnce(out);
+    if (next === out) break;
+    out = next;
+  }
+  return out;
+}
+
+/** One pass: strip a SINGLE leading preamble (separator form or standalone
+ *  sentence). Returns the input unchanged if the head isn't a full preamble. PURE. */
+function stripPreambleOnce(body: string): string {
   if (!body) return body;
 
   // Strategy 1 — preamble + `---` SEPARATOR. The model writes its transition note,
