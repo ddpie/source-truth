@@ -59,6 +59,8 @@ structure）描述系统*是什么*；本文描述*一次提问如何穿过系�
 | 可见性 | 所有会话 | 仅本 microVM |
 | 生命周期 | 持久（部署时构建一次，重部署刷新） | per-session（约 14 天空闲过期） |
 
+![会话隔离：多个 per-session microVM（各自独占 /mnt/workspace 临时文件）共享同一个只读 index-service 代码副本](../assets/session-isolation.svg)
+
 机器人粒度：**每个游戏项目一个机器人**，机器人内**按会话隔离**。上下文挂在飞书对话上、按需拉取消息
 记录；多用户不可共用 session。
 

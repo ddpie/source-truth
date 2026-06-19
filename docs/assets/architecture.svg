@@ -9,7 +9,7 @@
   </defs>
 
   <rect x="0" y="0" width="760" height="560" fill="#ffffff"/>
-  <text x="380" y="38" text-anchor="middle" font-size="19" font-weight="700" fill="#1f2733">source-truth — 一次提问如何穿过系统</text>
+  <text x="380" y="38" text-anchor="middle" font-size="18" font-weight="700" fill="#1f2733">source-truth — 一次提问如何穿过系统</text>
   <text x="380" y="60" text-anchor="middle" font-size="12.5" fill="#7a8493">代码为唯一依据 · 三个有状态组件 · 会话隔离 · 全程只读</text>
 
   <!-- lane labels (left gutter) -->
