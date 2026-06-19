@@ -317,7 +317,17 @@ else
       exit 1
     }
   fi
-  say ok "index-service at $INDEX_IP:8080"
+  # STABLE ENDPOINT: point the agent at a Route53 private DNS name, not the raw IP.
+  # On a --refresh-index the instance (and its IP) change, but we just re-point the
+  # SAME DNS name — so the runtime's CODEGRAPH_MCP_URL never changes, and AgentCore's
+  # warm microVMs (which cache the env for 30+ min) never end up pointed at a dead,
+  # terminated IP. This eliminates the intermittent empty-answer cards a refresh used
+  # to cause. The runtime phase below uses INDEX_DNS_NAME instead of INDEX_SERVICE_IP.
+  if [[ "$DRY_RUN" != true ]]; then
+    "$SCRIPT_DIR/lib/provision_index_dns.sh" "$REGION" "$CONFIG_FILE" "$VPC_ID" "$INDEX_IP" >/dev/null
+    safe_source_env "$CONFIG_FILE"
+  fi
+  say ok "index-service at $INDEX_IP:8080 (stable name: ${INDEX_DNS_NAME:-pending})"
 fi
 
 # ============================================================
@@ -374,13 +384,19 @@ else
   ROLE_ARN="${AGENT_RUNTIME_ROLE:-arn:aws:iam::${ACCOUNT}:role/SourceTruthAgentRuntimeRole}"
   SUBNET="${PRIVATE_SUBNET:?PRIVATE_SUBNET not set — run the network phase first}"
   IDX_IP="${INDEX_SERVICE_IP:?INDEX_SERVICE_IP not set — run the index-svc phase first}"
+  # Use the STABLE DNS name (set by provision_index_dns.sh) so the runtime env is
+  # invariant across index-instance replacement — warm microVMs never end up on a
+  # dead IP. Fall back to the raw IP only if DNS wasn't provisioned (e.g. an old
+  # config), so a partial/legacy state still deploys.
+  IDX_ENDPOINT="${INDEX_DNS_NAME:-$IDX_IP}"
+  CODEGRAPH_URL="http://${IDX_ENDPOINT}:8080/mcp"
   # Runtime joins the VPC with the index-service SG: it has default egress-all
   # (reaches the bridge on :8080), and the index SG accepts inbound from the VPC
   # CIDR — which covers this SG's members. No EFS: the agent reads all code over
   # that HTTP bridge, so the microVM mounts no filesystem.
   RUNTIME_SG="${INDEX_SERVICE_SG:?INDEX_SERVICE_SG not set — run the index-svc phase first}"
   if [[ "$DRY_RUN" == true ]]; then
-    say info "[dry-run] deploy_runtime.py → AgentCore runtime (model=$MODEL, sg=$RUNTIME_SG, CODEGRAPH_MCP_URL=${IDX_IP}:8080)"
+    say info "[dry-run] deploy_runtime.py → AgentCore runtime (model=$MODEL, sg=$RUNTIME_SG, CODEGRAPH_MCP_URL=${CODEGRAPH_URL})"
   else
     # Capture stdout (deploy_runtime.py prints AGENT_RUNTIME_ID/ARN to stdout, all
     # status to stderr) so we can PERSIST the ARN. Without this the runtime deploys
@@ -390,7 +406,7 @@ else
       --region "$REGION" --account "$ACCOUNT" \
       --role-arn "$ROLE_ARN" --image "$ECR_URI" --model "$MODEL" \
       --subnets "$SUBNET" --security-groups "$RUNTIME_SG" \
-      --codegraph-mcp-url "http://${IDX_IP}:8080/mcp")"
+      --codegraph-mcp-url "$CODEGRAPH_URL")"
     RT_ARN="$(printf '%s\n' "$RT_OUT" | sed -n 's/^AGENT_RUNTIME_ARN=//p')"
     RT_ID="$(printf '%s\n' "$RT_OUT" | sed -n 's/^AGENT_RUNTIME_ID=//p')"
     if [[ -z "$RT_ARN" ]]; then
@@ -401,7 +417,7 @@ else
     update_env "$CONFIG_FILE" AGENT_RUNTIME_ARN "$RT_ARN"
     update_env "$CONFIG_FILE" RUNTIME_ARN "$RT_ARN"  # the name bot-gateway reads
     [[ -n "$RT_ID" ]] && update_env "$CONFIG_FILE" AGENT_RUNTIME_ID "$RT_ID"
-    say ok "runtime deployed → RUNTIME_ARN persisted to ${CONFIG_FILE} (VPC sg=$RUNTIME_SG, CODEGRAPH_MCP_URL → ${IDX_IP}:8080)"
+    say ok "runtime deployed → RUNTIME_ARN persisted to ${CONFIG_FILE} (VPC sg=$RUNTIME_SG, CODEGRAPH_MCP_URL → ${CODEGRAPH_URL})"
   fi
 fi
 
