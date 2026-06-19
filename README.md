@@ -121,6 +121,7 @@ deploy-all.sh：把目标仓库打成 tarball 上传 S3（部署时快照）
 
 | 主题 | 链接 |
 |------|------|
+| 部署 / 连飞书 / 运维 / 排错（从零到能用） | [`docs/runbook.md`](docs/runbook.md) |
 | 一次提问如何穿过系统（AI 必读） | [`docs/agent/architecture.md`](docs/agent/architecture.md) |
 | AI 协作约定 / 不变量 | [`AGENTS.md`](AGENTS.md) |
 | 目录结构（双语） | [`docs/structure_zh.md`](docs/structure_zh.md) · [`docs/structure_en.md`](docs/structure_en.md) |

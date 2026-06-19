@@ -23,7 +23,7 @@
 | 事实源 | 以代码为唯一依据 | 文档常滞后；配置与源数据基本在工程内 |
 | 范围 | MVP 仅查主分支 | 诉求是了解已上线功能；多分支后置 |
 | 运行环境 | AgentCore Runtime 会话隔离 | 每会话独立容器，秒级冷启、空闲约 15 分钟回收；Session Storage 约 14 天过期 |
-| 存储 | 共享存储，默认 EFS（待实测） | 关注读延迟，先实测，瓶颈出现再换 EBS/SSD |
+| 存储 | 共享存储，默认 EFS（待实测）<br>**现状已变更**：实测后废弃 EFS，改为 index-service 本地副本 + HTTP 桥（会话 microVM 不挂任何文件系统），见 [`../agent/efs-codegraph-sharing-spike.md`](../agent/efs-codegraph-sharing-spike.md) | 关注读延迟，先实测，瓶颈出现再换 EBS/SSD |
 | 索引 | 项目级索引，程序自动生成 | 后端多仓，需先定位查哪个工程；工程内检索交给 Claude Code |
 | 模型 | MVP 用 Claude Code | 先走 API 计费，后续评估订阅 |
 | 机器人 | 每个游戏项目一个机器人 | 机器人内按会话隔离 |

@@ -8,7 +8,7 @@
 agent-container/        Claude Code Agent running inside the session microVM (Python)
   README.md             Responsibility + external contract (goal/session input, index-service MCP endpoint: locate + read files)
   prompts/              System prompt + FAQ list + answer rules (code-as-truth / flag divergence / escalate)
-  Dockerfile            ARM64 base image pinned by sha256; pins Claude Agent SDK + @anthropic-ai/claude-code
+  Dockerfile            ARM64 base image pinned by sha256; pins Claude Agent SDK (claude-agent-sdk); @anthropic-ai/claude-code tracks @latest by operator choice (NOT pinned)
   agent.py              @app.entrypoint async streaming handler that drives the agent loop
   agent_lib.py          SDK-free read-only Q&A agent core (agent.py's testable kernel: option build / evidence loop)
   requirements.txt + requirements.lock  Pinned Python deps (lock = full-transitive pip freeze)
@@ -20,7 +20,7 @@ index-service/          Standalone CodeGraph index service + MCP-over-HTTP bridg
   README.md             Resident single-writer session / CodeGraph / HTTP bridge (locate + read files) / local repo copy / bootstrap
   http_bridge.py        FastMCP HTTP bridge (package root, not src/): exposes codegraph locate + read-file tools, aligns paths to repo-relative
   codegraph_session.py  Resident codegraph-server single-writer session (worker thread + private loop, health self-heal, timeouts)
-  file_search.py        Local-copy ripgrep/grep search tool (per-file traversal is ~225x slower remote, so served from local copy; content-dedups hits; MCP-exposed)
+  file_search.py        Local-copy ripgrep/grep search tool (whole-repo search is ~225x slower on a remote EFS/NFS mount than on the local copy: ~20-47s remote vs ~0.2s local, so builtin Grep is disabled and search runs on the local copy; content-dedups hits; MCP-exposed)
   file_read.py          Local-copy by-line/by-point file reader (read_file, paths aligned to repo-relative; MCP-exposed)
   file_table.py         Structured config-table reader (Excel/CSV/TSV/SQLite → text, read_table; read-only, DoS-bounded; MCP-exposed)
   path_align.py         Index path ↔ repo-relative lexical alignment (rejects escapes; mount_root defaults to "", legacy /mnt/repo still accepted)
