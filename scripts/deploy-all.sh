@@ -156,12 +156,19 @@ preflight_model_access() {
   else
     rc=$?
     case "$err" in
-      *AccessDenied*|*"don't have access"*|*"not authorized"*|*not\ enabled*)
-        say warn "Bedrock model access appears DISABLED for '$MODEL' in $REGION."
-        say warn "  → Enable it in the Bedrock console → Model access (per participating"
-        say warn "    region for the global.* inference profile), then questions will work."
-        say warn "  (Deploy continues; the runtime will reach READY but answers will fail"
-        say warn "   with AccessDeniedException until model access is granted.)" ;;
+      *AccessDenied*|*"don't have access"*|*"not authorized"*|*not\ enabled*|*ValidationException*|*"not found"*|*"inference profile"*)
+        say warn "Bedrock model '$MODEL' is unavailable in $REGION (access disabled OR the"
+        say warn "  inference-profile form isn't offered here)."
+        say warn "  → Enable it in the Bedrock console → Model access (per participating region)."
+        case "$MODEL" in
+          global.*)
+            say warn "  → '$MODEL' is a GLOBAL inference profile, only carried in a SUBSET of"
+            say warn "    regions. For a region outside that set, pass a REGION-SCOPED profile"
+            say warn "    instead, e.g. --model apac.anthropic.claude-opus-4-8 (APAC) or the"
+            say warn "    us.anthropic.* / eu.anthropic.* form for your region." ;;
+        esac
+        say warn "  (Deploy continues; the runtime reaches READY but answers fail with"
+        say warn "   AccessDenied/ValidationException until the model is available.)" ;;
       *)
         if [[ "$rc" == 124 ]]; then
           say info "model-access probe timed out (>30s); skipping check and continuing"
@@ -319,15 +326,20 @@ if skip iam; then say warn "skip iam"; else
 fi
 
 # ============================================================
-# Phase 2: network (reuse if NETWORK_VPC_ID already set)
+# Phase 2: network (VPC/subnets/IGW/NAT — fully idempotent, reconciles by tag)
 # ============================================================
 if skip network; then say warn "skip network"; else
   say step "Phase 2: network"
   if [[ "$DRY_RUN" == true ]]; then
-    say info "[dry-run] provision_network.sh (VPC/subnets/IGW/NAT) — reuse if VPC_ID set"
-  elif [[ -n "${VPC_ID:-}" ]]; then
-    say info "reusing VPC $VPC_ID"
+    say info "[dry-run] provision_network.sh (VPC/subnets/IGW/NAT) — discovers + reconciles by tag"
   else
+    # ALWAYS run the provisioner — never short-circuit on a non-empty VPC_ID. A prior
+    # run that died MID-network (e.g. NAT wait timed out, EIP quota) writes VPC_ID
+    # early but leaves PRIVATE_SUBNET/NAT_GATEWAY unset; skipping on VPC_ID alone left
+    # the network half-built forever and Phase 5 then failed on `PRIVATE_SUBNET:?`
+    # (cross-review CONFIRMED). provision_network.sh discovers every resource by tag
+    # and reconciles (describe-or-create per resource), so re-running is cheap and
+    # completes a partial network instead of defeating that inner idempotency.
     "$SCRIPT_DIR/lib/provision_network.sh" "$REGION" "$CONFIG_FILE"
     safe_source_env "$CONFIG_FILE"
   fi

@@ -267,12 +267,22 @@ class CodegraphSession:
                         self._health_detail = "ok"
 
     async def _acquire_restart_lock(self) -> None:
-        """Acquire the (threading) restart lock WITHOUT blocking the event loop.
+        """Acquire the (threading) restart lock WITHOUT blocking the event loop AND
+        without parking an executor thread per waiter.
 
-        The lock is a threading.Lock (loop-agnostic — see __init__). A blocking
-        .acquire() on the loop thread would freeze the whole bridge, so acquire it
-        in the default executor and await that."""
-        await asyncio.get_running_loop().run_in_executor(None, self._restart_lock.acquire)
+        The lock is a threading.Lock (loop-agnostic — see __init__). Two pitfalls:
+          - a blocking .acquire() on the loop thread freezes the whole bridge;
+          - submitting a BLOCKING .acquire() to the default executor (the old impl)
+            parks one pool thread per waiter. Under a restart STORM (a burst of N
+            concurrent requests all seeing _needs_restart() True) that exhausts the
+            default ThreadPoolExecutor (~min(32, cpu+4), i.e. ~12), so the holder's
+            OWN join()/reap() — also run_in_executor(None, …) — can never get a
+            thread → the whole bridge deadlocks and /health stays 503 forever
+            (cross-review CONFIRMED F1). Instead, poll a NON-blocking try-acquire with
+            a cooperative asyncio.sleep: no executor thread is held while waiting, so
+            the holder's join/reap always has the pool to itself."""
+        while not self._restart_lock.acquire(blocking=False):
+            await asyncio.sleep(0.05)
 
     async def stop(self) -> None:
         # Hold _restart_lock so shutdown is mutually exclusive with _restart /
@@ -426,9 +436,23 @@ class CodegraphSession:
         loop = self._loop
         if loop is None or self._session is None:
             raise IndexUnhealthy("worker not running")
+        cf = asyncio.run_coroutine_threadsafe(self._do_call(name, arguments), loop)
         try:
-            cf = asyncio.run_coroutine_threadsafe(self._do_call(name, arguments), loop)
             return await asyncio.wrap_future(cf)
+        except asyncio.CancelledError:
+            # The bridge-side request was cancelled (client disconnected / gateway
+            # gave up). wrap_future's cancellation only drops the bridge-side wrapper;
+            # it does NOT cancel the _do_call coroutine already running on the WORKER
+            # loop, which keeps holding _call_lock until QUERY_TIMEOUT_S (~30s) —
+            # head-of-line-blocking every other request and the liveness probe, and
+            # can cascade into needless cold restarts (cross-review CONFIRMED F2).
+            # Propagate the cancel across the loop boundary so the worker releases
+            # _call_lock promptly. The future returned by run_coroutine_threadsafe is
+            # cancel-thread-safe: cf.cancel() schedules cancellation of the underlying
+            # coroutine on the worker loop (best-effort — if it's mid blocking C call
+            # it lands at the next await, still far sooner than the 30s timeout).
+            cf.cancel()
+            raise
         except IndexUnhealthy:
             raise
         except Exception as exc:  # noqa: BLE001 - subprocess/loop died mid-call
