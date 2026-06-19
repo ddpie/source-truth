@@ -160,6 +160,16 @@ describe("stripPreamble", () => {
     expect(stripPreamble(body)).toBe(body);
   });
 
+  it("strips the 5th E2E case: '已经取到足够的信息，可以作答了。' + inline ---", () => {
+    const body = "已经取到足够的信息，可以作答了。---怪物的攻击力数值全部写死在代码里。";
+    expect(stripPreamble(body)).toBe("怪物的攻击力数值全部写死在代码里。");
+  });
+
+  it("does NOT over-strip a real answer whose first sentence begins with 回答", () => {
+    const body = "回答这个问题需要先看配置表。\n配置表在 Config 下。";
+    expect(stripPreamble(body)).toBe(body);
+  });
+
   it("does NOT match a --- adjacent to a table pipe as the cut point", () => {
     const body = "整理一下答案如下：\n| A | B |\n| --- | --- |\n| 1 | 2 |";
     // The head '整理一下答案如下' is a preamble-ish prefix, but the only `---` is in a

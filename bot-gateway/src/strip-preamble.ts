@@ -37,6 +37,11 @@ const STANDALONE_PREAMBLE_OPENERS: RegExp[] = [
   // "现在(我)(已经)掌握了足够的信息，(来)整理答案" — readiness + announce, full sentence.
   new RegExp(`^现在(我)?(已经)?(掌握|拿到|有)了?(足够|所有|相关)?(的)?(信息|证据|内容|数据)?[，,]?.{0,12}(整理|给出|得出)(一下)?(答案|结论|回答)${TAIL}$`),
   new RegExp(`^(我)?(已经)?(掌握|拿到|取得|获取|收集到|获取到)了?(足够|所有|相关|关键)(的)?(信息|证据|内容|数据)[，,]?.{0,16}(现在)?(整理|给出|得出|开始)?(完整|对比)?(一下)?(答案|结论|回答)?${TAIL}$`),
+  // "可以作答了" / "现在可以回答了" / "已取到信息，可以作答" — the readiness sentence that
+  // ends by announcing it will now answer (作答/回答). Broad on the lead-in but the
+  // FULL-sentence match + short-length guard keep it from eating a real answer.
+  new RegExp(`^.{0,48}(可以|现在|来|开始|这就)(作答|回答|给出答案|给出结论)(了|啦)?${TAIL}$`),
+  new RegExp(`^.{0,40}(已|都)(经)?.{0,8}(取到|取得|获取|收集|拿到|有|够)了?(足够|所有|相关|关键)?(的)?(信息|证据|内容|数据)?[，,]?.{0,12}(可以|现在|来|这就)?(作答|回答|给出|整理|说明)(答案|结论)?(了|啦)?${TAIL}$`),
   /^(let me|i'?ll)\s+(now\s+)?(compile|summarize|put together|organize)\s+(the\s+)?(answer|findings?|results?)\s*[.:]?$/i,
   /^now\s+(let me|i'?ll)\s+(compile|summarize|put together|organize|give|provide)\b.{0,30}$/i,
   /^(i\s+)?(now\s+)?have\s+(enough|all\s+the)\s+(info|information|evidence)\b.{0,40}$/i,
