@@ -27,18 +27,18 @@ describe("buildQuestionElement", () => {
     const el = buildQuestionElement("成本**翻倍**了吗 max_turns") as { tag: string; text: { tag: string; content: string } };
     expect(el.tag).toBe("div");
     expect(el.text.tag).toBe("plain_text");
-    expect(el.text.content).toBe("❓ 成本**翻倍**了吗 max_turns"); // verbatim, no backslashes
+    expect(el.text.content).toBe("问：成本**翻倍**了吗 max_turns"); // verbatim, no backslashes
   });
   it("collapses a multi-line paste to one line", () => {
     const el = buildQuestionElement("第一行\n第二行") as { text: { content: string } };
-    expect(el.text.content).toBe("❓ 第一行 第二行");
+    expect(el.text.content).toBe("问：第一行 第二行");
   });
   it("is the question element inside the created card body (element_id=question)", () => {
     const body = JSON.parse(buildCreateCardBody({ summary: "Q", question: "成本**翻倍**了吗" }));
     const card = JSON.parse(body.data);
     const qEl = card.body.elements.find((e: { element_id?: string }) => e.element_id === "question");
     expect(qEl.tag).toBe("div");
-    expect(qEl.text.content).toBe("❓ 成本**翻倍**了吗");
+    expect(qEl.text.content).toBe("问：成本**翻倍**了吗");
   });
 });
 
@@ -168,7 +168,7 @@ describe("follow-up card header", () => {
   });
 
   it("finalizeTitle does NOT show elapsed on a hard failure (misleading)", () => {
-    expect(finalizeTitle(false, false, true, "1m 7s")).toBe("⚠️ 查询失败");
+    expect(finalizeTitle(false, false, true, "1m 7s")).toBe("查询失败");
   });
 
   it("finalizeTitle marks a turn-capped partial distinctly (not a green 回答完成)", () => {

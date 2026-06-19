@@ -35,16 +35,16 @@ export function buildQuestionElement(question: string): Record<string, unknown> 
   return {
     tag: "div",
     element_id: "question",
-    text: { tag: "plain_text", content: `❓ ${oneLine}` },
+    text: { tag: "plain_text", content: `问：${oneLine}` },
   };
 }
 
 export function buildCreateCardBody(opts?: { summary?: string; followUp?: boolean; question?: string }): string {
   // summary.content customizes the chat-list preview (default would be "[生成中...]").
-  const summary = opts?.summary ? `💬 ${opts.summary.slice(0, 40)}` : "source-truth 正在回答…";
+  const summary = opts?.summary ? opts.summary.slice(0, 40) : "source-truth 正在回答…";
   // Follow-up cards (from a clicked button) get a distinct header so the chat
   // history clearly shows "this card answers a follow-up question".
-  const title = opts?.followUp ? "↳ 正在追问…" : "正在思考…";
+  const title = opts?.followUp ? "正在追问…" : "正在思考…";
   // Echo the user's question at the TOP of the card body as a plain_text div
   // (buildQuestionElement), so the card is self-contained — the reader sees WHAT
   // was asked without scrolling up the chat. element_id="question" so it stays put
@@ -192,24 +192,24 @@ export function finalizeTitle(followUp?: boolean, aborted?: boolean, failed?: bo
   // as a confident green "回答完成" while the body says "未完成". Distinct signal.
   // clarify is NOT an answer — the agent is asking the user to disambiguate — so
   // its header must say so, not "回答完成".
-  const base = failed ? "⚠️ 查询失败"
-    : aborted ? "⏹ 已停止"
-    : turnCapped ? "⚠️ 部分结论（步数受限）"
-    : clarify ? "❓ 请选择你想问的"
-    : followUp ? "↳ 追问 · 已回答"
+  const base = failed ? "查询失败"
+    : aborted ? "已停止"
+    : turnCapped ? "部分结论（步数受限）"
+    : clarify ? "请选择你想问的"
+    : followUp ? "追问 · 已回答"
     : "回答完成";
   // Show elapsed except on a hard failure (where "time" is meaningless/misleading)
   // and on a clarify (it's a question back to the user, elapsed is noise).
   return elapsedLabel && !failed && !clarify ? `${base} · 用时 ${elapsedLabel}` : base;
 }
 
-/** A "⏹ 停止" button shown during streaming. value.card_id lets the click
+/** A "停止" button shown during streaming. value.card_id lets the click
  *  callback route the abort to the right in-flight agent stream. */
 export function buildStopButton(cardId: string): unknown {
   return {
     tag: "button",
     element_id: "stopbtn",
-    text: { tag: "plain_text", content: "⏹ 停止" },
+    text: { tag: "plain_text", content: "停止" },
     type: "danger_text",
     size: "small",
     value: { action: "stop", card_id: cardId },
@@ -231,7 +231,7 @@ export async function appendStopButton(cardId: string, sequence: number): Promis
  *  mid-stream. Returns null when there are no steps yet. */
 export function buildReasoningPanel(steps: string[], expanded: boolean): unknown {
   if (steps.length === 0) return null;
-  const heading = expanded ? "**🔍 分析中…**" : "**🔍 分析过程（点开看依据）**";
+  const heading = expanded ? "**分析中…**" : "**分析过程（点开看依据）**";
   return {
     tag: "collapsible_panel",
     element_id: "reasoning",
@@ -346,7 +346,7 @@ export function buildEvidencePanel(evidence: string): unknown {
     border: { color: "grey", corner_radius: "5px" },
     vertical_spacing: "8px",
     header: {
-      title: { tag: "markdown", content: "**📎 供研发复核（点开看代码出处）**" },
+      title: { tag: "markdown", content: "**供研发复核（点开看代码出处）**" },
       vertical_align: "center",
       padding: "4px 0px 4px 8px",
       width: "auto_when_fold",
@@ -409,7 +409,7 @@ export async function finalizeCard(
 export function buildFollowUpElements(followUps: string[]): unknown[] {
   const elements: unknown[] = [{ tag: "hr" }];
   if (followUps.length > 0) {
-    elements.push({ tag: "markdown", content: "💡 **继续追问：**" });
+    elements.push({ tag: "markdown", content: "**继续追问：**" });
     followUps.slice(0, MAX_FOLLOW_UPS).forEach((q, i) => {
       const eid = `followup_${i}`;
       elements.push({
@@ -427,7 +427,7 @@ export function buildFollowUpElements(followUps: string[]): unknown[] {
     // to this card (or @ the bot referencing it). A bare "继续追问即可，上下文会
     //延续" was misleading — context only carries when the message replies to a
     // prior card, not for any new message.
-    elements.push({ tag: "markdown", content: "💡 想继续追问，**回复本条消息**即可（会带上本轮的上下文）。" });
+    elements.push({ tag: "markdown", content: "想继续追问，**回复本条消息**即可（会带上本轮的上下文）。" });
   }
   return elements;
 }

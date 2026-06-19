@@ -83,7 +83,7 @@ describe("shapeBody", () => {
   });
   it("aborted WITH body appends 已停止 note; WITHOUT body is just ⏹ 已停止", () => {
     expect(shapeBody("到一半", { ...flags, aborted: true })).toContain("已停止");
-    expect(shapeBody("", { ...flags, aborted: true })).toBe("⏹ 已停止。");
+    expect(shapeBody("", { ...flags, aborted: true })).toBe("已停止。");
   });
   it("timed out with no body → the timeout narrow-it message", () => {
     expect(shapeBody("", { ...flags, timedOut: true })).toContain("分析超时");
