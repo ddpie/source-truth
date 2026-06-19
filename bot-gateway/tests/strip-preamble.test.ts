@@ -64,4 +64,25 @@ describe("stripPreamble", () => {
     const body = "现在整理答案：\n-----\n答案在这里。";
     expect(stripPreamble(body)).toBe("答案在这里。");
   });
+
+  it("strips the 2nd E2E case: '所有关键逻辑都已读清楚' with INLINE --- (no newlines)", () => {
+    // The exact 2026-06-19 升级 card: readiness meta-statement + inline --- separator.
+    const body =
+      "所有关键逻辑都已读清楚。可以给出完整答案了。---这个项目的**角色升级完全不使用「经验值」这个概念**——升级靠技能成长。";
+    const out = stripPreamble(body);
+    expect(out.startsWith("这个项目的**角色升级")).toBe(true);
+    expect(out).not.toContain("所有关键逻辑都已读清楚");
+    expect(out).not.toContain("可以给出完整答案");
+  });
+
+  it("strips '可以给出完整答案了' readiness opener", () => {
+    const body = "可以给出完整答案了。---暴击倍率从 1.5 到 2.0 封顶。";
+    expect(stripPreamble(body)).toBe("暴击倍率从 1.5 到 2.0 封顶。");
+  });
+
+  it("does NOT strip an inline --- inside a real answer (no preamble opener)", () => {
+    // An answer with an inline triple-dash but NO planning opener must be untouched.
+    const body = "暴击倍率是 1.5 倍（区间 1---10 级），高等级更高。";
+    expect(stripPreamble(body)).toBe(body);
+  });
 });
