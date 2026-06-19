@@ -27,6 +27,21 @@ export interface ChainTurn {
  * is explicit so the agent treats prior answers as CONTEXT, not as freshly-
  * verified truth (it must still re-verify against code per the prime directive).
  */
+// Neutralize the composer's own STRUCTURAL markers if they appear INSIDE replayed
+// content. The prior answers (and the agent-suggested follow-up text) are
+// model-controlled and capped but otherwise verbatim — a replayed answer that quotes
+// or echoes "【本次追问】" / "第N轮 · 问：" / the 【前面的对话…】 header could otherwise
+// forge a second boundary and confuse the agent about which trailing 【本次追问】 is the
+// REAL new question (prompt-injection / wrong-turn). Inserting a zero-width space
+// breaks the literal match while staying visually identical, so the structural
+// markers the composer emits are the ONLY un-forged ones. (cross-review MEDIUM)
+function neutralizeMarkers(s: string): string {
+  return s
+    .replace(/【本次追问】/g, "【​本次追问】")
+    .replace(/【前面的对话/g, "【​前面的对话")
+    .replace(/(第)(\s*\d+\s*)(轮\s*·\s*[问答])/g, "$1​$2$3");
+}
+
 export function composeFollowUpPrompt(followUp: string, prior: ChainTurn[]): string {
   const turns = (prior ?? []).filter((t) => (t.question ?? "").trim() || (t.answer ?? "").trim());
   if (turns.length === 0) return followUp; // no context to replay → send as-is
@@ -36,11 +51,14 @@ export function composeFollowUpPrompt(followUp: string, prior: ChainTurn[]): str
   ];
   turns.forEach((t, i) => {
     const n = i + 1;
-    const q = (t.question ?? "").trim();
-    const a = (t.answer ?? "").trim();
+    const q = neutralizeMarkers((t.question ?? "").trim());
+    const a = neutralizeMarkers((t.answer ?? "").trim());
     if (q) lines.push(`第${n}轮 · 问：${q}`);
     if (a) lines.push(`第${n}轮 · 答：\n${a}`);
   });
-  lines.push("", `【本次追问】\n${followUp}`);
+  // The new question is the clearly-last segment, after an explicit instruction that
+  // it (and only it) is what to answer — so even if a replayed turn somehow still
+  // carried a marker, the agent is told the authoritative question is this final one.
+  lines.push("", "【本次追问】（只回答下面这一句，上面仅供背景参考）", followUp);
   return lines.join("\n");
 }
