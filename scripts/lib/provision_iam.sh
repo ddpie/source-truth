@@ -2,8 +2,9 @@
 # provision_iam.sh <region> <config_file> <bucket>
 # Idempotent IAM for a FRESH account:
 #   1. index-service EC2 instance profile (SSM + read the artifact bucket).
-#   2. AgentCore runtime role (assumed by bedrock-agentcore; pull image, mount
-#      EFS, reach the VPC, invoke Bedrock models).
+#   2. AgentCore runtime role (assumed by bedrock-agentcore; pull image, reach
+#      the VPC, invoke Bedrock models). No EFS: the agent reads code over the
+#      index-service HTTP bridge, so no elasticfilesystem permissions are needed.
 # IAM is global; names are fixed (not region-scoped) so re-runs reconcile.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -42,12 +43,11 @@ if ! aws iam get-role --role-name "$RUNTIME_ROLE" >/dev/null 2>&1; then
     \"Action\":\"sts:AssumeRole\",
     \"Condition\":{\"StringEquals\":{\"aws:SourceAccount\":\"${ACCOUNT}\"}}}]}" >/dev/null
 fi
-# Inline policy: pull ECR image, invoke Bedrock, mount EFS, attach ENIs, logs.
+# Inline policy: pull ECR image, invoke Bedrock, attach ENIs (VPC), logs. No EFS.
 aws iam put-role-policy --role-name "$RUNTIME_ROLE" --policy-name runtime-perms --policy-document '{
   "Version":"2012-10-17","Statement":[
     {"Effect":"Allow","Action":["bedrock:InvokeModel","bedrock:InvokeModelWithResponseStream"],"Resource":"*"},
     {"Effect":"Allow","Action":["ecr:GetDownloadUrlForLayer","ecr:BatchGetImage","ecr:GetAuthorizationToken"],"Resource":"*"},
-    {"Effect":"Allow","Action":["elasticfilesystem:ClientMount","elasticfilesystem:DescribeMountTargets","elasticfilesystem:DescribeAccessPoints"],"Resource":"*"},
     {"Effect":"Allow","Action":["ec2:CreateNetworkInterface","ec2:DescribeNetworkInterfaces","ec2:DeleteNetworkInterface","ec2:DescribeSecurityGroups","ec2:DescribeSubnets"],"Resource":"*"},
     {"Effect":"Allow","Action":["logs:CreateLogGroup","logs:CreateLogStream","logs:PutLogEvents"],"Resource":"*"}
   ]}' >/dev/null

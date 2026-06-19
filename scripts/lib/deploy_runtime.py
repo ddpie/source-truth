@@ -5,6 +5,10 @@ Create-or-update the source-truth agent runtime from an already-built+pushed
 ECR image. Idempotent: if a runtime with the same name exists, update it in
 place (= upgrade); otherwise create. Waits for READY.
 
+VPC-only, no EFS: the runtime joins the VPC to reach the in-VPC index-service
+and mounts NO repo filesystem — all source is read over the index-service HTTP
+bridge (read_file/glob_files/search_files/codegraph_*).
+
 Verified against real AWS: created source_truth_agent-xC7N7O63iA (READY),
 real InvokeAgentRuntime returned a real Bedrock answer.
 
@@ -54,8 +58,6 @@ def deploy(
     model: str,
     subnets: list[str] | None = None,
     security_groups: list[str] | None = None,
-    efs_access_point_arn: str | None = None,
-    efs_mount_path: str = "/mnt/repo",
     codegraph_mcp_url: str | None = None,
 ) -> tuple[str, str]:
     client = boto3.client("bedrock-agentcore-control", region_name=region)
@@ -66,7 +68,9 @@ def deploy(
     if codegraph_mcp_url:
         env["CODEGRAPH_MCP_URL"] = codegraph_mcp_url
 
-    # Network: VPC mode if subnets provided, else PUBLIC.
+    # Network: VPC mode if subnets provided (to reach the in-VPC index-service),
+    # else PUBLIC. The runtime needs VPC egress to the index-service for code
+    # access — there is NO EFS mount (all source is read over the HTTP bridge).
     if subnets and security_groups:
         net = {"networkMode": "VPC", "networkModeConfig": {
             "securityGroups": security_groups, "subnets": subnets,
@@ -74,10 +78,10 @@ def deploy(
     else:
         net = {"networkMode": "PUBLIC"}
 
-    # Filesystem: session storage + optional EFS.
+    # Filesystem: session storage ONLY. The agent microVM mounts NO repo
+    # filesystem — all code access goes over the index-service HTTP bridge
+    # (read_file/glob_files/search_files/codegraph_*). EFS removed.
     fs: list[dict] = [{"sessionStorage": {"mountPath": "/mnt/workspace"}}]
-    if efs_access_point_arn:
-        fs.append({"efsAccessPoint": {"accessPointArn": efs_access_point_arn, "mountPath": efs_mount_path}})
 
     common = dict(
         roleArn=role_arn,
@@ -137,10 +141,9 @@ def main() -> int:
     # resolved MODEL — so this script can't silently deploy a different default than
     # the orchestrator intends. Callers must pass --model explicitly.
     p.add_argument("--model", required=True)
-    # VPC mode (for EFS): all three must be provided together.
+    # VPC mode (to reach the in-VPC index-service): both must be provided together.
     p.add_argument("--subnets", help="comma-separated subnet ids (VPC mode)")
     p.add_argument("--security-groups", help="comma-separated security group ids")
-    p.add_argument("--efs-access-point-arn", help="EFS access point ARN to mount at /mnt/repo")
     p.add_argument("--codegraph-mcp-url", help="index-service CodeGraph MCP-over-HTTP URL")
     args = p.parse_args()
 
@@ -152,7 +155,6 @@ def main() -> int:
         model=args.model,
         subnets=args.subnets.split(",") if args.subnets else None,
         security_groups=args.security_groups.split(",") if args.security_groups else None,
-        efs_access_point_arn=args.efs_access_point_arn,
         codegraph_mcp_url=args.codegraph_mcp_url,
     )
     print(f"AGENT_RUNTIME_ID={rid}")
