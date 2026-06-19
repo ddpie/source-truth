@@ -7,14 +7,15 @@
 ## 是什么
 
 会话 microVM 内运行的 **Claude Code Agent（Python）**——source-truth 的推理与编排核心。收到飞书来的问题后，
-在 AgentCore Firecracker microVM 内跑一个**只读问答**的 agent 循环：调远程 CodeGraph 定位代码 → 读 EFS 上的
-最新主分支源码 → 流式产出答案。
+在 AgentCore Firecracker microVM 内跑一个**只读问答**的 agent 循环：经远程 index-service 定位并读取
+最新主分支源码 → 流式产出答案。microVM 本身不挂任何文件系统，全部取证经 index-service 的 MCP-over-HTTP 桥。
 
 ```
 bot-gateway ──InvokeAgentRuntime──▶ agent-container（本组件，microVM 内）
                                        claude_agent_sdk.query 循环
-                                       ├─ CodeGraph MCP-over-HTTP  ← 定位代码
-                                       └─ EFS /mnt/repo（只读）     ← 读真实代码/配置
+                                       └─ index-service MCP-over-HTTP
+                                            ├─ CodeGraph 定位（symbol_search / callers / impact）
+                                            └─ 读文件（read_file / glob_files / search_files）
                                        逐步 yield → 回 CardKit 流式卡片
 ```
 
@@ -25,8 +26,9 @@ bot-gateway ──InvokeAgentRuntime──▶ agent-container（本组件，micr
   异步流式 handler。
 - **模型走 Bedrock**：`CLAUDE_CODE_USE_BEDROCK=1`，microVM 内用 IAM role 鉴权（不传 bearer token）。模型 id
   钉死为 `global.anthropic.claude-*:0`（具体版本待定）。
-- **只读边界靠工具白名单**：`allowed_tools` 只放 `Read`/`Glob`/`Grep` + CodeGraph 工具，不放 `Bash`/`Write`/
-  `Edit`；`/mnt/repo` 内核级只读兜底。落实「不跑引擎、不写回、不提交」。
+- **只读边界靠工具白名单**：agent 内建 `Read`/`Glob`/`Grep` 全部禁用（`tools=[]`、不设 `cwd`），不放
+  `Bash`/`Write`/`Edit`；读文件只能经 index-service 的 `codegraph_*` 工具（`read_file`/`glob_files`/`search_files`
+  + 定位类）。落实「不跑引擎、不写回、不提交」。
 - **代码为唯一依据**：系统 prompt（`prompts/system.md`）规定答案必经真实代码 + CodeGraph 取证；与文档冲突
   以代码为准并标注差异与时间；低置信度转研发。
 - **语言 Python，容器 ARM64-only**，依赖与基础镜像 exact pin，漂移由 `scripts/check-versions.sh`（p1）守卫。
@@ -37,9 +39,9 @@ bot-gateway ──InvokeAgentRuntime──▶ agent-container（本组件，micr
 |----|------|
 | 入参 | `{ "prompt", "session" }`（bot-gateway 注入；agent 只依赖 `prompt`，`session` 当不透明上下文） |
 | 出参 | 流式 `yield` `AssistantMessage` / `ResultMessage`，由网关渲染回 CardKit |
-| 代码/配置 | EFS 只读挂载 `/mnt/repo`（最新主分支） |
+| 代码/配置 | 经 index-service 文件工具读取（仓库副本只在 index-service 本地磁盘；microVM 不挂文件系统；路径为仓库相对，如 `Assets/Scripts/Foo.cs`） |
 | 临时文件 | Session Storage 可写挂载 `/mnt/workspace`（per-session，约 14 天过期） |
-| CodeGraph | index-service 暴露的 MCP-over-HTTP 端点（env 注入） |
+| CodeGraph + 文件读取 | index-service 暴露的 MCP-over-HTTP 端点（env 注入）；定位与读文件都走此桥 |
 | 会话标识 | 经头 `X-Amzn-Bedrock-AgentCore-Runtime-Session-Id` 到达，仅用于审计关联 |
 
 ## 文件布局（p1 落地）
@@ -69,12 +71,14 @@ MVP 用 `agentcore` toolkit（`configure --disable-memory` → `deploy --env CLA
    原生支持 `McpHttpServerConfig`（`{type:"http", url, headers?}`，`type` 必填）。**不需** streamablehttp + `@tool` 桥。
    `agent_lib.build_options_dict` 已据此实现并与真 SDK 一致性测试通过。
 2. **路径对齐**：codegraph-server 0.18.5 真实返回 `./`-前缀相对路径（workspace 用 `.` 时）或 workspace 绝对路径；
-   `index-service/path_align.py`（`to_container_path` + `format_location`）已据真实输出实现并测试通过。
-3. **EFS 挂载**：东京（ap-northeast-1）真实挂载 `/mnt/repo` 成功，agent 真读到源码。须 botocore≥1.43
-   （含 `efsAccessPoint` 模型）、`networkMode=VPC` + NAT 出站；模型用 `global.anthropic.*`。
+   `index-service/path_align.py`（`to_container_path` + `format_location`）已据真实输出实现并测试通过。当前
+   `mount_root` 默认 `""`（输出仓库相对路径，如 `Assets/Scripts/Foo.cs`），遗留 `/mnt/repo` 值仍兼容但生产不用。
+3. **代码读取经 HTTP 桥（无 EFS）**：仓库副本只在 index-service 本地磁盘，agent 经其文件工具
+   （`codegraph_read_file` / `codegraph_glob_files` / `codegraph_search_files`）读到源码；microVM 不挂任何文件系统。
+   Runtime 仍 `networkMode=VPC`（为在 VPC 内经 HTTP `:8080` 访问 index-service）+ NAT 出站；模型用 `global.anthropic.*`。
 4. **真实 invoke**：`InvokeAgentRuntime`（`CLAUDE_CODE_USE_BEDROCK=1`）跑通，返回真实流式响应。
 
-**剩余待验证：** EFS 读性能 / 冷启动延迟 / CodeGraph 召回率 / 流式卡片频控对接 / index-service 桥的 HTTP 半边常驻部署。
+**剩余待验证：** 经 HTTP 桥读文件的延迟 / 冷启动延迟 / CodeGraph 召回率 / 流式卡片频控对接 / index-service 桥的 HTTP 半边常驻部署。
 
 > 逐条 gotcha 与开放问题（`session` schema、`HookContext` 语义、Bedrock 配额等）见全稿
 > `.claude/specs/2026-06-16-agent-container-design.md`；真实部署资源见 `.local/deploy-config`。
