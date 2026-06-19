@@ -402,14 +402,20 @@ async def run_agent(
         _perf("agent_run_total", (time.perf_counter() - t0) * 1000, messages=n)
 
 
-# Matches the tool-call markup the model emits as TEXT when MCP tools aren't
-# registered. Two observed shapes:
+# Matches the tool-call markup/leak the model emits as TEXT when MCP tools aren't
+# registered. THREE observed shapes:
 #   - Opus/Sonnet: <invoke ...> / <function_calls> (with an optional antml: prefix)
-#   - Haiku 4.5:   <attempt_{toolname}> ... </attempt_{toolname}>  (a DIFFERENT shape)
-# Both mean "model tried to call a tool but it wasn't registered" → the cold-start
-# MCP-init race. Detecting both is required or haiku leaks slip the retry + strip.
+#   - Haiku 4.5:   <attempt_{toolname}> ... </attempt_{toolname}>  (different markup)
+#   - Markup-LESS: the model just NARRATES calling tools ("let me call the tool",
+#     mixed JA/EN deliberation) and writes a bare tool NAME like
+#     `codegraph_symbol_search(...)` — no XML at all. The robust tell is the
+#     codegraph_* tool name appearing in OUTPUT text: a real answer NEVER exposes an
+#     internal tool name (the system prompt forbids it; answers use business words),
+#     so its presence + no real tool_use = the same cold-start MCP-init race.
+# All mean "model tried to retrieve but the tool wasn't registered". Detecting all
+# three is required or the leak slips the retry + strip.
 _TOOLCALL_MARKUP_RE = re.compile(
-    r"<(?:antml:)?invoke\b|(?:antml:)?function_calls\b|<attempt_[a-zA-Z0-9_]+\b",
+    r"<(?:antml:)?invoke\b|(?:antml:)?function_calls\b|<attempt_[a-zA-Z0-9_]+\b|\bcodegraph_[a-z_]+\b",
     re.IGNORECASE,
 )
 
