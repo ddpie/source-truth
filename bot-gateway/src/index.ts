@@ -296,10 +296,13 @@ async function runStreamingInvoke(
   let stepsShown = 0; // how many reasoning steps are currently rendered in the panel
   let panelAppended = false;
   // Live "供研发复核" (dev-review) panel: appended once when evidence first streams,
-  // updated in place as more citations arrive. evidenceShownLen tracks the rendered
-  // length so we only push when it actually grew (throttled on the same lastPanelUpdate).
+  // updated in place as more citations arrive. evidenceShown holds the last-RENDERED
+  // content so we only push when it actually CHANGED — a content compare, NOT a length
+  // compare: stripToolCallLeak is non-monotonic (a streaming <invoke> block strips to
+  // less once it closes), so a length gate `len > shownLen` could go false-and-stick
+  // when the text shrinks, freezing the panel on stale content (caught in cross-review).
   let evidenceAppended = false;
-  let evidenceShownLen = 0;
+  let evidenceShown = "";
   // The stop button is normally seeded at card-send time (so it's clickable while
   // queued + during thinking); this tracks that so the 思考→分析 flip only appends
   // it as a self-heal when the seed failed (never a 2nd button).
@@ -521,28 +524,29 @@ async function runStreamingInvoke(
       writer.coalesce("content", (seq) => updateContent(cardId, display, seq));
       // LIVE 供研发复核 panel: once the evidence section starts streaming, render it
       // (folded) so the dev can watch citations form, instead of only at finalize.
-      // Redact + strip-leak the same as the body. Throttle on lastPanelUpdate; only
-      // push when the CLEAN evidence grew. Append-vs-update decided at run-time
-      // (mirror the reasoning panel): evidenceAppended flips only on a successful
-      // append, and evidenceShownLen advances only after the write lands, so a failed
-      // append self-heals on the next tick and never strands an update on a missing
-      // element. finalizeCard re-renders the same element_id="evidence", so no
-      // re-layout at stream end.
+      // Redact + strip-leak the same as the body. Push when the CLEAN evidence CHANGED
+      // (content compare — see evidenceShown: a length gate sticks shut when strip-leak
+      // shrinks the text). Use a COALESCE lane ("evidence") rather than one-shot write():
+      // coalescing keeps only the latest pending frame (always the newest content) and
+      // drops stale intermediates, so two ticks reading the same pre-commit evidenceShown
+      // can't land a shorter frame after a longer one (the content-regression window the
+      // one-shot path had). Append-vs-update is decided at run-time inside the serial
+      // callback: evidenceAppended flips only on a successful append and evidenceShown
+      // commits only after the write lands, so a failed append self-heals on the next
+      // tick. finalizeCard re-renders the same element_id="evidence" (no re-layout).
       const safeEvidence = liveEvidence.trim()
         ? stripToolCallLeak(redactSensitive(liveEvidence)).trim()
         : "";
-      if (safeEvidence && safeEvidence.length > evidenceShownLen
-          && Date.now() - lastPanelUpdate >= THROTTLE_MS) {
-        lastPanelUpdate = Date.now();
-        const targetLen = safeEvidence.length;
-        void writer.write(async (seq) => {
+      if (safeEvidence && safeEvidence !== evidenceShown) {
+        const target = safeEvidence;
+        writer.coalesce("evidence", async (seq) => {
           if (!evidenceAppended) {
-            await appendEvidencePanel(cardId, safeEvidence, seq);
+            await appendEvidencePanel(cardId, target, seq);
             evidenceAppended = true;
           } else {
-            await updateEvidencePanel(cardId, safeEvidence, seq);
+            await updateEvidencePanel(cardId, target, seq);
           }
-          evidenceShownLen = targetLen;
+          evidenceShown = target;
         });
       }
     },
@@ -554,7 +558,7 @@ async function runStreamingInvoke(
     // live timer or stale "正在分析" text ONTO the card AFTER finalize runs (and
     // so the finalize writes aren't stuck behind a backlog — the "停止 no response
     // / card frozen" symptom). finalize uses one-shot write() which lands next.
-    writer.dropLanes("status", "content");
+    writer.dropLanes("status", "content", "evidence");
     abortControllers.delete(cardId);
   }
   const { status, answer, steps, aborted, error, timing } = result;
