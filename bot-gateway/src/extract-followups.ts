@@ -23,8 +23,12 @@ export const MAX_FOLLOW_UPS = 3;
 // buttons. Anchoring to line-start closes that hole, mirroring extract-clarify.ts.
 // `MARKER_RE` finds the marker line; `STRIP_RE` (anchored to end-of-string) backs
 // up over the marker line + an optional preceding divider for stripping.
-const MARKER_RE = /(?:^|\n)[ \t]*(?:💡[ \t]*)?你可能还想问/;
-const STRIP_RE = /(?:\n[ \t]*(?:-{3,}|\*{3,}|_{3,})[ \t]*)?\n?[ \t]*(?:💡[ \t]*)?你可能还想问[\s\S]*$/;
+// Leading-whitespace class includes U+3000 (full-width space): a model formatting
+// a CJK list often indents with 　 rather than ASCII space, and without it the
+// marker wouldn't match → buttons silently lost AND the raw trailer leaks into the
+// body. \t and ASCII space cover the rest.
+const MARKER_RE = /(?:^|\n)[ \t　]*(?:💡[ \t　]*)?你可能还想问/;
+const STRIP_RE = /(?:\n[ \t　]*(?:-{3,}|\*{3,}|_{3,})[ \t　]*)?\n?[ \t　]*(?:💡[ \t　]*)?你可能还想问[\s\S]*$/;
 
 export function extractFollowUps(answer: string): string[] {
   // Find the marker only when it LEADS A LINE (not in mid-prose).

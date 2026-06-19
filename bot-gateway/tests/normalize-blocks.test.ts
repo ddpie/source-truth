@@ -8,18 +8,18 @@ describe("normalizeBlocks — repair jammed block markers", () => {
     expect(out).not.toMatch(/：### /); // no longer jammed
   });
 
-  it("breaks an inline horizontal rule jammed between sentences", () => {
+  it("breaks an inline horizontal rule jammed after a sentence end", () => {
     const input = "值得注意。---### 礼仪（Etiquette）";
     const out = normalizeBlocks(input);
-    // The rule and the following heading each get their own line.
     expect(out).toMatch(/值得注意。\n\n-{3,}\n\n/);
     expect(out).toContain("### 礼仪");
   });
 
-  it("breaks a blockquote marker jammed after prose", () => {
-    const input = "一句话总结> 想要砍价只有商贩技能管用";
+  it("breaks the real '…信息。---怪物…---## 一、' chain", () => {
+    const input = "怪物分两种。---怪物的生命值不同。---## 一、野兽类型";
     const out = normalizeBlocks(input);
-    expect(out).toContain("\n\n> 想要砍价");
+    expect(out).not.toMatch(/。---/); // no jammed HR remains
+    expect(out).toContain("\n\n## 一、野兽类型");
   });
 });
 
@@ -29,30 +29,52 @@ describe("normalizeBlocks — must NOT touch well-formed / protected content", (
     expect(normalizeBlocks(input)).toBe(input);
   });
 
-  it("never breaks a markdown TABLE separator row", () => {
+  it("never breaks a tight markdown TABLE separator row (|---|---|)", () => {
     const input = "| 档位 | 提升 |\n|---|---|\n| A | +25% |";
-    const out = normalizeBlocks(input);
-    expect(out).toContain("|---|---|"); // table separator intact
-    expect(out).not.toContain("\n\n---"); // not turned into an HR
+    expect(normalizeBlocks(input)).toBe(input);
   });
 
-  it("does not touch a `#` that is not a heading (C#, #3)", () => {
-    const input = "这个值在 C# 里是 int，编号 #3 的字段。";
+  it("never breaks a SPACE-PADDED table separator row (| --- | --- |)", () => {
+    const input = "结果：\n| 名称 | 值 |\n| --- | --- |\n| A | 1 |";
+    // Every line here is a table line or prose with no jammed marker → untouched.
     expect(normalizeBlocks(input)).toBe(input);
+  });
+
+  it("does NOT shred a `>` comparison or shell redirect in prose", () => {
+    expect(normalizeBlocks("当血量 > 50% 时进入狂暴，伤害 > 基础值。")).toBe("当血量 > 50% 时进入狂暴，伤害 > 基础值。");
+    expect(normalizeBlocks("启动用 java -jar app.jar > log.txt 2>&1。")).toBe("启动用 java -jar app.jar > log.txt 2>&1。");
+  });
+
+  it("does NOT break state-machine / lambda arrows (-->, ->, =>)", () => {
+    expect(normalizeBlocks("状态：Idle --> Attack --> Cooldown")).toBe("状态：Idle --> Attack --> Cooldown");
+    expect(normalizeBlocks("回调写成 () -> doAttack()")).toBe("回调写成 () -> doAttack()");
+  });
+
+  it("does not touch a `#` that is not a heading (C#, #3, #tag)", () => {
+    const input = "这个值在 C# 里是 int，编号 #3 的字段，话题 #战斗。";
+    expect(normalizeBlocks(input)).toBe(input);
+  });
+
+  it("does not break a dash range, and only splits an HR after a SENTENCE end", () => {
+    // A range / comma-adjacent dash is NOT a divider → untouched.
+    expect(normalizeBlocks("范围是 1-10 级，权重 28%。")).toBe("范围是 1-10 级，权重 28%。");
+    expect(normalizeBlocks("说明：值在 1-10 级间，---暂不计。")).toBe("说明：值在 1-10 级间，---暂不计。");
+    // But a rule right after 。/！/？ IS the observed jam shape → split out.
+    expect(normalizeBlocks("第一部分讲完了。---第二部分")).toMatch(/了。\n\n---\n\n第二部分/);
   });
 
   it("leaves --- and ### inside a fenced code block literal", () => {
     const input = "看代码：\n```\nint x; ### not a heading\n--- not a rule\n```\n继续";
     const out = normalizeBlocks(input);
-    expect(out).toContain("### not a heading");
-    expect(out).toContain("--- not a rule");
-    // The fence content must be byte-identical (no \n\n injected inside it).
     expect(out).toContain("int x; ### not a heading\n--- not a rule");
   });
 
-  it("does not touch a single hyphen or a 1-2 char dash run", () => {
-    const input = "1-10 级是 1.5 倍，权重约占 28%。";
-    expect(normalizeBlocks(input)).toBe(input);
+  it("protects an UNCLOSED trailing fence (streaming partial)", () => {
+    const input = "看代码：\n```python\nx = 1 ### c\n值。--- 分隔";
+    const out = normalizeBlocks(input);
+    // The in-fence ### and --- must stay literal (no \n\n promotion inside).
+    expect(out).toContain("x = 1 ### c");
+    expect(out).toContain("值。--- 分隔");
   });
 
   it("leaves a line-leading HR untouched", () => {
