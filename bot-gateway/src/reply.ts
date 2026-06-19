@@ -21,7 +21,9 @@ export function buildTextContent(answer: string): string {
   return JSON.stringify({ text: answer });
 }
 
-/** Send a plain text reply in-process. Resolves when the reply is accepted. */
+/** Send a plain text reply in-process. Resolves when the reply is accepted.
+ *  LIVE: used as the error/serviceError fallback (index.ts) when the streaming
+ *  card path can't run. */
 export async function sendReply(p: ReplyParams): Promise<void> {
   await imReply(p.messageId, "text", buildTextContent(p.answer));
 }
@@ -32,8 +34,12 @@ function sendCardAsReply(messageId: string, cardId: string): Promise<void> {
 }
 
 /**
- * Reply with a CardKit "growing answer card": create → stream → close → send.
- * This is the production reply path; sendReply (markdown) stays as a fallback.
+ * @deprecated NOT the live path. The production streaming card is driven by
+ * streamingCardInvoke → sendStreamingCard → runStreamingInvoke in index.ts, which
+ * captures the sent message_id directly for the follow-up registry. This wrapper
+ * (and reply-card.ts's replyWithCard) returns only the card_id, NOT the message_id,
+ * so wiring it to rememberCard would silently break follow-up chaining — do not
+ * revive without threading message_id out first. Kept only for its unit test.
  */
 export async function sendReplyCard(p: ReplyParams & { title?: string }): Promise<string> {
   return replyWithCard(
