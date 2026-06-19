@@ -43,16 +43,14 @@ def test_load_system_prompt_missing_path_raises(tmp_path):
 
 
 # ── build_options_dict (pure, SDK-free) ────────────────────────────────────
-def test_build_options_dict_readonly_tools_only():
+def test_build_options_dict_no_builtin_tools():
     opts = agent_lib.build_options_dict(system_prompt="x")
     tools = opts["allowed_tools"]
-    # Read/Glob stay as builtins (single-file/metadata access on EFS is cheap).
-    assert "Read" in tools and "Glob" in tools
-    # Grep is GONE — it grepped EFS at ~20s; content search now goes through the
-    # fast index-service tool codegraph_search_files (local disk, ~0.2s).
-    assert "Grep" not in tools
-    # Read-only boundary: no write/exec tools auto-approved.
-    for forbidden in ("Bash", "Write", "Edit"):
+    # EFS removed: the microVM mounts NO filesystem, so NO builtin tool is used —
+    # not even Read/Glob (they hit the old /mnt/repo EFS mount). All file access
+    # goes through the index-service HTTP tools. tools=[] → SDK sends --tools "".
+    assert agent_lib.READONLY_TOOLS == ()
+    for forbidden in ("Read", "Glob", "Grep", "Bash", "Write", "Edit"):
         assert forbidden not in tools
 
 
@@ -64,6 +62,26 @@ def test_build_options_dict_grep_replaced_by_fast_search():
     opts = agent_lib.build_options_dict(system_prompt="x", codegraph_url="http://10.1.1.5:8080/mcp")
     assert "mcp__codegraph__codegraph_search_files" in opts["allowed_tools"]
     assert "Grep" in opts["disallowed_tools"]
+
+
+def test_build_options_dict_read_glob_replaced_by_mcp_file_tools():
+    # EFS removal: builtin Read/Glob (which hit the /mnt/repo EFS mount) are
+    # blocklisted, and the index-service HTTP read_file/glob_files tools take over.
+    assert "Read" not in agent_lib.READONLY_TOOLS
+    assert "Glob" not in agent_lib.READONLY_TOOLS
+    assert "Read" in agent_lib.WRITE_EXEC_TOOLS and "Glob" in agent_lib.WRITE_EXEC_TOOLS
+    opts = agent_lib.build_options_dict(system_prompt="x", codegraph_url="http://10.1.1.5:8080/mcp")
+    assert "mcp__codegraph__codegraph_read_file" in opts["allowed_tools"]
+    assert "mcp__codegraph__codegraph_glob_files" in opts["allowed_tools"]
+    assert "Read" in opts["disallowed_tools"] and "Glob" in opts["disallowed_tools"]
+
+
+def test_build_options_dict_no_filesystem_mount_cwd():
+    # The microVM mounts no filesystem (EFS removed), so build_options_dict must
+    # NOT pin cwd to /mnt/repo. (cwd may still be set in a local dev tree where the
+    # path happens to exist, but never to the removed mount.)
+    opts = agent_lib.build_options_dict(system_prompt="x")
+    assert opts.get("cwd") != "/mnt/repo"
 
 
 def test_build_options_dict_enforces_readonly_availability():
@@ -154,7 +172,8 @@ def test_build_options_dict_matches_real_sdk_options():
     )
     real = sdk.ClaudeAgentOptions(**opts)
     assert real.mcp_servers["codegraph"]["type"] == "http"
-    assert "Read" in real.allowed_tools
+    # File access is via MCP tools now (EFS removed), not builtin Read.
+    assert "mcp__codegraph__codegraph_read_file" in real.allowed_tools
     # The enforcing fields must round-trip onto the real options object, so the
     # CLI transport emits --tools / --disallowedTools / --permission-mode and the
     # read-only boundary is genuinely enforced (not just a dict we hand-built).

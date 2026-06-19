@@ -33,13 +33,17 @@ def _perf(event: str, ms: float, **ctx: Any) -> None:
     | jq to reconstruct the per-request three-stage timing breakdown."""
     logger.info(json.dumps({"event": event, "perf": True, "latency_ms": round(ms, 1), **ctx}))
 
-# Read-only evidence tools (no Bash/Write/Edit — read-only boundary, MVP).
-# NOTE: the builtin Grep is deliberately ABSENT. It greps the EFS/NFS mount where
-# a whole-repo search costs ~20-47s (network round-trip per file across ~18k
-# files); the index-service exposes codegraph_search_files instead, which greps a
-# LOCAL-disk copy at ~0.2s (measured 225x faster). Read/Glob stay (single-file /
-# metadata access on EFS is acceptable; broad content scans are the slow path).
-READONLY_TOOLS: tuple[str, ...] = ("Read", "Glob")
+# Read-only evidence tools: NONE of the builtins. The agent microVM mounts NO
+# filesystem (EFS removed) — ALL code access goes over the index-service HTTP
+# bridge: codegraph_symbol_search/get_callers/analyze_impact for the graph,
+# codegraph_search_files for text search, and codegraph_read_file/glob_files
+# (added in the EFS-removal) replacing the builtin Read/Glob that used to hit the
+# /mnt/repo EFS mount. With ``tools=[]`` the SDK sends ``--tools ""`` (verified
+# against claude-agent-sdk 0.2.103 subprocess_cli), so NO builtin tool is in the
+# model's context — a strictly STRONGER read-only boundary than before (not even
+# a filesystem Read exists). MCP tools are admitted via mcp_servers, unaffected
+# by ``--tools``.
+READONLY_TOOLS: tuple[str, ...] = ()
 
 # Write/exec built-ins that must NEVER be reachable in the read-only MVP. Setting
 # ``tools`` to the read-only whitelist already removes all non-listed built-ins,
@@ -57,6 +61,15 @@ WRITE_EXEC_TOOLS: tuple[str, ...] = (
     "WebFetch",
     "WebSearch",
     "Grep",
+    # Read/Glob/LS blocklisted too: not for safety but to GUARANTEE the agent never
+    # tries a filesystem read on a microVM that has NO mount (EFS removed). All file
+    # access goes through codegraph_read_file/glob_files over HTTP instead. With
+    # tools=[] these aren't available anyway; blocklisting removes them from the
+    # model's context entirely so it never even attempts a builtin Read that would
+    # just fail with no filesystem.
+    "Read",
+    "Glob",
+    "LS",
 )
 
 # CodeGraph MCP tools, allow-listed only when a CodeGraph endpoint is provided.
@@ -69,6 +82,11 @@ CODEGRAPH_TOOLS: tuple[str, ...] = (
     # Fast text search over the index-service's LOCAL repo copy (replaces the
     # slow builtin Grep). The agent uses this for config/string/numeric lookups.
     "mcp__codegraph__codegraph_search_files",
+    # File read + glob over the index-service's LOCAL repo copy, replacing the
+    # builtin Read/Glob that used to hit the /mnt/repo EFS mount (EFS removed —
+    # the microVM mounts no filesystem, so all file access is over HTTP).
+    "mcp__codegraph__codegraph_read_file",
+    "mcp__codegraph__codegraph_glob_files",
 )
 
 # CodeGraph MCP tools with write/state side effects. MCP tools are admitted via
@@ -212,19 +230,13 @@ def build_options_dict(
     }
     if model:
         opts["model"] = model
-    # Anchor the agent's working dir to the repo mount. The container WORKDIR is
-    # /app (the assistant's OWN code); without this, a reflexive relative Glob/Read
-    # lands there and the model wastes 1-2 opening turns discovering "this isn't the
-    # game project" before re-orienting to /mnt/repo. Defense-in-depth alongside the
-    # system-prompt orientation block (a stray relative path now lands INSIDE the
-    # repo). Set ONLY when the path actually exists: the SDK passes cwd straight to
-    # the CLI subprocess, which hard-fails (CLIConnectionError "Working directory
-    # does not exist") if it's absent — so in local/CI live-SDK runs without the
-    # mount we omit cwd and fall back to the process cwd (the prior behavior). In
-    # the production microVM /mnt/repo is always mounted, so the anchor always sets.
-    repo_root = os.environ.get("REPO_MOUNT_ROOT", "/mnt/repo")
-    if os.path.isdir(repo_root):
-        opts["cwd"] = repo_root
+    # NOTE: no `cwd` is set. The agent microVM mounts NO filesystem (EFS removed)
+    # and has no filesystem tools (tools=[]) — there is nothing to navigate, so
+    # there's no repo dir to anchor to. The old cwd=/mnt/repo anchor (which tamed a
+    # reflexive relative Glob landing in /app) is obsolete: all code access is over
+    # the index-service HTTP tools, which take repo-relative / mount-aligned paths
+    # directly. Leaving cwd unset keeps the SDK on the process cwd (/app), which is
+    # harmless since the model can't read it.
     return opts
 
 
