@@ -285,4 +285,18 @@ describe("stripPreamble", () => {
       expect(stripPreamble(real)).toBe(real);
     }
   });
+
+  // Observed live: readiness + a BARE announce verb (整理/汇总/梳理) with NO trailing
+  // 答案/结论 noun. The prior patterns all required a result noun → this leaked.
+  it("strips a readiness + bare-announce-verb preamble ('…都核实清楚了，下面整理。')", () => {
+    expect(stripPreamble("已经把成长途径都核实清楚了，下面整理。\n\n力量靠升级加点成长。"))
+      .toBe("力量靠升级加点成长。");
+    expect(stripPreamble("数据都查清了，我来梳理一下。答案正文。")).toBe("答案正文。");
+    expect(stripPreamble("下面整理一下。\n\n真正的答案。")).toBe("真正的答案。");
+  });
+
+  it("does NOT over-strip a real sentence that BEGINS with 下面整理 but continues", () => {
+    const real = "下面整理的逻辑都写在 InventoryManager.cs 里，包括扩容规则。";
+    expect(stripPreamble(real)).toBe(real);
+  });
 });

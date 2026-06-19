@@ -71,6 +71,14 @@ const STANDALONE_PREAMBLE_OPENERS: RegExp[] = [
   // bare verb 输出/作答 (no trailing noun). The lead-in absorbs the object; the
   // announce verb itself is the terminator.
   new RegExp(`^(现在)?(我)?(已经)?(有|拿到|掌握|取得|获取|收集|读到|查到|核实|确认)了?.{0,30}(数据|信息|内容|资料|证据|代码|逻辑)[，,]?.{0,8}(现在|来|这就|开始)?(整理|汇总|给出|呈现)?(并)?(输出|作答|回答)(一下)?${TAIL}$`),
+  // "<readiness>，下面整理" / "…都核实清楚了，下面整理" — readiness + a BARE
+  // announce verb (整理/汇总/梳理/归纳) with NO result noun after it (observed live:
+  // "已经把成长途径都核实清楚了，下面整理。"). The other patterns require a trailing
+  // 答案/结论 noun; here the announce verb itself is the sentence terminator. The
+  // .{0,60} lead-in absorbs the readiness clause; FULL-sentence match + 160-char cap
+  // keep it from eating a real sentence (a real answer never ENDS its first sentence
+  // on a bare "下面整理" — that's purely a transition).
+  new RegExp(`^.{0,60}[，,。]?(现在|来|这就|接下来|下面|稍后)(就)?(我)?(来|开始)?(整理|汇总|梳理|归纳)(一下)?${TAIL}$`),
   /^(let me|i'?ll)\s+(now\s+)?(compile|summarize|put together|organize)\s+(the\s+)?(answer|findings?|results?)\s*[.:]?$/i,
   /^now\s+(let me|i'?ll)\s+(compile|summarize|put together|organize|give|provide)\b.{0,30}$/i,
   /^(i\s+)?(now\s+)?have\s+(enough|all\s+the)\s+(info|information|evidence)\b.{0,40}$/i,
