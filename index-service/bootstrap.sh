@@ -110,10 +110,28 @@ fi
 SIG_STAMP="$REPO_ROOT/.artifact_sig"
 WANT_SIG="${ARTIFACT_SIG:-unset}"
 HAVE_SIG="$(cat "$SIG_STAMP" 2>/dev/null || echo none)"
+# DISK-FULL GUARD: graph.db (RocksDB) does NOT fail cleanly on ENOSPC — a partial
+# write yields a corrupt/truncated graph that the 64KiB floor can't catch (it's
+# well over 64KiB). The local repo copy + graph.db + the downloaded tarball all
+# live on the single root volume under /data, so check headroom BEFORE extracting
+# and fail LOUDLY (same style as the EFS-mount guard) rather than silently
+# corrupting. Budget ≈ 5× the tarball (tarball + EFS tree + local tree + graph.db
+# growth); /data free space must exceed it.
+require_disk_headroom() {
+  local tarball_kb avail_kb need_kb
+  tarball_kb="$(du -k /tmp/repo.tar.gz 2>/dev/null | cut -f1 || echo 0)"
+  avail_kb="$(df -Pk /data | awk 'NR==2{print $4}')"
+  need_kb=$(( tarball_kb * 5 + 1048576 ))   # 5x tarball + 1GiB base headroom
+  if [ "${avail_kb:-0}" -lt "$need_kb" ]; then
+    echo "BOOTSTRAP_FAILED: insufficient /data space: avail=${avail_kb}KiB need>=${need_kb}KiB (tarball ${tarball_kb}KiB). Grow the root volume."
+    exit 1
+  fi
+}
 # Re-extract EFS if: never extracted, empty tree, or the staged snapshot changed.
 if [ ! -d "$WORKSPACE" ] || [ -z "$(ls -A "$WORKSPACE" 2>/dev/null)" ] || [ "$HAVE_SIG" != "$WANT_SIG" ]; then
   mkdir -p "$REPO_ROOT"
   aws s3 cp "s3://$BUCKET/${REPO_SUBDIR}.tar.gz" /tmp/repo.tar.gz --region "$REGION"
+  require_disk_headroom                     # fail loud if /data can't hold the extracts + graph
   rm -rf "$WORKSPACE"                       # drop the stale snapshot so the new one is clean
   tar xzf /tmp/repo.tar.gz -C "$REPO_ROOT"
   echo "$WANT_SIG" > "$SIG_STAMP"           # stamp AFTER a successful extract
@@ -137,10 +155,15 @@ if [ ! -d "$LOCAL_WORKSPACE" ] || [ -z "$(ls -A "$LOCAL_WORKSPACE" 2>/dev/null)"
   if [ ! -f /tmp/repo.tar.gz ]; then
     aws s3 cp "s3://$BUCKET/${REPO_SUBDIR}.tar.gz" /tmp/repo.tar.gz --region "$REGION"
   fi
+  require_disk_headroom                     # same guard before the local extract
   rm -rf "$LOCAL_WORKSPACE"
   tar xzf /tmp/repo.tar.gz -C "$LOCAL_REPO_ROOT"
   echo "$WANT_SIG" > "$LOCAL_SIG_STAMP"
 fi
+# Reclaim the downloaded tarball now that BOTH copies are extracted — it is a dead
+# ~18MB+ file on the size-constrained root volume otherwise (a re-run re-downloads
+# it cheaply when a sig change requires re-extract).
+rm -f /tmp/repo.tar.gz
 # Install ripgrep for fast, .gitignore-aware search (apt has it on Ubuntu 24.04).
 command -v rg >/dev/null || apt-get install -y ripgrep || true
 

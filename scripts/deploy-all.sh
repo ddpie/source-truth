@@ -67,6 +67,17 @@ Options:
                       Without it, a stale reuse only WARNs (never silently serves old code).
   --dry-run           Print the plan and resolved IDs, make no changes
   -h, --help
+
+First-run PREREQUISITES (not auto-provisioned — the deploy hard-fails / WARNs if missing):
+  • codegraph-server binary (ARM aarch64, glibc>=2.38, pinned 0.18.5) on PATH or
+    via CODEGRAPH_SERVER_BIN — obtain from its official release channel; the deploy
+    does NOT download it.
+  • A host that can build linux/arm64 images (arm64 host, or x86 + `docker run
+    --privileged --rm tonistiigi/binfmt --install arm64`).
+  • Bedrock model access enabled for the model, and AgentCore available in --region
+    (both are probed at preflight and WARN if missing).
+  • Feishu app secret created by hand (Secrets Manager/SSM) for the separately-run
+    bot-gateway — see the NEXT STEPS printed at the end.
 EOF
 }
 
@@ -147,7 +158,23 @@ preflight_model_access() {
   fi
   rm -f "$resp"
 }
-if [[ "$DRY_RUN" != true ]]; then preflight_model_access; fi
+# AgentCore is a newer service available only in a SUBSET of regions, and on a
+# fresh account first use can need a service-linked role / activation. If it isn't
+# reachable in this region, Phase 5 would later abort with a raw boto3 traceback.
+# Probe it up-front and WARN actionably (non-blocking, like the model-access probe)
+# so the operator learns the region/enablement gap before the long EFS/build phases.
+preflight_agentcore() {
+  command -v aws >/dev/null || return 0
+  if timeout 20 aws bedrock-agentcore-control list-agent-runtimes --region "$REGION" --max-results 1 >/dev/null 2>&1; then
+    say ok "AgentCore reachable in $REGION"
+  else
+    say warn "AgentCore (bedrock-agentcore-control) not reachable in $REGION via this identity."
+    say warn "  → On a NEW account/region, confirm AgentCore is available in $REGION and enabled"
+    say warn "    for the account (first use may auto-create a service-linked role). If the region"
+    say warn "    doesn't support AgentCore, pick a supported one. Phase 5 will fail until then."
+  fi
+}
+if [[ "$DRY_RUN" != true ]]; then preflight_model_access; preflight_agentcore; fi
 
 # Persist resolved config — but NOT on --dry-run (dry-run must make no changes,
 # including no writes to deploy-config).
@@ -302,6 +329,18 @@ if skip image; then say warn "skip image"; elif [[ "$DRY_RUN" == true ]]; then
 else
   say step "Phase 4b: build + push agent image"
   require_cmd docker "install Docker (buildx, ARM64 capable)" || exit 1
+  # The agent image is ARM64-only. On an x86_64 host without arm64 emulation, the
+  # build silently produces an unusable image that Phase 5 then consumes. Fail LOUD
+  # with the fix command unless the host is arm64 OR a linux/arm64 buildx target is
+  # available. (On the ARM dev host this passes immediately.)
+  if [[ "$(uname -m)" != "aarch64" && "$(uname -m)" != "arm64" ]]; then
+    if ! docker buildx inspect --bootstrap 2>/dev/null | grep -q "linux/arm64"; then
+      say err "host is $(uname -m) and cannot build linux/arm64. Set up emulation first:"
+      say err "  docker run --privileged --rm tonistiigi/binfmt --install arm64"
+      say err "  (or run the deploy from an arm64 host). The agent container is ARM64-only."
+      exit 1
+    fi
+  fi
   ECR_REPO="source-truth/agent"
   ECR_URI="${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com/${ECR_REPO}:latest"
   aws ecr describe-repositories --repository-names "$ECR_REPO" --region "$REGION" >/dev/null 2>&1 \
