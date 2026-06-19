@@ -31,8 +31,14 @@ logger = logging.getLogger("agent")
 def _perf(event: str, ms: float, **ctx: Any) -> None:
     """Emit one structured perf-sample log line (same schema as index-service
     perf.py): {"perf":true,"event":...,"latency_ms":...,...}. grep '"perf":true'
-    | jq to reconstruct the per-request three-stage timing breakdown."""
-    logger.info(json.dumps({"event": event, "perf": True, "latency_ms": round(ms, 1), **ctx}))
+    | jq to reconstruct the per-request three-stage timing breakdown.
+
+    Best-effort: a non-serializable value in ctx must NEVER crash the streaming hot
+    path (this is called per-message). Swallow any logging failure."""
+    try:
+        logger.info(json.dumps({"event": event, "perf": True, "latency_ms": round(ms, 1), **ctx}))
+    except Exception:  # noqa: BLE001 - perf logging is best-effort, never break the stream
+        pass
 
 # Read-only evidence tools: NONE of the builtins. The agent microVM mounts NO
 # filesystem (EFS removed) — ALL code access goes over the index-service HTTP
@@ -434,6 +440,11 @@ async def run_agent(
             saw_markup_text = False
             saw_error_result = False
             last_num_turns = None
+            # Re-arm first_emitted so agent_first_message measures the RETRY's (real)
+            # first token, not the discarded cold-start attempt's leaked first message.
+            # Otherwise the dim#5 time-to-first metric is corrupted on exactly the
+            # cold-start runs it exists to measure (anchored to thrown-away output).
+            first_emitted = False
             pending.clear()  # drop attempt-1's unclosed tool timers so they can't mis-pair
             async for message in _drive(prompt, suppress_on_leak=False):
                 n += 1
@@ -466,15 +477,18 @@ _TOOLCALL_MARKUP_RE = re.compile(
 
 def _message_has_tool_use(message: Any) -> bool:
     """True if the message carries a REAL tool_use block (a tool was actually
-    dispatched). Duck-typed: a tool_use block has id + name + input."""
+    dispatched). Duck-typed on id + name: a tool_use block has both; a tool_result
+    block has tool_use_id + content (NO name); a text block has neither. We do NOT
+    also require `input` non-None — a legit no-argument tool call has input={} or
+    None, and requiring it would silently miss that call (dropping it from leak
+    detection AND tool-latency)."""
     try:
         content = getattr(message, "content", None)
         if not isinstance(content, (list, tuple)):
             return False
         for block in content:
             if (getattr(block, "id", None) is not None
-                    and getattr(block, "name", None) is not None
-                    and getattr(block, "input", None) is not None):
+                    and getattr(block, "name", None) is not None):
                 return True
     except Exception:  # noqa: BLE001 - detection must never break the stream
         return False
@@ -511,7 +525,9 @@ def _track_tool_latency(message: Any, pending: dict[str, tuple[str, float]]) -> 
         for block in content:
             tool_id = getattr(block, "id", None)
             name = getattr(block, "name", None)
-            if tool_id is not None and name is not None and getattr(block, "input", None) is not None:
+            # tool_use = id + name (a tool_result has tool_use_id + content, no name).
+            # Don't require input non-None — a no-arg tool call would be missed.
+            if tool_id is not None and name is not None:
                 pending[tool_id] = (name, now)  # tool_use opened
                 continue
             result_id = getattr(block, "tool_use_id", None)
