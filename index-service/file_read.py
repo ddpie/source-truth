@@ -76,7 +76,13 @@ def read_file(
     sliced = all_lines[start:end]
     line_truncated = end < len(all_lines)
 
-    mount_path = path_align.to_container_path(local_path, index_root=local_root, mount_root=mount_root)
+    # Align the RETURNED path against the realpath'd root: to_local_path already
+    # realpath'd local_path (symlinks followed), so re-rooting it against a raw
+    # local_root that itself contains a symlink component would fail the lexical
+    # prefix match and raise "escapes repo root" on every read. Mirror glob_files,
+    # which roots on os.path.realpath(local_root).
+    mount_path = path_align.to_container_path(
+        local_path, index_root=os.path.realpath(local_root), mount_root=mount_root)
     elapsed_ms = (perf_counter() - t0) * 1000
     logger.info(perf_entry("file_read", elapsed_ms, path=mount_path[:120],
                            lines=len(sliced), truncated=byte_truncated or line_truncated))
