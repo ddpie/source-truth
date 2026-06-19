@@ -352,6 +352,10 @@ def test_message_text_has_toolcall_markup_matches_bare_and_antml():
     assert agent_lib._message_text_has_toolcall_markup(_MsgWith([_TextBlock("function" + "_calls")])) is True
     # Haiku 4.5 shape: <attempt_{toolname}> ... </attempt_{toolname}>
     assert agent_lib._message_text_has_toolcall_markup(_MsgWith([_TextBlock("先查\n<attempt_codegraph_symbol_search>\n{}")])) is True
+    # Markup-LESS variant: the model narrates calling the tool by NAME without any
+    # XML ("Let me call codegraph_symbol_search"). A real answer never names an
+    # internal tool, so this is a leak tell.
+    assert agent_lib._message_text_has_toolcall_markup(_MsgWith([_TextBlock("Let me call codegraph_symbol_search(query=\"LevelUp\")")])) is True
     # A clean answer that merely mentions the word invoke/attempt is NOT markup.
     assert agent_lib._message_text_has_toolcall_markup(_MsgWith([_TextBlock("这个函数会 invoke 回调")])) is False
     assert agent_lib._message_text_has_toolcall_markup(_MsgWith([_TextBlock("第一次 attempt 失败后重试")])) is False
