@@ -38,6 +38,24 @@ from typing import Any
 DEFAULT_MOUNT_ROOT = ""
 
 
+def _normalize_seps(p: str) -> str:
+    """Normalize path separators BEFORE posixpath handling. Two fixes:
+      - Backslashes → '/': posixpath.normpath does NOT treat '\\' as a separator,
+        so a Windows-style path (some Unity/.NET tooling in a game repo, or a
+        codegraph frontend) would otherwise pass through as a single backslash-laden
+        filename → wrong citation + a read that can't find the file. Game repos are
+        exactly the domain here, so guard it.
+      - Collapse a leading '//' to '/': posixpath preserves a leading double slash
+        (POSIX implementation-defined), which would make an absolute '//data/repo/…'
+        never match the single-slash index_root prefix → a valid hit turns into a
+        hard 'escapes repo root' error.
+    Interior double slashes are left for posixpath.normpath to collapse."""
+    p = p.replace("\\", "/")
+    while p.startswith("//"):
+        p = p[1:]
+    return p
+
+
 def to_container_path(
     raw: str,
     *,
@@ -59,6 +77,7 @@ def to_container_path(
     """
     if not raw or not raw.strip():
         raise ValueError("path must be a non-empty string")
+    raw = _normalize_seps(raw)
 
     index_root = posixpath.normpath(index_root)
     # Empty mount_root means "repo-relative" — DON'T normpath("") → "." it.
@@ -111,6 +130,7 @@ def to_local_path(
     """
     if not requested or not requested.strip():
         raise ValueError("path must be a non-empty string")
+    requested = _normalize_seps(requested)
 
     local_root = posixpath.normpath(local_root)
     mount_root = posixpath.normpath(mount_root) if mount_root else ""
