@@ -147,10 +147,18 @@ AMI="$(Q describe-images --owners 099720109477 \
   --filters "Name=name,Values=ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-arm64-server-*" "Name=state,Values=available" \
   --query 'reverse(sort_by(Images,&CreationDate))[0].ImageId' --output text)"
 
-# user-data: write env file, drop bootstrap.sh, run it.
-BOOT_B64="$(base64 -w0 "$ROOT/index-service/bootstrap.sh")"
+# user-data: write env file, FETCH bootstrap.sh from S3 via curl, run it. We stage
+# bootstrap.sh to S3 and pass a PRESIGNED URL (no creds/awscli needed on the fresh
+# instance — the base Ubuntu AMI has curl but no aws CLI yet) rather than
+# base64-embedding the script in user-data: EC2 caps the encoded user-data blob at
+# 25600 bytes, which the growing bootstrap.sh blew past (the embed double-encodes).
+# A tiny fetch-and-run user-data is size-stable regardless of bootstrap.sh length.
+aws s3 cp "$ROOT/index-service/bootstrap.sh" "s3://$BUCKET/bootstrap.sh" --region "$REGION" >&2
+# Presign with a long expiry so a delayed cloud-init (or a retry) can still fetch.
+BOOT_URL="$(aws s3 presign "s3://$BUCKET/bootstrap.sh" --region "$REGION" --expires-in 3600)"
 UD="$(cat <<EOF
 #!/bin/bash
+set -e
 cat > /etc/index-service.env <<ENV
 BUCKET='$BUCKET'
 REGION='$REGION'
@@ -158,7 +166,7 @@ REPO_SUBDIR='$REPO_SUBDIR'
 MAX_FILES='$MAX_FILES'
 ARTIFACT_SIG='$CURRENT_SIG'
 ENV
-echo "$BOOT_B64" | base64 -d > /opt/bootstrap.sh
+for i in 1 2 3 4 5 6; do curl -fsSL "$BOOT_URL" -o /opt/bootstrap.sh && break || sleep 10; done
 bash /opt/bootstrap.sh
 EOF
 )"
