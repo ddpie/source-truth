@@ -368,6 +368,22 @@ describe("stripPreamble", () => {
     expect(stripPreamble("下面直接说结论。\n\nX答案。")).toBe("X答案。");
   });
 
+  it("strips '已经查清<topic>的完整逻辑了。' (readiness verb early + 逻辑了 terminator)", () => {
+    expect(stripPreamble("已经查清玩家摔落伤害的完整逻辑了。\n\n摔落伤害按高度算。"))
+      .toBe("摔落伤害按高度算。");
+    expect(stripPreamble("已经核实了暴击的完整计算了。\n\n暴击率 = 敏捷 / 4。"))
+      .toBe("暴击率 = 敏捷 / 4。");
+  });
+
+  it("does NOT over-strip a real sentence containing 逻辑了 mid-clause", () => {
+    for (const real of [
+      "查清玩家摔落伤害的逻辑后，会缓存到 FallCache。",
+      "这套逻辑了结于 DamageResolver.cs 的最后一行。",
+    ]) {
+      expect(stripPreamble(real)).toBe(real);
+    }
+  });
+
   it("does NOT over-strip a real sentence beginning with 已经查清楚了 / 下面直接说结论 then continuing", () => {
     for (const real of [
       "已经查清楚了的部分会标记为已核对状态。",

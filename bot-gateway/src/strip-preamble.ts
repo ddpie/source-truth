@@ -92,6 +92,12 @@ const STANDALONE_PREAMBLE_OPENERS: RegExp[] = [
   // FIRST of a 2-sentence preamble (paired with "下面分类说明。" below; the iterative
   // 2-pass strip handles the pair). FULL-match guard + 160 cap keep it safe.
   new RegExp(`^(我)?(现在)?(已经|已)?(把|将)?.{0,40}(都|全部|逐一|一一)?(查清楚|查清|查明|核对|核实|确认|查证|梳理|搞清楚|搞清|弄清楚|弄清|核查|查完|读完|看完|捋|过)(完|完毕|清楚|好|了一遍|一遍)?了${TAIL}$`),
+  // "已经查清玩家摔落伤害的完整逻辑了。" — readiness verb EARLY, then an object phrase,
+  // ending on "(的)(完整)?(逻辑|机制|规则|算法|计算|公式|设定|流程)了" — an
+  // investigation-complete announce about the TOPIC's logic, no result content. The
+  // .{0,40} absorbs the object; the trailing process-noun + 了 is the terminator.
+  // FULL-sentence match + 160 cap keep a real sentence (which continues past 了) safe.
+  new RegExp(`^(我)?(现在)?(已经|已)(把|将)?.{0,40}(查清楚|查清|查明|核对|核实|确认|查证|梳理|搞清楚|搞清|弄清楚|弄清|核查|看)了?.{0,30}(的)?(完整|整套|全部)?(逻辑|机制|规则|算法|计算|公式|设定|流程|来龙去脉|情况)了${TAIL}$`),
   // "下面分类说明。" / "下面是结论。" / "下面逐类讲。" — a bare "下面/接下来 + 呈现动词"
   // announce with NO readiness lead-in (often the SECOND sentence of a 2-sentence
   // preamble). Kept tight: requires a 下面/接下来/这就/下面就 opener so it can't match a
