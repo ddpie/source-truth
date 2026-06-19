@@ -521,7 +521,10 @@ async function runStreamingInvoke(
   const decision = decideFinalize({
     failed, httpFailed, turnCappedRaw: isTurnCapError(error), aborted, timedOut, accessDenied,
   });
-  const { turnCapped, hardFailed } = decision;
+  // Consume ALL of the decision's gating fields (not just hardFailed) so the
+  // unit-tested keep*/remember gates actually drive production — a regression in
+  // them is then caught by finalize-decision.test.ts, not only in the field.
+  const { turnCapped, hardFailed, keepCharts, keepFooter, remember } = decision;
 
   // 3. Final update + close streaming. Order matters so the "供研发复核" evidence
   //    folds correctly AND any incompleteness disclaimer stays VISIBLE (not swept
@@ -564,7 +567,7 @@ async function runStreamingInvoke(
   await writer.write((seq) => finalizeCard(cardId, finalText, redactSteps(steps), seq, isFollowUp, aborted, hardFailed, finalEvidence, question, elapsedLabel, turnCapped));
   // 5. Data charts + follow-ups: skip on HARD failure (no trustworthy conclusion).
   //    A turn-capped partial keeps its charts/follow-ups (labeled incomplete).
-  if (!hardFailed && charts.length > 0) {
+  if (keepCharts && charts.length > 0) {
     // Charts are pulled from the UNredacted answer (extractCharts ran on it),
     // so scrub every string leaf of each spec before it hits the group-visible
     // card — same secret/path safety net as the conclusion and reasoning panel.
@@ -580,7 +583,7 @@ async function runStreamingInvoke(
         .catch((e) => log({ event: "chart_error", index: i, error: String(e) })));
     });
   }
-  if (!hardFailed) {
+  if (keepFooter) {
     // Extract follow-ups from the RAW answer (still carries the "💡 你可能还想问"
     // trailer that stripFollowUps removed from the rendered body).
     const followUps = extractFollowUps(redactSensitive(answer));
@@ -589,7 +592,7 @@ async function runStreamingInvoke(
   // Remember the (redacted) answer so a follow-up on THIS card can replay the
   // prior turn as context. Use the redacted body — never store secrets, and it's
   // what the user actually saw. Skipped on hard failure (no trustworthy answer).
-  if (sentMessageId && !hardFailed) rememberAnswer(sentMessageId, finalText);
+  if (sentMessageId && remember) rememberAnswer(sentMessageId, finalText);
   // Redact `error` before logging: on a non-200 path it now carries the raw backend
   // response body (sigv4), which could echo a token/header/connection-string.
   log({ event: "card_closed", card: cardId, chars: answer.length, charts: charts.length, timedOut, failed, turnCapped, error: error ? redactSensitive(error) : undefined });
