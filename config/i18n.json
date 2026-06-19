@@ -2,13 +2,16 @@
   "_meta": {
     "description": "用户可见的 CardKit 卡片文案（多语言）。默认 zh；LOCALE 环境变量切换（zh|en）。注意：这里只放卡片 chrome 文案（标题/按钮/面板/状态/失败提示），不包含 agent 在答案文本里 emit、由网关解析的 marker（供研发复核 / 你可能还想问 / 需要你确认）——那些是 system.md 的契约，不在此。占位符用 {name} 形式。",
     "defaultLocale": "zh",
-    "locales": ["zh", "en"]
+    "locales": [
+      "zh",
+      "en"
+    ]
   },
   "zh": {
     "card.question.prefix": "问：",
     "card.summary.default": "source-truth 正在回答…",
-    "card.title.thinking": "正在思考…",
-    "card.title.thinking.followup": "正在追问…",
+    "card.title.thinking": "正在分析…",
+    "card.title.thinking.followup": "正在分析（追问）…",
     "card.conclusion.placeholder": "正在分析…",
     "card.title.done": "回答完成",
     "card.title.failed": "查询失败",
@@ -43,8 +46,8 @@
   "en": {
     "card.question.prefix": "Q: ",
     "card.summary.default": "source-truth is answering…",
-    "card.title.thinking": "Thinking…",
-    "card.title.thinking.followup": "Following up…",
+    "card.title.thinking": "Analyzing…",
+    "card.title.thinking.followup": "Analyzing (follow-up)…",
     "card.conclusion.placeholder": "Analyzing…",
     "card.title.done": "Answer complete",
     "card.title.failed": "Query failed",
