@@ -102,10 +102,19 @@ if [[ "$EXISTING" != "None" && -n "$EXISTING" ]]; then
   BOOTED_SIG="$(Q describe-instances --instance-ids "$EXISTING" --query "Reservations[0].Instances[0].Tags[?Key=='ArtifactSig'].Value | [0]" --output text 2>/dev/null)"
   if [[ "$BOOTED_SIG" != "$CURRENT_SIG" ]]; then
     if [[ "$REFRESH" == "true" ]]; then
-      log warn "index-service artifacts changed since $EXISTING booted (sig: ${BOOTED_SIG:-none} → $CURRENT_SIG); --refresh-index set → terminating it for a fresh bootstrap"
-      Q terminate-instances --instance-ids "$EXISTING" >/dev/null
-      Q wait instance-terminated --instance-ids "$EXISTING"
-      EXISTING="None"  # fall through to fresh launch below
+      # BLUE-GREEN: do NOT terminate the old instance here. Terminating up-front
+      # (before the new one is healthy + DNS re-pointed) leaves the stable name
+      # index.source-truth.internal resolving to a DEAD host for the whole multi-
+      # minute cold bootstrap → warm agent microVMs get connection-refused → empty
+      # codegraph → empty answer cards (the residual we observed). And if the new
+      # build fails health, the old (working) instance is already gone = total
+      # outage. So we RECORD the old id for deploy-all to terminate LAST (after the
+      # new instance is /health-green and DNS is cut over + TTL-drained), and fall
+      # through to launch the new one alongside it. Two instances briefly coexist —
+      # SAFE: each holds its OWN local graph.db (no shared writer), only paid-cost.
+      log warn "index-service artifacts changed since $EXISTING booted (sig: ${BOOTED_SIG:-none} → $CURRENT_SIG); --refresh-index set → blue-green: launching a fresh instance, old ($EXISTING) terminated AFTER new is healthy + DNS cut over"
+      update_env "$CONFIG" INDEX_OLD_INSTANCE "$EXISTING"
+      EXISTING="None"  # fall through to fresh launch below (old left running)
     else
       log warn "STALE index-service: instance $EXISTING booted from older artifacts (sig ${BOOTED_SIG:-none}, current $CURRENT_SIG)."
       log warn "  → This deploy re-staged index-service code/repo to S3 but reuse does NOT re-bootstrap, so those changes are NOT live."
