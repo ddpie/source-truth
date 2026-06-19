@@ -280,10 +280,10 @@ fi
 # Phase 3: index-service EC2 (ARM, Ubuntu 24.04, bootstrap.sh)
 # ============================================================
 if skip index-svc; then say warn "skip index-svc"; elif [[ "$DRY_RUN" == true ]]; then
-  say step "Phase 4: index-service EC2"
+  say step "Phase 3: index-service EC2"
   say info "[dry-run] provision_index_service.sh (ARM EC2 + bootstrap, reuse if running) + /health wait"
 else
-  say step "Phase 4: index-service EC2"
+  say step "Phase 3: index-service EC2"
   INDEX_IP="$("$SCRIPT_DIR/lib/provision_index_service.sh" \
     "$REGION" "$CONFIG_FILE" "$BUCKET" "$REPO_SUBDIR" "$MAX_FILES" "$INSTANCE_TYPE" "$REFRESH_INDEX")"
   update_env "$CONFIG_FILE" INDEX_SERVICE_IP "$INDEX_IP"
@@ -306,7 +306,7 @@ else
 fi
 
 # ============================================================
-# Phase 4b: build + push the agent-container image (ARM64) to ECR
+# Phase 4: build + push the agent-container image (ARM64) to ECR
 # ============================================================
 # Phase 5 references the image by URI; on a FRESH account that image doesn't
 # exist yet, so the one-click deploy must build+push it here (was missing →
@@ -314,10 +314,10 @@ fi
 # absent; image tagged :latest (mutable but fine for MVP — pinning tracked in
 # requirements/Dockerfile separately).
 if skip image; then say warn "skip image"; elif [[ "$DRY_RUN" == true ]]; then
-  say step "Phase 4b: build + push agent image"
+  say step "Phase 4: build + push agent image"
   say info "[dry-run] ECR create-if-absent + docker build --platform linux/arm64 + push source-truth/agent:latest"
 else
-  say step "Phase 4b: build + push agent image"
+  say step "Phase 4: build + push agent image"
   require_cmd docker "install Docker (buildx, ARM64 capable)" || exit 1
   # The agent image is ARM64-only. On an x86_64 host without arm64 emulation, the
   # build silently produces an unusable image that Phase 5 then consumes. Fail LOUD
