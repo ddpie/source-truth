@@ -190,14 +190,13 @@ async function streamingCardInvoke(
     // caps distinct-session stampede without delaying the user-visible card.
     return invokeGate.run(() => runStreamingInvoke(card, sessionId, finalPrompt, credentials));
   }).finally(() => {
-    // Backstop cleanup: the AbortController is registered at card-send (line ~209)
-    // so 停止 works while the turn is still QUEUED, but runStreamingInvoke's own
-    // try/finally only covers its streaming body — its setup (heartbeat/composer)
-    // runs before that try, and the serializer could in principle drop the task
-    // before the body's finally runs. Deleting here guarantees the map entry is
-    // removed on EVERY terminal path (resolve, throw, or never-bodied), so
-    // abortControllers can't slowly leak entries in the resident gateway. Idempotent
-    // with the body's own delete (a 2nd delete of an absent key is a no-op).
+    // SOLE point of AbortController removal. The controller is registered at card-send
+    // so 停止 works while the turn is still QUEUED and all through streaming +
+    // finalize; this .finally runs only AFTER runStreamingInvoke fully resolves (i.e.
+    // after closeStreaming/finalizeCard removed the 停止 button), so the button stays
+    // live+functional for the entire card lifetime and is gone exactly when the entry
+    // is removed — no dead-button window. Covers EVERY terminal path (resolve, throw,
+    // queued-task dropped before its body ran), so no leak in the resident gateway.
     abortControllers.delete(card.cardId);
   });
 }
@@ -629,8 +628,15 @@ async function runStreamingInvoke(
     // so the finalize writes aren't stuck behind a backlog — the "停止 no response
     // / card frozen" symptom). finalize uses one-shot write() which lands next.
     writer.dropLanes("status", "content", "evidence");
-    abortControllers.delete(cardId);
     clearTimeout(timeoutTimer); // stop the deadline timer on every exit path
+    // NB: do NOT delete the abortControllers entry HERE. This finally runs BEFORE the
+    // finalize writes below (closeStreaming / finalizeCard's full-PUT that removes the
+    // 停止 button). Deleting now would leave a clickable-but-dead button for the whole
+    // finalize window (a 停止 click → found:false → no feedback = the "停止没反应"
+    // symptom), and would also make gracefulShutdown's drain (waits for
+    // abortControllers.size===0) fire BEFORE the "已停止" finalize write flushed.
+    // The outer streamingCardInvoke .finally deletes the entry AFTER finalize fully
+    // resolves — that's the correct, single point of removal. (cross-review)
   }
   // A timeout aborts the controller too (to cancel the socket), so sigv4 reports
   // aborted=true. Distinguish it from a USER 停止: if we set timedOut, treat it as a
