@@ -127,4 +127,29 @@ describe("stripFollowUps", () => {
     const answer = "结论。\n💡 你可能还想问：\n- 调用方有哪些？\n- 调用方有哪些？\n- 它怎么初始化？";
     expect(extractFollowUps(answer)).toEqual(["调用方有哪些？", "它怎么初始化？"]);
   });
+
+  it("STOPS at an evidence block if it follows the follow-ups (model misorder)", () => {
+    // The model put the follow-ups BEFORE 供研发复核 — the evidence heading + its
+    // citation lines must NOT become fake buttons (cross-review HIGH).
+    const answer = [
+      "结论。",
+      "💡 你可能还想问：",
+      "- 真问题一？",
+      "> 🔍 **供研发复核**",
+      "> File.cs:10 里定义",
+    ].join("\n");
+    expect(extractFollowUps(answer)).toEqual(["真问题一？"]);
+  });
+
+  it("STOPS at a ```chart fence after the follow-ups", () => {
+    const answer = [
+      "结论。",
+      "💡 你可能还想问：",
+      "- 真问题一？",
+      "```chart",
+      '{"type":"line","data":{"values":[]}}',
+      "```",
+    ].join("\n");
+    expect(extractFollowUps(answer)).toEqual(["真问题一？"]);
+  });
 });
