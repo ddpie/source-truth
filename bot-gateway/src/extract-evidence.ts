@@ -24,7 +24,14 @@ export interface SplitEvidence {
 // 📎 / # decorations). "依据" is kept ONLY as a lenient fallback heading form
 // ("📎 依据" / "> 依据"), never mid-sentence. Anchored to a line start + a
 // line-end lookahead so prose mentions ("判断的依据：…", "代码为唯一依据") never match.
-const EVIDENCE_MARKER = /(?:^|\n)[ \t>#*_]*(?:🔍\s*)?(?:📎\s*)?\*{0,2}\s*(?:供研发复核|依据)\s*\*{0,2}[：:]?[ \t]*(?=\n|$)/;
+//
+// A HEADING-STYLE trailing suffix after the token is tolerated — a parenthetical
+// like "供研发复核（仅研发看）" or a "供研发复核 - 以下为出处" dash-note — so a decorated
+// heading is still recognized and the evidence is folded into the panel instead of
+// LEAKING the raw `> file:line` block into the user-facing conclusion. The suffix
+// is restricted to (parenthetical | dash-led note) so a normal prose sentence
+// containing 依据 mid-line ("我判断的依据是 X 因为 Y") still does NOT match.
+const EVIDENCE_MARKER = /(?:^|\n)[ \t>#*_]*(?:🔍\s*)?(?:📎\s*)?\*{0,2}\s*(?:供研发复核|依据)\s*\*{0,2}[：:]?(?:[ \t]*[（(][^\n]*[)）]|[ \t]*[-–—][^\n]*)?[ \t]*(?=\n|$)/;
 
 export function splitEvidence(answer: string): SplitEvidence {
   const m = EVIDENCE_MARKER.exec(answer);
