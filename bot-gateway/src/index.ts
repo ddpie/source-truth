@@ -61,6 +61,29 @@ function log(obj: Record<string, unknown>): void {
   console.log(JSON.stringify({ ts: new Date().toISOString(), ...obj }));
 }
 
+// Per-field caps for the finalized card body. A Feishu interactive card has a
+// total body-size limit; the finalize step rebuilds the WHOLE card in one PUT
+// (conclusion + reasoning panel + evidence), so an over-long conclusion or a huge
+// echoed config table in the evidence could push the PUT past the limit → CardKit
+// 400s the request. That failure is SWALLOWED by the serial CardWriter (a dropped
+// write must never wedge the queue), so the card would silently stay stuck
+// mid-stream (header blue "正在分析…", no footer) — the exact frozen-card failure the
+// design forbids. Clamp each field well under the limit BEFORE the PUT so finalize
+// always fits and lands. The agent's max_turns + prompt normally keep answers short;
+// this is the backstop for a pathological long answer / large evidence dump.
+const MAX_CARD_BODY_CHARS = 9000;     // conclusion (prose; charts/tables are separate)
+const MAX_CARD_EVIDENCE_CHARS = 9000; // 供研发复核 citations block
+function clampForCard(text: string, max: number): string {
+  if (text.length <= max) return text;
+  // Cut on a line boundary when one is near the limit so we don't slice mid-markup,
+  // and append a clear truncation marker (the dev-review panel still carries the
+  // file:line citations, so a research can read the full source there).
+  const head = text.slice(0, max);
+  const nl = head.lastIndexOf("\n");
+  const cut = nl > max - 400 ? head.slice(0, nl) : head;
+  return `${cut}\n\n_（内容较长，已截断；完整依据见“供研发复核”或直接查阅源码）_`;
+}
+
 // Message-level dedup uses the shared TTL-bounded `isDuplicate` (dedup.ts) with
 // a "msg:" prefix so it can't collide with event_id keys. This replaces an
 // earlier unbounded Set that leaked memory in an always-on gateway.
@@ -623,6 +646,10 @@ async function runStreamingInvoke(
         // strips + may show a clean failure message, but the live stream must not leak).
         display = stripToolCallLeak(normalizeBlocks(redactSensitive(stripPreamble(body.length > 0 ? body : textSoFar))));
         if (!display.trim()) display = "正在分析…";
+        // Clamp the LIVE update too: a runaway-long stream could 400 the per-frame PUT
+        // (coalesced → silently dropped → typewriter appears to freeze) before finalize
+        // even runs. Same cap as the finalized body. (finalize re-clamps independently.)
+        display = clampForCard(display, MAX_CARD_BODY_CHARS);
       }
       // Latest-wins lane: each content update carries the FULL text so far, so a
       // queued-but-not-yet-sent frame is stale and is replaced — the typewriter
@@ -827,8 +854,11 @@ async function runStreamingInvoke(
   // (which keys off inline `---`) and after redaction (additive newlines only, so it
   // can't move a secret across the redaction boundary). Clarify body is a single
   // prompt line — no blocks — so it's a harmless no-op there.
-  const finalText = normalizeBlocks(redactSensitive(bodyNoEvidence));
-  const finalEvidence = normalizeBlocks(redactSensitive(evidence));
+  // Clamp BEFORE normalize/redact-free PUT so an over-long conclusion or a huge echoed
+  // config table can't push the single finalize PUT past Feishu's card-size limit (a
+  // 400 there is swallowed by CardWriter → card stuck mid-stream). See MAX_CARD_* above.
+  const finalText = normalizeBlocks(clampForCard(redactSensitive(bodyNoEvidence), MAX_CARD_BODY_CHARS));
+  const finalEvidence = normalizeBlocks(clampForCard(redactSensitive(evidence), MAX_CARD_EVIDENCE_CHARS));
   // NOTE: do not trust `messages-mget` read-back to verify heading rendering — it
   // collapses the blank line around block markers in its re-serialization (verified:
   // we SEND "…：\n\n### X" but mget returns "…：### X"). The real card renders the
