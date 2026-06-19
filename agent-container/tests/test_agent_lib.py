@@ -325,3 +325,94 @@ def test_track_tool_latency_ignores_non_content_messages():
     for junk in (None, 42, "str", _MsgWith("not-a-list")):
         agent_lib._track_tool_latency(junk, pending)  # must not raise
     assert pending == {}
+
+
+# ── MCP-init-race detection + retry (the "raw <invoke> XML in card" root cause) ──
+class _TextBlock:
+    def __init__(self, text):
+        self.text = text
+
+
+class _ResultMsg:
+    def __init__(self, num_turns):
+        self.num_turns = num_turns
+
+
+def test_message_has_tool_use_detects_real_dispatch():
+    assert agent_lib._message_has_tool_use(_MsgWith([_ToolUseBlock("t1", "codegraph_search_files")])) is True
+    # A text-only message (model emitting markup as prose) is NOT a real tool_use.
+    assert agent_lib._message_has_tool_use(_MsgWith([_TextBlock("<invoke name=\"x\">")])) is False
+    assert agent_lib._message_has_tool_use(_MsgWith("not-a-list")) is False
+
+
+def test_message_text_has_toolcall_markup_matches_bare_and_antml():
+    assert agent_lib._message_text_has_toolcall_markup(_MsgWith([_TextBlock("先搜一下\n<invoke name=\"codegraph_search_files\">")])) is True
+    # antml: namespace prefix (the dominant real Claude shape)
+    assert agent_lib._message_text_has_toolcall_markup(_MsgWith([_TextBlock("<" + "antml:invoke name=\"x\">")])) is True
+    assert agent_lib._message_text_has_toolcall_markup(_MsgWith([_TextBlock("function" + "_calls")])) is True
+    # A clean answer that merely mentions the word invoke is NOT markup.
+    assert agent_lib._message_text_has_toolcall_markup(_MsgWith([_TextBlock("这个函数会 invoke 回调")])) is False
+
+
+def _collect(agen):
+    import asyncio
+
+    async def _run():
+        out = []
+        async for m in agen:
+            out.append(m)
+        return out
+
+    return asyncio.run(_run())
+
+
+def test_run_agent_retries_once_on_mcp_init_race():
+    # Attempt 1: leak shape — text with <invoke> markup, NO tool_use, num_turns=1.
+    # Attempt 2 (retry): real tool_use + a healthy result. The retry must fire and
+    # its messages must be yielded after the failed attempt's.
+    calls = {"n": 0}
+
+    async def fake_query(prompt, options):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            yield _MsgWith([_TextBlock("先搜一下\n<invoke name=\"codegraph_search_files\">")])
+            yield _ResultMsg(num_turns=1)
+        else:
+            yield _MsgWith([_ToolUseBlock("t1", "codegraph_search_files")])
+            yield _MsgWith([_TextBlock("怪物生命值写在 EnemyBasics.cs。")])
+            yield _ResultMsg(num_turns=4)
+
+    msgs = _collect(agent_lib.run_agent({"prompt": "怪物生命值怎么设定"}, query_fn=fake_query))
+    assert calls["n"] == 2, "must retry exactly once on the leak shape"
+    # The retry's real answer must be present in the yielded stream.
+    assert any(
+        any(getattr(b, "text", "").startswith("怪物生命值写在") for b in getattr(m, "content", []) if hasattr(b, "text"))
+        for m in msgs
+    )
+
+
+def test_run_agent_does_not_retry_on_healthy_run():
+    # A healthy run (real tool_use, multi-turn) must NOT trigger a retry.
+    calls = {"n": 0}
+
+    async def fake_query(prompt, options):
+        calls["n"] += 1
+        yield _MsgWith([_ToolUseBlock("t1", "codegraph_read_file")])
+        yield _MsgWith([_TextBlock("答案在这里。")])
+        yield _ResultMsg(num_turns=5)
+
+    _collect(agent_lib.run_agent({"prompt": "x"}, query_fn=fake_query))
+    assert calls["n"] == 1, "healthy run must not retry"
+
+
+def test_run_agent_does_not_retry_when_no_markup():
+    # num_turns=1 but NO tool-call markup (a legit short answer) → no retry.
+    calls = {"n": 0}
+
+    async def fake_query(prompt, options):
+        calls["n"] += 1
+        yield _MsgWith([_TextBlock("这个值是 100。")])
+        yield _ResultMsg(num_turns=1)
+
+    _collect(agent_lib.run_agent({"prompt": "x"}, query_fn=fake_query))
+    assert calls["n"] == 1, "a clean short answer must not retry"

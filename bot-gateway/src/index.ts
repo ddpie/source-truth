@@ -487,7 +487,12 @@ async function runStreamingInvoke(
         // keyed + conservative: no-op until the preamble's `---` has streamed.
         // normalizeBlocks (additive newlines only) also repairs jammed ###/---/>
         // live so the typewriter doesn't briefly show literal markers mid-paragraph.
-        display = normalizeBlocks(redactSensitive(stripPreamble(body.length > 0 ? body : textSoFar)));
+        // stripToolCallLeak: on the MCP-init-race failure (cold microVM whose MCP
+        // tools didn't register), the model emits raw <invoke> tool-call XML as text;
+        // strip it LIVE so the user never watches that markup type out (finalize also
+        // strips + may show a clean failure message, but the live stream must not leak).
+        display = stripToolCallLeak(normalizeBlocks(redactSensitive(stripPreamble(body.length > 0 ? body : textSoFar))));
+        if (!display.trim()) display = "正在分析…";
       }
       // Latest-wins lane: each content update carries the FULL text so far, so a
       // queued-but-not-yet-sent frame is stale and is replaced — the typewriter
