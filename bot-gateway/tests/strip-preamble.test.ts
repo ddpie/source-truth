@@ -387,6 +387,15 @@ describe("stripPreamble", () => {
       .toBe("天气影响移速。");
   });
 
+  it("strips a COMMA-joined readiness+announce in ONE sentence ('已核实清楚，下面分类说明。')", () => {
+    expect(stripPreamble("已核实清楚，下面分类说明。\n\n智力影响法力上限。")).toBe("智力影响法力上限。");
+  });
+
+  it("does NOT over-strip a real answer of form 'content，下面逐一说明…细节'", () => {
+    const real = "智力影响三类，下面逐一说明每一类的细节。";
+    expect(stripPreamble(real)).toBe(real);
+  });
+
   it("does NOT over-strip real sentences with 全貌 / 说明…作用 that continue", () => {
     for (const real of [
       "天气系统的全貌可以在 WeatherManager.cs 看到。",
