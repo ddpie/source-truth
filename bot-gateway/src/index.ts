@@ -35,6 +35,7 @@ import { splitEvidence } from "./extract-evidence";
 import { stripPreamble } from "./strip-preamble";
 import { stripToolCallLeak, isToolCallLeakDominant } from "./strip-toolcall-leak";
 import { normalizeBlocks } from "./normalize-blocks";
+import { t, initI18n, currentLocale } from "./i18n";
 import { extractClarification } from "./extract-clarify";
 import { handleMessageEvent, type InvokeFn } from "./handle-event";
 import { sdkEventToImEvent } from "./sdk-event";
@@ -177,7 +178,7 @@ async function sendStreamingCard(
   // where they came from. Use the CLEAN question for the preview (prompt may be
   // the replayed-context blob for a follow-up).
   const isFollowUp = "chatId" in target;
-  const summary = isFollowUp ? `追问：${safeQuestion}` : safeQuestion;
+  const summary = isFollowUp ? `${t("summary.followup.prefix")}${safeQuestion}` : safeQuestion;
   // Echo the question in the card body (esp. for follow-ups, so the card shows
   // WHAT was asked without scrolling). Pass it to createCard as the "question"
   // element; finalizeCard re-includes it so the full-PUT doesn't wipe it.
@@ -250,7 +251,7 @@ async function sendStreamingCard(
     // non-queued path relies on exactly this retry-as-append). startSeq advances
     // regardless to keep CardKit's monotonic-sequence contract.
     try {
-      await appendStatusLine(cardId, "排队中（正在等待上一个问题分析完成）", nextSeq);
+      await appendStatusLine(cardId, t("card.status.queued"), nextSeq);
       statusSeeded = true;
       nextSeq += 1;
     } catch { /* seed failed → heartbeat will append on its first tick */ }
@@ -605,7 +606,7 @@ async function runStreamingInvoke(
     // answer → clean failure message + suppress charts/evidence.
     if (isToolCallLeakDominant(bodyNoEvidence + "\n" + evidence)) {
       log({ event: "toolcall_leak_dominant", card: cardId, chars: bodyNoEvidence.length });
-      bodyNoEvidence = "这次没能得出可靠答案（取证过程未正常完成）。请再问一次试试；若反复如此，把问题发给研发排查。";
+      bodyNoEvidence = t("msg.fail.toolcallLeak");
       charts = []; evidence = ""; leakFailed = true;
     } else {
       // Strip stray markup from BOTH partitions so neither the body nor the folded
@@ -674,7 +675,7 @@ async function runStreamingInvoke(
   // though tools ran (the exact MCP-init-race shape).
   let panelSteps = redactSteps(steps);
   if (panelSteps.length === 0 && !hardFailed && !clarify && (timing.toolCalls ?? 0) > 0) {
-    panelSteps = ["已检索并查阅了相关代码，据此得出上面的结论（点开「供研发复核」可看精确出处）。"];
+    panelSteps = [t("card.reasoning.synthesized")];
   }
   // A clarification is a question back to the user, not an answer — don't show a
   // "已检索…据此得出结论" panel (no conclusion was reached).
@@ -712,9 +713,9 @@ async function runStreamingInvoke(
   const actions: ActionButton[] = [];
   const noAnswer = hardFailed || leakFailed || (aborted && bodyNoEvidence.trim().length <= 12);
   if (noAnswer && !clarify) {
-    actions.push({ kind: "retry", text: question, label: "重新试一次" });
+    actions.push({ kind: "retry", text: question, label: t("card.action.retry") });
   } else if (turnCapped && !clarify) {
-    actions.push({ kind: "narrow", text: `只聚焦其中一个最关键的点，简要回答：${question}`, label: "缩小范围再问一次" });
+    actions.push({ kind: "narrow", text: t("card.action.narrow.prompt", { question }), label: t("card.action.narrow") });
   }
   if (clarify) {
     // Disambiguation: render the option buttons (the prompt is already in the body).
@@ -745,6 +746,10 @@ async function runStreamingInvoke(
 
 async function main(): Promise<void> {
   if (!RUNTIME_ARN) throw new Error("RUNTIME_ARN env is required");
+  // Load card copy (config/i18n.json) at startup so a missing/broken bundle fails
+  // loudly here, not mid-answer. LOCALE env selects the locale (default zh).
+  initI18n();
+  log({ event: "i18n_loaded", locale: currentLocale() });
   // Hold the credential PROVIDER, not a one-time resolved snapshot. EC2 instance-
   // role creds (IMDS) are temporary; resolving once at startup and reusing the
   // snapshot for the lifetime of this always-on process meant every invoke 403'd
@@ -834,7 +839,7 @@ async function main(): Promise<void> {
       // would otherwise leak verbatim into the group here. redactSensitive is
       // idempotent, so re-redacting the already-safe chain part of a follow-up
       // blob is harmless while it covers the raw new-question segment.
-      await sendReply({ messageId: res.messageId, answer: `暂时无法回答（服务异常），请稍后重试：\n\n${redactSensitive(prompt)}` })
+      await sendReply({ messageId: res.messageId, answer: `${t("msg.serviceError")}\n\n${redactSensitive(prompt)}` })
         .catch((e) => log({ event: "fallback_error", error: String(e) }));
     }
     log({ event: "replied", message: hashUserId(res.messageId), session: sessionId });
