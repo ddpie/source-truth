@@ -153,8 +153,8 @@ def format_location(
     """Turn a CodeGraph ``symbol.location`` dict into an agent-readable reference.
 
     Real shape (codegraph-server 0.18.5): ``{file, line, column, end_line,
-    end_column}``. Returns ``<container-path>:<line>`` (e.g.
-    ``/mnt/repo/agent-container/agent.py:21``), or just the path when no line.
+    end_column}``. Returns ``<path>:<line>`` (repo-relative by default, e.g.
+    ``agent-container/agent.py:21``), or just the path when no line.
 
     Raises ValueError if ``file`` is absent (or via to_container_path on escape).
     """

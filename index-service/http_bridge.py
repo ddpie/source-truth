@@ -6,12 +6,13 @@ FastMCP streamable-HTTP server so session containers can query CodeGraph over
 HTTP. It also serves the repo's file content (read_file/glob_files) and text
 search (search_files) off the LOCAL repo copy, so the agent microVM needs NO
 filesystem mount — all code access is over HTTP. Tool results have their file
-paths rewritten into the agent's mount-aligned space (/mnt/repo) via path_align
-before returning.
+paths rewritten via path_align into REPO-RELATIVE form (mount_root defaults to
+""; a legacy /mnt/repo mount_root is still accepted for back-compat) before
+returning.
 
 Run as a resident service:
     python -m http_bridge --workspace /data/repo/<subdir> --host 0.0.0.0 --port 8080 \
-        --local-workspace /data/repo/<subdir>
+        --mount-root "" --local-workspace /data/repo/<subdir>
 """
 
 from __future__ import annotations
@@ -142,8 +143,9 @@ def build_bridge(
     """Build (but don't run) the FastMCP HTTP bridge for a CodeGraph workspace.
 
     ``workspace`` is the index-service-side repo path codegraph-server indexes
-    (a LOCAL-disk copy); its returned paths are rewritten from there onto
-    ``mount_root`` (the agent's /mnt/repo-aligned namespace). ``local_workspace``
+    (a LOCAL-disk copy); its returned paths are rewritten from there into the
+    agent's namespace — REPO-RELATIVE by default (``mount_root=""``), or under a
+    legacy ``/mnt/repo`` if a non-empty ``mount_root`` is given. ``local_workspace``
     is the LOCAL-disk repo copy the file tools (read_file/glob_files/search_files)
     read; post-EFS-removal it's the SAME path as ``workspace``.
     """
@@ -166,7 +168,7 @@ def build_bridge(
         """Resolve a symbol query to an index-space (uri, 0-based line).
 
         get_callers/analyze_impact need a uri+line, but the agent only ever sees
-        /mnt/repo-aligned paths and can't supply an index-space uri. So the bridge
+        repo-relative paths and can't supply an index-space uri. So the bridge
         resolves the query itself via symbol_search (the same resident session,
         index space), taking the top-ranked hit. Raises IndexUnhealthy on an
         unusable index; ValueError if the symbol can't be located.
@@ -190,7 +192,7 @@ def build_bridge(
         # agent has one consistent UX. For tools that actually need uri+line
         # (get_callers, analyze_impact) the bridge resolves query→uri+line via
         # symbol_search internally (see _build_args) — the agent can't supply an
-        # index-space uri because it only ever sees /mnt/repo-aligned paths.
+        # index-space uri because it only ever sees repo-relative paths.
         async def _tool(query: str) -> str:
             # Wait for warmup (don't refuse mid-startup), then refuse only on a
             # genuinely unhealthy (empty/corrupt) index. Returning an explicit
@@ -229,9 +231,9 @@ def build_bridge(
         import file_search
 
         async def codegraph_search_files(pattern: str, glob: str | None = None) -> str:
-            """Fast text search across the codebase (paths returned in /mnt/repo
-            space). `pattern` is a regex; optional `glob` narrows by filename
-            (e.g. "*.cs", "*.json"). Use this instead of shell grep."""
+            """Fast text search across the codebase (paths returned repo-relative,
+            e.g. `Assets/Scripts/Foo.cs`). `pattern` is a regex; optional `glob`
+            narrows by filename (e.g. "*.cs", "*.json"). Use this instead of shell grep."""
             try:
                 return file_search.search_to_json(
                     pattern, local_root=local_workspace, mount_root=mount_root, glob=glob,
@@ -253,9 +255,10 @@ def build_bridge(
         import file_read
 
         async def codegraph_read_file(path: str, offset: int = 0, limit: int | None = None) -> str:
-            """Read a source/config file's contents by its path (the /mnt/repo-aligned
-            path codegraph/search returns). Optional `offset` (0-based line) + `limit`
-            page large files. Use this instead of a shell `cat` or builtin Read."""
+            """Read a source/config file's contents by its path (the repo-relative
+            path codegraph/search returns, e.g. `Assets/Scripts/Foo.cs` — pass it
+            back verbatim, don't add any prefix). Optional `offset` (0-based line) +
+            `limit` page large files. Use this instead of a shell `cat` or builtin Read."""
             try:
                 return file_read.read_to_json(
                     path, local_root=local_workspace, mount_root=mount_root, offset=offset, limit=limit,
@@ -268,8 +271,9 @@ def build_bridge(
 
         async def codegraph_glob_files(pattern: str) -> str:
             """List files matching a glob `pattern` (e.g. "**/*.cs", "Config/*.json"),
-            interpreted relative to the repo root. Returns /mnt/repo-aligned paths.
-            Use this instead of a shell `ls`/`find` or builtin Glob."""
+            interpreted relative to the repo root. Returns repo-relative paths
+            (e.g. `Assets/Scripts/Foo.cs`). Use this instead of a shell `ls`/`find`
+            or builtin Glob."""
             try:
                 return file_read.glob_to_json(pattern, local_root=local_workspace, mount_root=mount_root)
             except ValueError as exc:
