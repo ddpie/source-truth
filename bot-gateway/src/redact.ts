@@ -138,15 +138,19 @@ export function redactDeep<T>(value: T): T {
   if (Array.isArray(value)) return value.map((v) => redactDeep(v)) as unknown as T;
   if (value && typeof value === "object") {
     const out: Record<string, unknown> = {};
-    // Redact the KEY as well as the value: VChart renders data-record / series /
-    // legend / tooltip KEYS (field names taken from the data the agent read) into
-    // the group-visible card, so a secret or /mnt/repo path in a key position
-    // would leak unredacted if we copied k verbatim. Routing k through
-    // redactSensitive closes that hole (the only redaction path that emits raw
-    // object keys). If two keys collapse to the same redacted string they clash —
-    // acceptable for a safety net (a secret-bearing key isn't a stable id).
+    // Redact only VALUES (recursively), NEVER object KEYS. A VChart data record's
+    // keys ARE the chart's field names (e.g. {"等级":"Lv1","攻击":100}) and the spec's
+    // xField/yField/seriesField/categoryField VALUES point at those keys by name.
+    // If we redacted a key, the field-reference value (redacted independently)
+    // would no longer match it → VChart binds nothing → the chart renders with AXES
+    // but NO bars/lines, while the tooltip still shows the raw datum (the exact
+    // "empty plot, hover shows data" bug). Field names are business labels the
+    // agent authored from data it read, not file content — a secret/path in a
+    // chart KEY is implausible, whereas a broken binding is a real, observed defect.
+    // The genuine leak surface (data values, titles, axis/legend/tooltip text) is
+    // all in string VALUES, which are still fully redacted.
     for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-      out[redactSensitive(k)] = redactDeep(v);
+      out[k] = redactDeep(v);
     }
     return out as unknown as T;
   }
