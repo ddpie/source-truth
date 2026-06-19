@@ -222,4 +222,24 @@ describe("stripPreamble", () => {
       expect(stripPreamble(real)).toBe(real);
     }
   });
+
+  // REGRESSION (observed live): readiness → announce-tail forms whose readiness
+  // clause the specific patterns missed (取证完毕 / 查清 / 齐全), but which END their
+  // first sentence announcing "现在整理答案 / 下面给出结论" — unambiguously a preamble.
+  it("strips broad readiness→announce-tail preambles", () => {
+    expect(stripPreamble("所有关键信息都已取证完毕，现在整理答案。\n\n这个项目是 X。"))
+      .toBe("这个项目是 X。");
+    expect(stripPreamble("代码都已查清，下面给出结论。\n\n伤害是 100。")).toBe("伤害是 100。");
+    expect(stripPreamble("数据齐全，接下来汇总内容。\n\n背包 30 格。")).toBe("背包 30 格。");
+  });
+
+  it("does NOT over-strip a real answer whose first sentence CONTINUES past the announce phrase", () => {
+    for (const real of [
+      "现在整理答案的逻辑在 AnswerBuilder.cs 里实现，分三步。",
+      "下面给出结论性的伤害公式：伤害 = 力量 × 1.5，这是真实答案正文继续写下去。",
+      "接下来要触发的技能是火球术，冷却 8 秒。",
+    ]) {
+      expect(stripPreamble(real)).toBe(real);
+    }
+  });
 });

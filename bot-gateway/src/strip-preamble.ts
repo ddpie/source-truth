@@ -49,6 +49,14 @@ const STANDALONE_PREAMBLE_OPENERS: RegExp[] = [
   // 答案/结论). The .{0,48} lead-in + FULL-sentence match + 160-char cap keep it from
   // matching a real answer sentence. Result noun set incl. 对比表/表格/清单/列表/对比.
   new RegExp(`^.{0,48}(都|也|已|已经)?(读到|读完|取到|取得|拿到|查到|获取|收集|核实|确认)了?[，,]?.{0,16}(可以|现在|来|这就|开始)?(整理|汇总|给出|得出|呈现|列出|做)(成|出|一下)?(完整|对比)?(的)?(对比表|表格|清单|列表|对比|答案|结论|回答)${TAIL}$`),
+  // Broad readiness→announce skeleton: "<任意取证铺垫>，(现在|来|这就)整理/汇总/给出
+  // …答案/结论". Keyed on the ANNOUNCE TAIL ("现在整理答案" / "来给出结论"), which is
+  // unambiguously a transition note, not a business answer — a real answer never
+  // ENDS its first sentence announcing it will now answer. The lead-in .{0,60}
+  // absorbs varied readiness phrasings (取证完毕 / 都已查清 / 数据齐全 …) that the
+  // specific patterns above miss. FULL-sentence match + 160-char cap是安全网：a real
+  // sentence继续讲内容、不会在"整理答案"处终止，故不会被full-match命中。
+  new RegExp(`^.{0,60}[，,。]?(现在|来|这就|接下来|下面)(就)?(我)?(来|开始)?(整理|汇总|给出|得出|呈现|输出)(一下)?(完整|最终|对比)?(的)?(答案|结论|回答|内容|信息|结果|输出)${TAIL}$`),
   // "现在我有完整的数据，来整理所有怪物的完整信息" / "数据齐全，来整理一下结果" — readiness
   // (有/拿到/掌握 + 数据/信息) + a 来/现在 + 整理/汇总 announce that ends in a
   // PROCESS-OUTPUT noun (信息/内容/输出/结果/数据/资料), NOT just 答案/结论. Observed live.
@@ -117,7 +125,10 @@ export function stripPreamble(body: string): string {
   if (sentMatch) {
     const firstSentence = sentMatch[0].trim();
     const sentenceBody = firstSentence.replace(/[。！!]\s*$/, "").trim();
-    const tail = body.slice(sentMatch[0].length).trim();
+    // The tail must hold REAL content — not just a bare separator / whitespace
+    // (else "现在我整理答案。\n---\n  " would strip down to "---", which is not an
+    // answer). Drop a leading HR line before checking emptiness.
+    const tail = body.slice(sentMatch[0].length).replace(/^\s*(?:-{3,}|\*{3,}|_{3,})\s*$/m, "").trim();
     if (tail.length > 0 && isFullPreamble(sentenceBody)) return tail;
   }
 
