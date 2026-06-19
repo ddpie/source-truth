@@ -25,7 +25,10 @@ export function buildTextContent(answer: string): string {
  *  LIVE: used as the error/serviceError fallback (index.ts) when the streaming
  *  card path can't run. */
 export async function sendReply(p: ReplyParams): Promise<void> {
-  await imReply(p.messageId, "text", buildTextContent(p.answer));
+  // Idempotency key stable per replied-to message so a transport retry can't post a
+  // second fallback text into the chat (cross-review H1). One message gets at most one
+  // fallback, so keying on messageId is both stable (dedupe retries) and distinct.
+  await imReply(p.messageId, "text", buildTextContent(p.answer), `reply-text-${p.messageId}`);
 }
 
 /** Reply to a message with an already-created interactive card (in-process). */

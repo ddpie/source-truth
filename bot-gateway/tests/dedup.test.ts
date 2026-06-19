@@ -43,13 +43,23 @@ describe("isDuplicate", () => {
     expect(isDuplicate("evt_c")).toBe(false);
   });
 
-  it("expires entries after TTL", () => {
+  it("does NOT expire before the default TTL (must outlive a ~9-min invoke)", () => {
+    // The window must exceed the longest in-flight invoke (~9 min) so a guard can't
+    // lapse mid-flight and let a re-delivery double-answer. At 10 min it's still live.
+    jest.useFakeTimers();
+    isDuplicate("evt_live");
+    jest.advanceTimersByTime(10 * 60 * 1000);
+    expect(isDuplicate("evt_live")).toBe(true); // still within the 15-min window
+    jest.useRealTimers();
+  });
+
+  it("expires entries after the default TTL (15 minutes)", () => {
     jest.useFakeTimers();
     isDuplicate("evt_ttl");
     expect(isDuplicate("evt_ttl")).toBe(true);
 
-    // Advance past default TTL (5 minutes)
-    jest.advanceTimersByTime(5 * 60 * 1000 + 1);
+    // Advance past the default TTL (15 minutes — see DEFAULT_TTL_MS rationale).
+    jest.advanceTimersByTime(15 * 60 * 1000 + 1);
 
     expect(isDuplicate("evt_ttl")).toBe(false); // expired, treated as new
     jest.useRealTimers();

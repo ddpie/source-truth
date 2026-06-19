@@ -10,7 +10,7 @@
 process.env.FEISHU_APP_ID = process.env.FEISHU_APP_ID || "cli_test";
 process.env.FEISHU_APP_SECRET = process.env.FEISHU_APP_SECRET || "secret_test";
 
-import { getTenantToken, invalidateToken, feishuApi } from "../src/feishu-http";
+import { getTenantToken, invalidateToken, feishuApi, imReply, imSendToChat } from "../src/feishu-http";
 
 type FetchArgs = [input: string, init?: { method?: string; headers?: Record<string, string>; body?: string }];
 
@@ -129,5 +129,44 @@ describe("feishuApi", () => {
       url.includes("tenant_access_token") ? { json: tokenResponse() } : { status: 200, json: null },
     );
     await expect(feishuApi("PUT", "/open-apis/x", {})).rejects.toThrow(/empty\/unparseable/);
+  });
+});
+
+describe("im send/reply idempotency uuid", () => {
+  it("imReply forwards the uuid in the body (so a retry can't double-post)", async () => {
+    stubFetch((url) =>
+      url.includes("tenant_access_token")
+        ? { json: tokenResponse() }
+        : { json: { code: 0, data: { message_id: "om_new" } } },
+    );
+    const id = await imReply("om_parent", "interactive", "{}", "card-7777");
+    expect(id).toBe("om_new");
+    const apiCall = calls.find(([u]) => u.includes("/messages/om_parent/reply"))!;
+    expect(JSON.parse(apiCall[1]!.body as string).uuid).toBe("card-7777");
+  });
+
+  it("imSendToChat forwards the uuid, and an over-50-char uuid is clamped", async () => {
+    stubFetch((url) =>
+      url.includes("tenant_access_token")
+        ? { json: tokenResponse() }
+        : { json: { code: 0, data: { message_id: "om_x" } } },
+    );
+    const long = "card-" + "a".repeat(80);
+    await imSendToChat("oc_chat", "interactive", "{}", long);
+    const apiCall = calls.find(([u]) => u.includes("/im/v1/messages?"))!;
+    const sentUuid = JSON.parse(apiCall[1]!.body as string).uuid as string;
+    expect(sentUuid.length).toBe(50); // clamped to Feishu's max
+    expect(long.startsWith(sentUuid)).toBe(true);
+  });
+
+  it("omits uuid when none is supplied (undefined drops out of JSON)", async () => {
+    stubFetch((url) =>
+      url.includes("tenant_access_token")
+        ? { json: tokenResponse() }
+        : { json: { code: 0, data: { message_id: "om_y" } } },
+    );
+    await imReply("om_p", "text", "{}");
+    const apiCall = calls.find(([u]) => u.includes("/messages/om_p/reply"))!;
+    expect("uuid" in JSON.parse(apiCall[1]!.body as string)).toBe(false);
   });
 });
