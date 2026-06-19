@@ -64,9 +64,13 @@ export function t(key: string, vars?: Record<string, string | number>): string {
     return key;
   }
   if (vars) {
-    for (const [k, v] of Object.entries(vars)) {
-      s = s.replace(new RegExp(`\\{${k}\\}`, "g"), String(v));
-    }
+    // Single pass over {placeholder} tokens, inserting the value LITERALLY. Using a
+    // replacer FUNCTION (not a string) is load-bearing: a string 2nd arg to replace
+    // treats $1/$&/$$/etc in the value as replacement patterns, so a user question
+    // containing "$" (e.g. interpolated into card.action.narrow.prompt) would be
+    // silently mangled. The function form inserts the raw value. An unknown
+    // placeholder is left as-is (no crash, visible in testing).
+    s = s.replace(/\{(\w+)\}/g, (m, name: string) => (name in vars ? String(vars[name]) : m));
   }
   return s;
 }

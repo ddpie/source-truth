@@ -33,6 +33,21 @@ describe("i18n", () => {
     expect(t("no.such.key.exists")).toBe("no.such.key.exists");
   });
 
+  it("inserts a value containing $ LITERALLY (no replace-pattern mangling)", () => {
+    initI18n("zh");
+    // The narrow-retry prompt interpolates the USER's question; a "$" in it must
+    // survive verbatim (regression: a string replacement arg ate $1/$$/$&).
+    const q = "伤害是 $1 还是 $$ 还是 100% & 50%?";
+    const out = t("card.action.narrow.prompt", { question: q });
+    expect(out).toContain(q); // the whole question survives unmangled
+  });
+
+  it("leaves an unknown {placeholder} literal (no crash, not dropped)", () => {
+    initI18n("zh");
+    // card.title.elapsed has {elapsed}; calling with a wrong var name leaves it.
+    expect(t("card.title.elapsed", { wrong: "x" })).toContain("{elapsed}");
+  });
+
   it("falls back to zh for a key missing in en (partial translation is safe)", () => {
     // Both bundles are complete today; simulate by asserting the merge behavior:
     // an en lookup of a zh-only key would yield the zh string. We assert the real
