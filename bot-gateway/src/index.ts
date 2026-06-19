@@ -691,6 +691,11 @@ async function runStreamingInvoke(
   // prompt line — no blocks — so it's a harmless no-op there.
   const finalText = normalizeBlocks(redactSensitive(bodyNoEvidence));
   const finalEvidence = normalizeBlocks(redactSensitive(evidence));
+  // NOTE: do not trust `messages-mget` read-back to verify heading rendering — it
+  // collapses the blank line around block markers in its re-serialization (verified:
+  // we SEND "…：\n\n### X" but mget returns "…：### X"). The real card renders the
+  // heading correctly; the mget "jam" is a read-back artifact. normalizeBlocks is
+  // covered by unit tests.
   // Finalize writes go through the SAME serial writer, so they're ordered AFTER
   // every streaming write drained (FIFO) and carry strictly-higher sequences —
   // no stale rejection. Each is independently guarded inside writer.write (a
