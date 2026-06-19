@@ -1,8 +1,9 @@
 """Unit tests for file_search — the fast local-disk content search that replaces
 the agent's slow EFS Grep. Uses a tiny temp repo (real ripgrep/grep on local
-disk, no EFS, no network). Asserts: matches found, paths rewritten into /mnt/repo
-space, no-match returns empty (not an error), glob filtering, and the command
-builder shape.
+disk, no EFS, no network). Asserts: matches found, paths rewritten into the
+agent's namespace (legacy /mnt/repo here for back-compat coverage; the shipped
+mount_root="" repo-relative branch is covered too), no-match returns empty (not
+an error), glob filtering, and the command builder shape.
 """
 
 from __future__ import annotations
@@ -42,6 +43,18 @@ def test_finds_matches_and_rewrites_paths(repo: Path):
     # The .cs and .json files both matched.
     paths = " ".join(m["path"] for m in out["matches"])
     assert "hero.cs" in paths and "items.json" in paths
+
+
+def test_repo_relative_mount_root_returns_relative_paths(repo: Path):
+    # Production ships with mount_root="" (bootstrap.sh --mount-root "") → paths
+    # come back repo-relative, never absolute. This is the actually-deployed branch.
+    out = file_search.run_search("MaxEncumbrance", local_root=str(repo), mount_root="")
+    assert out["count"] >= 2, out
+    for m in out["matches"]:
+        assert not m["path"].startswith("/"), m   # repo-relative, no leading slash
+        assert str(repo) not in m["path"]
+    paths = " ".join(m["path"] for m in out["matches"])
+    assert "src/hero.cs" in paths and "config/items.json" in paths
 
 
 def test_glob_narrows_by_filetype(repo: Path):

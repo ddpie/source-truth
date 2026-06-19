@@ -35,6 +35,44 @@ def repo(tmp_path):
     return root
 
 
+# --- production mount_root="" (repo-relative) round-trip -------------------
+# Production ships the bridge with --mount-root "" (bootstrap.sh), so the tools
+# return and re-resolve PLAIN repo-relative paths. The bulk of the cases below
+# use the legacy MOUNT="/mnt/repo" for back-compat coverage; these assert the
+# actually-shipped repo-relative branch end to end.
+def test_read_file_repo_relative_path_is_returned(repo):
+    out = file_read.read_file("Config/bag.json", local_root=str(repo), mount_root="")
+    assert out["path"] == "Config/bag.json"  # repo-relative, no /mnt/repo prefix
+    assert not out["path"].startswith("/")
+
+
+def test_glob_then_read_roundtrip_repo_relative(repo):
+    # The real agent loop: glob/search returns a path, agent feeds it back to read.
+    g = file_read.glob_files("**/*.cs", local_root=str(repo), mount_root="")
+    assert g["paths"] == ["src/A.cs"]
+    out = file_read.read_file(g["paths"][0], local_root=str(repo), mount_root="")
+    assert out["content"].splitlines() == ["line1", "line2", "line3"]
+
+
+def test_read_file_repo_relative_rejects_escape(repo):
+    with pytest.raises(ValueError):
+        file_read.read_file("../../etc/passwd", local_root=str(repo), mount_root="")
+
+
+def test_read_file_works_when_local_root_has_symlink_component(tmp_path):
+    # Regression: to_local_path realpath's the file; the returned-path alignment
+    # must root on realpath(local_root) too, or a symlinked local_root makes EVERY
+    # read fail with "escapes repo root". local_root here is a symlink to the repo.
+    real = tmp_path / "real"
+    (real / "src").mkdir(parents=True)
+    (real / "src" / "A.cs").write_text("x\ny\n")
+    link = tmp_path / "link"
+    os.symlink(str(real), str(link))
+    out = file_read.read_file("src/A.cs", local_root=str(link), mount_root="")
+    assert out["content"].splitlines() == ["x", "y"]
+    assert out["path"] == "src/A.cs"
+
+
 # --- read_file -------------------------------------------------------------
 def test_read_file_returns_content_and_mount_path(repo):
     out = file_read.read_file(f"{MOUNT}/Config/bag.json", local_root=str(repo), mount_root=MOUNT)
