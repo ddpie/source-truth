@@ -3,7 +3,6 @@ writer) unless explicitly opted in, so it can never be revived onto the resident
 serving path → 2nd writer → corruption. No codegraph-server binary needed."""
 from __future__ import annotations
 
-import os
 import sys
 from pathlib import Path
 
