@@ -14,9 +14,21 @@
 
 import { createHash } from "node:crypto";
 
-// Optional deployment salt so hashes can't be trivially rainbow-tabled across
-// environments. Not a secret-grade control (logs are internal), just hygiene.
-const SALT = process.env.LOG_HASH_SALT ?? "source-truth";
+// Deployment salt so hashes can't be trivially rainbow-tabled across environments.
+// Not a secret-grade control (logs are internal), just hygiene — but the fallback
+// constant is PUBLIC (in the repo + AGENTS.md), so a missing env salt makes the
+// known-format Feishu open_id hashes rainbow-tableable. We don't throw (this is an
+// always-on gateway; a missing salt must not crash logging), but we WARN ONCE so
+// the weakened de-identification is diagnosable rather than silent.
+const SALT_FALLBACK = "source-truth";
+const SALT = process.env.LOG_HASH_SALT ?? SALT_FALLBACK;
+if (SALT === SALT_FALLBACK) {
+  // eslint-disable-next-line no-console
+  console.warn(JSON.stringify({
+    event: "log_hash_salt_default",
+    detail: "LOG_HASH_SALT unset — using the PUBLIC fallback salt; user-id hashes are weakly de-identified. Set LOG_HASH_SALT in the gateway env.",
+  }));
+}
 
 /**
  * Stable, non-reversible short token for a user/chat/message identifier.

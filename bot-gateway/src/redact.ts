@@ -13,6 +13,19 @@ const REDACTED = "[已隐藏]";
 const PATTERNS: Array<[RegExp, string | ((...args: string[]) => string)]> = [
   // AWS access key IDs.
   [/AKIA[0-9A-Z]{16}/g, REDACTED],
+  // AWS SigV4 Authorization header (Credential=AKIA…/… + Signature=<hex>). The
+  // whole credential scope + signature is sensitive. Single char-classes ended by
+  // required literals → no ReDoS.
+  [/AWS4-HMAC-SHA256\s+Credential=[^\s,]+(?:,\s*SignedHeaders=[^\s,]+)?(?:,\s*Signature=[0-9a-f]+)?/gi, REDACTED],
+  // AWS STS session token (x-amz-security-token header OR AWS_SESSION_TOKEN= dump):
+  // a long opaque base64 blob with no fixed prefix → anchor to its key/header name
+  // so we don't over-redact. The value class allows +/=_- (base64url + padding).
+  [/((?:x-amz-security-token|aws_session_token|sessiontoken)["']?\s*[:=]\s*["']?)[A-Za-z0-9+/=_-]{20,}/gi,
+    (_m, pre: string) => `${pre}${REDACTED}`],
+  // Presigned-URL signing params in a query string (X-Amz-Signature / -Credential /
+  // -Security-Token). Redact only the value up to the next '&' or delimiter.
+  [/(X-Amz-(?:Signature|Credential|Security-Token)=)[^&\s"'`]+/gi,
+    (_m, pre: string) => `${pre}${REDACTED}`],
   // PEM private key blocks (multi-line).
   [/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, REDACTED],
   // JWTs (header.payload.signature). Both leading segments start with the

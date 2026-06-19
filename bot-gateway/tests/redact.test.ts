@@ -240,6 +240,26 @@ describe("redactSensitive", () => {
       expect(redactSensitive(line)).not.toContain(secret);
     }
   });
+
+  it("redacts AWS SigV4 / STS / presigned-URL credentials (no AWS creds should ever surface)", () => {
+    const sig = "Authorization: AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20260619/ap-northeast-1/bedrock/aws4_request, SignedHeaders=host, Signature=abcd1234ef567890";
+    expect(redactSensitive(sig)).not.toContain("AKIAIOSFODNN7EXAMPLE");
+    expect(redactSensitive(sig)).not.toContain("abcd1234ef567890");
+    expect(redactSensitive("x-amz-security-token: IQoJb3JpZ2luX2VjEC8aDmFwLW5vcnRoL1MQ==")).not.toContain("IQoJb3JpZ2luX2Vj");
+    expect(redactSensitive("AWS_SESSION_TOKEN=FwoGZXIvYXdzEXAMPLEabc123def456")).not.toContain("FwoGZXIvYXdzEXAMPLE");
+    const url = "https://s3.amazonaws.com/b/k?X-Amz-Signature=deadbeef1234&X-Amz-Credential=AKIA/x";
+    expect(redactSensitive(url)).not.toContain("deadbeef1234");
+  });
+
+  it("does NOT over-redact code-QA content next to the new AWS patterns", () => {
+    for (const real of [
+      "负重上限 = 力量 × 1.5，见 FormulaHelper.cs:75。",
+      "掉落数量 token_reward=50000000 是配置值。",
+      "比率是 3:4，在 http://10.1.1.97:8080/mcp 读取。",
+    ]) {
+      expect(redactSensitive(real)).toBe(real);
+    }
+  });
 });
 
 describe("redactSteps", () => {
