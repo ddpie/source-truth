@@ -13,3 +13,5 @@
 mcp==1.23.3       # drives codegraph-server MCP over stdio + FastMCP HTTP bridge
 uvicorn==0.44.0   # ASGI server backing the streamable-http bridge
 typing_extensions==4.15.0  # explicit shim (some deps resolve against it)
+openpyxl==3.1.5   # read_table: parse Excel (.xlsx/.xls) config tables → text (read-only).
+                  # CSV/TSV/SQLite use the stdlib (csv/sqlite3); only Excel needs this.

@@ -80,8 +80,13 @@ def _read_csv(local_path: str, *, delimiter: str) -> tuple[str, bool]:
 
 def _read_excel(local_path: str) -> tuple[str, bool]:
     # Lazy import so the module loads even where openpyxl is absent (it's installed
-    # on the index host; this keeps unit tests / local dev importable).
-    import openpyxl  # noqa: PLC0415
+    # on the index host via requirements.txt; this keeps unit tests / local dev
+    # importable). If it's genuinely missing, raise a CLEAN ValueError (→ the bridge
+    # returns an actionable "cannot read table" rather than an opaque "failed").
+    try:
+        import openpyxl  # noqa: PLC0415
+    except ImportError as exc:
+        raise ValueError("Excel parsing unavailable on this index-service (openpyxl not installed)") from exc
 
     # read_only + data_only: stream rows without loading the whole workbook, and
     # return computed values rather than formula strings (planners want the numbers).
