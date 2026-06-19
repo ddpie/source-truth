@@ -8,6 +8,16 @@ describe("normalizeBlocks — repair jammed block markers", () => {
     expect(out).not.toMatch(/：### /); // no longer jammed
   });
 
+  it("breaks an HR jammed after a colon (observed: '分两大类：---###')", () => {
+    const out = normalizeBlocks("怪物分两大类：---### 一、普通怪物");
+    expect(out).toMatch(/两大类：\n\n-{3,}\n\n/);
+    expect(out).toContain("### 一、普通怪物");
+  });
+
+  it("does NOT treat a ratio/range colon+dash as an HR (3:1-5:1)", () => {
+    expect(normalizeBlocks("比例是 3:1-5:1 之间")).toBe("比例是 3:1-5:1 之间");
+  });
+
   it("breaks an inline horizontal rule jammed after a sentence end", () => {
     const input = "值得注意。---### 礼仪（Etiquette）";
     const out = normalizeBlocks(input);

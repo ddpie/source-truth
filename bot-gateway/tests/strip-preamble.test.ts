@@ -269,4 +269,20 @@ describe("stripPreamble", () => {
       expect(stripPreamble(real)).toBe(real);
     }
   });
+
+  // REGRESSION (observed live): readiness + 来整理…设定/逻辑/机制/规则 (an object phrase
+  // between 整理 and the noun) leaked into the body.
+  it("strips '现在已经掌握了完整数据，来整理全部怪物的…设定。'", () => {
+    expect(stripPreamble("现在已经掌握了完整数据，来整理全部怪物的生命值和攻击力设定。\n\n怪物分两大类。"))
+      .toBe("怪物分两大类。");
+  });
+
+  it("does NOT over-strip a real answer mentioning 设定/逻辑 mid-sentence", () => {
+    for (const real of [
+      "怪物的攻击力设定在 EnemyBasics.cs 里，按等级区间随机。",
+      "整理逻辑由 Sorter.cs 负责，分三步执行。",
+    ]) {
+      expect(stripPreamble(real)).toBe(real);
+    }
+  });
 });
