@@ -449,16 +449,18 @@ async function runStreamingInvoke(
           if (safeSteps.length <= stepsShown) {
             // Nothing new survived stripping this tick → keep the panel as-is.
           } else {
-          lastPanelUpdate = nowPanel;
-          stepsShown = safeSteps.length;
+          lastPanelUpdate = nowPanel; // throttle stamp (schedule-time is fine)
           // Decide append-vs-update at EXECUTION time (inside the serial callback),
           // NOT at schedule time. The CardWriter chain is FIFO, so by the time this
           // callback runs, any earlier panel write has already settled and set
-          // panelAppended. That means: two writes can't both append (the first sets
-          // the flag true on success before the second runs), AND a FAILED append
-          // leaves the flag false so the next write retries as an append instead of
-          // stranding an UPDATE on a never-created "reasoning" element (the bug the
-          // schedule-time capture had — caught in review).
+          // panelAppended. CRITICAL: advance stepsShown only AFTER the write actually
+          // LANDS (inside the callback), not at schedule time — else a FAILED append
+          // would leave panelAppended=false but stepsShown already raised, so the
+          // retry gate (safeSteps.length > stepsShown) could stay shut while the
+          // clean-step count plateaus → the panel never appears at all (caught in
+          // re-review). Capturing `target` and committing it post-await makes a
+          // failed append fully self-heal on the next tick.
+          const target = safeSteps.length;
           void writer.write(async (seq) => {
             if (!panelAppended) {
               await appendReasoningPanel(cardId, safeSteps, seq);
@@ -466,6 +468,7 @@ async function runStreamingInvoke(
             } else {
               await updateReasoningPanel(cardId, safeSteps, seq);
             }
+            stepsShown = target; // only after the write landed (throw → not advanced → retry)
           });
           }
         }
@@ -694,6 +697,14 @@ async function runStreamingInvoke(
   // panelSteps is already cleaned (redactSteps above); finalizeCard re-redacts which
   // is idempotent (no markup/secret left to strip).
   await writer.write((seq) => finalizeCard(cardId, finalText, redactSteps(panelSteps), seq, isFollowUp, aborted, hardFailed, finalEvidence, question, elapsedLabel, turnCapped, !!clarify));
+  // Store the (redacted) answer in the registry BEFORE rendering the follow-up
+  // buttons. rememberAnswer is pure in-memory (no card I/O), and the follow-up
+  // suggestion buttons are written just below — if a user clicks one in the window
+  // between the footer-append and the answer-store, collectChain would read an
+  // answer-less parent and drop the immediate turn from context (caught in
+  // re-review). Storing first closes that race. Skipped on hard failure (no
+  // trustworthy answer) and on a clarification (prompt-back-to-user, not an answer).
+  if (sentMessageId && remember && !clarify) rememberAnswer(sentMessageId, finalText);
   // 5. Data charts + follow-ups: skip on HARD failure (no trustworthy conclusion).
   //    A turn-capped partial keeps its charts/follow-ups (labeled incomplete).
   if (keepCharts && charts.length > 0) {
@@ -742,12 +753,6 @@ async function runStreamingInvoke(
     // what the user needs here. Append a footer carrying ONLY the action button(s).
     await writer.write((seq) => appendFooter(cardId, seq, [], actions));
   }
-  // Remember the (redacted) answer so a follow-up on THIS card can replay the
-  // prior turn as context. Use the redacted body — never store secrets, and it's
-  // what the user actually saw. Skipped on hard failure (no trustworthy answer)
-  // and on a clarification (the prompt-back-to-user is not an answer to replay; the
-  // chosen option's NEW card will carry the real Q&A as context instead).
-  if (sentMessageId && remember && !clarify) rememberAnswer(sentMessageId, finalText);
   // Redact `error` before logging: on a non-200 path it now carries the raw backend
   // response body (sigv4), which could echo a token/header/connection-string.
   log({ event: "card_closed", card: cardId, chars: answer.length, charts: charts.length, timedOut, failed, turnCapped, error: error ? redactSensitive(error) : undefined });
@@ -943,21 +948,37 @@ async function main(): Promise<void> {
           // the question FRESH (no chain). Otherwise replay the WHOLE prior chain
           // (this card + ancestors) so multi-turn follow-ups build full history.
           const fresh = value.fresh === true;
+          // Eager prompt for the immediate-fire case; the deferred composer below
+          // recomputes at turn-start. A "重新试一次" (retry) button sets value.fresh:
+          // the prior turn FAILED (no usable answer), so carry NO context (replaying
+          // the failure message would poison the retry) — re-ask the question fresh.
           const chain = fresh ? [] : collectChain(messageId);
           const prompt = fresh ? value.text : composeFollowUpPrompt(value.text, chain);
           if (fresh) {
             log({ event: "retry_clicked", chatId: hashUserId(chatId) });
           } else if (chain.length === 0) {
-            // No prior context (card evicted past the 500-cap or wiped by a gateway
-            // restart) → can't continue the thread. Log it (operator-visible)
-            // rather than silently answering context-free.
             log({ event: "followup_context_missing", chatId: hashUserId(chatId), reason: entry ? "no_answer_stored" : "entry_missing" });
           } else {
             log({ event: "followup_context_replayed", chatId: hashUserId(chatId), turns: chain.length });
           }
+          // DEFER context composition to turn-start (mirror the reply path): a button
+          // clicked while the PARENT is still streaming — or in the sub-second window
+          // before the parent's answer is stored — would otherwise freeze an
+          // answer-less chain at click time and lose the immediate parent turn. The
+          // composer re-collects the chain at invoke time, by when the parent (same
+          // session, runs first) has finalized + stored its answer. Skipped for a
+          // fresh retry (no context wanted).
+          const composeBtn = fresh
+            ? undefined
+            : () => {
+                const c = collectChain(messageId);
+                if (c.length === 0) return prompt; // still nothing — keep eager (bare)
+                log({ event: "followup_context_replayed_deferred", turns: c.length });
+                return composeFollowUpPrompt(value.text!, c);
+              };
           // The new follow-up card's PARENT is the card being followed up, so a
           // follow-up-of-this-follow-up keeps walking the chain.
-          void streamingCardInvoke(sessionId, prompt, { chatId }, credentials, value.text, messageId, operatorOpenId)
+          void streamingCardInvoke(sessionId, prompt, { chatId }, credentials, value.text, messageId, operatorOpenId, composeBtn)
             .catch((e) => log({ event: "follow_up_error", error: String(e) }));
           // Mark the clicked button: disable it + ✓ on the original card, so the
           // user sees which one they picked (best-effort, async).
