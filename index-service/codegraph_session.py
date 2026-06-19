@@ -31,6 +31,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import signal
 import subprocess
 import threading
@@ -542,12 +543,13 @@ class CodegraphSession:
         (cross-review C1). The `--workspace <ours>` anchor keeps us from touching an
         unrelated codegraph-server serving a different repo on the same host. Never raises."""
         pids: set[int] = set()
-        # quote-free fixed-ish pattern; pgrep -f treats it as a regex, but a POSIX path
-        # has no regex metachars that would broaden the match dangerously (only '.'/'-'),
-        # and the surrounding literal "--workspace " keeps it anchored to our server.
+        # pgrep -f treats the pattern as a regex; re.escape the workspace path so a
+        # metachar in it (e.g. a '.' or '+') can't broaden the match to a sibling
+        # workspace (…/code-5x matching …/code-5x.bak) — exact-anchor to OUR server.
+        ws_re = re.escape(self._workspace)
         queries = (
             ["pgrep", "-P", str(os.getpid()), "-f", "codegraph-server"],
-            ["pgrep", "-f", "codegraph-server.*--workspace %s" % self._workspace],
+            ["pgrep", "-f", "codegraph-server.*--workspace %s" % ws_re],
         )
         for q in queries:
             try:
