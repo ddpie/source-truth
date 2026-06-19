@@ -44,7 +44,7 @@ const STANDALONE_PREAMBLE_OPENERS: RegExp[] = [
   // "可以作答了" / "现在可以回答了" / "已取到信息，可以作答" — the readiness sentence that
   // ends by announcing it will now answer (作答/回答). Broad on the lead-in but the
   // FULL-sentence match + short-length guard keep it from eating a real answer.
-  new RegExp(`^.{0,48}(可以|现在|来|开始|这就)(作答|回答|给出答案|给出结论)(了|啦)?${TAIL}$`),
+  new RegExp(`^.{0,48}(可以|现在|来|开始|这就)(作答|回答|给出答案|给出结论|下结论)(了|啦)?${TAIL}$`),
   new RegExp(`^.{0,40}(已|都)(经)?.{0,8}(取到|取得|获取|收集|拿到|有|够)了?(足够|所有|相关|关键)?(的)?(信息|证据|内容|数据)?[，,]?.{0,12}(可以|现在|来|这就)?(作答|回答|给出|整理|说明)(答案|结论)?(了|啦)?${TAIL}$`),
   // "(所有)信息都齐了，(来)整理答案" — readiness phrased as "data is all here" + announce.
   new RegExp(`^(所有|相关|关键)?(的)?(信息|证据|内容|数据|资料)(都|也|已)?(齐|够|到位|到齐|备齐)了?[，,]?.{0,12}(可以|现在|来|这就)?(整理|给出|得出|作答|回答|说明)(一下)?(完整|对比)?(的)?(答案|结论|回答)?(了|啦)?${TAIL}$`),
