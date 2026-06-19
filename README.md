@@ -104,8 +104,11 @@ deploy-all.sh：把目标仓库打成 tarball 上传 S3（部署时快照）
 ```
 
 要更新主分支代码 / 索引，**重新部署 index-service 即可**（替换实例重跑 bootstrap）。
-为什么必须建索引而非让 Agent 全仓 grep：实测全仓冷扫 grep 达 265s，建索引后查询恒 1–5ms，见
+为什么必须建索引而非让 Agent 全仓 grep：实测全仓冷扫 grep 在本地盘约 127s、在已废弃的 EFS 方案上
+最坏达 265s，建索引后查询恒 1–5ms，见
 [`docs/agent/indexing-performance-spike.md`](docs/agent/indexing-performance-spike.md)。
+（为何不挂 EFS、改用 index-service 本地副本的论证，见
+[`docs/agent/efs-codegraph-sharing-spike.md`](docs/agent/efs-codegraph-sharing-spike.md)。）
 
 ## 风险与可信度
 
@@ -124,4 +127,5 @@ deploy-all.sh：把目标仓库打成 tarball 上传 S3（部署时快照）
 | 需求 / 架构设计真相源 | [`docs/design/requirements_zh.md`](docs/design/requirements_zh.md) · [`docs/design/architecture-overview_zh.md`](docs/design/architecture-overview_zh.md) |
 | CardKit 流式卡片调研 | [`docs/agent/cardkit-streaming-spike.md`](docs/agent/cardkit-streaming-spike.md) |
 | 索引性能基准 | [`docs/agent/indexing-performance-spike.md`](docs/agent/indexing-performance-spike.md) |
+| 为何不挂 EFS / 改用本地副本 | [`docs/agent/efs-codegraph-sharing-spike.md`](docs/agent/efs-codegraph-sharing-spike.md) |
 | 性能对比（vs 原生 Claude Code） | [`docs/agent/perf-comparison.md`](docs/agent/perf-comparison.md) |
