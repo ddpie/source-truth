@@ -1162,13 +1162,22 @@ async function main(): Promise<void> {
           log({ event: "callback_duplicate", action: value?.action ?? "" });
           return {};
         }
-        if (value?.action === "stop" && value.card_id) {
-          // 停止: abort the in-flight agent stream for this card. The invoke
-          // then finalizes with whatever was generated, header → ⏹ 已停止.
-          const ctrl = abortControllers.get(value.card_id);
-          log({ event: "stop_clicked", card: value.card_id, found: !!ctrl });
-          if (ctrl) ctrl.abort();
-        } else if (value?.action === "follow_up" && value.text && chatId) {
+        if (value?.action === "stop") {
+          // 停止: abort the in-flight agent stream for this card. The invoke then
+          // finalizes with whatever was generated, header → ⏹ 已停止. Resolve the
+          // cardId from the button's own value.card_id, falling back to the
+          // registry by messageId (mirrors follow_up) so a payload whose value
+          // dropped card_id still stops the right card instead of silently no-op'ing
+          // with no trace ("点了停止没反应" + no log) (cross-review).
+          const stopCardId = value.card_id || lookupCard(messageId)?.cardId;
+          if (!stopCardId) {
+            log({ event: "stop_unresolved", message: messageId ? hashUserId(messageId) : "" });
+          } else {
+            const ctrl = abortControllers.get(stopCardId);
+            log({ event: "stop_clicked", card: stopCardId, found: !!ctrl });
+            if (ctrl) ctrl.abort();
+          }
+        } else if (value?.action === "follow_up" && typeof value.text === "string" && value.text && chatId) {
           // Hash the chat id; log only the question LENGTH, not the text, to
           // avoid "who asked what" profiling in logs (data minimization).
           log({ event: "follow_up_clicked", chatId: hashUserId(chatId), question_len: value.text.length });
@@ -1228,6 +1237,15 @@ async function main(): Promise<void> {
               .catch((e) => log({ event: "disable_button_error", error: String(e) }));
           }
           // No toast — the in-place button disable (✓ + greyed) is feedback enough.
+        } else {
+          // A callback we recognized the envelope of but could NOT act on — e.g. a
+          // follow_up whose context.open_chat_id was absent (chatId empty), or an
+          // unknown action. The dedup key was already burned above; roll it back so a
+          // Feishu re-delivery with the missing field populated can retry instead of
+          // being dropped as a duplicate forever (mirrors the reply path's forget;
+          // cross-review). Log so the skip is diagnosable rather than silent.
+          forget(`cb:${cbId}`);
+          log({ event: "callback_unactionable", action: value?.action ?? "", hasText: !!value?.text, hasChat: !!chatId });
         }
       } catch (e) {
         // Best-effort (the SDK callback must not throw), but DON'T swallow silently:
