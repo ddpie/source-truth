@@ -85,6 +85,16 @@ reconcile_index_sg_ingress() { # <sg>
 #     deploy is never a SILENT no-op (the operator is told their changes aren't
 #     live and how to apply them).
 CURRENT_SIG="$(artifact_signature)"
+# SINGLE-WRITER (shared EFS) GUARD: an instance still in a TRANSIENT shutdown state
+# (stopping / shutting-down) may STILL have EFS mounted and could be mid rm-rf/tar
+# of the shared /mnt/efs/repo tree. The reuse filter below only sees running/pending,
+# so without this a fresh launch could overlap that peer and race its EFS extract →
+# torn tree → 0-node graph. Wait for any such peer to fully terminate first.
+DRAINING="$(Q describe-instances --filters "Name=tag:Name,Values=source-truth-index-service" "Name=instance-state-name,Values=stopping,shutting-down,stopped" --query 'Reservations[0].Instances[0].InstanceId' --output text 2>/dev/null)"
+if [[ "$DRAINING" != "None" && -n "$DRAINING" ]]; then
+  log warn "an index-service instance ($DRAINING) is still draining (stopping/shutting-down); waiting for it to terminate before launching, to avoid a shared-EFS extract race"
+  Q wait instance-terminated --instance-ids "$DRAINING" 2>/dev/null || true
+fi
 EXISTING="$(Q describe-instances --filters "Name=tag:Name,Values=source-truth-index-service" "Name=instance-state-name,Values=running,pending" --query 'Reservations[0].Instances[0].InstanceId' --output text 2>/dev/null)"
 if [[ "$EXISTING" != "None" && -n "$EXISTING" ]]; then
   BOOTED_SIG="$(Q describe-instances --instance-ids "$EXISTING" --query "Reservations[0].Instances[0].Tags[?Key=='ArtifactSig'].Value | [0]" --output text 2>/dev/null)"

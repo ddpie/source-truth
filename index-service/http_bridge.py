@@ -255,12 +255,16 @@ def build_bridge(
     @app.custom_route("/health", methods=["GET"])
     async def _health(_req: Request) -> JSONResponse:  # pragma: no cover - thin
         ok = session.healthy
-        # EFS read-latency probe: stat + a small read of the workspace on the
-        # network filesystem. EFS does a metadata round-trip per op, so this is
-        # the disk-speed signal — logged as a perf line and returned so ops can
-        # watch NFS latency without per-query overhead. Best-effort, never fails
-        # /health on a probe error.
+        detail = session.health_detail
+        # EFS read probe — NOW A HEALTH GATE, not just telemetry. The agent reads
+        # source from /mnt/repo (EFS) AFTER we hand it EFS-aligned paths, so if EFS
+        # drops while serving, codegraph still answers from its IN-MEMORY graph
+        # (session.healthy stays true) but every agent file read fails — the user
+        # gets a broken answer while /health lied 200. So a probe FAILURE (or
+        # latency above the ceiling) flips /health to unhealthy. A consecutive-fail
+        # counter avoids flapping on a single slow NFS round-trip.
         disk_ms = -1.0
+        probe_ok = True
         try:
             import os
             import time as _t
@@ -273,9 +277,18 @@ def build_bridge(
             logger.info(json.dumps({"event": "efs_probe", "perf": True,
                                     "latency_ms": disk_ms, "entries": len(entries)}))
         except Exception as exc:  # noqa: BLE001
+            probe_ok = False
             logger.warning(json.dumps({"event": "efs_probe_failed", "error": str(exc)}))
+        # Track consecutive failures on the app object (survives across requests).
+        fails = getattr(app, "_efs_probe_fails", 0)
+        fails = 0 if probe_ok else fails + 1
+        app._efs_probe_fails = fails  # type: ignore[attr-defined]
+        efs_down = fails >= 2  # two strikes → treat EFS as down (avoid single-blip flap)
+        if efs_down:
+            ok = False
+            detail = f"efs unreadable ({fails} consecutive probe failures): {detail}"
         return JSONResponse(
-            {"healthy": ok, "detail": session.health_detail, "efs_probe_ms": disk_ms},
+            {"healthy": ok, "detail": detail, "efs_probe_ms": disk_ms},
             status_code=200 if ok else 503,
         )
 
