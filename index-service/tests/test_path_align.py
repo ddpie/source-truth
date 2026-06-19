@@ -213,6 +213,21 @@ def test_to_local_empty_rejected(tmp_path):
         path_align.to_local_path("", local_root=str(root), mount_root=MOUNT)
 
 
+def test_to_local_rejects_sibling_prefix_dir(tmp_path):
+    # SECURITY: the boundary check must be anchored with a trailing slash, so a
+    # SIBLING dir sharing the root's name prefix (/x/repo vs /x/repo-evil) can NOT be
+    # reached. A bare startswith(real_root) would wrongly allow it. The escape would
+    # need a path that realpath-resolves into repo-evil; the simplest proof is that
+    # the root prefix itself is slash-anchored — verified via a relative climb into
+    # the sibling, which must raise.
+    root = tmp_path / "repo"
+    root.mkdir()
+    (tmp_path / "repo-evil").mkdir()
+    (tmp_path / "repo-evil" / "secret.txt").write_text("x")
+    with pytest.raises(ValueError):
+        path_align.to_local_path("../repo-evil/secret.txt", local_root=str(root), mount_root=MOUNT)
+
+
 def test_to_local_rejects_symlink_escape(tmp_path):
     # A symlink INSIDE the repo whose target is OUTSIDE it passes the lexical
     # guard but MUST be caught by the realpath re-check (R3 in the design memory).

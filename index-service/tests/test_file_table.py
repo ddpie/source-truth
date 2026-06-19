@@ -77,6 +77,22 @@ def test_read_sqlite(repo):
     assert "orc | 30" in out["content"]
 
 
+def test_read_sqlite_with_question_mark_in_filename(repo):
+    # REGRESSION: a db file whose NAME contains '?' must not be mis-parsed as the
+    # start of the URI query string (which silently opened the wrong file / failed).
+    # The path is now percent-encoded in the file: URI.
+    p = repo / "Config" / "weird?name.db"
+    con = sqlite3.connect(str(p))
+    con.execute("CREATE TABLE t(x INT)")
+    con.execute("INSERT INTO t VALUES (7)")
+    con.commit()
+    con.close()
+    out = file_table.read_table("Config/weird?name.db", local_root=str(repo), mount_root=MOUNT)
+    assert out["kind"] == "sqlite"
+    assert "table 't'" in out["content"]
+    assert "7" in out["content"]
+
+
 def test_sqlite_is_read_only(repo):
     # The tool opens the db mode=ro&immutable=1 — confirm it can't write. (We can't
     # easily assert no-write from outside, but a read of a normal db must succeed and
