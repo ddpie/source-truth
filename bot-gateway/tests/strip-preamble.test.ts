@@ -149,6 +149,17 @@ describe("stripPreamble", () => {
     expect(stripPreamble(body)).toBe(body);
   });
 
+  it("strips the 4th E2E case: '已取得所有关键数据，现在整理完整答案。' + inline ---", () => {
+    // Observed 2026-06-19 on the clarified-answer card.
+    const body = "已取得所有关键数据，现在整理完整答案。---## 武器攻击伤害的完整算法…";
+    expect(stripPreamble(body)).toBe("## 武器攻击伤害的完整算法…");
+  });
+
+  it("does NOT over-strip a real answer that mentions 已取得的数据 mid-sentence", () => {
+    const body = "攻击力由武器决定，已取得的数据显示匕首 1-6。\n详见表。";
+    expect(stripPreamble(body)).toBe(body);
+  });
+
   it("does NOT match a --- adjacent to a table pipe as the cut point", () => {
     const body = "整理一下答案如下：\n| A | B |\n| --- | --- |\n| 1 | 2 |";
     // The head '整理一下答案如下' is a preamble-ish prefix, but the only `---` is in a
