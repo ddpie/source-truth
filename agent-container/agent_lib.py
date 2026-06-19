@@ -364,8 +364,12 @@ async def run_agent(
                 yield message
             else:
                 buf.append(message)
-                if saw_tool_use:
-                    # Real retrieval happened → definitely not a leak. Flush + commit.
+                # Flush + commit as soon as it CANNOT be the leak shape: either a real
+                # tool_use happened, OR the loop has run >1 turn (the cold-start leak
+                # is always num_turns<=1). The >1-turn guard also bounds the buffer —
+                # a long tool-free multi-turn answer no longer accumulates entirely in
+                # RAM / defeats the typewriter; it streams live once turn 2 starts.
+                if saw_tool_use or (last_num_turns is not None and last_num_turns > 1):
                     committed = True
                     for m in buf:
                         yield m
@@ -414,8 +418,12 @@ async def run_agent(
 #     so its presence + no real tool_use = the same cold-start MCP-init race.
 # All mean "model tried to retrieve but the tool wasn't registered". Detecting all
 # three is required or the leak slips the retry + strip.
+#     The bare-name arm requires a trailing "(" — a LEAK narration writes the tool
+#     as a CALL "codegraph_x(...)", whereas a legit dev-review citation writes it as
+#     `codegraph_x` / "用 codegraph_x 去读" (no paren). Anchoring on "(" avoids
+#     wrongly retrying a tool-free answer that merely NAMES a tool in prose.
 _TOOLCALL_MARKUP_RE = re.compile(
-    r"<(?:antml:)?invoke\b|(?:antml:)?function_calls\b|<attempt_[a-zA-Z0-9_]+\b|\bcodegraph_[a-z_]+\b",
+    r"<(?:antml:)?invoke\b|(?:antml:)?function_calls\b|<attempt_[a-zA-Z0-9_]+\b|\bcodegraph_[a-z_]+\s*\(",
     re.IGNORECASE,
 )
 
