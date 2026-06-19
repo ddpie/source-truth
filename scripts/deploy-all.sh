@@ -335,12 +335,23 @@ else
     # old instance keeps serving). Best-effort: a terminate hiccup must not fail the
     # otherwise-successful deploy.
     if [[ -n "${INDEX_OLD_INSTANCE:-}" && "$INDEX_OLD_INSTANCE" != "$INDEX_SERVICE_INSTANCE" ]]; then
-      say info "blue-green: new index healthy + DNS cut over; draining DNS TTL then terminating old instance $INDEX_OLD_INSTANCE"
-      sleep 35  # > Route53 A-record TTL (30s) so warm-VM resolvers pick up the new IP
-      aws ec2 terminate-instances --region "$REGION" --instance-ids "$INDEX_OLD_INSTANCE" >/dev/null 2>&1 \
-        && say ok "old index instance $INDEX_OLD_INSTANCE terminated" \
-        || say warn "could not terminate old index $INDEX_OLD_INSTANCE (terminate it manually); deploy still OK"
-      update_env "$CONFIG_FILE" INDEX_OLD_INSTANCE ""   # clear so a later run doesn't re-terminate
+      # Drain longer than the A-record TTL so warm-VM resolvers pick up the new IP
+      # before we kill the old host. Derive the wait from the SAME TTL the DNS
+      # record was written with (INDEX_DNS_TTL, persisted by provision_index_dns)
+      # + a 5s margin, so the two can't silently drift apart. Fallback 35 if unset
+      # (older config) — still > the historical 30s TTL.
+      DRAIN_S=$(( ${INDEX_DNS_TTL:-30} + 5 ))
+      say info "blue-green: new index healthy + DNS cut over; draining ${DRAIN_S}s (TTL ${INDEX_DNS_TTL:-30}+5) then terminating old instance $INDEX_OLD_INSTANCE"
+      sleep "$DRAIN_S"
+      # Clear INDEX_OLD_INSTANCE only on a SUCCESSFUL terminate: if terminate fails
+      # (throttle/IAM), keep the id so the next deploy's reconcile can still GC the
+      # orphan (clearing it unconditionally would leak a paid instance silently).
+      if aws ec2 terminate-instances --region "$REGION" --instance-ids "$INDEX_OLD_INSTANCE" >/dev/null 2>&1; then
+        say ok "old index instance $INDEX_OLD_INSTANCE terminated"
+        update_env "$CONFIG_FILE" INDEX_OLD_INSTANCE ""   # clear so a later run doesn't re-terminate
+      else
+        say warn "could not terminate old index $INDEX_OLD_INSTANCE (kept in config for next-run GC; terminate manually if needed); deploy still OK"
+      fi
     fi
   fi
   say ok "index-service at $INDEX_IP:8080 (stable name: ${INDEX_DNS_NAME:-pending})"

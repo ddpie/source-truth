@@ -21,6 +21,12 @@ source "$SCRIPT_DIR/common.sh"; source "$SCRIPT_DIR/env-utils.sh"
 REGION="$1"; CONFIG="$2"; VPC_ID="$3"; INDEX_IP="$4"
 ZONE_NAME="source-truth.internal"
 RECORD="index.${ZONE_NAME}"
+# A-record TTL (seconds). The blue-green terminate-last drain in deploy-all.sh MUST
+# wait longer than this before killing the old instance, or a warm VM's resolver
+# cache still points at the dead IP. Persisted to config (INDEX_DNS_TTL) so the
+# drain derives from THIS value rather than a hardcoded constant in another file
+# that can silently drift out of sync.
+DNS_TTL=30
 
 : "${INDEX_IP:?provision_index_dns: index private IP required}"
 [[ "$INDEX_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || { say err "index IP '$INDEX_IP' is not an IPv4 address"; exit 1; }
@@ -83,7 +89,7 @@ CHANGE_ID="$(R change-resource-record-sets --hosted-zone-id "$ZONE_ID" --change-
     \"ResourceRecordSet\": {
       \"Name\": \"${RECORD}\",
       \"Type\": \"A\",
-      \"TTL\": 30,
+      \"TTL\": ${DNS_TTL},
       \"ResourceRecords\": [{\"Value\": \"${INDEX_IP}\"}]
     }
   }]
@@ -92,5 +98,6 @@ say info "upserted ${RECORD} → ${INDEX_IP} (zone $ZONE_ID, change ${CHANGE_ID#
 
 update_env "$CONFIG" INDEX_DNS_ZONE_ID "$ZONE_ID"
 update_env "$CONFIG" INDEX_DNS_NAME "$RECORD"
+update_env "$CONFIG" INDEX_DNS_TTL "$DNS_TTL"
 say ok "index DNS ready: ${RECORD} → ${INDEX_IP}" >&2
 echo "INDEX_DNS_NAME=${RECORD}"

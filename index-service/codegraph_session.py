@@ -82,7 +82,16 @@ class CodegraphSession:
         self._call_lock: asyncio.Lock | None = None  # lives on the worker loop
         self._ready = threading.Event()
         self._stop = threading.Event()
-        self._restart_lock: asyncio.Lock | None = None  # lives on the bridge loop
+        # Created EAGERLY (not lazily on first call_tool): an asyncio.Lock() since
+        # py3.10 binds to the running loop on first await, not at construction, so
+        # this is safe in __init__. Eager creation removes the `if is None:` lazy
+        # blocks whose non-atomicity was only ever safe because there's exactly ONE
+        # bridge event loop. SINGLE-WRITER INVARIANT: that one-loop assumption is
+        # load-bearing — the bridge MUST run uvicorn single-worker. If anyone sets
+        # uvicorn workers>1, each worker process gets its own CodegraphSession →
+        # multiple graph.db writers → corruption. The flock guards cross-PROCESS
+        # races; this lock guards in-process restart churn. Keep both.
+        self._restart_lock: asyncio.Lock = asyncio.Lock()  # lives on the bridge loop
         # Health: True only when warmup confirmed a non-empty graph AND no
         # subsequent response has signalled degradation. The bridge refuses to
         # serve when this is False (never answers on a broken/empty index).
@@ -222,12 +231,19 @@ class CodegraphSession:
                         return  # exit _serve → thread ends → next call restarts worker
 
     async def stop(self) -> None:
-        self._stop.set()
-        if self._thread is not None:
-            await asyncio.get_running_loop().run_in_executor(None, self._thread.join, 10)
-            if self._thread.is_alive():
-                logger.error(json.dumps({"event": "stop_timeout", "detail": "worker thread still alive after 10s"}))
-            self._thread = None
+        # Take _restart_lock so shutdown is mutually exclusive with _restart /
+        # maybe_self_heal. Without it, a /health-poll-triggered self-heal could
+        # start() a NEW worker while stop() is draining the OLD one — leaving a live
+        # worker thread with _thread=None (an orphaned codegraph-server subprocess
+        # stop() can't join and `healthy` can't see). The lock lives on the bridge
+        # loop; stop() runs on that loop too, so this can't deadlock.
+        async with self._restart_lock:
+            self._stop.set()
+            if self._thread is not None:
+                await asyncio.get_running_loop().run_in_executor(None, self._thread.join, 10)
+                if self._thread.is_alive():
+                    logger.error(json.dumps({"event": "stop_timeout", "detail": "worker thread still alive after 10s"}))
+                self._thread = None
 
     # ---- health classification ----------------------------------------------
 
@@ -348,9 +364,6 @@ class CodegraphSession:
         it once (single-flight) before failing — so a crashed codegraph recovers
         on the next request instead of wedging the service permanently.
         """
-        if self._restart_lock is None:
-            self._restart_lock = asyncio.Lock()
-
         # Recover from BOTH failure modes: a dead worker thread, AND a thread
         # that is alive but wedged unhealthy. The decision is made INSIDE the
         # restart lock (see _restart) so two concurrent requests can't each fire
@@ -389,8 +402,6 @@ class CodegraphSession:
         worker. Single-flight + idempotent (shares _restart's lock), so concurrent
         /health polls + a real query can't spawn two writers. Best-effort: a failed
         restart leaves health False (the next poll retries), never raises."""
-        if self._restart_lock is None:
-            self._restart_lock = asyncio.Lock()
         if not self._needs_restart():
             return
         try:
