@@ -60,7 +60,7 @@ const STANDALONE_PREAMBLE_OPENERS: RegExp[] = [
   // absorbs varied readiness phrasings (取证完毕 / 都已查清 / 数据齐全 …) that the
   // specific patterns above miss. FULL-sentence match + 160-char cap是安全网：a real
   // sentence继续讲内容、不会在"整理答案"处终止，故不会被full-match命中。
-  new RegExp(`^.{0,60}[，,。]?(现在|来|这就|接下来|下面)(就)?(我)?(来|开始)?(整理|汇总|给出|得出|呈现|输出)(一下)?(完整|最终|对比)?(的)?(答案|结论|回答|内容|信息|结果|输出)${TAIL}$`),
+  new RegExp(`^.{0,60}[，,。]?(现在|来|这就|接下来|下面|直接)(就)?(我)?(来|开始|直接)?(整理|汇总|给出|得出|呈现|输出|回答)(成|出)?(一下)?(完整|最终|对比)?(的)?(答案|结论|回答|内容|信息|结果|输出)?${TAIL}$`),
   // "现在我有完整的数据，来整理所有怪物的完整信息" / "数据齐全，来整理一下结果" — readiness
   // (有/拿到/掌握 + 数据/信息) + a 来/现在 + 整理/汇总 announce that ends in a
   // PROCESS-OUTPUT noun (信息/内容/输出/结果/数据/资料), NOT just 答案/结论. Observed live.
