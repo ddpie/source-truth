@@ -181,6 +181,19 @@ describe("stripPreamble", () => {
     expect(stripPreamble("下结论的逻辑写在 ConclusionBuilder.cs:10。")).toBe("下结论的逻辑写在 ConclusionBuilder.cs:10。");
   });
 
+  it("strips a '…核对清楚了，下面分类说一下。' announce (E2E warm-VM case)", () => {
+    // Live capture: the announce verb was 说 ("下面分类说一下"), not in the 讲/说明
+    // alternation, so it leaked. Added 说.
+    const body = "已经把治疗这套逻辑核对清楚了，下面分类说一下。\n\n得了病有 4 条路子能治好。";
+    expect(stripPreamble(body)).toBe("得了病有 4 条路子能治好。");
+  });
+
+  it("does NOT over-strip real answers containing 说 / 下面 / 说明", () => {
+    expect(stripPreamble("下面说的这几个数值都写死在代码里。")).toBe("下面说的这几个数值都写死在代码里。");
+    expect(stripPreamble("技能说明写在 SkillDesc.cs。")).toBe("技能说明写在 SkillDesc.cs。");
+    expect(stripPreamble("力量影响负重，下面是具体公式。")).toBe("力量影响负重，下面是具体公式。");
+  });
+
   it("strips the 6th E2E case: '所有信息都齐了，来整理答案。' + inline ---", () => {
     const body = "所有信息都齐了，来整理答案。---角色的负重上限完全由力量决定。";
     expect(stripPreamble(body)).toBe("角色的负重上限完全由力量决定。");
