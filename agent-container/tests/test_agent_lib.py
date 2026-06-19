@@ -384,11 +384,24 @@ def test_run_agent_retries_once_on_mcp_init_race():
 
     msgs = _collect(agent_lib.run_agent({"prompt": "怪物生命值怎么设定"}, query_fn=fake_query))
     assert calls["n"] == 2, "must retry exactly once on the leak shape"
+
+    def _texts(ms):
+        out = []
+        for m in ms:
+            for b in getattr(m, "content", []) or []:
+                tx = getattr(b, "text", None)
+                if isinstance(tx, str):
+                    out.append(tx)
+        return out
+
+    yielded = _texts(msgs)
     # The retry's real answer must be present in the yielded stream.
-    assert any(
-        any(getattr(b, "text", "").startswith("怪物生命值写在") for b in getattr(m, "content", []) if hasattr(b, "text"))
-        for m in msgs
-    )
+    assert any(s.startswith("怪物生命值写在") for s in yielded)
+    # CRITICAL: the FAILED attempt's leaked-markup narration must NOT be yielded —
+    # otherwise it pollutes the 分析过程 panel (the live-observed bug). The buffer
+    # for a leak attempt is DISCARDED, not flushed.
+    assert not any("先搜一下" in s or "<invoke" in s for s in yielded), \
+        "failed-attempt narration must be discarded, not yielded"
 
 
 def test_run_agent_does_not_retry_on_healthy_run():

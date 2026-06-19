@@ -27,7 +27,11 @@
 // requires mm.index===0 AND mm[0].length===sentenceBody.length (a FULL match), so
 // these never strip a sentence that merely BEGINS with the phrase and continues
 // with real content (e.g. "整理答案的逻辑在 Foo.java").
-const TAIL = "[了啦呢吧，,：:。\\s]{0,4}";
+// Trailing particles/punctuation that can follow the announce noun without making
+// it a real answer. Includes an optional "如下"/"如下所示"/"下面" closer ("整理答案
+// 如下。") — a transition sentence often ends that way, and it's never how a real
+// business answer's FIRST sentence ends.
+const TAIL = "(?:如下所示|如下|下面)?[了啦呢吧，,：:。\\s]{0,4}";
 const STANDALONE_PREAMBLE_OPENERS: RegExp[] = [
   new RegExp(`^(好的?[，,。.\\s]*)?(我)?(现在)?(来|开始)?(整理|汇总|总结)(一下)?(答案|结论|回答)${TAIL}$`),
   new RegExp(`^让我(来)?(整理|汇总|总结)(一下)?(答案|结论|回答)?${TAIL}$`),
