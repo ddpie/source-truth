@@ -143,3 +143,42 @@ def test_needs_restart_when_thread_dead_or_wedged():
     sess._ready.set()
     sess._healthy = False
     assert sess._needs_restart() is True
+
+
+def test_reap_orphan_servers_kills_only_own_children(monkeypatch):
+    # _reap_orphan_servers must SIGKILL codegraph-server children of THIS pid found
+    # by pgrep, and never raise. Mock pgrep output + os.kill.
+    import codegraph_session as cs
+
+    killed = []
+
+    class _Out:
+        stdout = "12345\n67890\n"
+
+    monkeypatch.setattr(cs.subprocess, "run", lambda *a, **k: _Out())
+    monkeypatch.setattr(cs.os, "kill", lambda pid, sig: killed.append((pid, sig)))
+    cs.CodegraphSession._reap_orphan_servers()
+    assert (12345, cs.signal.SIGKILL) in killed
+    assert (67890, cs.signal.SIGKILL) in killed
+
+
+def test_reap_orphan_servers_never_raises(monkeypatch):
+    import codegraph_session as cs
+
+    # pgrep itself blowing up must be swallowed (best-effort).
+    def _boom(*a, **k):
+        raise OSError("pgrep missing")
+
+    monkeypatch.setattr(cs.subprocess, "run", _boom)
+    cs.CodegraphSession._reap_orphan_servers()  # must not raise
+
+    # An already-gone pid (ProcessLookupError) is the normal case, also swallowed.
+    class _Out:
+        stdout = "999999\n"
+
+    def _gone(pid, sig):
+        raise ProcessLookupError()
+
+    monkeypatch.setattr(cs.subprocess, "run", lambda *a, **k: _Out())
+    monkeypatch.setattr(cs.os, "kill", _gone)
+    cs.CodegraphSession._reap_orphan_servers()  # must not raise

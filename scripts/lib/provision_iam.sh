@@ -52,6 +52,19 @@ aws iam put-role-policy --role-name "$RUNTIME_ROLE" --policy-name runtime-perms 
     {"Effect":"Allow","Action":["logs:CreateLogGroup","logs:CreateLogStream","logs:PutLogEvents"],"Resource":"*"}
   ]}' >/dev/null
 
+# ---- 3. AgentCore SERVICE-LINKED role (fresh-account safe) ----
+# On a brand-new account, AgentCore's VPC mode needs the AWS service-linked role
+# (manages ENIs for the microVM). The CUSTOMER role above is not enough — without
+# the SLR, create_agent_runtime can fail at Phase 5 with an opaque error AFTER the
+# long build/image phases. Best-effort: create it if absent; already-exists /
+# not-authorized / unknown-service are all tolerated (older accounts have it
+# auto-created, and some partitions name it differently). Never blocks the deploy.
+if aws iam create-service-linked-role --aws-service-name bedrock-agentcore.amazonaws.com >/dev/null 2>&1; then
+  say ok "created AgentCore service-linked role"
+else
+  say info "AgentCore service-linked role: already present or auto-managed (skipped)"
+fi
+
 update_env "$CONFIG" AGENT_RUNTIME_ROLE "arn:aws:iam::${ACCOUNT}:role/${RUNTIME_ROLE}"
 update_env "$CONFIG" INDEX_INSTANCE_PROFILE "$INDEX_PROFILE"
 say ok "iam ready: profile=$INDEX_PROFILE runtime-role=$RUNTIME_ROLE"

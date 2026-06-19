@@ -30,6 +30,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import signal
+import subprocess
 import threading
 from datetime import timedelta
 from time import perf_counter
@@ -91,7 +94,16 @@ class CodegraphSession:
         # uvicorn workers>1, each worker process gets its own CodegraphSession →
         # multiple graph.db writers → corruption. The flock guards cross-PROCESS
         # races; this lock guards in-process restart churn. Keep both.
-        self._restart_lock: asyncio.Lock = asyncio.Lock()  # lives on the bridge loop
+        # Restart/stop mutual exclusion. A THREADING lock, NOT asyncio.Lock: an
+        # asyncio.Lock binds to whichever event loop first awaits it, and
+        # maybe_self_heal() is invoked from the FastMCP /health route which can run
+        # in a DIFFERENT anyio task scope than call_tool/stop. If /health acquired
+        # first, a later `await` from the bridge loop would raise "Future attached to
+        # a different loop" or silently fail to serialize — defeating the single-
+        # writer guard exactly when stop() races a self-heal. A threading.Lock is
+        # loop-agnostic and correct regardless of caller loop/thread; the async
+        # callers acquire it off-loop via run_in_executor so they never block the loop.
+        self._restart_lock = threading.Lock()
         # Health: True only when warmup confirmed a non-empty graph AND no
         # subsequent response has signalled degradation. The bridge refuses to
         # serve when this is False (never answers on a broken/empty index).
@@ -230,20 +242,30 @@ class CodegraphSession:
                         logger.error(json.dumps({"event": "liveness_failed", "error": str(exc)}))
                         return  # exit _serve → thread ends → next call restarts worker
 
+    async def _acquire_restart_lock(self) -> None:
+        """Acquire the (threading) restart lock WITHOUT blocking the event loop.
+
+        The lock is a threading.Lock (loop-agnostic — see __init__). A blocking
+        .acquire() on the loop thread would freeze the whole bridge, so acquire it
+        in the default executor and await that."""
+        await asyncio.get_running_loop().run_in_executor(None, self._restart_lock.acquire)
+
     async def stop(self) -> None:
-        # Take _restart_lock so shutdown is mutually exclusive with _restart /
+        # Hold _restart_lock so shutdown is mutually exclusive with _restart /
         # maybe_self_heal. Without it, a /health-poll-triggered self-heal could
         # start() a NEW worker while stop() is draining the OLD one — leaving a live
         # worker thread with _thread=None (an orphaned codegraph-server subprocess
-        # stop() can't join and `healthy` can't see). The lock lives on the bridge
-        # loop; stop() runs on that loop too, so this can't deadlock.
-        async with self._restart_lock:
+        # stop() can't join and `healthy` can't see).
+        await self._acquire_restart_lock()
+        try:
             self._stop.set()
             if self._thread is not None:
                 await asyncio.get_running_loop().run_in_executor(None, self._thread.join, 10)
                 if self._thread.is_alive():
                     logger.error(json.dumps({"event": "stop_timeout", "detail": "worker thread still alive after 10s"}))
                 self._thread = None
+        finally:
+            self._restart_lock.release()
 
     # ---- health classification ----------------------------------------------
 
@@ -429,8 +451,8 @@ class CodegraphSession:
         fresh worker still warming up), this no-ops — preventing two concurrent
         requests from each restarting and the 2nd killing the 1st's new worker.
         """
-        assert self._restart_lock is not None
-        async with self._restart_lock:
+        await self._acquire_restart_lock()
+        try:
             if not self._needs_restart():
                 return  # someone else already restarted (healthy, or warming up)
             logger.error(json.dumps({"event": "worker_restart", "workspace": self._workspace,
@@ -454,4 +476,41 @@ class CodegraphSession:
             self._thread = None
             self._healthy = False
             self._health_detail = "restarting"
+            # BACKSTOP (single-writer): the join above proved the old worker THREAD
+            # is dead, but the thread's death does not by itself guarantee its
+            # codegraph-server CHILD was reaped (stdio_client's __aexit__ sends
+            # SIGTERM + waits, but a hard loop teardown could skip that). flock is
+            # held once by THIS python pid for its whole life, so it does NOT stop a
+            # second child of the same pid from writing graph.db. Before spawning a
+            # fresh worker, kill any surviving codegraph-server orphan — at this exact
+            # point (old thread confirmed dead, new not yet started) ANY live one is
+            # an orphan that would become a second writer.
+            await asyncio.get_running_loop().run_in_executor(None, self._reap_orphan_servers)
             self.start()
+        finally:
+            self._restart_lock.release()
+
+    @staticmethod
+    def _reap_orphan_servers() -> None:
+        """SIGKILL any stray codegraph-server child of THIS process. Best-effort,
+        stdlib-only (no psutil). Called only from _restart, under the restart lock,
+        AFTER the old worker thread is confirmed dead — so a match is an orphan, not
+        the live worker (there is none at this instant). Never raises."""
+        try:
+            # Children of this pid only — never touch an unrelated codegraph-server.
+            out = subprocess.run(
+                ["pgrep", "-P", str(os.getpid()), "-f", "codegraph-server"],
+                capture_output=True, text=True, timeout=5,
+            )
+            for line in out.stdout.split():
+                try:
+                    pid = int(line)
+                except ValueError:
+                    continue
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                    logger.error(json.dumps({"event": "reaped_orphan_codegraph", "pid": pid}))
+                except ProcessLookupError:
+                    pass  # already gone — the normal case
+        except Exception as exc:  # noqa: BLE001 - best-effort; must never break restart
+            logger.warning(json.dumps({"event": "reap_orphan_failed", "error": str(exc)}))
