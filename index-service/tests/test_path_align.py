@@ -42,6 +42,24 @@ def test_repo_relative_strips_absolute_index_root():
     assert got == "index-service/path_align.py"
 
 
+def test_backslash_path_normalized_to_forward_slash():
+    # A Windows-style path (some Unity/.NET tooling) must not pass through as a single
+    # backslash-laden filename → wrong citation + unreadable. Normalized to '/'.
+    assert path_align.to_container_path(r"Assets\Scripts\Foo.cs", index_root=INDEX_ROOT) == "Assets/Scripts/Foo.cs"
+    assert path_align.to_container_path(f"{INDEX_ROOT}\\Assets\\Foo.cs", index_root=INDEX_ROOT) == "Assets/Foo.cs"
+    # And a backslash '..' climb is still rejected (normalized first, then guarded).
+    import pytest
+    with pytest.raises(ValueError):
+        path_align.to_container_path(r"..\..\etc\passwd", index_root=INDEX_ROOT)
+
+
+def test_leading_double_slash_absolute_is_handled():
+    # POSIX preserves a leading '//'; collapse it so an absolute '//data/...' still
+    # matches the single-slash index_root prefix instead of erroring as an escape.
+    got = path_align.to_container_path(f"/{INDEX_ROOT}/Assets/Foo.cs", index_root=INDEX_ROOT)
+    assert got == "Assets/Foo.cs"
+
+
 def test_repo_relative_dot_slash_form():
     got = path_align.to_container_path("./Assets/Foo.cs", index_root=INDEX_ROOT)
     assert got == "Assets/Foo.cs"
