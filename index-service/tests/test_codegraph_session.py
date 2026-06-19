@@ -199,6 +199,27 @@ def test_reap_orphan_servers_catches_reparented_orphan_by_workspace(monkeypatch)
     assert (4242, cs.signal.SIGKILL) in killed  # caught despite not being a child
 
 
+def test_reap_orphan_workspace_regex_is_escaped(monkeypatch):
+    # The workspace path is interpolated into a pgrep -f REGEX; a metachar in it must
+    # be escaped so it can't broaden the match to a sibling workspace. Verify the
+    # pattern passed to pgrep is the literal (escaped) path, not a live regex.
+    import codegraph_session as cs
+
+    sess = cs.CodegraphSession("/data/repo/code-5x+beta")  # '+' is a regex metachar
+    seen_patterns = []
+
+    def fake_run(cmd, **k):
+        seen_patterns.append(cmd[-1])
+        return type("O", (), {"stdout": ""})()
+
+    monkeypatch.setattr(cs.subprocess, "run", fake_run)
+    monkeypatch.setattr(cs.os, "kill", lambda pid, sig: None)
+    sess._reap_orphan_servers()
+    ws_query = [p for p in seen_patterns if "--workspace" in p][0]
+    assert r"\+beta" in ws_query  # '+' escaped (re.escape), not left as a regex quantifier
+    assert "code-5x+beta" not in ws_query  # the raw unescaped path must NOT appear
+
+
 def test_reap_orphan_never_targets_self(monkeypatch):
     # The workspace regex could match this very python process's cmdline; must never
     # SIGKILL os.getpid().
