@@ -118,6 +118,9 @@ REGION="${REGION:-${DEPLOY_REGION:-}}"
 # (which would flip the live runtime's model via the in-place update).
 MODEL="${MODEL:-${DEPLOY_MODEL:-$DEFAULT_MODEL}}"
 INSTANCE_TYPE="${INSTANCE_TYPE:-${DEPLOY_INSTANCE_TYPE:-$DEFAULT_INSTANCE_TYPE}}"
+# Export so provision_network.sh can pick an AZ that actually offers this type
+# (Graviton isn't in every AZ of every region) instead of a blind AvailabilityZones[0].
+export DEPLOY_INSTANCE_TYPE="$INSTANCE_TYPE"
 MAX_FILES="${MAX_FILES:-${DEPLOY_MAX_FILES:-$DEFAULT_MAX_FILES}}"
 ROOT_VOLUME_GB="${ROOT_VOLUME_GB:-${DEPLOY_ROOT_VOLUME_GB:-$DEFAULT_ROOT_VOLUME_GB}}"
 ACCOUNT="$(aws sts get-caller-identity --query Account --output text)"

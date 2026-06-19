@@ -164,40 +164,68 @@ def test_liveness_exits_after_consecutive_failures():
     assert (n, should_exit) == (2, True)  # 2 consecutive → worker exits → restart
 
 
-def test_reap_orphan_servers_kills_only_own_children(monkeypatch):
+def test_reap_orphan_servers_kills_own_children(monkeypatch):
     # _reap_orphan_servers must SIGKILL codegraph-server children of THIS pid found
     # by pgrep, and never raise. Mock pgrep output + os.kill.
     import codegraph_session as cs
 
     killed = []
-
-    class _Out:
-        stdout = "12345\n67890\n"
-
-    monkeypatch.setattr(cs.subprocess, "run", lambda *a, **k: _Out())
+    sess = cs.CodegraphSession("/data/repo/ws")
+    monkeypatch.setattr(cs.subprocess, "run", lambda *a, **k: type("O", (), {"stdout": "12345\n67890\n"})())
     monkeypatch.setattr(cs.os, "kill", lambda pid, sig: killed.append((pid, sig)))
-    cs.CodegraphSession._reap_orphan_servers()
+    sess._reap_orphan_servers()
     assert (12345, cs.signal.SIGKILL) in killed
     assert (67890, cs.signal.SIGKILL) in killed
+
+
+def test_reap_orphan_servers_catches_reparented_orphan_by_workspace(monkeypatch):
+    # C1 regression: a codegraph-server reparented to init (PPID=1) is NOT a child of
+    # this pid, so `pgrep -P self` misses it — but the workspace-cmdline query MUST
+    # catch it, or it becomes a silent 2nd writer → graph.db corruption.
+    import codegraph_session as cs
+
+    killed = []
+    sess = cs.CodegraphSession("/data/repo/ws")
+
+    def fake_run(cmd, **k):
+        # `-P self` query → no children; workspace query → the reparented orphan 4242.
+        if "-P" in cmd:
+            return type("O", (), {"stdout": ""})()
+        return type("O", (), {"stdout": "4242\n"})()
+
+    monkeypatch.setattr(cs.subprocess, "run", fake_run)
+    monkeypatch.setattr(cs.os, "kill", lambda pid, sig: killed.append((pid, sig)))
+    sess._reap_orphan_servers()
+    assert (4242, cs.signal.SIGKILL) in killed  # caught despite not being a child
+
+
+def test_reap_orphan_never_targets_self(monkeypatch):
+    # The workspace regex could match this very python process's cmdline; must never
+    # SIGKILL os.getpid().
+    import codegraph_session as cs
+
+    killed = []
+    sess = cs.CodegraphSession("/data/repo/ws")
+    monkeypatch.setattr(cs.subprocess, "run",
+                        lambda *a, **k: type("O", (), {"stdout": "%d\n" % cs.os.getpid()})())
+    monkeypatch.setattr(cs.os, "kill", lambda pid, sig: killed.append((pid, sig)))
+    sess._reap_orphan_servers()
+    assert killed == []  # self excluded
 
 
 def test_reap_orphan_servers_never_raises(monkeypatch):
     import codegraph_session as cs
 
-    # pgrep itself blowing up must be swallowed (best-effort).
-    def _boom(*a, **k):
-        raise OSError("pgrep missing")
+    sess = cs.CodegraphSession("/data/repo/ws")
 
-    monkeypatch.setattr(cs.subprocess, "run", _boom)
-    cs.CodegraphSession._reap_orphan_servers()  # must not raise
+    # pgrep itself blowing up must be swallowed (best-effort).
+    monkeypatch.setattr(cs.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(OSError("pgrep missing")))
+    sess._reap_orphan_servers()  # must not raise
 
     # An already-gone pid (ProcessLookupError) is the normal case, also swallowed.
-    class _Out:
-        stdout = "999999\n"
-
     def _gone(pid, sig):
         raise ProcessLookupError()
 
-    monkeypatch.setattr(cs.subprocess, "run", lambda *a, **k: _Out())
+    monkeypatch.setattr(cs.subprocess, "run", lambda *a, **k: type("O", (), {"stdout": "999999\n"})())
     monkeypatch.setattr(cs.os, "kill", _gone)
-    cs.CodegraphSession._reap_orphan_servers()  # must not raise
+    sess._reap_orphan_servers()  # must not raise

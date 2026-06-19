@@ -18,6 +18,31 @@ source "$SCRIPT_DIR/common.sh"
 REGION="$1"; IID="$2"
 DEADLINE=$(( SECONDS + ${INDEX_HEALTH_TIMEOUT_SECS:-900} ))
 
+# Gate on SSM-agent registration FIRST (bounded), and report it DISTINCTLY. The
+# health probe runs entirely via SSM send-command; if the agent never registers
+# (NAT egress broken / SSM unreachable / agent crash), every send-command no-ops
+# and the old code would burn the full timeout then blame a "still-building cold
+# graph" — pointing the operator at the wrong cause. So first wait up to
+# INDEX_SSM_ONLINE_SECS for PingStatus=Online; if it never comes online, fail with
+# a connectivity-specific message instead of the build message.
+SSM_DEADLINE=$(( SECONDS + ${INDEX_SSM_ONLINE_SECS:-300} ))
+ssm_online=""
+while (( SECONDS < SSM_DEADLINE )); do
+  PING="$(aws ssm describe-instance-information --region "$REGION" \
+    --filters "Key=InstanceIds,Values=$IID" \
+    --query 'InstanceInformationList[0].PingStatus' --output text 2>/dev/null || echo "")"
+  if [[ "$PING" == "Online" ]]; then ssm_online="yes"; break; fi
+  say info "  waiting for SSM agent to register (PingStatus=${PING:-none}) ..."
+  sleep 10
+done
+if [[ -z "$ssm_online" ]]; then
+  say err "SSM agent never registered for $IID within ${INDEX_SSM_ONLINE_SECS:-300}s."
+  say info "  This is a CONNECTIVITY problem, NOT a slow build: the instance can't reach SSM."
+  say info "  Check NAT egress (private subnet → NAT → ssm/ssmmessages/ec2messages endpoints),"
+  say info "  the instance's IAM profile (AmazonSSMManagedInstanceCore), and that the AMI ships ssm-agent."
+  exit 2
+fi
+
 while (( SECONDS < DEADLINE )); do
   CID="$(aws ssm send-command --region "$REGION" --instance-ids "$IID" \
     --document-name AWS-RunShellScript \
