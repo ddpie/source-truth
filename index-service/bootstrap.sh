@@ -74,6 +74,11 @@ export PATH=/usr/local/bin:$PATH
 aws s3 cp "s3://$BUCKET/bin/codegraph-server" "$BIN" --region "$REGION"
 chmod +x "$BIN"
 ln -sf "$BIN" /usr/local/bin/codegraph-server
+# SMOKE-TEST the binary NOW (fail loud + early) instead of letting a wrong-arch /
+# wrong-glibc / S3-truncated binary surface 10 min later as an opaque index-build
+# health-gate timeout. A bad binary can't exec → `--version` fails → we exit with a
+# greppable marker the SSM health probe / journalctl can pinpoint.
+"$BIN" --version >/dev/null 2>&1 || { echo "BOOTSTRAP_FAILED: codegraph-server binary not executable (wrong arch/glibc or truncated S3 object)"; exit 1; }
 aws s3 cp "s3://$BUCKET/index-service.tar.gz" /tmp/idx.tar.gz --region "$REGION"
 tar xzf /tmp/idx.tar.gz -C "$APP"
 # Install from the shipped requirements.txt — the SINGLE source of truth for
@@ -81,6 +86,13 @@ tar xzf /tmp/idx.tar.gz -C "$APP"
 # standalone `fastmcp`, never imported, while the bridge uses the FastMCP class
 # bundled in `mcp`). `mcp` pulls starlette/sse-starlette transitively.
 pip3 install --break-system-packages -q --ignore-installed -r "$APP/requirements.txt"
+# Verify the RESOLVED dependency set is self-consistent. Top-level deps are ==-pinned,
+# but mcp's transitive closure (starlette/pydantic/anyio/httpx) is not — a breaking
+# transitive major resolved on a fresh install months later would otherwise only
+# surface as a bridge import crash → Restart=always crash-loop → /health never 200 →
+# the deploy health-gate burns its full timeout with no clear cause. `pip check`
+# turns that into a loud, greppable bootstrap failure here.
+python3 -m pip check >/dev/null 2>&1 || { echo "BOOTSTRAP_FAILED: pip dependency conflict (incompatible transitive deps) — pin the transitive closure in requirements.txt"; exit 1; }
 
 # --- extract the repo to LOCAL disk (deploy stages <repo>.tar.gz in S3) ------
 # NO EFS: the repo lives only on LOCAL disk at /data/repo/<subdir>. codegraph
