@@ -438,11 +438,19 @@ async function runStreamingInvoke(
         // fall through to the content update below.
         const nowPanel = Date.now();
         if (nowPanel - lastPanelUpdate >= THROTTLE_MS) {
-          lastPanelUpdate = nowPanel;
-          stepsShown = liveSteps.length;
           // Redact steps before they hit the group-visible panel (same safety net
           // as the conclusion text) — a secret/path in a narration step leaks too.
+          // redactSteps also DROPS steps that are pure tool-call markup, so safeSteps
+          // can be SHORTER than liveSteps (or empty). The live panel must NEVER shrink
+          // or vanish mid-stream (the "进展默认展开区突然消失" report): only push when
+          // the CLEAN step count actually grew, and never render an empty panel over a
+          // non-empty one. Track progress by the CLEAN count, not the raw count.
           const safeSteps = redactSteps(liveSteps);
+          if (safeSteps.length <= stepsShown) {
+            // Nothing new survived stripping this tick → keep the panel as-is.
+          } else {
+          lastPanelUpdate = nowPanel;
+          stepsShown = safeSteps.length;
           // Decide append-vs-update at EXECUTION time (inside the serial callback),
           // NOT at schedule time. The CardWriter chain is FIFO, so by the time this
           // callback runs, any earlier panel write has already settled and set
@@ -459,6 +467,7 @@ async function runStreamingInvoke(
               await updateReasoningPanel(cardId, safeSteps, seq);
             }
           });
+          }
         }
       }
       // Conclusion area: stream the answer text as it arrives. While the agent
