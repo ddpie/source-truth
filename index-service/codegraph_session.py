@@ -378,6 +378,26 @@ class CodegraphSession:
             logger.error(json.dumps({"event": "call_failed", "tool": name, "error": str(exc)}))
             raise IndexUnhealthy(self._health_detail) from exc
 
+    async def maybe_self_heal(self) -> None:
+        """Restart the worker if it's dead/wedged — WITHOUT needing a user query.
+
+        Crash recovery is otherwise request-triggered (only call_tool restarts), so
+        an IDLE instance whose subprocess died would sit unhealthy until traffic
+        resumes — and a health-gated load balancer polling /health would never see
+        it recover (it might even pull the instance from rotation). Calling this from
+        the /health probe makes recovery autonomous: each poll heals a dead/wedged
+        worker. Single-flight + idempotent (shares _restart's lock), so concurrent
+        /health polls + a real query can't spawn two writers. Best-effort: a failed
+        restart leaves health False (the next poll retries), never raises."""
+        if self._restart_lock is None:
+            self._restart_lock = asyncio.Lock()
+        if not self._needs_restart():
+            return
+        try:
+            await self._restart()
+        except Exception as exc:  # noqa: BLE001 - health probe must never raise
+            logger.warning(json.dumps({"event": "self_heal_failed", "error": str(exc)}))
+
     def _needs_restart(self) -> bool:
         """Whether the worker must be (re)started: dead thread, or alive-but-wedged.
 

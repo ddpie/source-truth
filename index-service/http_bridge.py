@@ -302,6 +302,11 @@ def build_bridge(
 
     @app.custom_route("/health", methods=["GET"])
     async def _health(_req: Request) -> JSONResponse:  # pragma: no cover - thin
+        # Autonomous recovery: heal a dead/wedged worker on a health poll, so an
+        # IDLE instance (no user traffic) recovers without waiting for a query —
+        # otherwise a health-gated load balancer would see 503 forever. Single-
+        # flight + best-effort (never raises); a no-op when the worker is healthy.
+        await session.maybe_self_heal()
         ok = session.healthy
         detail = session.health_detail
         # LOCAL repo read probe — A HEALTH GATE, not just telemetry. The agent reads

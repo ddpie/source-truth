@@ -6,19 +6,26 @@
 #     Amazon Linux 2023's glibc 2.34 is too old, verified failing).
 #   - codegraph-server + bridge code pulled from S3 (artifacts staged by deploy).
 #   - SINGLE-WRITER discipline: exactly one codegraph process ever touches
-#     graph.db. The BUILD phase (oneshot) holds an flock while it creates the
-#     graph. The SERVE phase (the bridge's resident --mcp session) does NOT hold
-#     the flock — its single-writer guarantee rests on (a) systemd ordering
-#     (index-bridge After=/Requires= index-build, so build has fully exited before
-#     serve starts), (b) `Conflicts=` so systemd refuses to run a second build
-#     oneshot while the bridge is live (closes the `systemctl restart index-build`
-#     footgun), and (c) the bridge's in-process restart join-guard. Concurrent
-#     writers corrupt RocksDB → 0-node graph (the #1 failure we hit). graph.db
-#     and the repo copy both live on LOCAL disk, so this is per-instance — the
-#     deploy provisions exactly ONE index-service instance
-#     (provision_index_service.sh reuses an existing one). Horizontal scale-out
-#     (multiple instances) is unsupported in the MVP; each instance would just
-#     hold its own independent local copy + graph (no shared state to corrupt).
+#     graph.db. BOTH writers — the BUILD oneshot AND the resident SERVE --mcp
+#     session (which opens graph.db read-write, so it IS a writer) — hold the SAME
+#     `flock $LOCK`. The build uses `flock -n` (fail-fast): if the bridge is up it
+#     refuses immediately rather than opening a second concurrent writer. This is
+#     OS-enforced mutual exclusion, backed by THREE layers:
+#       (a) flock $LOCK held by BOTH units (the actual guarantee);
+#       (b) systemd policy: index-build has `Conflicts=index-bridge` + `Before=`,
+#           and index-bridge has `After=/Requires= index-build` — so a manual
+#           `systemctl start/restart index-build` STOPS the bridge first, runs the
+#           build, then `Requires=` brings the bridge back (closes the
+#           `systemctl restart index-build` footgun the flock also guards);
+#       (c) the bridge's in-process restart join-guard (refuses to spawn a second
+#           worker until the old one's subprocess is confirmed dead).
+#     Concurrent writers corrupt RocksDB -> 0-node graph (the #1 failure we hit);
+#     codegraph-server additionally self-quarantines a corrupt graph + detects a
+#     stale LOCK on open. graph.db and the repo copy both live on LOCAL disk, so
+#     this is per-instance — the deploy provisions exactly ONE index-service
+#     instance (provision_index_service.sh reuses an existing one). Horizontal
+#     scale-out (multiple instances) is unsupported in the MVP; each instance just
+#     holds its own independent local copy + graph (no shared state to corrupt).
 #   - PATH baked into the unit (codegraph-server lives in /usr/local/bin; systemd
 #     has no login PATH — a bare "codegraph-server" spawn fails otherwise).
 #   - NO EFS: index-service is self-contained on LOCAL disk. The repo is extracted
@@ -128,6 +135,12 @@ cat > /etc/systemd/system/index-build.service <<UNIT
 Description=CodeGraph index build (single-writer, runs to completion before serve)
 After=network-online.target remote-fs.target
 Wants=network-online.target
+# Single-writer policy at the systemd layer: starting/restarting the build STOPS
+# the bridge first (Conflicts), and the build is ordered Before the bridge so on
+# boot it completes before serve. Combined with the flock backstop below, a
+# second concurrent writer on graph.db is impossible by BOTH policy and OS lock.
+Conflicts=index-bridge.service
+Before=index-bridge.service
 [Service]
 Type=oneshot
 RemainAfterExit=yes
@@ -140,8 +153,23 @@ Environment=PATH=/usr/local/bin:/usr/bin:/bin
 # dir exists, not that it has code. On a REBOOT the user-data bootstrap does NOT
 # re-run, but the local copy persists on the root volume, so this check still holds.
 ExecStartPre=/bin/bash -c '[ -n "\$(ls -A $WORKSPACE 2>/dev/null)" ] || { echo "FATAL: $WORKSPACE is empty — refusing to build a 0-node graph"; exit 1; }'
-# flock guarantees only ONE codegraph process writes graph.db at a time.
-ExecStart=/usr/bin/flock $LOCK $BIN --graph-only --workspace $WORKSPACE \\
+# DISK HEADROOM before the WRITER runs (not just at extract time): RocksDB does not
+# fail cleanly on ENOSPC — a partial write yields an oversized-but-corrupt graph the
+# 64KiB floor below cannot catch. On a REBOOT this unit re-runs (bridge Requires=)
+# while the cloud-init headroom check does NOT, so guard the writer itself. Budget
+# ~2.5x the on-disk repo (graph ≈ repo-order-of-magnitude) + 1GiB.
+ExecStartPre=/bin/bash -c 'need=\$(( \$(du -sk $WORKSPACE 2>/dev/null | cut -f1) * 5 / 2 + 1048576 )); avail=\$(df -Pk $INDEX_HOME | awk "NR==2{print \\\$4}"); [ "\${avail:-0}" -ge "\$need" ] || { echo "FATAL: insufficient $INDEX_HOME space for graph build: avail=\${avail}KiB need>=\${need}KiB — grow the root volume"; exit 1; }'
+# flock -n: take the EXCLUSIVE writer lock or FAIL FAST. The resident bridge holds
+# this same lock for its whole life (see index-bridge ExecStart), so if the bridge
+# is up this build refuses immediately (clean failure) instead of opening graph.db
+# as a SECOND concurrent writer → RocksDB 0-node corruption (the #1 failure). On a
+# normal boot/redeploy the bridge isn't up yet (Conflicts/ordering stop+sequence it),
+# so the lock is free and the build proceeds. Build is in-place (codegraph derives
+# graph.db from \$HOME/.codegraph and also keeps a projects/<hash>/memory dir there);
+# a partial/corrupt result is caught THREE ways: the size floor below, the bridge's
+# warmup health-gate (refuses to serve a 0-node graph), and codegraph-server's own
+# stale-LOCK detection + corrupt-graph quarantine on the next open.
+ExecStart=/usr/bin/flock -n $LOCK $BIN --graph-only --workspace $WORKSPACE \\
   --exclude node_modules --exclude .venv --exclude .git --max-files $MAX_FILES \\
   --run-tool codegraph_symbol_search --tool-args '{"query":"__build__"}'
 # Post-build floor: a real build of a non-empty repo produces a graph.db well
@@ -161,9 +189,14 @@ Environment=HOME=$INDEX_HOME
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
 Environment=CODEGRAPH_MAX_FILES=$MAX_FILES
 WorkingDirectory=$APP
+# Hold the SAME writer lock for the bridge's whole life: the resident --mcp process
+# opens graph.db read-write, so it IS a writer. Holding $LOCK makes the build's
+# flock -n fail fast if anyone tries to run it while we're up — OS-enforced single
+# writer, not just systemd policy. flock keeps the lock until python exits (and
+# propagates SIGTERM on stop), so Restart=always re-acquires cleanly.
 # No --mount-root: the agent has no filesystem mount, so paths are returned
 # REPO-RELATIVE (e.g. Assets/Foo.cs), which is the honest representation.
-ExecStart=/usr/bin/python3 -m http_bridge --workspace $WORKSPACE --host 0.0.0.0 --port 8080 --mount-root "" --local-workspace $LOCAL_WORKSPACE
+ExecStart=/usr/bin/flock $LOCK /usr/bin/python3 -m http_bridge --workspace $WORKSPACE --host 0.0.0.0 --port 8080 --mount-root "" --local-workspace $LOCAL_WORKSPACE
 Restart=always
 RestartSec=5
 [Install]
