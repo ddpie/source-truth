@@ -15,12 +15,23 @@
  *  can't drift to different caps. */
 export const MAX_FOLLOW_UPS = 3;
 
-export function extractFollowUps(answer: string): string[] {
-  // Find the section after "你可能还想问" (tolerant of formatting variations).
-  const marker = answer.indexOf("你可能还想问");
-  if (marker === -1) return [];
+// The marker must LEAD A LINE (optionally after a "💡" and whitespace, and an
+// optional preceding "---/***/___" divider line). A bare indexOf("你可能还想问")
+// matches the phrase in ORDINARY prose — e.g. an answer that says "这些数值你可能
+// 还想问的我都列了：" followed by data bullets — which would (1) truncate the real
+// answer at the marker mid-stream and (2) turn the data rows into fake follow-up
+// buttons. Anchoring to line-start closes that hole, mirroring extract-clarify.ts.
+// `MARKER_RE` finds the marker line; `STRIP_RE` (anchored to end-of-string) backs
+// up over the marker line + an optional preceding divider for stripping.
+const MARKER_RE = /(?:^|\n)[ \t]*(?:💡[ \t]*)?你可能还想问/;
+const STRIP_RE = /(?:\n[ \t]*(?:-{3,}|\*{3,}|_{3,})[ \t]*)?\n?[ \t]*(?:💡[ \t]*)?你可能还想问[\s\S]*$/;
 
-  return _extractAfter(answer.slice(marker));
+export function extractFollowUps(answer: string): string[] {
+  // Find the marker only when it LEADS A LINE (not in mid-prose).
+  const m = MARKER_RE.exec(answer);
+  if (!m || m.index === undefined) return [];
+  // Slice from the marker so _extractAfter scans the trailer's list lines.
+  return _extractAfter(answer.slice(m.index + m[0].length));
 }
 
 /**
@@ -31,15 +42,12 @@ export function extractFollowUps(answer: string): string[] {
  * Returns the answer unchanged if there's no trailer.
  */
 export function stripFollowUps(answer: string): string {
-  const marker = answer.indexOf("你可能还想问");
-  if (marker === -1) return answer;
-  // Back up over an optional "💡" and a preceding "---" divider line so the body
-  // doesn't end with a dangling rule. Match from the start of the line/divider.
-  const head = answer.slice(0, marker);
-  // Drop a trailing "💡 " on the marker line, then any whitespace, then an
-  // optional horizontal-rule line (--- / *** / ___), then trailing whitespace.
-  const cleaned = head.replace(/\s*💡?\s*$/, "").replace(/\n\s*(?:-{3,}|\*{3,}|_{3,})\s*$/, "");
-  return cleaned.trimEnd();
+  // Only strip when the marker LEADS A LINE (same guard as extractFollowUps), so a
+  // mid-prose mention of "你可能还想问" never truncates a real answer. STRIP_RE
+  // anchors to end-of-string and eats the optional preceding divider + the marker
+  // line + everything after, leaving the body clean (no dangling rule).
+  if (!MARKER_RE.test(answer)) return answer;
+  return answer.replace(STRIP_RE, "").trimEnd();
 }
 
 function _extractAfter(afterMarker: string): string[] {

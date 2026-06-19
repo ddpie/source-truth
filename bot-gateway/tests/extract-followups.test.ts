@@ -43,6 +43,24 @@ describe("extractFollowUps", () => {
     const answer = "💡 你可能还想问：\n- 问题一？\n- 问题二？\n- 问题三？\n- 问题四？";
     expect(extractFollowUps(answer)).toHaveLength(3);
   });
+
+  // REGRESSION (HIGH): the marker must LEAD A LINE. A real answer that merely
+  // MENTIONS "你可能还想问" mid-prose, then lists DATA rows, must NOT have those
+  // rows scraped into follow-up buttons.
+  it("does NOT extract from a mid-prose mention of the phrase", () => {
+    const answer = [
+      "这个技能的相关数值，你可能还想问的我都列了：",
+      "- 基础伤害 50",
+      "- 暴击倍率 1.5",
+      "- 冷却 8 秒",
+    ].join("\n");
+    expect(extractFollowUps(answer)).toEqual([]);
+  });
+
+  it("extracts only when the marker is at line start (after 💡)", () => {
+    const answer = "正文。\n💡 你可能还想问：\n- 调用方有哪些？";
+    expect(extractFollowUps(answer)).toEqual(["调用方有哪些？"]);
+  });
 });
 
 describe("stripFollowUps", () => {
@@ -77,5 +95,16 @@ describe("stripFollowUps", () => {
     const answer = "正文结论。\n\n---\n💡 你可能还想问：\n- 调用方有哪些？\n- 改了会影响什么？";
     expect(stripFollowUps(answer)).toBe("正文结论。");
     expect(extractFollowUps(answer)).toEqual(["调用方有哪些？", "改了会影响什么？"]);
+  });
+
+  // REGRESSION (HIGH): a mid-prose mention must NOT truncate the answer body.
+  it("does NOT truncate the body on a mid-prose mention of the phrase", () => {
+    const answer = [
+      "这个技能的相关数值，你可能还想问的我都列了：",
+      "- 基础伤害 50",
+      "- 暴击倍率 1.5",
+    ].join("\n");
+    // The whole thing is real answer text — strip must be a no-op.
+    expect(stripFollowUps(answer)).toBe(answer);
   });
 });
