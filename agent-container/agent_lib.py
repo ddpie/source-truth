@@ -330,17 +330,27 @@ async def run_agent(
     # first (failed) attempt DOES establish the MCP connection, so a single retry
     # lands on a now-warm connection and succeeds. We watch these signals on the
     # stream and, iff it ends in that exact shape, transparently re-run ONCE.
-    saw_tool_use = False
-    saw_markup_text = False
-    last_num_turns: int | None = None
-
-    async def _drive(p: str) -> AsyncIterator[Any]:
-        nonlocal first_emitted, n, saw_tool_use, saw_markup_text, last_num_turns
+    # Stream live, but HOLD each attempt's messages in a small buffer UNTIL we know
+    # it's not a leak — then flush + stream the rest live. Rationale: once the failed
+    # attempt's messages reach the gateway they pollute the card (its narration + a
+    # fake "你可能还想问" land in the 分析过程 panel, and the two attempts' text
+    # concatenate). The leak shape is num_turns<=1 with NO real tool_use, so:
+    #   - the MOMENT a real tool_use appears → it's NOT a leak → flush the buffer and
+    #     stream every subsequent message live (typewriter preserved for the answer,
+    #     which is generated AFTER the tool round-trips),
+    #   - if the attempt ENDS still having seen no tool_use + emitted tool-call markup
+    #     → it's the cold-start leak → DISCARD the buffer and retry once on the
+    #     now-warm MCP connection.
+    # The only thing not streamed live is the brief pre-first-tool narration, which is
+    # tiny; the leak attempt is at most ~1 turn so its buffer is small.
+    async def _drive(p: str, *, suppress_on_leak: bool) -> AsyncIterator[Any]:
+        nonlocal first_emitted, saw_tool_use, saw_markup_text, last_num_turns
+        buf: list[Any] = []
+        committed = not suppress_on_leak  # retry attempt streams immediately
         async for message in qfn(prompt=p, options=options):
             if not first_emitted:
                 first_emitted = True
                 _perf("agent_first_message", (time.perf_counter() - t0) * 1000)
-            n += 1
             _track_tool_latency(message, pending)
             _maybe_log_result(message)
             if _message_has_tool_use(message):
@@ -350,22 +360,43 @@ async def run_agent(
             nt = getattr(message, "num_turns", None)
             if isinstance(nt, int):
                 last_num_turns = nt
-            yield message
+            if committed:
+                yield message
+            else:
+                buf.append(message)
+                if saw_tool_use:
+                    # Real retrieval happened → definitely not a leak. Flush + commit.
+                    committed = True
+                    for m in buf:
+                        yield m
+                    buf = []
+        # Stream ended. If still uncommitted, the buffer holds the whole attempt: a
+        # clean short answer (no markup) is flushed; a leak (markup, no tool) is
+        # dropped by NOT yielding (the caller will retry).
+        if not committed and not _is_leak_shape():
+            for m in buf:
+                yield m
+
+    def _is_leak_shape() -> bool:
+        return (not saw_tool_use) and saw_markup_text and (last_num_turns is None or last_num_turns <= 1)
+
+    saw_tool_use = False
+    saw_markup_text = False
+    last_num_turns: int | None = None
 
     try:
-        async for message in _drive(prompt):
+        async for message in _drive(prompt, suppress_on_leak=True):
+            n += 1
             yield message
-        # Leak shape: no tool ever executed, the model emitted tool-call markup as
-        # text, and the loop ended in <=1 turn. Retry ONCE on the now-warm MCP conn.
-        if (not saw_tool_use) and saw_markup_text and (last_num_turns is None or last_num_turns <= 1):
-            _perf("mcp_init_race_retry", (time.perf_counter() - t0) * 1000,
-                  num_turns=last_num_turns)
+        if _is_leak_shape():
+            _perf("mcp_init_race_retry", (time.perf_counter() - t0) * 1000, num_turns=last_num_turns)
             logger.warning(json.dumps({"event": "mcp_init_race_retry",
                                        "detail": "tools not registered on cold start; retrying once"}))
             saw_tool_use = False
             saw_markup_text = False
             last_num_turns = None
-            async for message in _drive(prompt):
+            async for message in _drive(prompt, suppress_on_leak=False):
+                n += 1
                 yield message
     finally:
         _perf("agent_run_total", (time.perf_counter() - t0) * 1000, messages=n)

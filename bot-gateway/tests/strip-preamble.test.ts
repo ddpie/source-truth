@@ -190,10 +190,20 @@ describe("stripPreamble", () => {
     expect(stripPreamble(body)).toBe(body);
   });
 
-  it("does NOT match a --- adjacent to a table pipe as the cut point", () => {
+  it("never cuts ON a table separator: the FULL table survives intact", () => {
     const body = "整理一下答案如下：\n| A | B |\n| --- | --- |\n| 1 | 2 |";
-    // The head '整理一下答案如下' is a preamble-ish prefix, but the only `---` is in a
-    // table separator (pipe-adjacent), so nothing is stripped.
+    // '整理一下答案如下：' is a leading preamble (now recognized), so it IS dropped —
+    // but the table is the real answer and MUST survive whole, separator included
+    // (the `| --- |` row must NOT be mistaken for the preamble's `---` cut point).
+    const out = stripPreamble(body);
+    expect(out).toBe("| A | B |\n| --- | --- |\n| 1 | 2 |");
+    expect(out).toContain("| --- | --- |"); // table separator intact
+    expect(out).not.toContain("整理一下答案"); // preamble intro dropped (结论先行)
+  });
+
+  it("does NOT cut a real answer's inline --- that is a table separator (no preamble head)", () => {
+    // A body whose head is NOT a preamble must be left entirely alone, table and all.
+    const body = "暴击倍率对照：\n| 等级 | 倍率 |\n| --- | --- |\n| 1 | 1.5 |";
     expect(stripPreamble(body)).toBe(body);
   });
 
@@ -238,6 +248,23 @@ describe("stripPreamble", () => {
       "现在整理答案的逻辑在 AnswerBuilder.cs 里实现，分三步。",
       "下面给出结论性的伤害公式：伤害 = 力量 × 1.5，这是真实答案正文继续写下去。",
       "接下来要触发的技能是火球术，冷却 8 秒。",
+    ]) {
+      expect(stripPreamble(real)).toBe(real);
+    }
+  });
+
+  // REGRESSION (observed live on a sonnet card): a preamble ending in a result noun
+  // + 如下 ("整理答案如下。" / "给出结论如下：") leaked into the body.
+  it("strips an announce preamble that ends in 如下 / 如下所示", () => {
+    expect(stripPreamble("已拿到完整信息，整理答案如下。\n\n角色的最大负重由力量决定。"))
+      .toBe("角色的最大负重由力量决定。");
+    expect(stripPreamble("数据齐全，现在给出结论如下：\n\n伤害是 100。")).toBe("伤害是 100。");
+  });
+
+  it("does NOT over-strip a real answer whose first sentence ends in 如下 then continues", () => {
+    for (const real of [
+      "升级所需经验如下表所示，从 1 到 10 级递增。",
+      "配置表如下：A=1,B=2。",
     ]) {
       expect(stripPreamble(real)).toBe(real);
     }
