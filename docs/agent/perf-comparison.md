@@ -40,8 +40,19 @@
 **结论**：在 source-truth 的取证式工作负载下，**Sonnet 与 Opus 耗时基本打平**（85s vs 82s，差异远
 小于同一问题不同轮次间的方差 40–120s）。**耗时的主导因素是工具往返次数 + 该问题需要几轮取证，不是
 模型本身的出 token 速度**——这也是为什么单次跑的数字会大幅波动、必须多轮取中位。质量上两者都正确给出
-公式与配置可调性、都带「供研发复核」精确出处；Opus 在多轮纠错 / 自我核实上略更主动。**默认模型已切到
-Sonnet 4.6**（成本更低、质量与延迟与 Opus 相当）；对正确性要求极高的场景可切回 Opus。
+公式与配置可调性、都带「供研发复核」精确出处；二者各有所长——Sonnet 往往更细、更结构化（如商人价格题
+给全了物价指数钳制范围 250–4000、阈值、完整公式并尝试画图），Opus 更口语、在多轮纠错 / 自我核实上略更
+主动。**当前默认模型：Opus 4.8**（`ANTHROPIC_MODEL=global.anthropic.claude-opus-4-8`）；对成本敏感且能
+接受同等延迟的场景可切 Sonnet 4.6（质量相当、更省）。
+
+## 3. Haiku 4.5（已测试并排除）
+
+也实测了 `claude-haiku-4-5`，但**判定能力不足、不纳入候选**，原因（均为真机读卡观察）：
+- **冷启动 MCP 工具未注册时的「工具调用泄漏」最严重**，且 Haiku 用一种**独有的泄漏格式**
+  `<attempt_{toolname}>{JSON}</attempt_{toolname}>`（Opus/Sonnet 是 `<invoke>` / `<function_calls>`）——
+  网关剥离与 agent 自动重试已扩展覆盖这第二种格式（见 `mcp-init-race-leak` 记忆 / `strip-toolcall-leak.ts`）。
+- 答案正文前常带**大段 JA/EN 混合的啰嗦旁白**（"let me call the tool / 実際に呼び出します…"），违背「结论先行」。
+- 综合：Haiku 在「严格基于代码取证 + 结构化作答」这个负载上稳定性与质量都明显弱于 Sonnet/Opus，故排除。
 
 > 方法论教训：source-truth 的单次延迟受「这一轮模型决定调几次工具」主导，方差很大；**对比模型/版本
 > 必须多轮取中位 + 预热丢弃 + 串行**，否则单次抽样会得出相反结论（早期单跑曾得 sonnet 94 / opus 86，
@@ -60,7 +71,11 @@ claude -p --model global.anthropic.claude-opus-4-8 \
   --append-system-prompt "$(cat agent-container/prompts/system.md)" \
   --allowed-tools Read Glob Grep --output-format json "<问题>"   # duration_ms / num_turns
 
-# 切模型：改 .local/deploy-config 的 DEPLOY_MODEL，再
-./scripts/deploy-all.sh --region ap-northeast-1 --repo <repo> \
-  --skip artifacts --skip iam --skip network --skip efs --skip index-svc --skip image
+# 切模型（只更新 Runtime 的 ANTHROPIC_MODEL，不动镜像/索引）：
+./scripts/deploy-all.sh --region ap-northeast-1 --repo-subdir code-5x \
+  --skip artifacts --skip iam --skip network --skip index-svc --skip image \
+  --model global.anthropic.claude-opus-4-8
+# 注意：warm microVM 持旧 env 直到老化，切换后早期 invoke 可能还是旧模型，多发几条或稍等。
+# 模型 id：opus=global.anthropic.claude-opus-4-8、sonnet=global.anthropic.claude-sonnet-4-6、
+#         haiku=global.anthropic.claude-haiku-4-5-20251001-v1:0（已排除）。
 ```
