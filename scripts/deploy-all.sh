@@ -186,7 +186,34 @@ preflight_agentcore() {
     say warn "    doesn't support AgentCore, pick a supported one. Phase 5 will fail until then."
   fi
 }
-if [[ "$DRY_RUN" != true ]]; then preflight_model_access; preflight_agentcore; fi
+# Phase 5 configures the AgentCore Runtime via boto3 (lib/deploy_runtime.py), NOT the
+# aws CLI — so the CLI-based preflight_agentcore above does NOT cover it. A fresh box
+# can have a recent aws CLI (green above) but a stale pip boto3 that lacks the
+# bedrock-agentcore-control service → create_agent_runtime raises UnknownServiceError
+# only AFTER Phases 1-4 (~10+ min of upload/bootstrap/build) already ran. Assert the
+# boto3 service is present up front and FAIL FAST with the fix. HARD blocker (not WARN):
+# without it Phase 5 cannot succeed at all.
+preflight_boto3() {
+  python3 - <<'PY' 2>/dev/null && return 0
+import boto3, sys
+sys.exit(0 if "bedrock-agentcore-control" in boto3.Session().get_available_services() else 1)
+PY
+  say err "boto3/botocore is too old (no 'bedrock-agentcore-control' service) — Phase 5 would fail"
+  say err "  ~10 min in, after the build. Fix now:  python3 -m pip install -U boto3 botocore"
+  exit 1
+}
+# Fresh accounts default to low EIP(5)/VPC(5) per-region quotas. provision_network's
+# allocate-address/create-vpc run under set -e and would abort mid-Phase-2 with a raw
+# AddressLimitExceeded/VpcLimitExceeded if the account already sits at the cap. WARN up
+# front (non-blocking — a deploy reuses its own tagged EIP/VPC, so a clean account is fine).
+preflight_quota() {
+  command -v aws >/dev/null || return 0
+  local eips; eips="$(aws ec2 describe-addresses --region "$REGION" --query 'length(Addresses)' --output text 2>/dev/null || echo "")"
+  local vpcs; vpcs="$(aws ec2 describe-vpcs --region "$REGION" --query 'length(Vpcs)' --output text 2>/dev/null || echo "")"
+  [[ "$eips" =~ ^[0-9]+$ && "$eips" -ge 4 ]] && say warn "已有 $eips 个 EIP（默认配额 5）——若 NAT 的 allocate-address 失败，先去 Service Quotas 提额或释放闲置 EIP。"
+  [[ "$vpcs" =~ ^[0-9]+$ && "$vpcs" -ge 4 ]] && say warn "已有 $vpcs 个 VPC（默认配额 5）——若 create-vpc 失败，先提额或清理。"
+}
+if [[ "$DRY_RUN" != true ]]; then preflight_boto3; preflight_model_access; preflight_agentcore; preflight_quota; fi
 
 # Persist resolved config — but NOT on --dry-run (dry-run must make no changes,
 # including no writes to deploy-config).
