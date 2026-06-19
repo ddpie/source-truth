@@ -64,6 +64,21 @@ describe("redactSensitive", () => {
     expect(out).toContain("[已隐藏]");
   });
 
+  it("redacts newer secret prefixes: github_pat_ / sk_live_ / sk-proj- (cross-review)", () => {
+    const ghpat = "github_pat_11ABCDE0000_" + "a".repeat(60);
+    expect(redactSensitive(ghpat)).not.toContain(ghpat);
+    const stripe = "sk_live_4eC39HqLyjWDarjtT1zdp7dc";
+    expect(redactSensitive(stripe)).not.toContain(stripe);
+    const openai = "sk-proj-" + "a".repeat(24);
+    expect(redactSensitive(openai)).not.toContain(openai);
+  });
+
+  it("does NOT over-redact a short sk- token that is not a key", () => {
+    // "sk-3" (a game term) is below the 20-char body floor → must survive.
+    const text = "技能 sk-3 的冷却是 5 秒。";
+    expect(redactSensitive(text)).toBe(text);
+  });
+
   it("leaves normal answer text untouched", () => {
     const text = "resolve_match 函数在 match_resolver.py 第 5 行，作用是扫描消除。";
     expect(redactSensitive(text)).toBe(text);

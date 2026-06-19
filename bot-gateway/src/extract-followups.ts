@@ -61,11 +61,24 @@ export function stripFollowUps(answer: string): string {
   return answer.replace(STRIP_RE, "").trimEnd();
 }
 
+// A line that opens a DIFFERENT section — if the follow-up list is followed by (or,
+// on a model misorder, precedes content that includes) an evidence block / chart /
+// code fence, collection must STOP at that boundary, NOT swallow its lines as fake
+// buttons. _extractAfter scans the raw post-marker tail (which can run to the very end
+// of the answer), so without this an evidence heading `> 🔍 **供研发复核**`, a
+// ```chart fence, or its JSON line each became a clickable "follow-up" that re-asks
+// garbage on click (cross-review HIGH). Line-anchored, marker-tolerant of bold/quote.
+const SECTION_BOUNDARY_RE = /(?:供研发复核|需要你确认)|^[ \t　]*(?:>?[ \t]*\**)?```/;
+
 function _extractAfter(afterMarker: string): string[] {
   // Extract lines starting with "- " or "· " or numbered "1. " etc.
   const lines = afterMarker.split("\n");
   const questions: string[] = [];
   for (const line of lines) {
+    // STOP at the start of another section (evidence/clarify/chart/code fence): its
+    // lines are NOT follow-ups. break (not continue) so nothing past the boundary is
+    // collected even if a later line happens to look list-shaped.
+    if (SECTION_BOUNDARY_RE.test(line)) break;
     const trimmed = line.replace(/^[\s\-·•*\d.]+/, "").trim();
     // Dedup: a model that repeats a suggestion would otherwise render twin buttons
     // with identical captions but distinct element_ids — clicking one disables only

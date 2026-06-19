@@ -147,4 +147,23 @@ describe("no ReDoS on many unclosed invoke opens", () => {
     stripToolCallLeak(body);
     expect(Date.now() - t0).toBeLessThan(2000); // bounded gap → no O(n^2) stall
   });
+
+  it("strips fast on a long '*' run after a markup marker (leading bold-marker ReDoS)", () => {
+    // The leading bold marker was `\\**` (unbounded). A `<function_calls>` (so
+    // hasToolCallMarkup passes) + tens of thousands of '*' with no matchable tag made
+    // every pattern retry `\\**` from each offset → O(n^2) (~10s at 32k). Bounded to
+    // \\*{0,4} → linear (cross-review P0).
+    const body = `<${A}function_calls> ` + "*".repeat(200000);
+    const t0 = Date.now();
+    stripToolCallLeak(body);
+    expect(Date.now() - t0).toBeLessThan(1000);
+  });
+
+  it("still strips a real bold-wrapped invoke block (the bound keeps correctness)", () => {
+    const leak = `结论X。\n**${inv("codegraph_read_file", param("p", "a"))}**\n后续。`;
+    const out = stripToolCallLeak(leak);
+    expect(out).not.toMatch(/invoke|parameter/);
+    expect(out).toContain("结论X");
+    expect(out).toContain("后续");
+  });
 });
