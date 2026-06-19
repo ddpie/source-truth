@@ -358,4 +358,23 @@ describe("stripPreamble", () => {
     const out = stripPreamble("已经把数据都查清了。下面是结论。法术消耗和等级无关。");
     expect(out).toBe("法术消耗和等级无关。");
   });
+
+  // Observed live: '已经查清楚了。下面直接说结论。' — bare-completion ('查清楚了') +
+  // a 直接说结论 announce, two ultra-short generic sentences. Both must strip.
+  it("strips '已经查清楚了。下面直接说结论。' (bare completion + 直接说结论)", () => {
+    expect(stripPreamble("已经查清楚了。下面直接说结论。\n\n魔法值上限 = 智力 × 系数。"))
+      .toBe("魔法值上限 = 智力 × 系数。");
+    expect(stripPreamble("已经查清楚了。\n\nX答案。")).toBe("X答案。");
+    expect(stripPreamble("下面直接说结论。\n\nX答案。")).toBe("X答案。");
+  });
+
+  it("does NOT over-strip a real sentence beginning with 已经查清楚了 / 下面直接说结论 then continuing", () => {
+    for (const real of [
+      "已经查清楚了的部分会标记为已核对状态。",
+      "下面直接说结论那一段代码在 Foo.cs:20。",
+      "说结论之前要先看三个输入。",
+    ]) {
+      expect(stripPreamble(real)).toBe(real);
+    }
+  });
 });
