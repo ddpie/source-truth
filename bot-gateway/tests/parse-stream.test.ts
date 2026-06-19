@@ -188,6 +188,42 @@ describe("parseAgentStream — partial messages (include_partial_messages)", () 
     expect(narrations).toEqual(["narration"]);
     expect(conclusion).toBe("conclusion");
   });
+
+  // REGRESSION (HIGH): a trailing text block opened after the LAST tool_use but never
+  // filled must NOT become the conclusion and demote the real answer to a narration.
+  it("ignores a dangling EMPTY trailing text block (real answer stays the conclusion)", () => {
+    const sse =
+      textStart() + textDelta("正在定位") +
+      toolStart() +
+      textStart() + textDelta("最终答案在这里") +
+      toolStart() +            // one last verification call
+      textStart();             // opens "" — never filled, model stops
+    const { narrations, conclusion } = parseAgentStream(sse);
+    expect(conclusion).toBe("最终答案在这里");
+    expect(narrations).toEqual(["正在定位"]);
+  });
+
+  // REGRESSION: a whitespace-only final block isn't a real answer.
+  it("drops a whitespace-only final block (does not render blank as the conclusion)", () => {
+    const sse =
+      textStart() + textDelta("真正的结论") +
+      toolStart() +
+      textStart() + textDelta("   \n  ");
+    expect(parseAgentStream(sse).conclusion).toBe("真正的结论");
+  });
+
+  // REGRESSION (BUG 2): a thinking block between two text blocks is a boundary — the
+  // two text blocks must NOT merge (would garble narration into the conclusion).
+  it("treats a thinking block as a text-block boundary (no merge)", () => {
+    const thinkingStart = () => ev({ type: "content_block_start", index: 1, content_block: { type: "thinking" } });
+    const sse =
+      textStart() + textDelta("先想一下定位") +
+      thinkingStart() +        // extended-thinking block (content ignored)
+      textStart() + textDelta("结论：闪避看敏捷");
+    const { narrations, conclusion } = parseAgentStream(sse);
+    expect(narrations).toEqual(["先想一下定位"]);
+    expect(conclusion).toBe("结论：闪避看敏捷");
+  });
 });
 
 describe("tool-call accounting (perf: few-deep-turns vs many-round-trips)", () => {

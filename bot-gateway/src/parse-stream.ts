@@ -158,14 +158,22 @@ export function applyStreamEvent(state: StreamState, raw: Record<string, unknown
       state.sawToolAfterLastText = true;
       countTool(state, block?.name);
     } else if (blockType === "text") {
-      // A new text block opened. Mark stream-event mode and open a fresh block
-      // ONLY if a tool intervened (or none exists yet); otherwise the existing
-      // block continues (deltas append to it).
+      // A new text block opened. Mark stream-event mode, but DON'T eagerly push("")
+      // here — the content_block_delta branch below lazily creates the block on the
+      // first text_delta (respecting the tool-boundary flag). Pushing on start
+      // created a phantom EMPTY block when a text block is opened but never filled
+      // (model opens a final text block after a last tool_use, then stops): that
+      // empty trailing block became splitTexts' "conclusion" → blank card, real
+      // answer demoted to the 分析过程 panel (cross-review HIGH). Just record the mode.
       state.sawStreamEvent = true;
-      if (state.sawToolAfterLastText || state.texts.length === 0) {
-        state.texts.push("");
-        state.sawToolAfterLastText = false;
-      }
+    } else if (blockType !== undefined) {
+      // Any OTHER block opening (thinking / redacted_thinking / server_tool_use / …)
+      // is a boundary too: a text block after it is a NEW logical block, not a
+      // continuation of the prior narration. Without this, two text blocks separated
+      // only by a thinking block would MERGE (garbled). The block's own content is
+      // still ignored for reassembly (only text_delta is folded in).
+      state.sawStreamEvent = true;
+      state.sawToolAfterLastText = true;
     }
     return;
   }
@@ -203,10 +211,16 @@ export function applyContentItem(state: StreamState, item: Record<string, unknow
   // thinking / tool_result: ignored.
 }
 
-/** texts[] → {narrations (all but last), conclusion (last)}. */
+/** texts[] → {narrations (all but last), conclusion (last NON-EMPTY)}.
+ *  Empty/whitespace-only blocks are dropped BEFORE classifying: a trailing empty
+ *  block (model opened a final text block but never filled it) must not steal the
+ *  conclusion slot and blank the card while the real answer sits in narrations
+ *  (cross-review HIGH). Same filter also prevents a whitespace-only final block
+ *  from rendering as a blank answer at finalize. */
 export function splitTexts(texts: string[], error: string | null = null): ParsedStream {
-  if (texts.length === 0) return { narrations: [], conclusion: "", error };
-  return { narrations: texts.slice(0, -1), conclusion: texts[texts.length - 1], error };
+  const nonEmpty = texts.filter((t) => t.trim() !== "");
+  if (nonEmpty.length === 0) return { narrations: [], conclusion: "", error };
+  return { narrations: nonEmpty.slice(0, -1), conclusion: nonEmpty[nonEmpty.length - 1], error };
 }
 
 /** Parse a whole captured SSE string (used by tests / non-streaming callers). */
