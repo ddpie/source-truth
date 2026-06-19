@@ -67,7 +67,12 @@ function _extractAfter(afterMarker: string): string[] {
   const questions: string[] = [];
   for (const line of lines) {
     const trimmed = line.replace(/^[\s\-·•*\d.]+/, "").trim();
-    if (trimmed.length >= 4 && trimmed.length <= 80 && !trimmed.startsWith("💡") && !trimmed.includes("你可能还想问") && !trimmed.includes("继续追问")) {
+    // Dedup: a model that repeats a suggestion would otherwise render twin buttons
+    // with identical captions but distinct element_ids — clicking one disables only
+    // it, leaving the duplicate live (confusing UX; cross-review MED).
+    if (trimmed.length >= 4 && trimmed.length <= 80 && !trimmed.startsWith("💡")
+        && !trimmed.includes("你可能还想问") && !trimmed.includes("继续追问")
+        && !questions.includes(trimmed)) {
       questions.push(trimmed);
     }
     if (questions.length >= MAX_FOLLOW_UPS) break;

@@ -65,7 +65,9 @@ export function extractClarification(answer: string): Clarification | null {
     if (LIST_ITEM_RE.test(line)) {
       started = true;
       const text = line.replace(LIST_ITEM_RE, "").trim();
-      if (text.length >= 2 && text.length <= 120) options.push(text);
+      // Dedup (same rationale as follow-ups): twin clarify buttons with identical
+      // captions confuse the user and waste an option slot.
+      if (text.length >= 2 && text.length <= 120 && !options.includes(text)) options.push(text);
       if (options.length >= MAX_CLARIFY_OPTIONS) break;
       continue;
     }

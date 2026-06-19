@@ -24,6 +24,12 @@ describe("extractClarification", () => {
     ]);
   });
 
+  it("dedups repeated options (no twin clarify buttons)", () => {
+    const answer = "🔀 需要你确认：指哪种？\n- 武器攻击力？\n- 武器攻击力？\n- 角色总攻击力？";
+    const c = extractClarification(answer);
+    expect(c!.options).toEqual(["武器攻击力？", "角色总攻击力？"]);
+  });
+
   it("works without the 🔀 emoji (keys on the literal 需要你确认)", () => {
     const answer = "需要你确认: 指哪个背包？\n- 主角随身背包容量\n- 仓库/银行存储容量";
     const c = extractClarification(answer);

@@ -123,4 +123,8 @@ describe("stripFollowUps", () => {
     expect(extractFollowUps("结论。\n你可能还想问\n- 问题A？")).toEqual(["问题A？"]);
     expect(extractFollowUps("结论。\n💡 你可能还想问：\n- 问题B？")).toEqual(["问题B？"]);
   });
+  it("dedups repeated suggestions (no twin buttons)", () => {
+    const answer = "结论。\n💡 你可能还想问：\n- 调用方有哪些？\n- 调用方有哪些？\n- 它怎么初始化？";
+    expect(extractFollowUps(answer)).toEqual(["调用方有哪些？", "它怎么初始化？"]);
+  });
 });
