@@ -30,6 +30,21 @@ export function isDuplicate(eventId: string, ttlMs: number = DEFAULT_TTL_MS): bo
   return false;
 }
 
+/**
+ * Roll back a `isDuplicate` mark so the SAME id can be processed again. Used when
+ * the work the dedup was guarding FAILED before completing (e.g. the card send threw
+ * on a transient error): without this, the dedup key stays burned for the full TTL,
+ * so Feishu's re-delivery of that event — the very retry the user needs — is silently
+ * dropped and they get no card at all. Rolling back lets the re-delivery retry.
+ */
+export function forget(eventId: string): void {
+  const timer = seen.get(eventId);
+  if (timer) {
+    clearTimeout(timer);
+    seen.delete(eventId);
+  }
+}
+
 /** Clear all tracked event_ids. Test-only. */
 export function resetForTesting(): void {
   for (const timer of seen.values()) {

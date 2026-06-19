@@ -46,7 +46,7 @@ import { SessionSerializer } from "./serialize-session";
 import { Semaphore } from "./semaphore";
 import { CardWriter } from "./card-writer";
 import { hashUserId } from "./log";
-import { isDuplicate } from "./dedup";
+import { isDuplicate, forget } from "./dedup";
 
 const REGION = process.env.AWS_REGION ?? "ap-northeast-1";
 const RUNTIME_ARN = process.env.RUNTIME_ARN ?? "";
@@ -177,7 +177,17 @@ async function streamingCardInvoke(
   // a follow-up (or a 2nd message in the same chat) chained behind a 9-minute
   // stream would show NO card and couldn't be 停止'd until it finally began. The
   // abort handle is registered here too, so 停止 cancels even a still-queued turn.
-  const card = await sendStreamingCard(sessionId, target, queued, question ?? prompt, parentMessageId, askerOpenId);
+  // If the SEND ITSELF fails (transient Feishu/token error), roll back the dedup
+  // mark so Feishu's re-delivery of this IM event can RETRY — otherwise the key
+  // stays burned for the full TTL and the user gets no card and no retry
+  // (cross-review MED). Re-throw so the caller's .catch logs it.
+  let card: Awaited<ReturnType<typeof sendStreamingCard>>;
+  try {
+    card = await sendStreamingCard(sessionId, target, queued, question ?? prompt, parentMessageId, askerOpenId);
+  } catch (e) {
+    if ("messageId" in target) forget(`msg:${target.messageId}`);
+    throw e;
+  }
 
   return sessionSerializer.serialize(sessionId, () => {
     // Recompute the prompt HERE (turn start) if a composer was given: by now the
