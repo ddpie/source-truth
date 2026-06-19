@@ -175,6 +175,19 @@ describe("handleMessageEvent", () => {
     expect(captured).toBe("那骷髅呢");
   });
 
+  it("surfaces the upstream event_id on a handled result (so a failed first send can roll it back)", async () => {
+    // The IM dedup gate burns event_id; if the FIRST card-send then fails, the
+    // gateway must roll back THIS event_id (not just the msg: key) so Feishu's
+    // re-delivery — which carries the same event_id — isn't dropped at the gate
+    // and can retry. That rollback needs the event_id surfaced here.
+    const out = await handleMessageEvent(
+      evt({ event_id: "evt_rollback", chat_type: "p2p", mentions: [] }),
+      { invoke: async () => "ok" },
+    );
+    expect(out.handled).toBe(true);
+    expect(out.eventId).toBe("evt_rollback");
+  });
+
   it("in a GROUP, a reply to OUR card by a DIFFERENT member (not the asker) is not auto-answered", async () => {
     let n = 0;
     const invoke = async () => { n++; return "ok"; };

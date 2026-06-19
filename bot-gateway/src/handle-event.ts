@@ -51,6 +51,11 @@ export interface HandleResult {
   /** open_id of the asker, remembered on the card so a later bare reply by the
    *  same user is auto-answered (scopes the group reply bypass to the asker). */
   senderId?: string;
+  /** Upstream Feishu event_id (idempotency key burned by the dedup gate above).
+   *  Surfaced so a failed first card-send can roll it back and let the re-delivery
+   *  retry — the `msg:` key alone can't, since the re-delivery hits this event_id
+   *  gate first. */
+  eventId?: string;
   reason?: "duplicate" | "unsupported_type" | "empty" | "not_mentioned" | "not_a_user" | "reply_to_unknown_card";
 }
 
@@ -144,5 +149,5 @@ export async function handleMessageEvent(
 
   // 4. Invoke the agent.
   const answer = await deps.invoke(sessionId, prompt);
-  return { handled: true, answer, sessionId, messageId: event.message_id, parentId: event.parent_id, senderId: event.sender_id };
+  return { handled: true, answer, sessionId, messageId: event.message_id, parentId: event.parent_id, senderId: event.sender_id, eventId: event.event_id };
 }

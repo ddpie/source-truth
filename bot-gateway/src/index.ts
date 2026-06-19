@@ -157,6 +157,12 @@ async function streamingCardInvoke(
   // relevant (immediate) turn. Falls back to the eager `prompt` if it returns
   // empty. Pure-ish: it reads the card registry, no side effects.
   composePrompt?: () => string,
+  // OPTIONAL upstream Feishu event_id. Only the IM path passes it (that path dedups
+  // re-deliveries on event_id in handleMessageEvent); rolled back alongside the
+  // `msg:` key if the FIRST card-send fails, so the re-delivery can retry. The
+  // follow-up/callback path leaves it undefined (those are deliberate user clicks,
+  // never event_id-deduped).
+  eventId?: string,
 ): Promise<void> {
   // Dedup only IM messages (Feishu re-delivers them on restart). Follow-up
   // clicks (chatId target) are deliberate user actions — never dedup them, or a
@@ -177,15 +183,21 @@ async function streamingCardInvoke(
   // a follow-up (or a 2nd message in the same chat) chained behind a 9-minute
   // stream would show NO card and couldn't be 停止'd until it finally began. The
   // abort handle is registered here too, so 停止 cancels even a still-queued turn.
-  // If the SEND ITSELF fails (transient Feishu/token error), roll back the dedup
-  // mark so Feishu's re-delivery of this IM event can RETRY — otherwise the key
-  // stays burned for the full TTL and the user gets no card and no retry
-  // (cross-review MED). Re-throw so the caller's .catch logs it.
+  // If the SEND ITSELF fails (transient Feishu/token error), roll back BOTH dedup
+  // marks so a Feishu re-delivery of this IM event can RETRY:
+  //   - `msg:<messageId>` is burned just above (this function's own guard);
+  //   - `eventId` (the upstream event_id) is burned EARLIER in handleMessageEvent,
+  //     which is the gate the re-delivery actually hits FIRST. Rolling back only the
+  //     `msg:` key was dead code: the re-delivery carries the SAME event_id, so it'd
+  //     be dropped at handleMessageEvent's event_id gate and never reach here — the
+  //     "first-send failure can retry" guarantee silently didn't hold (cross-review).
+  //     `eventId` is threaded in for exactly this rollback. Re-throw so the caller logs.
   let card: Awaited<ReturnType<typeof sendStreamingCard>>;
   try {
     card = await sendStreamingCard(sessionId, target, queued, question ?? prompt, parentMessageId, askerOpenId);
   } catch (e) {
     if ("messageId" in target) forget(`msg:${target.messageId}`);
+    if (eventId) forget(eventId);
     throw e;
   }
 
@@ -663,6 +675,16 @@ async function runStreamingInvoke(
     // The outer streamingCardInvoke .finally deletes the entry AFTER finalize fully
     // resolves — that's the correct, single point of removal. (cross-review)
   }
+  // FINALIZE ORCHESTRATION — guarded. Everything below composes the terminal card
+  // (classify outcome → extract charts/evidence → strip/normalize → close streaming →
+  // finalizeCard → footer). It runs AFTER the heartbeat was stopped in the finally
+  // above, so ANY unexpected throw here (a helper choking on pathological agent
+  // output, a missing i18n key, or a re-thrown failed updateContent/closeStreaming
+  // write) would otherwise strand the card forever in "正在分析…": timer frozen,
+  // streaming_mode still true, 停止 button clickable-but-dead — the exact "card
+  // frozen" failure the design forbids. The catch guarantees a clean, self-consistent
+  // terminal state instead. (cross-review HIGH)
+  try {
   // A timeout aborts the controller too (to cancel the socket), so sigv4 reports
   // aborted=true. Distinguish it from a USER 停止: if we set timedOut, treat it as a
   // timeout (its own message), NOT as an abort — else a 9-min timeout would render
@@ -912,6 +934,22 @@ async function runStreamingInvoke(
   // Redact `error` before logging: on a non-200 path it now carries the raw backend
   // response body (sigv4), which could echo a token/header/connection-string.
   log({ event: "card_closed", card: cardId, chars: answer.length, charts: charts.length, timedOut, failed, turnCapped, error: error ? redactSensitive(error) : undefined });
+  } catch (finalizeErr) {
+    // The finalize composition threw unexpectedly. The card is still mid-stream
+    // (header blue "正在分析…", live timer, dead 停止 button). Best-effort force it to
+    // a clean, self-consistent terminal state so it never hangs: drop any queued
+    // status/content frames, then a single one-shot finalizeCard (full-PUT) that
+    // rebuilds the body as a generic service error, closes streaming, and removes
+    // the 停止 button + live status line. Each step is independently swallowed —
+    // we must not throw out of the emergency path. closeStreaming is attempted too
+    // in case finalizeCard's PUT itself fails (so streaming_mode is cleared either way).
+    log({ event: "finalize_error", card: cardId, error: redactSensitive(String(finalizeErr)).slice(0, 300) });
+    try { writer.dropLanes("status", "content", "evidence"); } catch { /* best-effort */ }
+    await writer.write((seq) =>
+      finalizeCard(cardId, t("msg.serviceError"), [], seq, isFollowUp, false, true, "", question, "", false, false),
+    ).catch(() => {});
+    await writer.write((seq) => closeStreaming(cardId, seq)).catch(() => {});
+  }
 }
 
 async function main(): Promise<void> {
@@ -992,7 +1030,7 @@ async function main(): Promise<void> {
         }
       : undefined;
     try {
-      await streamingCardInvoke(sessionId, prompt, { messageId: res.messageId }, credentials, question, parentId, res.senderId, composePrompt);
+      await streamingCardInvoke(sessionId, prompt, { messageId: res.messageId }, credentials, question, parentId, res.senderId, composePrompt, res.eventId);
     } catch (cardErr) {
       // streamingCardInvoke now finalizes the card itself on backend failure
       // (non-200 / stream error), so reaching here means something unexpected
