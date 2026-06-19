@@ -58,6 +58,14 @@ DEFAULT_EXCLUDES = ("node_modules", ".venv", ".git")
 WARMUP_TIMEOUT_S = 90.0
 QUERY_TIMEOUT_S = 30.0
 LIVENESS_TIMEOUT_S = 8.0
+# A SINGLE failed liveness probe must NOT end the worker: an 8s probe can be lost
+# to a transient blip — a GC pause, or a heavy real query holding _call_lock past
+# the probe's timeout — and a full cold restart (~20s reindex) over a transient
+# blip is a self-inflicted outage (the "restart storm" risk). Only TREAT the worker
+# as dead after this many CONSECUTIVE probe failures; any success resets the count.
+# A real subprocess death fails every probe, so it's still caught within
+# THRESHOLD × probe_every (~10s) — fast enough for /health to track reality.
+LIVENESS_FAILURE_THRESHOLD = 2
 
 
 class IndexUnhealthy(RuntimeError):
@@ -214,33 +222,48 @@ class CodegraphSession:
                 # within one probe interval instead of waiting for a user to hit it.
                 probe_every = 5.0
                 since_probe = 0.0
+                consecutive_failures = 0  # only end the worker after THRESHOLD in a row
                 while not self._stop.is_set():
                     await asyncio.sleep(0.5)
                     since_probe += 0.5
                     if since_probe < probe_every:
                         continue
                     since_probe = 0.0
+                    # A probe is "bad" if it errored OR classified unhealthy. We flip
+                    # _healthy False immediately on a bad probe (so /health reflects the
+                    # blip honestly), but only EXIT the worker — triggering a full cold
+                    # restart — after THRESHOLD consecutive bad probes. A single good
+                    # probe resets the streak and re-affirms health, so a transient blip
+                    # (GC pause / a heavy query that held _call_lock past the timeout)
+                    # self-recovers without a needless ~20s reindex.
+                    bad = False
+                    reason = ""
                     try:
                         async with self._call_lock:
                             probe = await session.call_tool(
                                 "codegraph_symbol_search", {"query": "__liveness__"},
                                 read_timeout_seconds=timedelta(seconds=LIVENESS_TIMEOUT_S),
                             )
-                        unhealthy, reason = self._classify(probe)
+                        unhealthy, why = self._classify(probe)
                         if unhealthy:
-                            self._healthy = False
-                            self._health_detail = "liveness: %s" % reason
-                            logger.error(json.dumps({"event": "liveness_unhealthy", "reason": reason}))
+                            bad, reason = True, why
+                    except Exception as exc:  # noqa: BLE001 - subprocess/stream died
+                        bad, reason = True, "probe failed: %s" % str(exc)
+                    consecutive_failures, should_exit = self._record_probe(consecutive_failures, bad)
+                    if bad:
+                        self._healthy = False
+                        self._health_detail = "liveness: %s" % reason
+                        logger.error(json.dumps({"event": "liveness_unhealthy", "reason": reason,
+                                                 "consecutive": consecutive_failures}))
+                        if should_exit:
+                            logger.error(json.dumps({"event": "liveness_worker_exit",
+                                                     "detail": "%d consecutive failed probes" % consecutive_failures}))
                             return  # exit _serve → thread ends → _needs_restart() recovers
-                        # A successful probe re-affirms health (recovers a transient
-                        # blip that a failed user query may have flipped).
+                    else:
+                        # A successful probe re-affirms health and clears the streak
+                        # (recovers a transient blip a failed user query may have flipped).
                         self._healthy = True
                         self._health_detail = "ok"
-                    except Exception as exc:  # noqa: BLE001 - subprocess/stream died
-                        self._healthy = False
-                        self._health_detail = "liveness probe failed: %s" % str(exc)
-                        logger.error(json.dumps({"event": "liveness_failed", "error": str(exc)}))
-                        return  # exit _serve → thread ends → next call restarts worker
 
     async def _acquire_restart_lock(self) -> None:
         """Acquire the (threading) restart lock WITHOUT blocking the event loop.
@@ -430,6 +453,19 @@ class CodegraphSession:
             await self._restart()
         except Exception as exc:  # noqa: BLE001 - health probe must never raise
             logger.warning(json.dumps({"event": "self_heal_failed", "error": str(exc)}))
+
+    @staticmethod
+    def _record_probe(consecutive_failures: int, bad: bool) -> tuple[int, bool]:
+        """Pure streak bookkeeping for the liveness probe. Returns the updated
+        consecutive-failure count and whether the worker should EXIT (restart).
+        A good probe resets the streak; the worker exits only once the streak
+        reaches LIVENESS_FAILURE_THRESHOLD so a transient blip can't force a
+        full cold restart. Extracted (pure) so the threshold logic is unit-tested
+        without driving the live _serve subprocess loop."""
+        if not bad:
+            return 0, False
+        consecutive_failures += 1
+        return consecutive_failures, consecutive_failures >= LIVENESS_FAILURE_THRESHOLD
 
     def _needs_restart(self) -> bool:
         """Whether the worker must be (re)started: dead thread, or alive-but-wedged.

@@ -415,6 +415,7 @@ async def run_agent(
             saw_markup_text = False
             saw_error_result = False
             last_num_turns = None
+            pending.clear()  # drop attempt-1's unclosed tool timers so they can't mis-pair
             async for message in _drive(prompt, suppress_on_leak=False):
                 n += 1
                 yield message
