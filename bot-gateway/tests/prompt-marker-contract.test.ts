@@ -15,6 +15,7 @@
 
 import { readFileSync } from "fs";
 import { join } from "path";
+import { ALLOWED_CHART_TYPES } from "../src/extract-charts";
 
 const SYSTEM_MD = join(__dirname, "../../agent-container/prompts/system.md");
 
@@ -39,5 +40,25 @@ describe("agent↔gateway marker contract (system.md must emit the literals the 
     // keying on this literal. A prompt reword that drops it would silently disable
     // button-based clarification (the block would render as raw prose).
     expect(md).toContain("需要你确认");
+  });
+
+  it("instructs the ```chart fence the gateway's extract-charts.ts keys on", () => {
+    expect(md).toContain("```chart");
+  });
+
+  // CHART-TYPE contract: extract-charts.ts has a bar/line/pie ALLOW-LIST and SILENTLY
+  // DROPS any other type while still stripping the fence — so if the prompt advertises
+  // a type the parser doesn't allow (it used to suggest area/scatter), the model emits
+  // it, the chart vanishes, and the user gets NO chart and NO fallback. This pins the
+  // prompt's advertised types to the parser's allow-list so that drift fails CI loudly.
+  it("only advertises chart types that the gateway's allow-list will actually render", () => {
+    // The prompt's authoritative allow-list line: 只用这三类（`bar`/`line`/`pie`）
+    const advertised = Array.from(md.matchAll(/`(bar|line|pie|area|scatter|radar|funnel)`/g), (m) => m[1]);
+    expect(advertised.length).toBeGreaterThan(0); // sanity: the chart block still names types
+    for (const t of new Set(advertised)) {
+      expect(ALLOWED_CHART_TYPES.has(t)).toBe(true); // every type the prompt names must render
+    }
+    // And the parser must still allow exactly the safe trio (guards an accidental shrink).
+    expect([...ALLOWED_CHART_TYPES].sort()).toEqual(["bar", "line", "pie"]);
   });
 });
