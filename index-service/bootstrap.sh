@@ -170,8 +170,8 @@ ExecStartPre=/bin/bash -c 'need=\$(( \$(du -sk $WORKSPACE 2>/dev/null | cut -f1)
 # this same lock for its whole life (see index-bridge ExecStart), so if the bridge
 # is up this build refuses immediately (clean failure) instead of opening graph.db
 # as a SECOND concurrent writer → RocksDB 0-node corruption (the #1 failure). On a
-# normal boot/redeploy the bridge isn't up yet (Conflicts/ordering stop+sequence it),
-# so the lock is free and the build proceeds. Build is in-place (codegraph derives
+# normal boot/redeploy the bridge isn't up yet (ordering Before=/After= sequences
+# the build ahead of it), so the lock is free and the build proceeds. Build is in-place (codegraph derives
 # graph.db from \$HOME/.codegraph and also keeps a projects/<hash>/memory dir there);
 # a partial/corrupt result is caught THREE ways: the size floor below, the bridge's
 # warmup health-gate (refuses to serve a 0-node graph), and codegraph-server's own
