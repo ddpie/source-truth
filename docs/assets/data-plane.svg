@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="470" viewBox="0 0 760 470" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#5b6573"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="760" height="470" fill="#ffffff"/>
+  <text x="380" y="36" text-anchor="middle" font-size="18" font-weight="700" fill="#1f2733">数据面：代码如何进入 index-service（MVP 实况）</text>
+  <text x="380" y="58" text-anchor="middle" font-size="12.5" fill="#7a8493">一次性快照构建 · 靠重部署刷新 · 无 webhook / inotify 增量</text>
+
+  <!-- 5 stacked stages, all x=120 w=520, centered -->
+  <!-- stage 1 -->
+  <rect x="120" y="80" width="520" height="52" rx="8" fill="#eef3fb" stroke="#b9c9e6" stroke-width="1.2"/>
+  <text x="140" y="104" font-size="13.5" font-weight="600" fill="#1f2733">① deploy-all.sh · Phase 1</text>
+  <text x="140" y="123" font-size="11.5" fill="#5b6573">目标仓库整体打成 &lt;repo&gt;.tar.gz 上传 S3（部署时快照）</text>
+
+  <!-- stage 2 -->
+  <rect x="120" y="156" width="520" height="52" rx="8" fill="#eef3fb" stroke="#b9c9e6" stroke-width="1.2"/>
+  <text x="140" y="180" font-size="13.5" font-weight="600" fill="#1f2733">② bootstrap.sh · EC2 user-data（仅首启）</text>
+  <text x="140" y="199" font-size="11.5" fill="#5b6573">从 S3 解包到 index-service 本地磁盘 /data/repo/&lt;subdir&gt;</text>
+
+  <!-- stage 3 -->
+  <rect x="120" y="232" width="520" height="52" rx="8" fill="#eef3fb" stroke="#b9c9e6" stroke-width="1.2"/>
+  <text x="140" y="256" font-size="13.5" font-weight="600" fill="#1f2733">③ index-build.service · systemd oneshot（flock 单写者）</text>
+  <text x="140" y="275" font-size="11.5" fill="#5b6573">codegraph-server --graph-only 建图一次（索引本地副本）</text>
+
+  <!-- stage 4 -->
+  <rect x="120" y="308" width="520" height="52" rx="8" fill="#eef3fb" stroke="#b9c9e6" stroke-width="1.2"/>
+  <text x="140" y="332" font-size="13.5" font-weight="600" fill="#1f2733">④ index-bridge.service · 常驻只读</text>
+  <text x="140" y="351" font-size="11.5" fill="#5b6573">codegraph-server --mcp（内存图）+ http_bridge 暴露 streamable HTTP</text>
+
+  <!-- stage 5 (accent: the consumer) -->
+  <rect x="120" y="384" width="520" height="52" rx="8" fill="#eef6ef" stroke="#9cc6a8" stroke-width="1.2"/>
+  <text x="140" y="408" font-size="13.5" font-weight="600" fill="#1f2733">⑤ 会话 microVM 经 HTTP 端点远程取证</text>
+  <text x="140" y="427" font-size="10" fill="#3b7d4f">symbol_search / get_callers / analyze_impact / search_files / read_file / glob_files / read_table</text>
+
+  <!-- connectors centered at x=380 -->
+  <line x1="380" y1="132" x2="380" y2="156" stroke="#5b6573" stroke-width="1.4" marker-end="url(#arrow)"/>
+  <line x1="380" y1="208" x2="380" y2="232" stroke="#5b6573" stroke-width="1.4" marker-end="url(#arrow)"/>
+  <line x1="380" y1="284" x2="380" y2="308" stroke="#5b6573" stroke-width="1.4" marker-end="url(#arrow)"/>
+  <line x1="380" y1="360" x2="380" y2="384" stroke="#5b6573" stroke-width="1.4" marker-end="url(#arrow)"/>
+
+  <!-- right note: single-writer + refresh -->
+  <text x="656" y="258" text-anchor="middle" font-size="11" fill="#9aa3b0" transform="rotate(-90 656 258)">唯一代码副本只在本地磁盘 · 重部署才刷新</text>
+</svg>

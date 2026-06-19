@@ -41,18 +41,7 @@ structure）描述系统*是什么*；本文描述*一次提问如何穿过系�
 **当前 MVP 的真实管线**（一次性快照构建，靠重部署刷新——**没有** webhook / git pull / inotify
 增量 / 夜间 CI；那是 post-MVP 目标形态，未实现）：
 
-```
-deploy-all.sh Phase 1：把目标仓库整体打成 <repo>.tar.gz 上传 S3（部署时快照）
-  ▼
-bootstrap.sh（EC2 user-data，仅首启跑）：从 S3 解包到 index-service 本地磁盘 /data/repo/<subdir>（仅一次）
-  ▼
-index-build.service（systemd oneshot，flock 单写者）：codegraph-server --graph-only 建图一次（索引本地副本）
-  ▼
-index-bridge.service：codegraph-server --mcp（常驻、内存图、只读）+ http_bridge 暴露 streamable HTTP
-  ▼
-会话容器经该 HTTP 端点远程定位 + 读文件
-  （codegraph_symbol_search / get_callers / analyze_impact / search_files / read_file / glob_files）
-```
+![数据面五段管线：deploy-all 打包→S3，bootstrap 解包，index-build 建图，index-bridge 常驻只读，会话 microVM 远程取证](../assets/data-plane.svg)
 
 **唯一一份代码、本地副本**：仓库只在 index-service 的**本地磁盘** `/data/repo/<subdir>`；codegraph-server
 索引该本地副本，文件读取工具也直接读它。**会话 microVM 不挂任何文件系统**——既无 EFS、也无 `/mnt/repo`
