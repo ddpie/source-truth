@@ -35,6 +35,10 @@ from codegraph_session import CodegraphSession, IndexUnhealthy
 # codegraph process per query is the corruption-risk pattern the resident
 # session replaced, so it must never re-enter the production path.
 
+# Process-lifetime singleton lock fd (set in main()); module-global so the GC can't
+# collect it and release the flock mid-run. See main()'s SINGLE-WRITER HARD GUARD.
+_SINGLETON_FD: Any = None
+
 logger = logging.getLogger("codegraph-bridge")
 
 # CodeGraph tools exposed over HTTP. Kept small + read-only (MVP evidence set).
@@ -439,6 +443,35 @@ def main() -> int:
     args = p.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
+
+    # SINGLE-WRITER HARD GUARD (do NOT rely on a comment). The whole no-corruption
+    # invariant rests on exactly ONE process owning the codegraph-server that writes
+    # graph.db. uvicorn's single-worker default gives us that today, but a future
+    # `--workers N` / gunicorn deploy would fork N bridges, each spawning its own
+    # writer → concurrent graph.db writers → silent 0-node corruption (cross-review
+    # H1). Take a process-lifetime exclusive flock keyed to the workspace BEFORE we
+    # start the worker; if another bridge already holds it, die LOUDLY instead of
+    # becoming a second writer. A forked worker re-running main() gets a fresh open
+    # fd → separate lock attempt → fails the non-blocking acquire → exits. The fd is
+    # intentionally leaked (held until process exit); the OS releases it on exit.
+    import fcntl
+    # Workspace-keyed lock file (stable across restarts; one per indexed repo). Lives
+    # next to the repo copy so it shares the graph.db's local disk (a real fs, not a
+    # tmpfs that a container restart wipes). The held fd is module-global so it is not
+    # GC'd (which would release the lock) for the process lifetime.
+    lock_path = args.workspace.rstrip("/") + ".bridge.lock"
+    try:
+        global _SINGLETON_FD
+        _SINGLETON_FD = open(lock_path, "w")  # noqa: SIM115 - held for process life
+        fcntl.flock(_SINGLETON_FD, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        _SINGLETON_FD.write(str(os.getpid()))
+        _SINGLETON_FD.flush()
+    except (OSError, BlockingIOError) as exc:
+        logger.error(json.dumps({"event": "bridge_singleton_conflict", "lock": lock_path,
+                                 "detail": "another bridge already owns this workspace; refusing to start a second graph.db writer",
+                                 "error": str(exc)}))
+        return 1
+
     logger.info(json.dumps({"event": "bridge_start", "workspace": args.workspace,
                             "host": args.host, "port": args.port,
                             "local_workspace": args.local_workspace}))

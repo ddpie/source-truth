@@ -526,27 +526,46 @@ class CodegraphSession:
         finally:
             self._restart_lock.release()
 
-    @staticmethod
-    def _reap_orphan_servers() -> None:
-        """SIGKILL any stray codegraph-server child of THIS process. Best-effort,
+    def _reap_orphan_servers(self) -> None:
+        """SIGKILL any stray codegraph-server still bound to OUR workspace. Best-effort,
         stdlib-only (no psutil). Called only from _restart, under the restart lock,
-        AFTER the old worker thread is confirmed dead — so a match is an orphan, not
-        the live worker (there is none at this instant). Never raises."""
-        try:
-            # Children of this pid only — never touch an unrelated codegraph-server.
-            out = subprocess.run(
-                ["pgrep", "-P", str(os.getpid()), "-f", "codegraph-server"],
-                capture_output=True, text=True, timeout=5,
-            )
-            for line in out.stdout.split():
-                try:
-                    pid = int(line)
-                except ValueError:
-                    continue
-                try:
-                    os.kill(pid, signal.SIGKILL)
-                    logger.error(json.dumps({"event": "reaped_orphan_codegraph", "pid": pid}))
-                except ProcessLookupError:
-                    pass  # already gone — the normal case
-        except Exception as exc:  # noqa: BLE001 - best-effort; must never break restart
-            logger.warning(json.dumps({"event": "reap_orphan_failed", "error": str(exc)}))
+        AFTER the old worker thread is confirmed dead — so at this instant there is NO
+        live worker, hence ANY codegraph-server writing OUR workspace is an orphan that
+        would become a second writer → graph.db corruption.
+
+        Match by TWO pgrep queries, unioned:
+          (a) direct children of this pid (`-P self`), AND
+          (b) ANY process whose cmdline contains `codegraph-server … --workspace <ours>`.
+        (b) is the critical one: a hard worker-loop teardown can leave the
+        codegraph-server REPARENTED to init (PPID=1), which `-P self` never sees —
+        that reparented orphan is exactly the silent second-writer the old code missed
+        (cross-review C1). The `--workspace <ours>` anchor keeps us from touching an
+        unrelated codegraph-server serving a different repo on the same host. Never raises."""
+        pids: set[int] = set()
+        # quote-free fixed-ish pattern; pgrep -f treats it as a regex, but a POSIX path
+        # has no regex metachars that would broaden the match dangerously (only '.'/'-'),
+        # and the surrounding literal "--workspace " keeps it anchored to our server.
+        queries = (
+            ["pgrep", "-P", str(os.getpid()), "-f", "codegraph-server"],
+            ["pgrep", "-f", "codegraph-server.*--workspace %s" % self._workspace],
+        )
+        for q in queries:
+            try:
+                out = subprocess.run(q, capture_output=True, text=True, timeout=5)
+                for line in out.stdout.split():
+                    try:
+                        pid = int(line)
+                    except ValueError:
+                        continue
+                    if pid != os.getpid():  # never target the bridge itself
+                        pids.add(pid)
+            except Exception as exc:  # noqa: BLE001 - best-effort; must never break restart
+                logger.warning(json.dumps({"event": "reap_orphan_query_failed", "error": str(exc)}))
+        for pid in pids:
+            try:
+                os.kill(pid, signal.SIGKILL)
+                logger.error(json.dumps({"event": "reaped_orphan_codegraph", "pid": pid}))
+            except ProcessLookupError:
+                pass  # already gone — the normal case
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(json.dumps({"event": "reap_orphan_kill_failed", "pid": pid, "error": str(exc)}))

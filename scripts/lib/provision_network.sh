@@ -26,7 +26,19 @@ fi
 # both unconditionally is idempotent and closes that silent foot-gun.
 Q modify-vpc-attribute --vpc-id "$VPC_ID" --enable-dns-support >/dev/null
 Q modify-vpc-attribute --vpc-id "$VPC_ID" --enable-dns-hostnames >/dev/null
-AZ="$(Q describe-availability-zones --query 'AvailabilityZones[0].ZoneName' --output text)"
+# Pick an AZ that actually OFFERS the index instance type. A blind AvailabilityZones[0]
+# breaks in regions where Graviton (t4g.*) isn't in the first AZ — run-instances later
+# dies with Unsupported/InsufficientInstanceCapacity (cross-review M4). Prefer the first
+# AZ that offers the type; fall back to AZ[0] if the lookup yields nothing (older CLI /
+# odd region). The instance type comes from the deploy config/env (default t4g.large).
+ITYPE_FOR_AZ="${DEPLOY_INSTANCE_TYPE:-t4g.large}"
+AZ="$(Q describe-instance-type-offerings --location-type availability-zone \
+  --filters "Name=instance-type,Values=$ITYPE_FOR_AZ" \
+  --query 'InstanceTypeOfferings[0].Location' --output text 2>/dev/null || echo "")"
+if [[ -z "$AZ" || "$AZ" == "None" ]]; then
+  AZ="$(Q describe-availability-zones --query 'AvailabilityZones[0].ZoneName' --output text)"
+  say warn "no AZ offers $ITYPE_FOR_AZ via offerings lookup; falling back to first AZ $AZ"
+fi
 
 ensure_subnet() { # name cidr public
   local id; id="$(by_name subnets "$1" Subnets SubnetId)"
