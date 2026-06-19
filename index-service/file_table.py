@@ -23,6 +23,7 @@ import json
 import logging
 import os
 import sqlite3
+import urllib.parse
 from time import perf_counter
 from typing import Any
 
@@ -143,7 +144,12 @@ def _read_excel(local_path: str) -> tuple[str, bool]:
 def _read_sqlite(local_path: str) -> tuple[str, bool]:
     # READ-ONLY open: immutable=1 + mode=ro via URI so the tool can NEVER write/lock
     # the db (matches the read-only boundary). file: URI requires uri=True.
-    uri = f"file:{local_path}?mode=ro&immutable=1"
+    # PERCENT-ENCODE the path: a repo file whose name contains '?' or '#' would
+    # otherwise be mis-parsed as the start of the URI query/fragment, silently
+    # opening the wrong file or failing with a confusing "no such table" (cross-review;
+    # NOT an escape — '..' is already rejected upstream — but a correctness bug).
+    # quote() keeps '/' so the absolute path stays intact; only special chars escape.
+    uri = f"file:{urllib.parse.quote(local_path)}?mode=ro&immutable=1"
     con = sqlite3.connect(uri, uri=True)
     try:
         cur = con.cursor()
