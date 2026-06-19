@@ -321,6 +321,25 @@ def build_bridge(
                 logger.error(json.dumps({"event": "glob_error", "error": str(exc)}))
                 return json.dumps({"error": "glob failed", "detail": "internal error (see service logs)"})
 
+        # read_table: parse STRUCTURED/binary config files (Excel/CSV/TSV/SQLite) to
+        # text. read_file decodes as UTF-8, so an Excel/SQLite config table comes back
+        # as garbage and the agent can't use it — yet that's where game-dev numbers
+        # often live. read_table parses them server-side (read-only) into compact text.
+        import file_table
+
+        async def codegraph_read_table(path: str) -> str:
+            """Read a STRUCTURED config table that read_file can't (Excel .xlsx/.xls,
+            .csv, .tsv, or a SQLite .db) — parsed server-side into plain text rows.
+            Use this when the data lives in a spreadsheet/database config file (common
+            for game numeric tables); for plain-text source/config use read_file."""
+            try:
+                return file_table.read_table_to_json(path, local_root=local_workspace, mount_root=mount_root)
+            except ValueError as exc:
+                return json.dumps({"error": "cannot read table", "detail": str(exc)})
+            except Exception as exc:  # noqa: BLE001 - isolate one query's failure
+                logger.error(json.dumps({"event": "read_table_error", "error": str(exc)}))
+                return json.dumps({"error": "read table failed", "detail": "internal error (see service logs)"})
+
         # Ship the FULL docstrings as the tool description (FastMCP uses `description or
         # __doc__`, so passing a terse description= DROPS the docstring the model needs to
         # disambiguate the tools). Per Anthropic "writing tools for agents": the description
@@ -331,8 +350,11 @@ def build_bridge(
         app.add_tool(codegraph_glob_files, name="codegraph_glob_files",
                      description=(codegraph_glob_files.__doc__ or "").strip(),
                      annotations=READONLY_ANNOT)
+        app.add_tool(codegraph_read_table, name="codegraph_read_table",
+                     description=(codegraph_read_table.__doc__ or "").strip(),
+                     annotations=READONLY_ANNOT)
         logger.info(json.dumps({"event": "search_tool_enabled", "local_workspace": local_workspace,
-                                "file_tools": ["codegraph_read_file", "codegraph_glob_files"]}))
+                                "file_tools": ["codegraph_read_file", "codegraph_glob_files", "codegraph_read_table"]}))
     else:
         logger.warning(json.dumps({"event": "search_tool_disabled",
                                    "reason": "no local_workspace", "given": local_workspace}))

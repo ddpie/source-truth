@@ -73,6 +73,8 @@ def test_build_options_dict_read_glob_replaced_by_mcp_file_tools():
     opts = agent_lib.build_options_dict(system_prompt="x", codegraph_url="http://10.1.1.5:8080/mcp")
     assert "mcp__codegraph__codegraph_read_file" in opts["allowed_tools"]
     assert "mcp__codegraph__codegraph_glob_files" in opts["allowed_tools"]
+    # read_table (Excel/CSV/SQLite config tables) is also allow-listed.
+    assert "mcp__codegraph__codegraph_read_table" in opts["allowed_tools"]
     assert "Read" in opts["disallowed_tools"] and "Glob" in opts["disallowed_tools"]
 
 

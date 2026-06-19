@@ -33,6 +33,7 @@ import { redactSensitive, redactSteps, redactDeep } from "./redact";
 import { extractFollowUps, stripFollowUps } from "./extract-followups";
 import { splitEvidence } from "./extract-evidence";
 import { stripPreamble } from "./strip-preamble";
+import { stripToolCallLeak, isToolCallLeakDominant } from "./strip-toolcall-leak";
 import { extractClarification } from "./extract-clarify";
 import { handleMessageEvent, type InvokeFn } from "./handle-event";
 import { sdkEventToImEvent } from "./sdk-event";
@@ -564,6 +565,25 @@ async function runStreamingInvoke(
     // Then shape the VISIBLE body: append the incompleteness note AFTER evidence is
     // split off, so the note isn't hidden inside the collapsed panel.
     bodyNoEvidence = shapeBody(stripPreamble(body), { turnCapped, aborted, timedOut });
+  }
+  // LEAKED TOOL-CALL MARKUP: sometimes the model emits its tool-call XML
+  // (<function_calls>/<invoke>) as plain TEXT instead of actually invoking the tools,
+  // and that text lands in the conclusion (the user sees raw markup). The exact cause
+  // varies (tools unavailable that turn, a formatting slip, a truncated stream) and is
+  // NOT something we can assert from here — so the user-facing message stays
+  // cause-AGNOSTIC: it only says the answer couldn't be completed + suggests a retry,
+  // without claiming a specific reason. If the body is DOMINATED by such markup the
+  // turn produced no real answer → show the clean failure message; otherwise just strip
+  // the stray block(s). Skip on hard failure (already a fixed message). The operator
+  // log carries the signal for real root-causing.
+  if (!hardFailed) {
+    if (isToolCallLeakDominant(bodyNoEvidence)) {
+      log({ event: "toolcall_leak_dominant", card: cardId, chars: bodyNoEvidence.length });
+      bodyNoEvidence = "⚠️ 这次没能得出可靠答案（取证过程未正常完成）。请再问一次试试；若反复如此，把问题发给研发排查。";
+      charts = []; evidence = "";
+    } else {
+      bodyNoEvidence = stripToolCallLeak(bodyNoEvidence);
+    }
   }
   // Clarification: when the agent判定 the question is ambiguous it emits a
   // "🔀 需要你确认 + options" block INSTEAD of an answer. Detect it on the raw answer
