@@ -208,10 +208,20 @@ PY
 # front (non-blocking — a deploy reuses its own tagged EIP/VPC, so a clean account is fine).
 preflight_quota() {
   command -v aws >/dev/null || return 0
-  local eips; eips="$(aws ec2 describe-addresses --region "$REGION" --query 'length(Addresses)' --output text 2>/dev/null || echo "")"
-  local vpcs; vpcs="$(aws ec2 describe-vpcs --region "$REGION" --query 'length(Vpcs)' --output text 2>/dev/null || echo "")"
-  [[ "$eips" =~ ^[0-9]+$ && "$eips" -ge 4 ]] && say warn "已有 $eips 个 EIP（默认配额 5）——若 NAT 的 allocate-address 失败，先去 Service Quotas 提额或释放闲置 EIP。"
-  [[ "$vpcs" =~ ^[0-9]+$ && "$vpcs" -ge 4 ]] && say warn "已有 $vpcs 个 VPC（默认配额 5）——若 create-vpc 失败，先提额或清理。"
+  local eips vpcs
+  eips="$(aws ec2 describe-addresses --region "$REGION" --query 'length(Addresses)' --output text 2>/dev/null || echo "")"
+  vpcs="$(aws ec2 describe-vpcs --region "$REGION" --query 'length(Vpcs)' --output text 2>/dev/null || echo "")"
+  # NB: use `if`, NOT `[[ … ]] && say` — under `set -e`, a `[[ … ]] && cmd` whose
+  # test is FALSE returns non-zero, and as the LAST statement of the function that
+  # non-zero return aborts the whole script (this exact trap silently killed a
+  # deploy at Phase 0 when the account had <4 EIPs — the common fresh-account case).
+  if [[ "$eips" =~ ^[0-9]+$ && "$eips" -ge 4 ]]; then
+    say warn "已有 $eips 个 EIP（默认配额 5）——若 NAT 的 allocate-address 失败，先去 Service Quotas 提额或释放闲置 EIP。"
+  fi
+  if [[ "$vpcs" =~ ^[0-9]+$ && "$vpcs" -ge 4 ]]; then
+    say warn "已有 $vpcs 个 VPC（默认配额 5）——若 create-vpc 失败，先提额或清理。"
+  fi
+  return 0
 }
 if [[ "$DRY_RUN" != true ]]; then preflight_boto3; preflight_model_access; preflight_agentcore; preflight_quota; fi
 
