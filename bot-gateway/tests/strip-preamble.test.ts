@@ -318,4 +318,23 @@ describe("stripPreamble", () => {
       expect(stripPreamble(real)).toBe(real);
     }
   });
+
+  // Observed live: a readiness/取证 verb + a COMPLETION announce ("结论清楚了") with no
+  // result content after it. Pure "done investigating" transition.
+  it("strips '已核对…逻辑，结论清楚了。' and '都查清了，结论很明确。'", () => {
+    expect(stripPreamble("已核对完整的法力消耗计算逻辑，结论清楚了。\n\n法术的法力消耗和等级无关。"))
+      .toBe("法术的法力消耗和等级无关。");
+    expect(stripPreamble("都查清了，结论很明确。\n\n伤害公式是攻击×系数。"))
+      .toBe("伤害公式是攻击×系数。");
+  });
+
+  it("does NOT over-strip real sentences with 核对/确认/结论清楚 mid-clause", () => {
+    for (const real of [
+      "这条逻辑的结论清楚了之后会缓存到 ResultCache 里。",
+      "核对清楚的伤害值会写进 DamageLog，供回放。",
+      "确认机制清晰可见：状态机有三个状态。",
+    ]) {
+      expect(stripPreamble(real)).toBe(real);
+    }
+  });
 });

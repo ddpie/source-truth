@@ -7,8 +7,8 @@
 在 AgentCore Runtime 的 Firecracker microVM 内，用 **Claude Code Agent SDK**（`claude_agent_sdk`）+
 **bedrock-agentcore** runtime（`@app.entrypoint` 异步流式 handler）跑一个 agent 循环：理解策划的问题 →
 调远程 CodeGraph MCP 定位代码 → 经 index-service 的文件工具（`codegraph_read_file` / `codegraph_glob_files` /
-`codegraph_search_files`）读最新主分支源码与配置表 → 生成结构化答案并逐步 `yield`。microVM 本身不挂任何
-文件系统，所有代码都经 index-service 的 MCP-over-HTTP 桥读取。
+`codegraph_search_files` / `codegraph_read_table`）读最新主分支源码与配置表（含 Excel/CSV/SQLite 数值表）→
+生成结构化答案并逐步 `yield`。microVM 本身不挂任何文件系统，所有代码都经 index-service 的 MCP-over-HTTP 桥读取。
 
 模型走 Bedrock 计费（`CLAUDE_CODE_USE_BEDROCK=1`）。MVP 单引擎 Claude Code（Codex 第二引擎后置）。
 
@@ -17,7 +17,7 @@
 | 项 | 约定 |
 |----|------|
 | 入参 payload | `{ "prompt": <问题文本>, "session": <会话上下文> }`（由 bot-gateway 注入） |
-| CodeGraph + 文件读取 | 远程 MCP-over-HTTP 端点（由 index-service 暴露），通过 env / option 注入；定位与读文件（`codegraph_read_file` / `codegraph_glob_files` / `codegraph_search_files`）都走此桥 |
+| CodeGraph + 文件读取 | 远程 MCP-over-HTTP 端点（由 index-service 暴露），通过 env / option 注入；定位与读文件（`codegraph_read_file` / `codegraph_glob_files` / `codegraph_search_files` / `codegraph_read_table`）都走此桥 |
 | 代码与配置 | 经 index-service 文件工具读取（**仓库副本只在 index-service 本地磁盘**；microVM 不挂文件系统）；路径为仓库相对（如 `Assets/Scripts/Foo.cs`） |
 | 临时文件 | Session Storage 可写挂载在 `/mnt/workspace`（per-session 隔离） |
 | 出参 | 流式 `yield` AssistantMessage / ResultMessage，由网关渲染回 CardKit |
@@ -30,11 +30,13 @@
 
 ## 约束
 
-- **ARM64-only** 容器；基础镜像与 Claude Agent SDK / lark-cli 版本钉死（pin，`claude-agent-sdk==0.2.103`）。
+- **ARM64-only** 容器；基础镜像与 Claude Agent SDK 版本钉死（pin，`claude-agent-sdk==0.2.103`）。
+  （lark-cli 仅是开发期手测工具，不装进任何运行镜像，不在该 pin 范围内。）
 - **只读边界**：MVP 仅问答，不跑引擎、不写回、不提交。agent 内建 `Read`/`Glob`/`Grep` 全部禁用
-  （`tools=[]`，不设 `cwd`），读文件只能经 index-service 的 `codegraph_*` 工具。
-- **模型 ID 按区域**：东京 ap-northeast-1 **不认 `us.anthropic.*`**（US cross-region），用
-  `global.anthropic.claude-sonnet-4-6`（全球路由，资源最足）；`apac.*`/`jp.*` 亦可。
+  （`tools=[]`，不设 `cwd`），读文件只能经 index-service 的 `codegraph_*` 工具。强制手段不止 `tools=[]`：还有
+  `disallowed_tools` 黑名单 + `permission_mode="dontAsk"` + `strict_mcp_config=True` + `setting_sources=[]`。
+- **模型 ID 按区域**：东京 ap-northeast-1 **不认 `us.anthropic.*`**（US cross-region），当前默认
+  `global.anthropic.claude-opus-4-8`（全球路由，资源最足；operator 可经 `ANTHROPIC_MODEL` env 调整）；`apac.*`/`jp.*` 亦可。
 - **VPC 出站**：Runtime 须 `networkMode=VPC`（为在 VPC 内经 HTTP `:8080` 访问 index-service），而 VPC 内的
   microVM 无公网 IP，出站（Bedrock/CLI）**须经 NAT Gateway**。
 
@@ -52,10 +54,11 @@
 
 p1 已落地并真实部署到 AWS（东京 ap-northeast-1）：`Dockerfile`（ARM64）、`agent.py`（流式 entrypoint 薄壳）、
 `agent_lib.py`（纯函数 `build_options`/`run_agent`，可单测）、`prompts/system.md`、`requirements.txt`
-（`claude-agent-sdk==0.2.103` 钉死）。
+（人读意图，`claude-agent-sdk==0.2.103` 钉死）+ `requirements.lock`（完整传递依赖锁，Dockerfile 实际按它
+`uv pip install --no-deps` 安装）。
 
 **已验证（真实）：** ① CodeGraph MCP 接入定型为 **方案 A**——`ClaudeAgentOptions.mcp_servers` 原生支持
 `McpHttpServerConfig`（`{type:"http", url, headers?}`，对照真实 SDK 0.2.103 核实），不需 streamablehttp 桥；
-② Runtime 经 `InvokeAgentRuntime` 真实跑通（`CLAUDE_CODE_USE_BEDROCK=1`，模型 `global.anthropic.claude-sonnet-4-6`）；
+② Runtime 经 `InvokeAgentRuntime` 真实跑通（`CLAUDE_CODE_USE_BEDROCK=1`，当前默认模型 `global.anthropic.claude-opus-4-8`）；
 ③ agent 经 index-service 的文件工具真读到源码并解释（无 EFS、microVM 不挂任何文件系统）。部署细节见 `scripts/deploy-all.sh`（canonical；
 `deploy.sh` 为已废弃转发垫片）+ `.local/deploy-config`。

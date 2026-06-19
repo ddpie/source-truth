@@ -18,8 +18,9 @@
    调用关系图（~3s）；夜间 CI 全量重建兜底。
 3. **MCP-over-HTTP 桥**（已落地）：CodeGraph 原生仅 stdio MCP，把它暴露为 streamable HTTP，
    供会话容器远程**定位 + 读文件**——定位类 `codegraph_symbol_search` / `codegraph_get_callers` /
-   `codegraph_analyze_impact`，文本检索 `codegraph_search_files`，以及读文件 `codegraph_read_file` /
-   `codegraph_glob_files`（替代会话 agent 原本的内建 `Read`/`Glob`）。
+   `codegraph_analyze_impact`，文本检索 `codegraph_search_files`，读文件 `codegraph_read_file` /
+   `codegraph_glob_files`，以及读数值表 `codegraph_read_table`（Excel/CSV/TSV/SQLite，对应 `file_table.py`）
+   （替代会话 agent 原本的内建 `Read`/`Glob`）。
 
 ## 存储模型（唯一一份代码，本地副本）
 
@@ -52,9 +53,11 @@ CodeGraph 引擎是一个独立的原生二进制 `codegraph-server`，**不在�
 
 已实现（资源化于包根，**不在 `src/`**）：`http_bridge.py`（FastMCP streamable-HTTP 桥，用 `mcp`
 内置的 `mcp.server.fastmcp.FastMCP`）、`codegraph_session.py`（常驻单写者会话：worker 线程 + 私有
-事件循环 + 健康自愈）、`path_align.py`（索引路径对齐为仓库相对路径；`mount_root` 默认 `""`，遗留
-`/mnt/repo` 值仍兼容但生产不用）、`perf.py`（结构化耗时日志）、`bootstrap.sh`（EC2 user-data：装依赖 /
-本地解包仓库到 `/data/repo` / systemd `index-build`→`index-bridge`）。
+事件循环 + 健康自愈 + liveness 连续失败容忍）、`codegraph_client.py`（定位类工具的 stdio 调用封装）、
+`file_read.py` / `file_search.py` / `file_table.py`（三个文件工具的实现：读文件 / 文本检索 / 读数值表）、
+`path_align.py`（索引路径对齐为仓库相对路径；`mount_root` 默认 `""`，遗留 `/mnt/repo` 值仍兼容但生产不用）、
+`perf.py`（结构化耗时日志）、`bootstrap.sh`（EC2 user-data：装依赖 / 本地解包仓库到 `/data/repo` /
+systemd `index-build`→`index-bridge`）。
 依赖单一来源是 `requirements.txt`（`mcp` + `uvicorn` + `typing_extensions`，全部 `==` 钉死；
 `bootstrap.sh` 用 `pip install -r` 安装；`scripts/check-versions.sh` 守卫不漂移）。
 

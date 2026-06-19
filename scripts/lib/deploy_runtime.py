@@ -16,7 +16,7 @@ Usage:
   python3 deploy_runtime.py --region us-east-1 --account 557690613480 \
     --role-arn arn:...:role/SourceTruthAgentRuntimeRole \
     --image <acct>.dkr.ecr.<region>.amazonaws.com/source-truth/agent:latest \
-    --model global.anthropic.claude-sonnet-4-6 [--name source_truth_agent]
+    --model global.anthropic.claude-opus-4-8 [--name source_truth_agent]
 
 Prints `AGENT_RUNTIME_ID=<id>` and `AGENT_RUNTIME_ARN=<arn>` on success.
 """
