@@ -334,8 +334,9 @@ class _TextBlock:
 
 
 class _ResultMsg:
-    def __init__(self, num_turns):
+    def __init__(self, num_turns, is_error=False):
         self.num_turns = num_turns
+        self.is_error = is_error
 
 
 def test_message_has_tool_use_detects_real_dispatch():
@@ -444,6 +445,26 @@ def test_run_agent_does_not_retry_on_healthy_run():
 
     _collect(agent_lib.run_agent({"prompt": "x"}, query_fn=fake_query))
     assert calls["n"] == 1, "healthy run must not retry"
+
+
+def test_run_agent_retries_on_errored_empty_result():
+    # The OTHER cold-start failure: is_error=True, out=0, num_turns=1, no tool_use,
+    # no markup (the SDK/MCP errored before any answer). Must retry once.
+    calls = {"n": 0}
+
+    async def fake_query(prompt, options):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            yield _ResultMsg(num_turns=1, is_error=True)  # errored empty result
+        else:
+            yield _MsgWith([_ToolUseBlock("t1", "codegraph_search_files")])
+            yield _MsgWith([_TextBlock("升级每级加 1 点力量。")])
+            yield _ResultMsg(num_turns=3)
+
+    msgs = _collect(agent_lib.run_agent({"prompt": "力量怎么长"}, query_fn=fake_query))
+    assert calls["n"] == 2, "errored empty cold-start result must retry once"
+    texts = [getattr(b, "text", "") for m in msgs for b in getattr(m, "content", []) or [] if hasattr(b, "text")]
+    assert any(s.startswith("升级每级加") for s in texts)
 
 
 def test_run_agent_does_not_retry_when_no_markup():
