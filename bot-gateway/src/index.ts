@@ -573,7 +573,14 @@ async function runStreamingInvoke(
   // answer yet). Only on a clean run — a hard failure / abort / turn-cap is not a
   // clarification. The buttons reuse the follow_up callback so a click re-asks the
   // chosen clarified question WITH context replay.
-  const clarify = (!hardFailed && !aborted && !turnCapped) ? extractClarification(answer) : null;
+  const clarifyRaw = (!hardFailed && !aborted && !turnCapped) ? extractClarification(answer) : null;
+  // Redact the question + every option before they reach the group-visible card —
+  // same secret/path safety net as the conclusion / follow-ups / reasoning panel.
+  // The options are agent-authored business questions (low risk), but the agent is
+  // steered by repo content, so scrub defensively (defense in depth).
+  const clarify = clarifyRaw
+    ? { question: redactSensitive(clarifyRaw.question), options: clarifyRaw.options.map(redactSensitive) }
+    : null;
   if (clarify) {
     // The body becomes just the disambiguation prompt; the options are buttons.
     bodyNoEvidence = `🤔 ${clarify.question}`;

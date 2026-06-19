@@ -112,4 +112,22 @@ describe("stripPreamble", () => {
     const body = "暴击倍率是 1.5 倍。\n不同等级会变化。";
     expect(stripPreamble(body)).toBe(body);
   });
+
+  // --- over-strip regressions (cross-review: prefix-match was too greedy) ----
+  it("does NOT strip a real sentence that merely BEGINS with 整理答案 (then continues)", () => {
+    // "整理答案的逻辑在 Foo.java。" is a REAL answer about where assembly logic lives —
+    // the opener must match the WHOLE sentence, not just the 整理答案 prefix.
+    const body = "整理答案的逻辑在 Foo.java。\n它做了排序。";
+    expect(stripPreamble(body)).toBe(body);
+  });
+
+  it("does NOT strip '可以给出完整答案，但需要补充测试数据。' (real caveat, not a pure preamble)", () => {
+    const body = "可以给出完整答案，但需要补充测试数据。\n详见下。";
+    expect(stripPreamble(body)).toBe(body);
+  });
+
+  it("STILL strips a pure '整理一下答案。' preamble (full-sentence match)", () => {
+    const body = "整理一下答案。\n暴击倍率是 1.5 倍。";
+    expect(stripPreamble(body)).toBe("暴击倍率是 1.5 倍。");
+  });
 });
