@@ -43,6 +43,7 @@ import { sendReply } from "./reply";
 import { imReply, imSendToChat } from "./feishu-http";
 import { getSessionId } from "./session-map";
 import { SessionSerializer } from "./serialize-session";
+import { Semaphore } from "./semaphore";
 import { CardWriter } from "./card-writer";
 import { hashUserId } from "./log";
 import { isDuplicate } from "./dedup";
@@ -73,6 +74,14 @@ const abortControllers = new Map<string, AbortController>();
 // serialize-session.ts for the why; it's a tested module so the critical
 // concurrency logic doesn't live untested in this entry shell.
 const sessionSerializer = new SessionSerializer();
+// GLOBAL invoke concurrency gate. Per-session serialization bounds same-session
+// turns but NOT distinct sessions — a burst of N different users in a busy group
+// would otherwise fire N concurrent AgentCore invokes (cost/throttle/memory). Cap
+// the number running at once across ALL sessions; excess waits for a slot (its card
+// is already sent eagerly, so the user sees 排队中/思考, not silence). Operator-tunable
+// via MAX_CONCURRENT_INVOKES; default 8 balances throughput vs. AgentCore pressure.
+const _maxConc = Number(process.env.MAX_CONCURRENT_INVOKES);
+const invokeGate = new Semaphore(Number.isFinite(_maxConc) && _maxConc > 0 ? _maxConc : 8);
 
 // Monotonic sequence for card-callback (button-disable) updates. Based on Unix
 // seconds since a 2025 epoch (stays int32 for ~60y, and is orders of magnitude
@@ -138,7 +147,10 @@ async function streamingCardInvoke(
     // answer, so collectChain sees the immediate parent turn (the freshness gap a
     // reply-to-a-still-streaming-parent otherwise had).
     const finalPrompt = composePrompt ? (composePrompt() || prompt) : prompt;
-    return runStreamingInvoke(card, sessionId, finalPrompt, credentials);
+    // Hold a GLOBAL concurrency slot only around the heavy AgentCore invoke (the card
+    // was already sent eagerly above, so a queued caller still shows 排队中/思考). This
+    // caps distinct-session stampede without delaying the user-visible card.
+    return invokeGate.run(() => runStreamingInvoke(card, sessionId, finalPrompt, credentials));
   }).finally(() => {
     // Backstop cleanup: the AbortController is registered at card-send (line ~209)
     // so 停止 works while the turn is still QUEUED, but runStreamingInvoke's own
@@ -1117,6 +1129,40 @@ async function main(): Promise<void> {
   // "start() invoked". The real "connected + receiving events" signal is the
   // sdk_wsclient_connected log from onReady above.
   log({ event: "sdk_wsclient_started" });
+
+  // GRACEFUL SHUTDOWN. Without this, a SIGTERM (every deploy / supervisor bounce /
+  // docker stop) kills the process instantly and abandons every in-flight stream —
+  // its heartbeat stops and finalizeCard never runs, so the card is stuck on
+  // "正在分析…" FOREVER (a user-visible wedge on every routine restart). Instead:
+  // abort all in-flight invokes (each hits its own abort path → finalizes its card
+  // to a "已停止" state), give the finalize writes a brief bounded window to land,
+  // then exit. Idempotent + bounded so a stuck finalize can't block shutdown.
+  let shuttingDown = false;
+  const gracefulShutdown = (sig: string) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    const inflight = abortControllers.size;
+    log({ event: "shutdown_begin", signal: sig, inflight });
+    // Best-effort: ask the WSClient to stop accepting new events if the SDK exposes
+    // a stop/close (not in its public types) — abort-all below is the load-bearing part.
+    try { (ws as unknown as { stop?: () => void }).stop?.(); } catch { /* no-op if absent */ }
+    for (const ctrl of abortControllers.values()) {
+      try { ctrl.abort(); } catch { /* each invoke finalizes its own card on abort */ }
+    }
+    // Bounded drain: give the abort-path finalize writes ~3s to reach CardKit, then
+    // exit regardless (never hang a deploy on a wedged finalize).
+    const deadline = Date.now() + 3000;
+    const waitDrain = () => {
+      if (abortControllers.size === 0 || Date.now() > deadline) {
+        log({ event: "shutdown_done", drained: abortControllers.size === 0 });
+        process.exit(0);
+      }
+      setTimeout(waitDrain, 150);
+    };
+    waitDrain();
+  };
+  process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
+  process.on("SIGINT", () => gracefulShutdown("SIGINT"));
 }
 
 if (require.main === module) {
