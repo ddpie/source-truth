@@ -21,6 +21,32 @@ describe("splitEvidence", () => {
     expect(evidence).not.toContain("供研发复核");
   });
 
+  it("recognizes a DECORATED 供研发复核 heading (parenthetical / dash note) so evidence still folds, not leaks", () => {
+    // If the agent decorates the heading, a too-strict marker would MISS it and the
+    // raw `> file:line` block would leak into the user-facing conclusion. Tolerate
+    // a trailing parenthetical / dash-note while staying line-anchored.
+    for (const heading of ["> 🔍 **供研发复核**（仅研发看）", "> 🔍 供研发复核 - 以下为出处", "📎 供研发复核（研发可展开）"]) {
+      const answer = `结论在此。\n\n${heading}\n> - FormulaHelper.cs:75 MaxEncumbrance()`;
+      const { body, evidence } = splitEvidence(answer);
+      expect(body).toBe("结论在此。");
+      expect(evidence).toContain("FormulaHelper.cs:75");
+      expect(body).not.toContain("供研发复核"); // the heading must NOT leak into the body
+      expect(body).not.toContain("FormulaHelper"); // nor the file:line evidence
+    }
+  });
+
+  it("does NOT mistake a prose sentence containing 依据 for the evidence marker", () => {
+    for (const prose of [
+      "我判断的依据是后一行无条件覆盖了默认值，所以最终生效的是 75。",
+      "这条规则代码为唯一依据，配置表改不了，要走研发。",
+      "依据玩家当前等级，伤害会按公式提升。",
+    ]) {
+      const { body, evidence } = splitEvidence(prose);
+      expect(evidence).toBe(""); // no false split
+      expect(body).toBe(prose);
+    }
+  });
+
   it("still handles the lenient '📎 依据' / '> 依据' fallback heading", () => {
     const answer = "结论文本。\n\n> 📎 依据\n> - A.cs:1 foo()\n> - B.cs:2 bar()";
     const { body, evidence } = splitEvidence(answer);
