@@ -403,14 +403,33 @@ async def run_agent(
     saw_error_result = False
     last_num_turns: int | None = None
 
+    retry_due_to_raise = False
     try:
-        async for message in _drive(prompt, suppress_on_leak=True):
-            n += 1
-            yield message
-        if _is_leak_shape():
-            _perf("mcp_init_race_retry", (time.perf_counter() - t0) * 1000, num_turns=last_num_turns)
-            logger.warning(json.dumps({"event": "mcp_init_race_retry",
-                                       "detail": "tools not registered on cold start; retrying once"}))
+        try:
+            async for message in _drive(prompt, suppress_on_leak=True):
+                n += 1
+                yield message
+        except Exception as exc:  # noqa: BLE001
+            # A THROWN SDK/CLI exception on the cold first attempt — e.g. the
+            # contradictory "Claude Code returned an error result: success" the CLI
+            # raises when a cold microVM's first turn fails before producing an answer
+            # (observed live, esp. right after a redeploy spins fresh VMs). This is the
+            # SAME cold-start class as the leak/errored-result shapes, but it ESCAPES
+            # _is_leak_shape because it arrives as a raised exception, not a message.
+            # Retry once on the now-warm connection — but ONLY if we yielded nothing
+            # yet (n == 0), so we can never duplicate already-streamed answer content.
+            if n > 0:
+                raise  # already streamed real content → don't re-run, surface the error
+            retry_due_to_raise = True
+            _perf("agent_first_attempt_raised", (time.perf_counter() - t0) * 1000)
+            logger.warning(json.dumps({"event": "agent_first_attempt_raised",
+                                       "detail": "cold-start exception before any output; retrying once",
+                                       "error": str(exc)[:200]}))
+        if retry_due_to_raise or _is_leak_shape():
+            if not retry_due_to_raise:
+                _perf("mcp_init_race_retry", (time.perf_counter() - t0) * 1000, num_turns=last_num_turns)
+                logger.warning(json.dumps({"event": "mcp_init_race_retry",
+                                           "detail": "tools not registered on cold start; retrying once"}))
             saw_tool_use = False
             saw_markup_text = False
             saw_error_result = False
