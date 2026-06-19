@@ -15,7 +15,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 source "$SCRIPT_DIR/common.sh"; source "$SCRIPT_DIR/env-utils.sh"
-REGION="$1"; CONFIG="$2"; BUCKET="$3"; REPO_SUBDIR="$4"; MAX_FILES="$5"; ITYPE="$6"; REFRESH="${7:-false}"
+REGION="$1"; CONFIG="$2"; BUCKET="$3"; REPO_SUBDIR="$4"; MAX_FILES="$5"; ITYPE="$6"; REFRESH="${7:-false}"; ROOT_VOLUME_GB="${8:-30}"
 safe_source_env "$CONFIG"
 Q() { aws ec2 "$@" --region "$REGION"; }
 QS() { aws s3api "$@" --region "$REGION"; }
@@ -185,7 +185,7 @@ IID="$(Q run-instances --image-id "$AMI" --instance-type "$ITYPE" \
   --subnet-id "$PRIVATE_SUBNET" --security-group-ids "$SG" \
   "${PROFILE_ARG[@]}" \
   --user-data "$UD" \
-  --block-device-mappings '[{"DeviceName":"/dev/sda1","Ebs":{"VolumeSize":30,"VolumeType":"gp3"}}]' \
+  --block-device-mappings "[{\"DeviceName\":\"/dev/sda1\",\"Ebs\":{\"VolumeSize\":${ROOT_VOLUME_GB},\"VolumeType\":\"gp3\"}}]" \
   --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=source-truth-index-service},{Key=ArtifactSig,Value=$CURRENT_SIG}]" \
   --query 'Instances[0].InstanceId' --output text)"
 log info "launched index-service $IID (Ubuntu 24.04 ARM); bootstrap runs build→serve"

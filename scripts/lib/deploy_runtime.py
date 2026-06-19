@@ -62,7 +62,14 @@ def deploy(
 ) -> tuple[str, str]:
     client = boto3.client("bedrock-agentcore-control", region_name=region)
     artifact = {"containerConfiguration": {"containerUri": image}}
-    env = {"CLAUDE_CODE_USE_BEDROCK": "1", "ANTHROPIC_MODEL": model}
+    # Pin the agent's Bedrock region to the DEPLOY region, overriding the image's
+    # baked-in default (Dockerfile sets AWS_REGION=us-east-1). The default model is
+    # a global.* inference profile (works from any regional endpoint), so this is
+    # mainly correctness + lower cross-region latency — but it's REQUIRED if an
+    # operator deploys with a region-pinned --model (apac.*/jp.*) where a us-east-1
+    # endpoint would mismatch. Track --region so the runtime's region is never stale.
+    env = {"CLAUDE_CODE_USE_BEDROCK": "1", "ANTHROPIC_MODEL": model,
+           "AWS_REGION": region, "AWS_DEFAULT_REGION": region}
     # CodeGraph MCP endpoint (index-service). Only set when provided so a
     # PUBLIC-mode runtime without an index-service stays a plain agent.
     if codegraph_mcp_url:

@@ -45,9 +45,11 @@ REPO_SUBDIR=""           # name the repo lives under on the index host (defaults
 INSTANCE_TYPE=""
 MAX_FILES=""
 MODEL=""
+ROOT_VOLUME_GB=""
 DEFAULT_INSTANCE_TYPE="t4g.large"
 DEFAULT_MAX_FILES="10000"
 DEFAULT_MODEL="global.anthropic.claude-sonnet-4-6"
+DEFAULT_ROOT_VOLUME_GB="30"
 REFRESH_INDEX=false       # --refresh-index: replace a running index instance if its artifacts are stale
 declare -A SKIP=()
 
@@ -63,6 +65,8 @@ Options:
   --repo-subdir <n>   Name to place the repo under on the index host (default: basename of --repo)
   --instance-type <t> index-service EC2 type, ARM (default: t4g.large)
   --max-files <n>     codegraph max files to index (default: 10000)
+  --root-volume-gb <n> index-service root EBS size in GiB (default: 30). Grow for a
+                      large repo: it holds the repo copy + graph.db + tarball.
   --model <id>        Bedrock model id for the agent runtime
   --skip <phase>      Skip a phase: artifacts|iam|network|index-svc|image|runtime (repeatable)
   --refresh-index     Replace the running index-service instance if this run staged
@@ -92,6 +96,7 @@ while [[ $# -gt 0 ]]; do
     --repo-subdir) REPO_SUBDIR="$2"; shift 2 ;;
     --instance-type) INSTANCE_TYPE="$2"; shift 2 ;;
     --max-files) MAX_FILES="$2"; shift 2 ;;
+    --root-volume-gb) ROOT_VOLUME_GB="$2"; shift 2 ;;
     --model) MODEL="$2"; shift 2 ;;
     --skip) SKIP["$2"]=1; shift 2 ;;
     --refresh-index) REFRESH_INDEX=true; shift ;;
@@ -114,6 +119,7 @@ REGION="${REGION:-${DEPLOY_REGION:-}}"
 MODEL="${MODEL:-${DEPLOY_MODEL:-$DEFAULT_MODEL}}"
 INSTANCE_TYPE="${INSTANCE_TYPE:-${DEPLOY_INSTANCE_TYPE:-$DEFAULT_INSTANCE_TYPE}}"
 MAX_FILES="${MAX_FILES:-${DEPLOY_MAX_FILES:-$DEFAULT_MAX_FILES}}"
+ROOT_VOLUME_GB="${ROOT_VOLUME_GB:-${DEPLOY_ROOT_VOLUME_GB:-$DEFAULT_ROOT_VOLUME_GB}}"
 ACCOUNT="$(aws sts get-caller-identity --query Account --output text)"
 [[ -n "$REPO_SUBDIR" ]] || REPO_SUBDIR="$(basename "${REPO_PATH:-${REPO_SUBDIR:-repo}}")"
 BUCKET="source-truth-repo-${ACCOUNT}-$(echo "$REGION" | tr -d '-')"
@@ -189,6 +195,7 @@ if [[ "$DRY_RUN" != true ]]; then
   update_env "$CONFIG_FILE" DEPLOY_MODEL "$MODEL"
   update_env "$CONFIG_FILE" DEPLOY_INSTANCE_TYPE "$INSTANCE_TYPE"
   update_env "$CONFIG_FILE" DEPLOY_MAX_FILES "$MAX_FILES"
+  update_env "$CONFIG_FILE" DEPLOY_ROOT_VOLUME_GB "$ROOT_VOLUME_GB"
 fi
 
 run() { if [[ "$DRY_RUN" == true ]]; then say info "[dry-run] $*"; else "$@"; fi; }
@@ -243,10 +250,18 @@ else
   ( cd "$ROOT/index-service" && tar czf "$TMP_IDX" ./*.py requirements.txt )
   run aws s3 cp "$TMP_IDX" "s3://$BUCKET/index-service.tar.gz" --region "$REGION"
 
-  # repo to index.
+  # repo to index. EXCLUDE .git / vendored deps / build caches: codegraph already
+  # skips them at index time (--exclude node_modules/.venv/.git), and they're NOT
+  # served as source — but without excluding them here they'd inflate the S3 tarball
+  # AND the on-disk extract on the index host's (size-bounded) root volume, which is
+  # the most likely fresh-account hard-stop on a real repo with a multi-GB .git
+  # history. Excluding them keeps the staged artifact == what codegraph indexes.
   if [[ -n "$REPO_PATH" ]]; then
     TMP_REPO="$(mktemp /tmp/repo.XXXX.tar.gz)"
-    tar czf "$TMP_REPO" -C "$(dirname "$REPO_PATH")" "$(basename "$REPO_PATH")"
+    tar czf "$TMP_REPO" \
+      --exclude='.git' --exclude='node_modules' --exclude='.venv' \
+      --exclude='*.tmp' --exclude='__pycache__' \
+      -C "$(dirname "$REPO_PATH")" "$(basename "$REPO_PATH")"
     run aws s3 cp "$TMP_REPO" "s3://$BUCKET/${REPO_SUBDIR}.tar.gz" --region "$REGION"
   fi
   say ok "artifacts staged"
@@ -285,7 +300,7 @@ if skip index-svc; then say warn "skip index-svc"; elif [[ "$DRY_RUN" == true ]]
 else
   say step "Phase 3: index-service EC2"
   INDEX_IP="$("$SCRIPT_DIR/lib/provision_index_service.sh" \
-    "$REGION" "$CONFIG_FILE" "$BUCKET" "$REPO_SUBDIR" "$MAX_FILES" "$INSTANCE_TYPE" "$REFRESH_INDEX")"
+    "$REGION" "$CONFIG_FILE" "$BUCKET" "$REPO_SUBDIR" "$MAX_FILES" "$INSTANCE_TYPE" "$REFRESH_INDEX" "$ROOT_VOLUME_GB")"
   update_env "$CONFIG_FILE" INDEX_SERVICE_IP "$INDEX_IP"
   safe_source_env "$CONFIG_FILE"
   # Wait for the bridge to become healthy before wiring the runtime to it. The
