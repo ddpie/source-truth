@@ -1169,9 +1169,22 @@ async function main(): Promise<void> {
           // registry by messageId (mirrors follow_up) so a payload whose value
           // dropped card_id still stops the right card instead of silently no-op'ing
           // with no trace ("点了停止没反应" + no log) (cross-review).
-          const stopCardId = value.card_id || lookupCard(messageId)?.cardId;
+          const stopEntry = lookupCard(messageId);
+          const stopCardId = value.card_id || stopEntry?.cardId;
+          // ASKER-SCOPING (operator decision 2026-06-19): only the user who ASKED the
+          // card may stop its stream — aborting someone else's in-flight answer is a
+          // low-friction DoS, so gate it like the reply path. FAIL CLOSED: refuse if
+          // the card's asker is unknown (can't verify) or the operator isn't the
+          // asker. (Follow-up buttons stay group-open by the same decision — clicking
+          // one only spends a fresh invoke, it doesn't disrupt an in-flight stream.)
+          const stopAsker = stopEntry?.askerOpenId;
+          const stopAllowed = !!stopAsker && !!operatorOpenId && operatorOpenId === stopAsker;
           if (!stopCardId) {
             log({ event: "stop_unresolved", message: messageId ? hashUserId(messageId) : "" });
+          } else if (!stopAllowed) {
+            // Not the asker (or asker unknown) → ignore. Logged (hashed) so abuse /
+            // an unexpected-empty-asker is diagnosable, not silent.
+            log({ event: "stop_denied", card: stopCardId, reason: stopAsker ? "not_asker" : "asker_unknown" });
           } else {
             const ctrl = abortControllers.get(stopCardId);
             log({ event: "stop_clicked", card: stopCardId, found: !!ctrl });
