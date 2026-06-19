@@ -52,6 +52,14 @@ const PATTERNS: Array<[RegExp, string | ((...args: string[]) => string)]> = [
   [/pypi-[A-Za-z0-9_-]{16,}/g, REDACTED],          // PyPI API token
   // GitHub personal access tokens (ghp_/gho_/ghs_/ghr_ + 36+ chars), no key prefix.
   [/gh[pousr]_[A-Za-z0-9]{36,}/g, REDACTED],
+  // GitHub FINE-GRAINED PAT (github_pat_ + base62/underscore). The classic gh[pousr]_
+  // rule above does NOT cover this newer prefix (cross-review).
+  [/github_pat_[A-Za-z0-9_]{60,}/g, REDACTED],
+  // Stripe secret keys (sk_live_ / sk_test_ + 16+). Fixed prefix → near-zero FP.
+  [/sk_(?:live|test)_[A-Za-z0-9]{16,}/g, REDACTED],
+  // OpenAI keys (sk- / sk-proj- + 20+). Fixed `sk-` prefix; bound the body to
+  // [A-Za-z0-9_-] and require length so it can't swallow a hyphenated identifier.
+  [/sk-(?:proj-)?[A-Za-z0-9_-]{20,}/g, REDACTED],
   // Feishu/Lark access tokens: tenant_access_token (t-), app_access_token (a-),
   // user_access_token (u-). A BARE "t-<20+ chars>" prefix rule over-redacts benign
   // snake_case identifiers that happen to start t-/a-/u- (e.g.

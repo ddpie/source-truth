@@ -29,16 +29,22 @@
 // unbounded `[\s\S]*?`) so N unclosed `<invoke` opens can't each scan to end-of-string
 // (O(n^2) event-loop stall). A genuinely-unclosed open is then mopped up by the orphan
 // pattern; 8000 chars comfortably covers a real tool-call block.
-const TOOLCALL_BLOCK = /\**<\/?(?:antml:)?function_calls\b[^>]*>\**/gi;
-const INVOKE_BLOCK = /\**<(?:antml:)?invoke\b[\s\S]{0,8000}?<\/(?:antml:)?invoke>\**/gi;
-const PARAM_BLOCK = /\**<\/?(?:antml:)?parameter\b[^>]*>\**/gi;
-const ORPHAN_INVOKE_OPEN = /\**<(?:antml:)?invoke\b[^>\n]{0,400}>\**/gi; // unclosed <invoke …> (truncated)
+// SECOND ReDoS axis (cross-review CONFIRMED): the LEADING bold marker was `\**` — an
+// UNBOUNDED `*` run. On input with a long `*` streak NOT followed by a matchable tag,
+// the engine retried `\**` from every offset → O(n^2) (~10s on 32k `*`, a single-event-
+// loop DoS, and the leak shape itself involves bolded markup so it's reachable). The
+// marker only ever needs to absorb markdown bolding (`**…**`), so bound it to `\*{0,4}`.
+const BOLD = "\\*{0,4}"; // leading/trailing markdown bold marker, BOUNDED (was \** → ReDoS)
+const TOOLCALL_BLOCK = new RegExp(`${BOLD}<\\/?(?:antml:)?function_calls\\b[^>]*>${BOLD}`, "gi");
+const INVOKE_BLOCK = new RegExp(`${BOLD}<(?:antml:)?invoke\\b[\\s\\S]{0,8000}?<\\/(?:antml:)?invoke>${BOLD}`, "gi");
+const PARAM_BLOCK = new RegExp(`${BOLD}<\\/?(?:antml:)?parameter\\b[^>]*>${BOLD}`, "gi");
+const ORPHAN_INVOKE_OPEN = new RegExp(`${BOLD}<(?:antml:)?invoke\\b[^>\\n]{0,400}>${BOLD}`, "gi"); // unclosed <invoke …>
 // HAIKU-style leak: the model serializes a tool call as <attempt_{toolname}>{JSON}
 // </attempt_{toolname}> (observed live on claude-haiku-4-5; a DIFFERENT shape from
 // Opus/Sonnet's <invoke>). Match the paired block (bounded gap) then any orphan
 // open. The tag name is always `attempt_` + word chars (the tool name).
-const ATTEMPT_BLOCK = /\**<(attempt_[a-zA-Z0-9_]+)\b[\s\S]{0,8000}?<\/\1>\**/gi;
-const ORPHAN_ATTEMPT_OPEN = /\**<\/?attempt_[a-zA-Z0-9_]+\b[^>\n]{0,400}>\**/gi;
+const ATTEMPT_BLOCK = new RegExp(`${BOLD}<(attempt_[a-zA-Z0-9_]+)\\b[\\s\\S]{0,8000}?<\\/\\1>${BOLD}`, "gi");
+const ORPHAN_ATTEMPT_OPEN = new RegExp(`${BOLD}<\\/?attempt_[a-zA-Z0-9_]+\\b[^>\\n]{0,400}>${BOLD}`, "gi");
 
 /** True if `text` contains any (prefixed or bare) tool-call markup. */
 function hasToolCallMarkup(text: string): boolean {

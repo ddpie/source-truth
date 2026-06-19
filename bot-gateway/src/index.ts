@@ -649,7 +649,11 @@ async function runStreamingInvoke(
         // tools didn't register), the model emits raw <invoke> tool-call XML as text;
         // strip it LIVE so the user never watches that markup type out (finalize also
         // strips + may show a clean failure message, but the live stream must not leak).
-        display = stripToolCallLeak(normalizeBlocks(redactSensitive(stripPreamble(body.length > 0 ? body : textSoFar))));
+        // ORDER: redact LAST (outermost). Stripping a tag can re-join the two halves of
+        // a secret that a `<parameter …>` split, so redaction must run AFTER strip or a
+        // leaked tail survives this live frame (finalize already orders it strip→redact;
+        // the live path had it inverted — cross-review P1).
+        display = redactSensitive(stripToolCallLeak(normalizeBlocks(stripPreamble(body.length > 0 ? body : textSoFar))));
         if (!display.trim()) display = "正在分析…";
         // Clamp the LIVE update too: a runaway-long stream could 400 the per-frame PUT
         // (coalesced → silently dropped → typewriter appears to freeze) before finalize
