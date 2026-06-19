@@ -28,16 +28,19 @@ RUN uv pip install --no-deps -r requirements.lock
 
 # Node + claude-code CLI — REQUIRED: claude_agent_sdk spawns the `claude` CLI
 # (the @anthropic-ai/claude-code npm package) as a subprocess via its
-# SubprocessCLITransport. claude-code is EXACT-pinned (2.1.179). Node is pinned
-# to the major (setup_24.x), NOT an exact patch on purpose: NodeSource prunes
-# old patch debs from its apt repo, so `nodejs=24.16.0` would make the build
-# FAIL outright once that patch is GC'd — strictly worse for reproducibility
-# than a major pin. The npm pin is what actually gates the SDK contract.
+# SubprocessCLITransport. claude-code tracks @latest by OPERATOR CHOICE (set
+# 2026-06-19): we always build with the newest CLI to pick up upstream fixes
+# fastest. TRADEOFF: this gives up reproducible builds — the same Dockerfile can
+# produce different CLI versions over time, and an upstream regression lands on
+# the next build with no buffer. Pin back to an exact @<version> if a build
+# regresses. Node is pinned to the major (setup_24.x), NOT an exact patch on
+# purpose: NodeSource prunes old patch debs from its apt repo, so `nodejs=24.16.0`
+# would make the build FAIL once that patch is GC'd.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends curl ca-certificates && \
     curl -fsSL https://deb.nodesource.com/setup_24.x | bash - && \
     apt-get install -y --no-install-recommends nodejs && \
-    npm install -g @anthropic-ai/claude-code@2.1.179 && \
+    npm install -g @anthropic-ai/claude-code@latest && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Non-root (AgentCore runs containers as non-root).

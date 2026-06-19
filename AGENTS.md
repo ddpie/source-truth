@@ -71,9 +71,11 @@ Agent）、`bot-gateway/`（TS 网关 + CardKit）、`index-service/`（CodeGrap
 
 - **代码为唯一依据**：答案必须基于 index-service 服务的最新主分支真实代码 + CodeGraph 取证；代码与文档 / 记忆
   冲突时以代码为准，并标注差异与文档时间；低置信度转研发。
-- **会话容器 ARM64-only**；基础镜像、Claude Agent SDK、`@anthropic-ai/claude-code` CLI（agent
-  microVM 内 SDK spawn 的子进程）版本钉死（pin），漂移由 `scripts/check-versions.sh`（已实现，
-  `test.sh --lint` 调用）守卫。（注：lark-cli 仅是开发期手测工具，不装进任何运行镜像，也不在该守卫范围内。）
+- **会话容器 ARM64-only**；基础镜像、Claude Agent SDK 版本钉死（pin），漂移由
+  `scripts/check-versions.sh`（已实现，`test.sh --lint` 调用）守卫。**例外：`@anthropic-ai/claude-code`
+  CLI（agent microVM 内 SDK spawn 的子进程）按运维决定（2026-06-19）改用 `@latest` 跟最新**——牺牲可复现换
+  最快拿到上游修复；守卫对 `@latest` 放行（仅告警），出现回归时改回 `@<version>` 即可。（注：lark-cli 仅是
+  开发期手测工具，不装进任何运行镜像，也不在该守卫范围内。）
 - **生成物绝不手改**——改源再重生成。
 - **改顶层目录 ⇒ 同步 `docs/structure_zh.md`（及 `_en.md`）**；**新增 `docs/*_en.md` ⇒ 补 `_zh.md`**（反之亦然）。
 - **MVP 边界**：仅主分支、仅只读问答、不跑引擎、不写回 / 提交。越界能力（设计文档读取、多分支、

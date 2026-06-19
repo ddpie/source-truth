@@ -18,8 +18,9 @@ REQ="agent-container/requirements.txt"
 LOCK="agent-container/requirements.lock"
 
 fail=0
-err() { printf '  ✗ %s\n' "$1" >&2; fail=1; }
-ok()  { printf '  ✓ %s\n' "$1"; }
+err()  { printf '  ✗ %s\n' "$1" >&2; fail=1; }
+ok()   { printf '  ✓ %s\n' "$1"; }
+warn() { printf '  ! %s\n' "$1"; }  # advisory; does NOT set fail
 
 echo "check-versions: $ROOT"
 
@@ -66,10 +67,14 @@ if [[ -f "$DOCKERFILE" ]]; then
     ok "Node 主版本钉死（setup_<N>.x）"
   else err "未找到 Node 安装行（setup_<N>.x）"; fi
 
-  # 5. claude-code npm EXACT-pin
+  # 5. claude-code npm: EXACT-pin OR @latest (operator choice 2026-06-19 — track
+  #    latest, trading reproducibility for fastest upstream fixes). A bare
+  #    `claude-code` with NO @tag is still an error (ambiguous).
   if grep -qE '@anthropic-ai/claude-code@[0-9]' "$DOCKERFILE"; then
     ok "@anthropic-ai/claude-code 已 EXACT-pin"
-  else err "@anthropic-ai/claude-code 未钉版本（应 npm install -g @anthropic-ai/claude-code@<version>）"; fi
+  elif grep -qE '@anthropic-ai/claude-code@latest' "$DOCKERFILE"; then
+    warn "@anthropic-ai/claude-code 用 @latest（按运维选择跟最新；牺牲可复现，回归时改回 @<version>）"
+  else err "@anthropic-ai/claude-code 未带 @tag（应 @<version> 或 @latest）"; fi
 fi
 
 # 6. index-service deps：requirements.txt 全 ==-钉死，且 bootstrap 从它装（而非手列
