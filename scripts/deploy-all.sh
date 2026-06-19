@@ -326,6 +326,22 @@ else
   if [[ "$DRY_RUN" != true ]]; then
     "$SCRIPT_DIR/lib/provision_index_dns.sh" "$REGION" "$CONFIG_FILE" "$VPC_ID" "$INDEX_IP" >/dev/null
     safe_source_env "$CONFIG_FILE"
+    # BLUE-GREEN terminate-last: provision_index_service recorded the OLD instance
+    # in INDEX_OLD_INSTANCE (refresh path) instead of killing it up-front. Now that
+    # the NEW instance is /health-green (the wait above) AND the DNS name is cut over
+    # to it, drain the TTL (30s) so resolver caches expire, then terminate the old
+    # one. This makes --refresh-index seamless (no dead-host window) and makes a
+    # FAILED refresh a no-op (we never reach here — the health gate exited — so the
+    # old instance keeps serving). Best-effort: a terminate hiccup must not fail the
+    # otherwise-successful deploy.
+    if [[ -n "${INDEX_OLD_INSTANCE:-}" && "$INDEX_OLD_INSTANCE" != "$INDEX_SERVICE_INSTANCE" ]]; then
+      say info "blue-green: new index healthy + DNS cut over; draining DNS TTL then terminating old instance $INDEX_OLD_INSTANCE"
+      sleep 35  # > Route53 A-record TTL (30s) so warm-VM resolvers pick up the new IP
+      aws ec2 terminate-instances --region "$REGION" --instance-ids "$INDEX_OLD_INSTANCE" >/dev/null 2>&1 \
+        && say ok "old index instance $INDEX_OLD_INSTANCE terminated" \
+        || say warn "could not terminate old index $INDEX_OLD_INSTANCE (terminate it manually); deploy still OK"
+      update_env "$CONFIG_FILE" INDEX_OLD_INSTANCE ""   # clear so a later run doesn't re-terminate
+    fi
   fi
   say ok "index-service at $INDEX_IP:8080 (stable name: ${INDEX_DNS_NAME:-pending})"
 fi
