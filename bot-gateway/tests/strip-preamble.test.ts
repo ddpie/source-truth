@@ -170,6 +170,16 @@ describe("stripPreamble", () => {
     expect(stripPreamble(body)).toBe(body);
   });
 
+  it("strips the 6th E2E case: '所有信息都齐了，来整理答案。' + inline ---", () => {
+    const body = "所有信息都齐了，来整理答案。---角色的负重上限完全由力量决定。";
+    expect(stripPreamble(body)).toBe("角色的负重上限完全由力量决定。");
+  });
+
+  it("does NOT over-strip '所有信息都在配置表里…' (real answer, not a preamble)", () => {
+    const body = "所有信息都在配置表里，可自行调整。\n详见表。";
+    expect(stripPreamble(body)).toBe(body);
+  });
+
   it("does NOT match a --- adjacent to a table pipe as the cut point", () => {
     const body = "整理一下答案如下：\n| A | B |\n| --- | --- |\n| 1 | 2 |";
     // The head '整理一下答案如下' is a preamble-ish prefix, but the only `---` is in a
