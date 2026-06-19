@@ -106,11 +106,11 @@ def glob_files(
         raise ValueError("glob pattern must be non-empty")
     t0 = perf_counter()
 
-    # Rebase an absolute/mount-prefixed pattern to repo-relative, then confine the
+    # Rebase a (legacy) mount-prefixed pattern to repo-relative, then confine the
     # NON-glob prefix to the repo (a pattern like ../../etc/* must be rejected).
     norm_mount = mount_root.rstrip("/")
     rel_pattern = pattern
-    if pattern.startswith(norm_mount + "/"):
+    if norm_mount and pattern.startswith(norm_mount + "/"):
         rel_pattern = pattern[len(norm_mount) + 1:]
     elif os.path.isabs(pattern):
         raise ValueError(f"absolute glob pattern outside repo: {pattern!r}")

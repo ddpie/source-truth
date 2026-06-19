@@ -77,12 +77,15 @@ def test_bridge_exposes_codegraph_tools_over_http():
     assert all("symbol" in r and "location" in r["symbol"] for r in data["results"])
 
 
-def test_bridge_result_paths_are_container_aligned():
-    # Tool result must already be /mnt/repo-aligned (path_align chained in).
+def test_bridge_result_paths_are_repo_relative():
+    # Tool result paths must be REPO-RELATIVE (path_align chained in, mount_root="").
+    # The agent has no filesystem mount, so paths are plain relative, never the raw
+    # codegraph ./-prefixed form and never an absolute host/index path.
     _, text = asyncio.run(_run_bridge_and_query("to_container_path", 8912))
     data = json.loads(text)
     files = [r["symbol"]["location"]["file"] for r in data["results"]]
-    assert any(f.startswith("/mnt/repo/") for f in files), files
+    assert files, "no result files"
+    assert not any(f.startswith("/") for f in files), f"absolute path leaked: {files}"
     assert not any(f.startswith("./") for f in files), "raw ./-paths leaked, not aligned"
 
 
@@ -101,11 +104,11 @@ def test_bridge_get_callers_resolves_query_and_stays_healthy():
     # Healthy envelope: a callers list (may be empty for a leaf, but build_options
     # is called by build_options_dict's wrapper, so we expect ≥0 and no error).
     assert isinstance(data.get("callers"), list), f"no callers list: {text[:300]}"
-    # Any returned caller path must be container-aligned, never a raw index path.
+    # Any returned caller path must be repo-relative, never a raw/absolute index path.
     for c in data["callers"]:
         loc = c.get("symbol", {}).get("location", {})
         if loc.get("file"):
-            assert loc["file"].startswith("/mnt/repo/"), loc["file"]
+            assert not loc["file"].startswith(("/", "./")), loc["file"]
 
 
 def test_bridge_analyze_impact_resolves_query_and_aligns_paths():
@@ -120,7 +123,7 @@ def test_bridge_analyze_impact_resolves_query_and_aligns_paths():
     assert isinstance(data.get("impacted"), list), f"no impacted list: {text[:300]}"
     for item in data["impacted"]:
         if isinstance(item, dict) and item.get("path"):
-            assert item["path"].startswith("/mnt/repo/"), item["path"]
+            assert not item["path"].startswith(("/", "./")), item["path"]
 
 
 def test_bridge_caller_query_does_not_wedge_symbol_search():

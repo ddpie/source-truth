@@ -54,8 +54,8 @@ describe("E2E smoke (offline, stubbed externals)", () => {
     ];
 
     // --- 6. index-service path_align (✅ real function, tested separately) ---
-    // Included by reference: CodeGraph paths are rewritten to /mnt/repo/*.
-    // Verified in index-service/tests/test_path_align.py (8 tests passing).
+    // Included by reference: CodeGraph paths are rewritten to repo-relative form
+    // (no agent mount). Verified in index-service/tests/test_path_align.py.
 
     // --- 7. Stream parsing: narrations vs conclusion (✅ real prod logic) ---
     // The live path (sigv4.invokeRuntimeStreaming) folds the SSE stream via the

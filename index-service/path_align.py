@@ -1,25 +1,30 @@
-"""Path alignment between CodeGraph index space and container mount space (POC#1).
+"""Path alignment between CodeGraph index space and the agent's repo namespace.
 
 CodeGraph indexes a repo worktree that lives at ``index_root`` on the
-index-service host (writable EFS mount). Session containers read the *same* files
-at a read-only mount (default ``/mnt/repo``). Paths returned by CodeGraph tools
-must be rewritten into the container's mount space before the agent reads them.
+index-service host (its LOCAL disk copy, e.g. ``/data/repo/<subdir>``). The agent
+microVM mounts NO filesystem — it reads code over the index-service HTTP bridge —
+so the paths it sees should be plain REPO-RELATIVE (e.g.
+``index-service/path_align.py``), not tied to any host path. ``to_container_path``
+strips the index_root prefix and returns the repo-relative remainder
+(``mount_root`` defaults to ``""`` = repo-relative). A legacy non-empty
+``mount_root`` (e.g. ``/mnt/repo``) is still supported for back-compat: the
+remainder is re-rooted under it.
 
 Real path formats from codegraph-server 0.18.5 (empirically verified — the
 ``file`` field mirrors the ``--workspace`` arg the server was started with):
-  - workspace "."          -> "./index-service/path_align.py"   (./-prefixed)
-  - workspace "/mnt/efs/repo" -> "/mnt/efs/repo/index-service/path_align.py"
-Both forms (plus bare relative) are normalized and re-rooted at ``mount_root``.
+  - workspace "."             -> "./index-service/path_align.py"   (./-prefixed)
+  - workspace "/data/repo/x"  -> "/data/repo/x/index-service/path_align.py"
+Both forms (plus bare relative) are normalized to a repo-relative path.
 ``format_location`` consumes the full ``symbol.location`` dict
 (``{file, line, column, end_line, end_column}``) into a ``path:line`` reference.
 
 Security: any path that LEXICALLY resolves outside the repo root is rejected
 (``..`` escapes, sibling-prefix paths), so a stray CodeGraph path can never point
-the agent at files outside ``/mnt/repo``. NOTE this is a LEXICAL guard only — it
-does not follow symlinks, so a symlink INSIDE the repo whose target is outside is
-not detected. That is acceptable for the MVP (single trusted main-branch repo,
-read-only mount); add ``os.path.realpath`` re-validation if untrusted symlinks
-ever enter the indexed tree.
+the agent at files outside the repo. NOTE this is a LEXICAL guard only — it does
+not follow symlinks. ``to_local_path`` (the inverse, used by the file-read tools
+on UNTRUSTED agent input) adds an ``os.path.realpath`` re-validation to close the
+symlink-escape hole; ``to_container_path`` operates on codegraph's own emitted
+paths and stays lexical.
 """
 
 from __future__ import annotations
@@ -28,7 +33,9 @@ import os
 import posixpath
 from typing import Any
 
-DEFAULT_MOUNT_ROOT = "/mnt/repo"
+# "" = repo-relative paths (the agent has no mount). A legacy absolute root like
+# "/mnt/repo" is still accepted by the functions for back-compat.
+DEFAULT_MOUNT_ROOT = ""
 
 
 def to_container_path(
@@ -39,10 +46,12 @@ def to_container_path(
 ) -> str:
     """Rewrite a CodeGraph-returned path into the container mount path.
 
-    - Absolute paths under ``index_root`` are re-rooted at ``mount_root``.
-    - Absolute paths already under ``mount_root`` are returned as-is (idempotent).
-    - Relative paths are interpreted relative to the repo root and joined onto
-      ``mount_root``.
+    With the default ``mount_root=""`` the result is REPO-RELATIVE (the agent has
+    no mount). A non-empty ``mount_root`` (legacy ``/mnt/repo``) re-roots under it.
+
+    - Absolute paths under ``index_root`` have that prefix stripped.
+    - Absolute paths already under a non-empty ``mount_root`` are idempotent.
+    - Relative paths are interpreted relative to the repo root.
     - Redundant ``.`` / ``..`` / double-slash segments are normalized.
 
     Raises ValueError if ``raw`` is empty or resolves outside the repo root
@@ -52,11 +61,13 @@ def to_container_path(
         raise ValueError("path must be a non-empty string")
 
     index_root = posixpath.normpath(index_root)
-    mount_root = posixpath.normpath(mount_root)
+    # Empty mount_root means "repo-relative" — DON'T normpath("") → "." it.
+    mount_root = posixpath.normpath(mount_root) if mount_root else ""
 
     if posixpath.isabs(raw):
         norm = posixpath.normpath(raw)
-        for root in (index_root, mount_root):
+        roots = (index_root, mount_root) if mount_root else (index_root,)
+        for root in roots:
             rel = _relative_to(norm, root)
             if rel is not None:
                 return _join_mount(mount_root, rel)
@@ -102,14 +113,14 @@ def to_local_path(
         raise ValueError("path must be a non-empty string")
 
     local_root = posixpath.normpath(local_root)
-    mount_root = posixpath.normpath(mount_root)
+    mount_root = posixpath.normpath(mount_root) if mount_root else ""
 
     if posixpath.isabs(requested):
         norm = posixpath.normpath(requested)
-        rel = _relative_to(norm, mount_root)
+        # Accept an absolute path under a non-empty (legacy) mount_root, or one
+        # already under local_root (idempotent) — anything else escapes.
+        rel = _relative_to(norm, mount_root) if mount_root else None
         if rel is None:
-            # An absolute path already under local_root is also acceptable
-            # (idempotent) — anything else escapes the repo namespace.
             rel = _relative_to(norm, local_root)
         if rel is None:
             raise ValueError(f"absolute path escapes repo root: {requested!r}")
@@ -166,4 +177,8 @@ def _relative_to(norm_path: str, root: str) -> str | None:
 
 
 def _join_mount(mount_root: str, rel: str) -> str:
+    # Empty mount_root → repo-relative: return the remainder verbatim (".", the
+    # repo root, becomes "." rather than an absolute path).
+    if not mount_root:
+        return rel if rel else "."
     return mount_root if not rel else posixpath.normpath(f"{mount_root}/{rel}")
