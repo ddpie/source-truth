@@ -344,7 +344,7 @@ async def run_agent(
     # The only thing not streamed live is the brief pre-first-tool narration, which is
     # tiny; the leak attempt is at most ~1 turn so its buffer is small.
     async def _drive(p: str, *, suppress_on_leak: bool) -> AsyncIterator[Any]:
-        nonlocal first_emitted, saw_tool_use, saw_markup_text, last_num_turns
+        nonlocal first_emitted, saw_tool_use, saw_markup_text, last_num_turns, saw_error_result
         buf: list[Any] = []
         committed = not suppress_on_leak  # retry attempt streams immediately
         async for message in qfn(prompt=p, options=options):
@@ -357,6 +357,12 @@ async def run_agent(
                 saw_tool_use = True
             if _message_text_has_toolcall_markup(message):
                 saw_markup_text = True
+            # An ERRORED terminal result (is_error=True) with no tool use is the OTHER
+            # cold-start failure: the SDK/CLI errored before producing an answer (e.g.
+            # MCP server unreachable on a cold microVM) → out=0, turns<=1. Track it so
+            # the same single retry covers it (it usually clears on a warm connection).
+            if getattr(message, "is_error", None) and getattr(message, "num_turns", None) is not None:
+                saw_error_result = True
             nt = getattr(message, "num_turns", None)
             if isinstance(nt, int):
                 last_num_turns = nt
@@ -382,10 +388,19 @@ async def run_agent(
                 yield m
 
     def _is_leak_shape() -> bool:
-        return (not saw_tool_use) and saw_markup_text and (last_num_turns is None or last_num_turns <= 1)
+        # Retry the cold-start failure class (≤1 turn, no real tool use) when EITHER:
+        #  - the model emitted tool-call markup as text (tools weren't registered), OR
+        #  - the run ended in an ERRORED empty result (SDK/MCP errored before any
+        #    answer). Both usually clear on a warm retry.
+        if saw_tool_use:
+            return False
+        if not (last_num_turns is None or last_num_turns <= 1):
+            return False
+        return saw_markup_text or saw_error_result
 
     saw_tool_use = False
     saw_markup_text = False
+    saw_error_result = False
     last_num_turns: int | None = None
 
     try:
@@ -398,6 +413,7 @@ async def run_agent(
                                        "detail": "tools not registered on cold start; retrying once"}))
             saw_tool_use = False
             saw_markup_text = False
+            saw_error_result = False
             last_num_turns = None
             async for message in _drive(prompt, suppress_on_leak=False):
                 n += 1
@@ -517,5 +533,16 @@ def _maybe_log_result(message: Any) -> None:
             is_error=getattr(message, "is_error", None),
             subtype=getattr(message, "subtype", None),
         )
+        # On an ERRORED result, also log the result text (the SDK puts the failure
+        # reason in `.result`) so an is_error=True/out=0 cold-start failure is
+        # diagnosable — the structured perf line alone doesn't say WHY.
+        if getattr(message, "is_error", None):
+            detail = getattr(message, "result", None)
+            logger.warning(json.dumps({
+                "event": "agent_result_error",
+                "subtype": getattr(message, "subtype", None),
+                "num_turns": num_turns,
+                "detail": str(detail)[:500] if detail is not None else None,
+            }))
     except Exception as exc:  # noqa: BLE001 - perf logging must never break the stream
         logger.warning(json.dumps({"event": "agent_result_log_failed", "error": str(exc)}))
