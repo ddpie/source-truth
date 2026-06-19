@@ -187,6 +187,18 @@ reconcile_index_sg_ingress "$SG"
 AMI="$(Q describe-images --owners 099720109477 \
   --filters "Name=name,Values=ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-arm64-server-*" "Name=state,Values=available" \
   --query 'reverse(sort_by(Images,&CreationDate))[0].ImageId' --output text)"
+# `--output text` with NO match returns the literal "None" (and an empty result is
+# ""), which would otherwise flow into run-instances as `--image-id None` → an opaque
+# InvalidAMIID failure. Canonical's owner id is global, but a brand-new / GovCloud /
+# China region may not carry this noble-arm64 image (or uses a different owner). Fail
+# with an ACTIONABLE message naming the cause + the SSM-parameter alternative.
+if [ -z "$AMI" ] || [ "$AMI" = "None" ]; then
+  say err "no Ubuntu 24.04 arm64 AMI found from Canonical (owner 099720109477) in $REGION."
+  say err "this region may not carry that image (or uses a different owner, e.g. GovCloud/China)."
+  say err "set an explicit AMI via the SSM public parameter, e.g.:"
+  say err "  aws ssm get-parameter --region $REGION --name /aws/service/canonical/ubuntu/server/24.04/stable/current/arm64/hvm/ebs-gp3/ami-id"
+  return 1
+fi
 
 # user-data: write env file, FETCH bootstrap.sh from S3 via curl, run it. We stage
 # bootstrap.sh to S3 and pass a PRESIGNED URL (no creds/awscli needed on the fresh

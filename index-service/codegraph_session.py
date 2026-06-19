@@ -522,14 +522,26 @@ class CodegraphSession:
             # fresh worker, kill any surviving codegraph-server orphan — at this exact
             # point (old thread confirmed dead, new not yet started) ANY live one is
             # an orphan that would become a second writer.
-            await asyncio.get_running_loop().run_in_executor(None, self._reap_orphan_servers)
+            # The reaper returns False if it could NOT verify the orphan set (every
+            # pgrep query errored/timed out). In that case we don't KNOW whether an
+            # orphan survives, so spawning would risk a second writer → graph.db
+            # corruption. Mirror the "old worker still alive" branch above: refuse and
+            # let a later call_tool retry, rather than start blind (cross-review HIGH —
+            # close the silent-second-writer gap when verification itself fails).
+            verified = await asyncio.get_running_loop().run_in_executor(None, self._reap_orphan_servers)
+            if not verified:
+                self._healthy = False
+                self._health_detail = "orphan check unverifiable; refusing to spawn a second writer"
+                logger.error(json.dumps({"event": "restart_blocked",
+                                         "detail": "orphan reaper could not verify; not starting a second writer"}))
+                raise IndexUnhealthy(self._health_detail)
             self.start()
         finally:
             self._restart_lock.release()
 
-    def _reap_orphan_servers(self) -> None:
-        """SIGKILL any stray codegraph-server still bound to OUR workspace. Best-effort,
-        stdlib-only (no psutil). Called only from _restart, under the restart lock,
+    def _reap_orphan_servers(self) -> bool:
+        """SIGKILL any stray codegraph-server still bound to OUR workspace. Best-effort
+        kill, stdlib-only (no psutil). Called only from _restart, under the restart lock,
         AFTER the old worker thread is confirmed dead — so at this instant there is NO
         live worker, hence ANY codegraph-server writing OUR workspace is an orphan that
         would become a second writer → graph.db corruption.
@@ -541,8 +553,17 @@ class CodegraphSession:
         codegraph-server REPARENTED to init (PPID=1), which `-P self` never sees —
         that reparented orphan is exactly the silent second-writer the old code missed
         (cross-review C1). The `--workspace <ours>` anchor keeps us from touching an
-        unrelated codegraph-server serving a different repo on the same host. Never raises."""
+        unrelated codegraph-server serving a different repo on the same host. Never raises.
+
+        Returns True iff the orphan set was VERIFIED — at least one query ran cleanly
+        (exit 0 = no match, or 1 = no match for pgrep, both are valid empty results) AND
+        every targeted orphan was confirmed gone (killed or already dead). Returns False
+        if NO query could run (all errored/timed out) or a kill failed for a reason other
+        than ProcessLookupError — i.e. we cannot prove there's no surviving second writer,
+        so the caller must refuse to spawn. pgrep exit code 1 means "no processes
+        matched" and is NOT a failure."""
         pids: set[int] = set()
+        any_query_ok = False
         # pgrep -f treats the pattern as a regex; re.escape the workspace path so a
         # metachar in it (e.g. a '.' or '+') can't broaden the match to a sibling
         # workspace (…/code-5x matching …/code-5x.bak) — exact-anchor to OUR server.
@@ -554,6 +575,14 @@ class CodegraphSession:
         for q in queries:
             try:
                 out = subprocess.run(q, capture_output=True, text=True, timeout=5)
+                # pgrep: 0 = matched, 1 = no match (both are a SUCCESSFUL query); ≥2 = a
+                # real error (bad usage / syntax). Only 0/1 count as a verified result.
+                if out.returncode in (0, 1):
+                    any_query_ok = True
+                else:
+                    logger.warning(json.dumps({"event": "reap_orphan_query_failed",
+                                               "rc": out.returncode, "stderr": out.stderr[:200]}))
+                    continue
                 for line in out.stdout.split():
                     try:
                         pid = int(line)
@@ -563,6 +592,7 @@ class CodegraphSession:
                         pids.add(pid)
             except Exception as exc:  # noqa: BLE001 - best-effort; must never break restart
                 logger.warning(json.dumps({"event": "reap_orphan_query_failed", "error": str(exc)}))
+        kills_ok = True
         for pid in pids:
             try:
                 os.kill(pid, signal.SIGKILL)
@@ -570,4 +600,8 @@ class CodegraphSession:
             except ProcessLookupError:
                 pass  # already gone — the normal case
             except Exception as exc:  # noqa: BLE001
+                kills_ok = False  # an orphan we found but could NOT kill → unverified
                 logger.warning(json.dumps({"event": "reap_orphan_kill_failed", "pid": pid, "error": str(exc)}))
+        # Verified only if we could actually look (a query ran) AND every found orphan
+        # was dealt with. If no query ran, we never looked → cannot claim "no orphan".
+        return any_query_ok and kills_ok
