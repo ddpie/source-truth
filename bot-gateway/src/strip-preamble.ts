@@ -66,7 +66,7 @@ const STANDALONE_PREAMBLE_OPENERS: RegExp[] = [
   // PROCESS-OUTPUT noun (信息/内容/输出/结果/数据/资料), NOT just 答案/结论. Observed live.
   // The .{0,20} after 整理 absorbs an object phrase ("所有怪物的完整"). FULL-match +
   // 160-char cap keep it from eating a real answer sentence.
-  new RegExp(`^(现在)?(我)?(已经)?(有|拿到|掌握|取得|获取|收集)了?(完整|全部|所有|相关|足够|关键)?(的)?(数据|信息|内容|资料|证据)?[，,]?.{0,8}(现在|来|这就|开始)?(整理|汇总|输出|给出|呈现|列出)(一下)?.{0,20}(信息|内容|输出|结果|数据|资料|答案|结论|回答)${TAIL}$`),
+  new RegExp(`^(现在)?(我)?(已经)?(有|拿到|掌握|取得|获取|收集)了?(完整|全部|所有|相关|足够|关键)?(的)?(数据|信息|内容|资料|证据)?[，,]?.{0,8}(现在|来|这就|开始)?(整理|汇总|输出|给出|呈现|列出)(一下)?.{0,20}(信息|内容|输出|结果|数据|资料|答案|结论|回答|设定|逻辑|机制|规则)${TAIL}$`),
   // "已经掌握全部怪物生命值数据，现在整理输出" — readiness + announce ending in the
   // bare verb 输出/作答 (no trailing noun). The lead-in absorbs the object; the
   // announce verb itself is the terminator.
