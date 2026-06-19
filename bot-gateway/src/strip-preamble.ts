@@ -26,11 +26,17 @@ const PREAMBLE_OPENERS: RegExp[] = [
   /^(基于|根据)(以上|上述)(的)?(取证|查找|搜索|信息)/,
   /^让我(来)?(整理|汇总|总结)/,
   /^答案(已经)?(很)?(清楚|明确|明朗)(了)?/,
+  // "readiness to answer" meta-statements (the analysis is done, here's the answer)
+  /^所有?.{0,30}(逻辑|信息|内容|证据|数据|细节|出处|配置)[都也]?.{0,8}(读|查|弄|搞|看|确认)(清楚|清|完|明白|到了?)/,
+  /^可以(给出|开始|提供|整理)/, // 可以给出完整答案了
+  /^.{0,24}(信息|证据|数据|内容)(都|已)?.{0,6}(齐|足够|够了|拿到|到位|都有了?)/,
+  /^.{0,24}都(已|已经)?.{0,8}(读|查|弄|搞|确认)(清楚|清|完|到了?)/,
   // English transitions
   /^now\s+(let me|i'?ll|i\s+have|that)/i,
   /^(i\s+)?(now\s+)?have\s+(enough|all\s+the)\s+(info|information|evidence)/i,
   /^(let me|i'?ll)\s+(now\s+)?(compile|summarize|put together|organize)/i,
   /^based on (the above|my)/i,
+  /^(all|the)\s+(key\s+)?(logic|info|information|evidence|details?)\s+(is|are|has been|have been)\s+(read|gathered|confirmed|clear)/i,
 ];
 
 // A preamble is a SHORT lead-in, not a paragraph of real answer. If the segment
@@ -45,9 +51,12 @@ const MAX_PREAMBLE_LEN = 160;
  */
 export function stripPreamble(body: string): string {
   if (!body) return body;
-  // Find the first horizontal-rule line (`---` possibly with surrounding space),
-  // which is how the model separates its transition note from the real answer.
-  const hrMatch = body.match(/(^|\n)\s*-{3,}\s*(\n|$)/);
+  // Find the first `---` separator the model uses to divide its transition note
+  // from the real answer. Match BOTH a proper HR line (`\n---\n`) AND an inline
+  // `---` with no surrounding newlines (observed: "…答案了。---这个项目…") — the
+  // model sometimes emits the separator without line breaks. Over-stripping is
+  // guarded downstream: we only act when the head is a SHORT recognized preamble.
+  const hrMatch = body.match(/(^|\n)\s*-{3,}\s*(\n|$)/) ?? body.match(/-{3,}/);
   if (!hrMatch || hrMatch.index === undefined) return body;
   const splitAt = hrMatch.index + hrMatch[0].length;
   const head = body.slice(0, hrMatch.index).trim();
