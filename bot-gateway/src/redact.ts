@@ -6,6 +6,8 @@
  * safety net on top of the agent's system-prompt instruction — defense in depth.
  */
 
+import { stripToolCallLeak } from "./strip-toolcall-leak";
+
 const REDACTED = "[已隐藏]";
 
 const PATTERNS: Array<[RegExp, string | ((...args: string[]) => string)]> = [
@@ -125,7 +127,17 @@ export function redactSensitive(text: string): string {
  * leak than via the answer.
  */
 export function redactSteps(steps: string[]): string[] {
-  return steps.map(redactSensitive);
+  // Strip leaked tool-call markup FIRST: on the MCP-init-race the model writes
+  // <invoke>/<function_calls> XML into its NARRATION text, which lands in `steps`
+  // and renders raw in the 分析过程 panel (the body/evidence get stripped elsewhere,
+  // but the panel did not — observed live). Strip per step, then redact secrets, and
+  // drop any step that was PURE markup (empty after stripping) so the panel shows
+  // only real narration.
+  return steps
+    .map(stripToolCallLeak)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0)
+    .map(redactSensitive);
 }
 
 /**

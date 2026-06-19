@@ -255,9 +255,32 @@ describe("redactSteps", () => {
     expect(out[2]).not.toContain("Xj3kLmN0pQrStUvWxYz12345678");
   });
 
-  it("returns a same-length array (1:1 mapping)", () => {
-    expect(redactSteps(["a", "b", "c"]).length).toBe(3);
+  it("keeps benign steps 1:1 (no markup → no drop)", () => {
+    expect(redactSteps(["先定位函数", "读取配置", "得出结论"]).length).toBe(3);
     expect(redactSteps([])).toEqual([]);
+  });
+
+  // REGRESSION (observed live on a sonnet card): the MCP-init-race makes the model
+  // write <invoke> tool-call XML into its NARRATION, which landed RAW in the 分析过程
+  // panel (body/evidence were stripped, steps were not).
+  it("strips leaked tool-call markup from a step, keeping the real narration", () => {
+    const steps = [
+      "先找一下怪物相关的配置表和数值设定逻辑。<function_calls>\n<invoke name=\"codegraph_search_files\">\n<parameter name=\"pattern\">monster</parameter>\n</invoke>\n</function_calls>",
+    ];
+    const out = redactSteps(steps);
+    expect(out).toHaveLength(1);
+    expect(out[0]).toBe("先找一下怪物相关的配置表和数值设定逻辑。");
+    expect(out[0]).not.toContain("invoke");
+    expect(out[0]).not.toContain("function_calls");
+  });
+
+  it("drops a step that is PURE tool-call markup (nothing real left)", () => {
+    const steps = [
+      "真正的分析narration。",
+      "<function_calls>\n<invoke name=\"codegraph_glob_files\">\n<parameter name=\"pattern\">**/*.cs</parameter>\n</invoke>\n</function_calls>",
+    ];
+    const out = redactSteps(steps);
+    expect(out).toEqual(["真正的分析narration。"]); // pure-markup step removed
   });
 });
 
