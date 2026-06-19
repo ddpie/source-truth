@@ -37,8 +37,10 @@ export class CardWriter {
 
   /** startSeq is the last sequence already consumed before this writer takes
    *  over (e.g. the queued-card "排队中" header used seq 1); the first write gets
-   *  startSeq + 1. */
-  constructor(startSeq = 0) {
+   *  startSeq + 1. onError (optional) is invoked with any swallowed write/coalesce
+   *  error so a dropped card op (esp. a failed FINALIZE after retries) is
+   *  diagnosable — the chain still stays alive (best-effort), this only observes. */
+  constructor(startSeq = 0, private readonly onError?: (label: string, err: unknown) => void) {
     this.seq = startSeq;
   }
 
@@ -54,8 +56,9 @@ export class CardWriter {
       const seq = ++this.seq;
       try {
         await fn(seq);
-      } catch {
+      } catch (e) {
         /* best-effort: a dropped card update must never wedge the queue */
+        this.onError?.("write", e);
       }
     });
     this.chain = run.catch(() => undefined);
@@ -82,8 +85,9 @@ export class CardWriter {
       const seq = ++this.seq;
       try {
         await latest(seq);
-      } catch {
+      } catch (e) {
         /* best-effort */
+        this.onError?.(`coalesce:${lane}`, e);
       }
     });
     this.chain = run.catch(() => undefined);

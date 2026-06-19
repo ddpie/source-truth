@@ -87,4 +87,47 @@ describe("feishuApi", () => {
     expect(res.data).toBe("ok");
     expect(apiHits).toBe(2); // first 401, retry succeeded
   });
+
+  it("treats an app-level token-expiry CODE (HTTP 200) like a 401 — refresh + retry", async () => {
+    let apiHits = 0;
+    stubFetch((url) => {
+      if (url.includes("tenant_access_token")) return { json: tokenResponse(`t-${Date.now()}`) };
+      apiHits++;
+      // 99991663 = invalid access token, returned as HTTP 200 body (the common shape).
+      return apiHits === 1 ? { json: { code: 99991663, msg: "invalid token" } } : { json: { code: 0, data: "ok" } };
+    });
+    const res = (await feishuApi("PUT", "/open-apis/x", {})) as { data: string };
+    expect(res.data).toBe("ok");
+    expect(apiHits).toBe(2);
+  });
+
+  it("retries a rate-limit (HTTP 429) with backoff, then succeeds", async () => {
+    let apiHits = 0;
+    stubFetch((url) => {
+      if (url.includes("tenant_access_token")) return { json: tokenResponse() };
+      apiHits++;
+      return apiHits < 3 ? { status: 429, json: { msg: "slow down" } } : { json: { code: 0, data: "ok" } };
+    });
+    const res = (await feishuApi("POST", "/open-apis/x", {})) as { data: string };
+    expect(res.data).toBe("ok");
+    expect(apiHits).toBe(3); // two 429s retried, third succeeded
+  });
+
+  it("retries an app-level throttle CODE then gives up after the cap", async () => {
+    let apiHits = 0;
+    stubFetch((url) => {
+      if (url.includes("tenant_access_token")) return { json: tokenResponse() };
+      apiHits++;
+      return { json: { code: 99991400, msg: "throttled" } }; // always throttled
+    });
+    await expect(feishuApi("POST", "/open-apis/x", {})).rejects.toThrow(/rate-limited/);
+    expect(apiHits).toBe(4); // 1 initial + 3 retries (MAX_RATE_RETRIES)
+  });
+
+  it("does NOT treat an empty/unparseable 2xx body as success", async () => {
+    stubFetch((url) =>
+      url.includes("tenant_access_token") ? { json: tokenResponse() } : { status: 200, json: null },
+    );
+    await expect(feishuApi("PUT", "/open-apis/x", {})).rejects.toThrow(/empty\/unparseable/);
+  });
 });
