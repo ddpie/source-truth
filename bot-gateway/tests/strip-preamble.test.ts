@@ -180,6 +180,16 @@ describe("stripPreamble", () => {
     expect(stripPreamble(body)).toBe(body);
   });
 
+  it("strips the 7th E2E case: '…数值都已读到，来整理成完整对比表。' running into a table (no separator)", () => {
+    const body = "所有武器的伤害区间数值都已读到，来整理成完整对比表。各武器的基础伤害如下：";
+    expect(stripPreamble(body)).toBe("各武器的基础伤害如下：");
+  });
+
+  it("does NOT over-strip a real answer mentioning 读到 mid-sentence with a table", () => {
+    const body = "所有武器的伤害都写在配置表里，可以逐项调整。\n详见下表。";
+    expect(stripPreamble(body)).toBe(body);
+  });
+
   it("does NOT match a --- adjacent to a table pipe as the cut point", () => {
     const body = "整理一下答案如下：\n| A | B |\n| --- | --- |\n| 1 | 2 |";
     // The head '整理一下答案如下' is a preamble-ish prefix, but the only `---` is in a
