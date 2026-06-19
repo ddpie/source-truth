@@ -67,6 +67,11 @@ WRITE_EXEC_TOOLS: tuple[str, ...] = (
     "NotebookEdit",
     "WebFetch",
     "WebSearch",
+    # Task = subagent spawn. tools=[] + dontAsk already make it unreachable, but if a
+    # future SDK preset re-introduced built-ins, a live Task could spawn a subagent
+    # that inherits a DIFFERENT/looser tool set — blocklist it so the read-only
+    # boundary can't be re-opened transitively (cross-review, defense-in-depth).
+    "Task",
     "Grep",
     # Read/Glob/LS blocklisted too: not for safety but to GUARANTEE the agent never
     # tries a filesystem read on a microVM that has NO mount (EFS removed). All file
@@ -105,6 +110,12 @@ CODEGRAPH_TOOLS: tuple[str, ...] = (
 # dontAsk rejects the rest". Blocklisting them explicitly is defense-in-depth:
 # the codegraph server exposes these (reindex/index_*/memory_*), and a future
 # allow-list change or preset must not be able to admit a graph mutation.
+# NOTE: this list is NOT an exhaustive enumeration of the ~50 codegraph tools — the
+# AUTHORITATIVE read-only guarantee is server-side: the index-service HTTP bridge
+# (http_bridge.py) is a CLOSED allowlist — it only ``add_tool``-registers 7 read-only
+# tools, so no mutating codegraph tool has an MCP descriptor for the model to name at
+# all. This blocklist names only the highest-risk mutators as a redundant agent-side
+# guard; completeness is intentionally delegated to the bridge's closed allowlist.
 CODEGRAPH_WRITE_TOOLS: tuple[str, ...] = (
     "mcp__codegraph__codegraph_reindex_workspace",
     "mcp__codegraph__codegraph_index_directory",

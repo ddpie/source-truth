@@ -94,7 +94,7 @@ def test_build_options_dict_enforces_readonly_availability():
     # boundary, since unset `tools` loads the full Claude Code preset.
     opts = agent_lib.build_options_dict(system_prompt="x")
     assert opts["tools"] == list(agent_lib.READONLY_TOOLS)
-    for forbidden in ("Bash", "Write", "Edit", "MultiEdit", "NotebookEdit"):
+    for forbidden in ("Bash", "Write", "Edit", "MultiEdit", "NotebookEdit", "Task"):
         assert forbidden not in opts["tools"], f"{forbidden} must not be AVAILABLE"
         assert forbidden in opts["disallowed_tools"], f"{forbidden} must be blocklisted"
     # Headless runtime: deny non-pre-approved calls, never hang on a prompt.
