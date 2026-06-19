@@ -32,6 +32,7 @@ import { removeReaction } from "./reaction";
 import { redactSensitive, redactSteps, redactDeep } from "./redact";
 import { extractFollowUps, stripFollowUps } from "./extract-followups";
 import { splitEvidence } from "./extract-evidence";
+import { stripPreamble } from "./strip-preamble";
 import { handleMessageEvent, type InvokeFn } from "./handle-event";
 import { sdkEventToImEvent } from "./sdk-event";
 import { sendReply } from "./reply";
@@ -465,7 +466,10 @@ async function runStreamingInvoke(
       let display = "正在分析…";
       if (textSoFar.length > 0) {
         const { body } = splitEvidence(stripFollowUps(textSoFar));
-        display = redactSensitive(body.length > 0 ? body : textSoFar);
+        // Drop a planning preamble ("现在我整理答案…" + ---) that leaked into the
+        // conclusion block so the typewriter shows 结论先行 from the first line. Marker-
+        // keyed + conservative: no-op until the preamble's `---` has streamed.
+        display = redactSensitive(stripPreamble(body.length > 0 ? body : textSoFar));
       }
       // Latest-wins lane: each content update carries the FULL text so far, so a
       // queued-but-not-yet-sent frame is stale and is replaced — the typewriter
@@ -554,9 +558,11 @@ async function runStreamingInvoke(
     charts = ex.charts;
     const { body, evidence: ev } = splitEvidence(stripFollowUps(ex.text));
     evidence = ev;
-    // Shape the VISIBLE body: append the incompleteness note AFTER evidence is
+    // Drop a planning preamble ("现在我整理答案…" + ---) that the model wrote into
+    // the conclusion block, so the finalized body leads with the answer (结论先行).
+    // Then shape the VISIBLE body: append the incompleteness note AFTER evidence is
     // split off, so the note isn't hidden inside the collapsed panel.
-    bodyNoEvidence = shapeBody(body, { turnCapped, aborted, timedOut });
+    bodyNoEvidence = shapeBody(stripPreamble(body), { turnCapped, aborted, timedOut });
   }
   const finalText = redactSensitive(bodyNoEvidence);
   const finalEvidence = redactSensitive(evidence);
