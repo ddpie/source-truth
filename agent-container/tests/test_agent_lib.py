@@ -433,6 +433,50 @@ def test_run_agent_retries_once_on_mcp_init_race():
         "failed-attempt narration must be discarded, not yielded"
 
 
+def test_run_agent_retries_once_on_thrown_cold_start_exception():
+    # Attempt 1 RAISES before any output (the contradictory CLI error
+    # "Claude Code returned an error result: success" on a cold microVM). This
+    # escapes _is_leak_shape (it's a raised exception, not a message), so the retry
+    # must be driven by the n==0 thrown-exception path. Attempt 2 succeeds.
+    calls = {"n": 0}
+
+    async def fake_query(prompt, options):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("Claude Code returned an error result: success")
+            yield  # pragma: no cover - makes this an async generator
+        yield _MsgWith([_ToolUseBlock("t1", "codegraph_search_files")])
+        yield _MsgWith([_TextBlock("耐力影响负重和疲劳。")])
+        yield _ResultMsg(num_turns=3)
+
+    msgs = _collect(agent_lib.run_agent({"prompt": "耐力的作用"}, query_fn=fake_query))
+    assert calls["n"] == 2, "a thrown cold-start exception before any output must retry once"
+    texts = []
+    for m in msgs:
+        for b in getattr(m, "content", []) or []:
+            tx = getattr(b, "text", None)
+            if isinstance(tx, str):
+                texts.append(tx)
+    assert any(s.startswith("耐力影响") for s in texts), "retry's real answer must be yielded"
+
+
+def test_run_agent_does_not_retry_thrown_exception_after_output():
+    # If attempt 1 already yielded real content THEN raised, we must NOT retry
+    # (would duplicate streamed content) — the exception propagates.
+    calls = {"n": 0}
+
+    async def fake_query(prompt, options):
+        calls["n"] += 1
+        yield _MsgWith([_ToolUseBlock("t1", "codegraph_search_files")])
+        yield _MsgWith([_TextBlock("部分答案……")])
+        raise RuntimeError("mid-stream blow up")
+
+    import pytest
+    with pytest.raises(RuntimeError):
+        _collect(agent_lib.run_agent({"prompt": "x"}, query_fn=fake_query))
+    assert calls["n"] == 1, "must NOT retry once real content was already streamed"
+
+
 def test_run_agent_does_not_retry_on_healthy_run():
     # A healthy run (real tool_use, multi-turn) must NOT trigger a retry.
     calls = {"n": 0}
