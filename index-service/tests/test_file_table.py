@@ -121,3 +121,46 @@ def test_to_json_valid(repo):
     s = file_table.read_table_to_json("Config/items.csv", local_root=str(repo), mount_root=MOUNT)
     d = json.loads(s)
     assert d["kind"] == "csv" and "content" in d
+
+
+# --- DoS guards: on-disk size + zip-bomb inflate ---------------------------
+def test_oversize_file_rejected_before_parse(repo, monkeypatch):
+    # A file over MAX_FILE_BYTES must be refused BEFORE any parser runs (cheap DoS
+    # guard). Shrink the cap rather than write GBs.
+    monkeypatch.setattr(file_table, "MAX_FILE_BYTES", 64)
+    (repo / "Config" / "huge.csv").write_text("a,b\n" + ("x,y\n" * 1000), encoding="utf-8")
+    with pytest.raises(ValueError, match="read_table limit"):
+        file_table.read_table("Config/huge.csv", local_root=str(repo), mount_root=MOUNT)
+
+
+def test_zip_inflate_guard_rejects_bomb(repo, monkeypatch):
+    # An .xlsx whose declared-uncompressed sizes exceed MAX_UNCOMPRESSED_BYTES must be
+    # rejected from the central-directory sizes WITHOUT decompressing. Build a real
+    # workbook, then lower the inflate ceiling below its uncompressed footprint.
+    openpyxl = pytest.importorskip("openpyxl")
+    p = repo / "Config" / "bomb.xlsx"
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    for i in range(200):
+        ws.append([f"cell-{i}-{j}" for j in range(20)])
+    wb.save(str(p))
+    monkeypatch.setattr(file_table, "MAX_UNCOMPRESSED_BYTES", 128)  # below the real inflate size
+    with pytest.raises(ValueError, match="zip-bomb"):
+        file_table.read_table("Config/bomb.xlsx", local_root=str(repo), mount_root=MOUNT)
+
+
+def test_corrupt_xlsx_raises_clean_error(repo):
+    # A file with an .xlsx extension that is NOT a valid zip must fail with a clean,
+    # actionable ValueError (not an opaque traceback).
+    pytest.importorskip("openpyxl")
+    (repo / "Config" / "fake.xlsx").write_bytes(b"this is not a zip at all")
+    with pytest.raises(ValueError, match="not a valid .xlsx|corrupt"):
+        file_table.read_table("Config/fake.xlsx", local_root=str(repo), mount_root=MOUNT)
+
+
+def test_legacy_xls_explicitly_unsupported(repo):
+    # The legacy binary .xls is NOT in EXCEL_EXT; the error must say so (openpyxl can't
+    # read it) rather than misadvertise support.
+    (repo / "Config" / "old.xls").write_bytes(b"\xd0\xcf\x11\xe0")  # OLE2 magic
+    with pytest.raises(ValueError, match="does not handle"):
+        file_table.read_table("Config/old.xls", local_root=str(repo), mount_root=MOUNT)
