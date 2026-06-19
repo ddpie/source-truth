@@ -403,8 +403,15 @@ async def run_agent(
 
 
 # Matches the tool-call markup the model emits as TEXT when MCP tools aren't
-# registered — Claude serializes with an `antml:` namespace prefix, so tolerate it.
-_TOOLCALL_MARKUP_RE = re.compile(r"<(?:antml:)?invoke\b|(?:antml:)?function_calls\b", re.IGNORECASE)
+# registered. Two observed shapes:
+#   - Opus/Sonnet: <invoke ...> / <function_calls> (with an optional antml: prefix)
+#   - Haiku 4.5:   <attempt_{toolname}> ... </attempt_{toolname}>  (a DIFFERENT shape)
+# Both mean "model tried to call a tool but it wasn't registered" → the cold-start
+# MCP-init race. Detecting both is required or haiku leaks slip the retry + strip.
+_TOOLCALL_MARKUP_RE = re.compile(
+    r"<(?:antml:)?invoke\b|(?:antml:)?function_calls\b|<attempt_[a-zA-Z0-9_]+\b",
+    re.IGNORECASE,
+)
 
 
 def _message_has_tool_use(message: Any) -> bool:

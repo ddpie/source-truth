@@ -72,6 +72,43 @@ describe("stripToolCallLeak — antml: prefix (dominant real Claude shape)", () 
   });
 });
 
+describe("stripToolCallLeak — haiku <attempt_tool> shape", () => {
+  it("strips a haiku <attempt_codegraph_*> tool-call block (real observed shape)", () => {
+    const body = [
+      "先定位负重系统的计算逻辑。",
+      "",
+      "<attempt_codegraph_symbol_search>",
+      '{ "pattern": "负重|weight", "limit": 20 }',
+      "</attempt_codegraph_symbol_search>",
+      "",
+      "负重上限在 FormulaHelper.cs。",
+    ].join("\n");
+    const out = stripToolCallLeak(body);
+    expect(out).not.toContain("attempt_");
+    expect(out).toContain("先定位负重系统的计算逻辑。");
+    expect(out).toContain("负重上限在 FormulaHelper.cs。");
+  });
+
+  it("strips multiple jammed attempt blocks and an orphan open", () => {
+    const body = '查一下。\n<attempt_codegraph_search_files>\n{"pattern":"x"}\n</attempt_codegraph_search_files>\n<attempt_codegraph_glob_files>';
+    const out = stripToolCallLeak(body);
+    expect(out).not.toContain("attempt_");
+    expect(out).toContain("查一下。");
+  });
+
+  it("does not touch prose mentioning the word attempt normally", () => {
+    const body = "这是第一次 attempt 调用失败后的重试逻辑说明。";
+    expect(stripToolCallLeak(body)).toBe(body); // no <attempt_ tag → untouched
+  });
+
+  it("flags a haiku attempt-dominant body via isToolCallLeakDominant", () => {
+    const blocks = Array.from({ length: 5 }, (_v, i) =>
+      `<attempt_codegraph_search_files>\n{"pattern":"q${i}"}\n</attempt_codegraph_search_files>`,
+    ).join("\n");
+    expect(isToolCallLeakDominant("先查。\n" + blocks)).toBe(true);
+  });
+});
+
 describe("isToolCallLeakDominant", () => {
   it("is TRUE when the body is mostly tool-call markup (bare)", () => {
     const blocks = Array.from({ length: 8 }, () =>
