@@ -34,16 +34,38 @@ R() { aws route53 "$@"; }  # route53 is global; no --region
 ZONE_ID="$(aws route53 list-hosted-zones-by-vpc --vpc-id "$VPC_ID" --vpc-region "$REGION" \
   --query "HostedZoneSummaries[?Name=='${ZONE_NAME}.'].HostedZoneId | [0]" --output text 2>/dev/null || echo "")"
 if [[ -z "$ZONE_ID" || "$ZONE_ID" == "None" ]]; then
-  say info "creating private hosted zone $ZONE_NAME for $VPC_ID" >&2
-  # CallerReference must be unique per create; a timestamp-free stable string would
-  # collide on retry, so use the VPC id + a fixed suffix (retry-safe: if the zone
-  # already exists for this VPC the list above would have found it; a genuine
-  # duplicate create is blocked by the find-first logic).
-  ZONE_ID="$(R create-hosted-zone --name "$ZONE_NAME" \
-    --vpc "VPCRegion=${REGION},VPCId=${VPC_ID}" \
-    --hosted-zone-config "Comment=source-truth index-service stable endpoint,PrivateZone=true" \
-    --caller-reference "source-truth-${VPC_ID}" \
-    --query 'HostedZone.Id' --output text 2>/dev/null)"
+  # list-hosted-zones-by-vpc only returns zones ALREADY associated with this VPC. A
+  # zone may EXIST (same name) but not be associated — e.g. a partial prior run that
+  # created the zone then failed before/at association, or a later disassociation.
+  # In that case create-hosted-zone with our stable CallerReference would fail with
+  # HostedZoneAlreadyExists and (under set -e, stderr eaten) abort the deploy with no
+  # message. So first look up the zone BY NAME; if it exists, ASSOCIATE this VPC
+  # (idempotent) instead of creating. Only create when truly absent.
+  EXISTING="$(R list-hosted-zones --query "HostedZones[?Name=='${ZONE_NAME}.' && Config.PrivateZone].Id | [0]" --output text 2>/dev/null || echo "")"
+  if [[ -n "$EXISTING" && "$EXISTING" != "None" ]]; then
+    ZONE_ID="${EXISTING##*/}"
+    say info "private zone $ZONE_NAME exists ($ZONE_ID) but not associated with $VPC_ID; associating" >&2
+    # Idempotent: a ConflictingDomainExists / already-associated error is benign.
+    assoc_err="$(R associate-vpc-with-hosted-zone --hosted-zone-id "$ZONE_ID" \
+      --vpc "VPCRegion=${REGION},VPCId=${VPC_ID}" 2>&1 >/dev/null)" || {
+      case "$assoc_err" in
+        *ConflictingDomainExists*|*already*associated*|*HasVPCAssociation*) : ;;
+        *) say err "failed to associate zone $ZONE_ID with $VPC_ID: $assoc_err"; exit 1 ;;
+      esac
+    }
+  else
+    say info "creating private hosted zone $ZONE_NAME for $VPC_ID" >&2
+    # CallerReference stable per VPC. Surface errors (don't 2>/dev/null-swallow) so a
+    # genuine failure is actionable instead of a silent set -e abort.
+    create_out="$(R create-hosted-zone --name "$ZONE_NAME" \
+      --vpc "VPCRegion=${REGION},VPCId=${VPC_ID}" \
+      --hosted-zone-config "Comment=source-truth index-service stable endpoint,PrivateZone=true" \
+      --caller-reference "source-truth-${VPC_ID}" \
+      --query 'HostedZone.Id' --output text 2>&1)" || {
+      say err "create-hosted-zone failed: $create_out"; exit 1
+    }
+    ZONE_ID="$create_out"
+  fi
 fi
 # Normalize the zone id (Route53 returns "/hostedzone/ZXXXX").
 ZONE_ID="${ZONE_ID##*/}"

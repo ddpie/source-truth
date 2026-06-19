@@ -15,9 +15,17 @@ by_name() { Q describe-"$1" --filters "Name=tag:Name,Values=$2" --query "${3}[0]
 VPC_ID="$(by_name vpcs source-truth-vpc Vpcs VpcId)"
 if [[ "$VPC_ID" == "None" || -z "$VPC_ID" ]]; then
   VPC_ID="$(Q create-vpc --cidr-block "$CIDR" --query Vpc.VpcId --output text)"
-  Q modify-vpc-attribute --vpc-id "$VPC_ID" --enable-dns-hostnames >/dev/null
   tag "$VPC_ID" source-truth-vpc
 fi
+# Reconcile BOTH DNS attributes EVERY run (not just on create): the index-service
+# stable endpoint (index.source-truth.internal, a Route53 private hosted zone) only
+# resolves inside the VPC when enableDnsSupport=true (drives the .2 resolver) AND
+# enableDnsHostnames=true. create-vpc defaults support=true, but a REUSED/externally
+# created VPC tagged source-truth-vpc could have it off → the agent runtime would get
+# NXDOMAIN on CODEGRAPH_MCP_URL → empty codegraph results on EVERY question. Setting
+# both unconditionally is idempotent and closes that silent foot-gun.
+Q modify-vpc-attribute --vpc-id "$VPC_ID" --enable-dns-support >/dev/null
+Q modify-vpc-attribute --vpc-id "$VPC_ID" --enable-dns-hostnames >/dev/null
 AZ="$(Q describe-availability-zones --query 'AvailabilityZones[0].ZoneName' --output text)"
 
 ensure_subnet() { # name cidr public
