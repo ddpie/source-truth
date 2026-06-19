@@ -109,8 +109,11 @@ export function redactSensitive(text: string): string {
   // rotated secret is picked up without restart.
   const appSecret = process.env.FEISHU_APP_SECRET;
   if (appSecret && appSecret.length >= 12) out = out.split(appSecret).join(REDACTED);
-  // Strip the internal EFS mount prefix; keep the meaningful relative path so
-  // code citations (file:line) still work, just without exposing /mnt/repo.
+  // Strip a legacy /mnt/repo/ prefix to its repo-relative form. Paths are now
+  // returned repo-relative by the index-service (no mount), so this is a
+  // back-compat safety net: it still scrubs the prefix if it ever appears (e.g.
+  // a path embedded in the indexed code's own content, or a stale cached answer),
+  // keeping code citations (file:line) intact without exposing an internal path.
   out = out.replace(/\/mnt\/repo\//g, "");
   return out;
 }

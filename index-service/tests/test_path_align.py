@@ -26,11 +26,44 @@ if str(SVC_DIR) not in sys.path:
 
 import path_align  # noqa: E402
 
-INDEX_ROOT = "/mnt/efs/repo"  # EFS worktree path (index-service writable mount)
-MOUNT = "/mnt/repo"
+INDEX_ROOT = "/data/repo/code-5x"  # index-service-side local repo copy
+MOUNT = "/mnt/repo"                 # legacy mount namespace (back-compat coverage)
 
 
-# --- Real codegraph-server output formats (empirically verified) ------------
+# --- Repo-relative output (the default post-EFS-removal: no agent mount) -----
+def test_default_is_repo_relative():
+    # mount_root defaults to "" → the agent sees plain repo-relative paths.
+    got = path_align.to_container_path("a/b.cs", index_root=INDEX_ROOT)
+    assert got == "a/b.cs"
+
+
+def test_repo_relative_strips_absolute_index_root():
+    got = path_align.to_container_path(f"{INDEX_ROOT}/index-service/path_align.py", index_root=INDEX_ROOT)
+    assert got == "index-service/path_align.py"
+
+
+def test_repo_relative_dot_slash_form():
+    got = path_align.to_container_path("./Assets/Foo.cs", index_root=INDEX_ROOT)
+    assert got == "Assets/Foo.cs"
+
+
+def test_repo_relative_bare_dot_returns_dot():
+    assert path_align.to_container_path(".", index_root=INDEX_ROOT) == "."
+
+
+def test_repo_relative_rejects_escape():
+    with pytest.raises(ValueError):
+        path_align.to_container_path("/etc/passwd", index_root=INDEX_ROOT)
+    with pytest.raises(ValueError):
+        path_align.to_container_path("../../etc/passwd", index_root=INDEX_ROOT)
+
+
+def test_format_location_repo_relative():
+    location = {"file": "./agent-container/agent.py", "line": 21}
+    assert path_align.format_location(location, index_root=INDEX_ROOT) == "agent-container/agent.py:21"
+
+
+# --- Legacy /mnt/repo mount namespace (still supported via explicit mount_root) -
 def test_dot_slash_relative_path_rewritten_to_mount():
     # codegraph-server started with --workspace "." returns this exact form.
     got = path_align.to_container_path(
@@ -65,11 +98,6 @@ def test_relative_path_prepended_with_mount():
 def test_already_under_mount_is_idempotent():
     p = f"{MOUNT}/Assets/Bar.cs"
     assert path_align.to_container_path(p, index_root=INDEX_ROOT, mount_root=MOUNT) == p
-
-
-def test_default_mount_root_is_mnt_repo():
-    got = path_align.to_container_path("a/b.cs", index_root=INDEX_ROOT)
-    assert got == "/mnt/repo/a/b.cs"
 
 
 def test_normalizes_redundant_segments():

@@ -161,7 +161,9 @@ Environment=HOME=$INDEX_HOME
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
 Environment=CODEGRAPH_MAX_FILES=$MAX_FILES
 WorkingDirectory=$APP
-ExecStart=/usr/bin/python3 -m http_bridge --workspace $WORKSPACE --host 0.0.0.0 --port 8080 --mount-root /mnt/repo/$REPO_SUBDIR --local-workspace $LOCAL_WORKSPACE
+# No --mount-root: the agent has no filesystem mount, so paths are returned
+# REPO-RELATIVE (e.g. Assets/Foo.cs), which is the honest representation.
+ExecStart=/usr/bin/python3 -m http_bridge --workspace $WORKSPACE --host 0.0.0.0 --port 8080 --mount-root "" --local-workspace $LOCAL_WORKSPACE
 Restart=always
 RestartSec=5
 [Install]
