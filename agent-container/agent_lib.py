@@ -509,7 +509,18 @@ def _message_has_tool_use(message: Any) -> bool:
 def _message_text_has_toolcall_markup(message: Any) -> bool:
     """True if the message's TEXT content contains tool-call markup (the model
     emitting <invoke>/<function_calls> as prose because no tools were registered).
-    Duck-typed over both content-block lists and a bare ``.text`` attribute."""
+    Duck-typed over a content-block list (AssistantMessage) or a bare ``.text``
+    attribute (a TextBlock).
+
+    NOTE: a token-delta ``StreamEvent`` has NEITHER ``.content`` NOR ``.text`` (its
+    fields are uuid/session_id/event/parent_tool_use_id), so leak markup arriving via
+    streaming deltas is NOT seen here — detection relies on the COMPLETE
+    ``AssistantMessage`` the SDK emits at each turn boundary (which carries the full
+    ``.content``). That turn-end message is what `_drive` keys the leak decision off,
+    and the leaked first attempt is buffered (never streamed) until then, so the gap is
+    covered for the cold-start race. If a future SDK ever stops emitting the per-turn
+    AssistantMessage (pure-delta streaming), this detector would go blind — guard that
+    assumption if the SDK contract changes."""
     try:
         content = getattr(message, "content", None)
         blocks = content if isinstance(content, (list, tuple)) else [message]
