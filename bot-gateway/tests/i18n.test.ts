@@ -74,6 +74,32 @@ describe("i18n", () => {
     expect(missingInZh).toEqual([]);
   });
 
+  it("every t(\"...\") key used in src/ exists in the i18n bundle", () => {
+    // REGRESSION GUARD: a newly-added t("card.new.key") whose key was forgotten in
+    // i18n.json renders the raw key (or "") onto a group-visible card and only WARNs
+    // once at runtime — never caught by the zh/en parity test (which only checks the
+    // two bundles agree with each OTHER). Scan src for literal t() keys and assert each
+    // resolves. Only LITERAL keys are checkable (dynamic t(variable) is not used here).
+    const { readdirSync, statSync } = require("fs") as typeof import("fs");
+    const SRC = resolve(__dirname, "..", "src");
+    const j = JSON.parse(readFileSync(I18N_PATH, "utf8")) as Record<string, Record<string, string>>;
+    const zhKeys = new Set(Object.keys(j.zh));
+    const walk = (dir: string): string[] =>
+      readdirSync(dir).flatMap((name) => {
+        const p = resolve(dir, name);
+        return statSync(p).isDirectory() ? walk(p) : p.endsWith(".ts") ? [p] : [];
+      });
+    const T_CALL = /\bt\(\s*"([^"]+)"/g;
+    const missing: string[] = [];
+    for (const file of walk(SRC)) {
+      const text = readFileSync(file, "utf8");
+      for (let m = T_CALL.exec(text); m !== null; m = T_CALL.exec(text)) {
+        if (!zhKeys.has(m[1])) missing.push(`${m[1]} (in ${file.split("/src/")[1]})`);
+      }
+    }
+    expect(missing).toEqual([]);
+  });
+
   // HARDENING: locale is validated against _meta.locales, NOT `locale in parsed`.
   // A stray LOCALE=_meta must NOT select the metadata object as a bundle (which
   // would make every t() miss and leak raw keys); it falls back to zh.
