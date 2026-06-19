@@ -70,7 +70,11 @@ def read_file(
 
     all_lines = text.splitlines()
     start = max(0, offset)
-    end = len(all_lines) if limit is None else min(len(all_lines), start + max(0, limit))
+    # A non-positive limit means "no caller line cap" (treat like None) — NOT "read
+    # zero lines". The old min(..., start + max(0, limit)) made limit<=0 collapse
+    # end→start: it returned an empty slice AND truncated=True on any non-empty file,
+    # so the agent thought the file was cut off and needlessly paged (cross-review).
+    end = len(all_lines) if (limit is None or limit <= 0) else min(len(all_lines), start + limit)
     # Independent line ceiling on top of any caller limit.
     end = min(end, start + MAX_READ_LINES)
     sliced = all_lines[start:end]
@@ -112,6 +116,14 @@ def glob_files(
     if not pattern or not pattern.strip():
         raise ValueError("glob pattern must be non-empty")
     t0 = perf_counter()
+
+    # Normalize separators FIRST, exactly like read_file (which goes through
+    # to_local_path → _normalize_seps). A game repo (Unity/.NET) can carry backslash
+    # paths; without this a pattern like `Config\*.json` stayed a single backslash-laden
+    # literal → glob found 0 files while read_file (normalized) could read the same path
+    # — an inconsistency the agent can't diagnose (cross-review). Backslashes → '/',
+    # leading '//' collapsed.
+    pattern = path_align._normalize_seps(pattern)
 
     # Rebase a (legacy) mount-prefixed pattern to repo-relative, then confine the
     # NON-glob prefix to the repo (a pattern like ../../etc/* must be rejected).
