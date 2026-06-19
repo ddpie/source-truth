@@ -196,4 +196,30 @@ describe("stripPreamble", () => {
     // table separator (pipe-adjacent), so nothing is stripped.
     expect(stripPreamble(body)).toBe(body);
   });
+
+  // REGRESSION (observed live via card read-back): two planning preambles that
+  // ended in a PROCESS-OUTPUT noun/verb (信息 / 整理输出), not 答案/结论, leaked into
+  // the body and violated 结论先行.
+  it("strips '现在我有完整的数据，来整理所有怪物的完整信息。' (ends in 信息, object phrase between)", () => {
+    const body = "现在我有完整的数据，来整理所有怪物的完整信息。\n\n怪物的生命值非常多样。";
+    expect(stripPreamble(body)).toBe("怪物的生命值非常多样。");
+  });
+
+  it("strips '已经掌握全部怪物生命值数据，现在整理输出。' (ends in bare verb 输出)", () => {
+    expect(stripPreamble("已经掌握全部怪物生命值数据，现在整理输出。\n\n各类怪物差别很大。"))
+      .toBe("各类怪物差别很大。");
+    // also without a separating blank line
+    expect(stripPreamble("已经掌握全部怪物生命值数据，现在整理输出。各类怪物差别很大。"))
+      .toBe("各类怪物差别很大。");
+  });
+
+  it("does NOT over-strip real answers that merely begin with 现在/整理/已经", () => {
+    for (const real of [
+      "现在的怪物生命值上限是 210 点，比旧版高很多。",
+      "整理背包的逻辑在 BagSystem.cs 里实现。",
+      "已经实装的怪物有 30 种，数据写死在代码里。",
+    ]) {
+      expect(stripPreamble(real)).toBe(real);
+    }
+  });
 });
