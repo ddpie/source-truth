@@ -85,4 +85,31 @@ describe("stripPreamble", () => {
     const body = "暴击倍率是 1.5 倍（区间 1---10 级），高等级更高。";
     expect(stripPreamble(body)).toBe(body);
   });
+
+  it("strips the 3rd E2E case: readiness preamble as a leading sentence, NO --- separator", () => {
+    // Exact 2026-06-19 reply card: preamble sentence then the answer on the next line.
+    const body =
+      "数值已从代码逐一核实，直接给出对比结论。\n**匕首**的基础伤害每次在 **1～6** 之间随机，平均 **3.5 点**。";
+    const out = stripPreamble(body);
+    expect(out.startsWith("**匕首**")).toBe(true);
+    expect(out).not.toContain("数值已从代码逐一核实");
+  });
+
+  it("strips a leading '可以给出完整答案了。' sentence with no separator", () => {
+    const body = "可以给出完整答案了。\n背包默认 30 格。";
+    expect(stripPreamble(body)).toBe("背包默认 30 格。");
+  });
+
+  it("does NOT truncate a real first sentence that merely starts with a stripped word (no separator)", () => {
+    // "现在的暴击倍率…" starts with 现在 but is the ANSWER. The strict standalone opener
+    // set (used when there's no --- separator) EXCLUDES bare 现在, so this real first
+    // sentence must be fully preserved.
+    const body = "现在的暴击倍率是 1.5 倍，比上个版本高。\n详见配置表。";
+    expect(stripPreamble(body)).toBe(body);
+  });
+
+  it("does NOT strip a normal multi-line answer with no preamble opener (no separator)", () => {
+    const body = "暴击倍率是 1.5 倍。\n不同等级会变化。";
+    expect(stripPreamble(body)).toBe(body);
+  });
 });

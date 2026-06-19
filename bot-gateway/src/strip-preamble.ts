@@ -31,12 +31,32 @@ const PREAMBLE_OPENERS: RegExp[] = [
   /^可以(给出|开始|提供|整理)/, // 可以给出完整答案了
   /^.{0,24}(信息|证据|数据|内容)(都|已)?.{0,6}(齐|足够|够了|拿到|到位|都有了?)/,
   /^.{0,24}都(已|已经)?.{0,8}(读|查|弄|搞|确认)(清楚|清|完|到了?)/,
+  // "X 已核实/取到，(直接)给出结论" — readiness statement that ends by announcing
+  // the answer (observed: "数值已从代码逐一核实，直接给出对比结论。").
+  /^.{0,40}(已|都).{0,8}(核实|确认|取到|读到|查到|拿到|读完|查完).{0,30}(给出|得出|整理|呈现|说明).{0,12}(答案|结论|对比|说明)/,
+  /^.{0,30}(直接|下面|以下就?)给出/,
   // English transitions
   /^now\s+(let me|i'?ll|i\s+have|that)/i,
   /^(i\s+)?(now\s+)?have\s+(enough|all\s+the)\s+(info|information|evidence)/i,
   /^(let me|i'?ll)\s+(now\s+)?(compile|summarize|put together|organize)/i,
   /^based on (the above|my)/i,
   /^(all|the)\s+(key\s+)?(logic|info|information|evidence|details?)\s+(is|are|has been|have been)\s+(read|gathered|confirmed|clear)/i,
+];
+
+// STRICTER subset for strategy 2 (NO separator). Without a `---` signal, an opener
+// must be UNAMBIGUOUSLY about the answer/analysis process — never a phrase that
+// could begin a real answer. E.g. the loose `^现在` (matches "现在的暴击倍率…", a real
+// answer) is EXCLUDED here; only meta-statements like "现在整理答案" / "数值已核实，给出
+// 结论" / "可以给出答案了" qualify. A standalone leading sentence is stripped only if it
+// matches one of these AND the whole sentence is the preamble (ends at 。/！/newline).
+const STANDALONE_PREAMBLE_OPENERS: RegExp[] = [
+  /^(好的?[，,。.\s]*)?(我)?(现在)?(来|开始)?(整理|汇总|总结)(一下)?(答案|结论|回答)/,
+  /^让我(来)?(整理|汇总|总结)/,
+  /^可以(给出|开始|提供|整理)(完整|最终|对比)?(的)?(答案|结论)/,
+  /^.{0,40}(已|都).{0,8}(核实|确认|取到|读到|查到|拿到|读完|查完|读清楚|查清楚|弄清楚).{0,30}(给出|得出|整理|呈现|说明)?.{0,12}(答案|结论|对比|说明)/,
+  /^.{0,30}(直接|下面|以下就?)给出(完整|最终|对比)?(的)?(答案|结论)/,
+  /^(let me|i'?ll)\s+(now\s+)?(compile|summarize|put together|organize)\s+(the\s+)?(answer|findings?|results?)/i,
+  /^(all|the)\s+(key\s+)?(logic|info|information|evidence|details?|values?)\s+(is|are|has been|have been)\s+(read|gathered|confirmed|verified|clear)/i,
 ];
 
 // A preamble is a SHORT lead-in, not a paragraph of real answer. If the segment
@@ -51,21 +71,36 @@ const MAX_PREAMBLE_LEN = 160;
  */
 export function stripPreamble(body: string): string {
   if (!body) return body;
-  // Find the first `---` separator the model uses to divide its transition note
-  // from the real answer. Match BOTH a proper HR line (`\n---\n`) AND an inline
-  // `---` with no surrounding newlines (observed: "…答案了。---这个项目…") — the
-  // model sometimes emits the separator without line breaks. Over-stripping is
-  // guarded downstream: we only act when the head is a SHORT recognized preamble.
+  const looksLikePreamble = (head: string): boolean =>
+    head.length > 0 && head.length <= MAX_PREAMBLE_LEN && PREAMBLE_OPENERS.some((re) => re.test(head));
+
+  // Strategy 1 — preamble + `---` SEPARATOR. The model writes its transition note,
+  // a `---`, then the real answer. Match BOTH a proper HR line (`\n---\n`) AND an
+  // inline `---` (observed: "…答案了。---这个项目…").
   const hrMatch = body.match(/(^|\n)\s*-{3,}\s*(\n|$)/) ?? body.match(/-{3,}/);
-  if (!hrMatch || hrMatch.index === undefined) return body;
-  const splitAt = hrMatch.index + hrMatch[0].length;
-  const head = body.slice(0, hrMatch.index).trim();
-  // Only strip when the head is SHORT and looks like a planning preamble.
-  if (head.length === 0 || head.length > MAX_PREAMBLE_LEN) return body;
-  const opensWithPreamble = PREAMBLE_OPENERS.some((re) => re.test(head));
-  if (!opensWithPreamble) return body;
-  const tail = body.slice(splitAt).trim();
-  // Don't strip into emptiness — if there's no real answer after the separator,
-  // keep the original (better a slightly noisy answer than an empty card).
-  return tail.length > 0 ? tail : body;
+  if (hrMatch && hrMatch.index !== undefined) {
+    const head = body.slice(0, hrMatch.index).trim();
+    if (looksLikePreamble(head)) {
+      const tail = body.slice(hrMatch.index + hrMatch[0].length).trim();
+      if (tail.length > 0) return tail;
+    }
+  }
+
+  // Strategy 2 — preamble as a standalone LEADING SENTENCE, no separator (observed:
+  // "数值已从代码逐一核实，直接给出对比结论。\n**匕首**的基础伤害…"). Only fire when the
+  // FIRST sentence (up to the first 。/！/.\n) is ENTIRELY a recognized preamble and
+  // real content follows — so a real answer whose first sentence merely starts with
+  // a stripped word is never truncated mid-sentence. Conservative by construction:
+  // the whole sentence must match an opener AND be short AND have a real tail.
+  const sentMatch = body.match(/^\s*([^\n。！.!]{1,}[。！!]|[^\n]{1,}\n)/);
+  if (sentMatch) {
+    const firstSentence = sentMatch[0].trim();
+    const tail = body.slice(sentMatch[0].length).trim();
+    const isStandalonePreamble =
+      firstSentence.length > 0 && firstSentence.length <= MAX_PREAMBLE_LEN &&
+      STANDALONE_PREAMBLE_OPENERS.some((re) => re.test(firstSentence));
+    if (tail.length > 0 && isStandalonePreamble) return tail;
+  }
+
+  return body;
 }
