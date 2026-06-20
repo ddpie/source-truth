@@ -63,12 +63,15 @@ function log(obj: Record<string, unknown>): void {
   console.log(JSON.stringify({ ts: new Date().toISOString(), ...obj }));
 }
 
-// A per-request trace id, shown on the card top (in a copyable code block) AND stamped
-// on every log line for that request, so when a user reports a problem the operator
-// pastes the id to grep all related logs. A full UUID with the dashes stripped (32 hex
-// chars) — collision-free even at high concurrency, and a clean token to grep.
+// A per-request trace id, shown on the card top AND stamped on every log line for that
+// request, so when a user reports a problem the operator pastes the id to grep all
+// related logs. Format follows the common community pattern (Stripe-style): a short
+// TYPE PREFIX (`st-` = source-truth) + 12 hex chars. 12 hex = 48 bits (~2.8e14): no
+// realistic collision for a single-bot support id, while staying short enough to read
+// aloud / relay in a support chat (a bare 32-char UUID is collision-proof but unwieldy;
+// 8 chars felt too short). The prefix makes it recognizable as a trace id at a glance.
 function newTraceId(): string {
-  return randomUUID().replace(/-/g, "");
+  return "st-" + randomUUID().replace(/-/g, "").slice(0, 12);
 }
 /** Build a logger that auto-stamps `trace` on every line for one request. The traceId
  *  is spread LAST so it always wins — a logged object that happens to carry its own
