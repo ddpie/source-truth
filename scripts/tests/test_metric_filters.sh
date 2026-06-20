@@ -45,6 +45,22 @@ check "each plan line has required put-metric-filter fields" "$bad"
 printf '%s\n' "$out" | python3 -c 'import json,sys; assert all(json.loads(l)["logGroupName"]=="/source-truth/bot-gateway" for l in sys.stdin if l.strip())'
 check "log group threaded into every plan" $?
 
+# --- the alarm-backing defs render too, and carry the DENSE AnswerFailedTotal counter
+# (no dimensions + defaultValue:0) that AnswerFailedBurst alarms on (closed gap) ---
+ALARM_DEFS="$ROOT/infra/monitoring/queries/metric-filters/alarm-metrics.json"
+aout="$(python3 "$RENDER" "$ALARM_DEFS" "/source-truth/bot-gateway" 2>"$TMP/aerr")"; check "alarm-metrics defs render with rc 0" $?
+printf '%s\n' "$aout" | python3 -c '
+import json,sys
+byname={}
+for l in sys.stdin:
+    if not l.strip(): continue
+    d=json.loads(l); byname[d["filterName"]]=d
+t=byname.get("AnswerFailedTotal"); assert t is not None, "AnswerFailedTotal filter missing"
+mt=t["metricTransformations"][0]
+assert mt.get("defaultValue")==0, "AnswerFailedTotal must be dense (defaultValue:0)"
+assert "dimensions" not in mt, "AnswerFailedTotal must have NO dimensions (else not dense/alarmable)"
+'; check "AnswerFailedTotal is dense (defaultValue:0, no dimensions)" $?
+
 # --- CONTRACT: defaultValue + dimensions together must FAIL loud ---
 cat > "$TMP/bad-both.json" <<'EOF'
 { "metricNamespace": "X/Y", "logGroup": "/x", "metrics": [

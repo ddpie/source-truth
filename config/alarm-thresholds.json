@@ -49,9 +49,8 @@
     },
     {
       "name": "AnswerFailedBurst",
-      "metricName": "AnswerCompleted",
-      "comment": "NOTE: AnswerFailed is dimensioned (by reason) → SPARSE, can't alarm stably. This burst alarm watches the DENSE AnswerCompleted as a proxy floor is wrong; instead we alarm on the dense failure proxy only once a dedicated dense AnswerFailedTotal filter exists. Until then this entry is DISABLED (enabled:false) so apply-alarms skips it — documented gap, not a silent miss.",
-      "enabled": false,
+      "metricName": "AnswerFailedTotal",
+      "comment": "Watches the DENSE AnswerFailedTotal filter (alarm-metrics.json, no dimensions, defaultValue:0) — NOT the sparse dimensioned AnswerFailed (by reason) which sits in INSUFFICIENT_DATA between events. Reason breakdown stays on the a-class dimensioned metric / dashboard; this alarm only needs the total count to judge a burst stably.",
       "statistic": "Sum",
       "periodSeconds": 300,
       "evaluationPeriods": 1,
@@ -60,7 +59,7 @@
       "comparisonOperator": "GreaterThanThreshold",
       "treatMissingData": "notBreaching",
       "severity": "warning",
-      "alarmDescription": "（待 dense AnswerFailedTotal filter）失败突增。"
+      "alarmDescription": "答案失败突增：5 分钟内 answer_failed 超过 5 次。提示后端/索引/模型出现批量故障，按 reason 维度（看板）定位具体原因。"
     },
     {
       "name": "LogPipelineStalled",
