@@ -76,11 +76,16 @@ RT_ID="${AGENT_RUNTIME_ID:-}"
 # leave it billing after reporting "teardown complete" (cross-review P1). Collect every
 # `Instances[].InstanceId` across all reservations + the config ids, dedup, terminate all.
 TAGGED_INSTANCES="$(Q describe-instances --filters "Name=tag:Name,Values=source-truth-index-service" "Name=instance-state-name,Values=pending,running,stopping,stopped" --query 'Reservations[].Instances[].InstanceId' --output text 2>/dev/null || echo "")"
-# space-separated, deduped union of config ids + every tagged id
-ALL_INSTANCES="$(printf '%s\n' ${INDEX_SERVICE_INSTANCE:-} ${INDEX_OLD_INSTANCE:-} $TAGGED_INSTANCES | grep -vE '^(None)?$' | sort -u | tr '\n' ' ')"
-# EC2_ID kept as the "primary" id for the SG/ENI-drain lookups further down (which key
-# off a single instance's SG); the full set is terminated via ALL_INSTANCES above.
-EC2_ID="${INDEX_SERVICE_INSTANCE:-}"; is_set "$EC2_ID" || EC2_ID="$(printf '%s' "$ALL_INSTANCES" | awk '{print $1}')"
+# space-separated, deduped union of config ids + every tagged id. CRITICAL: `|| true`
+# on the pipeline — `grep -v` exits 1 when NOTHING matches (the zero-instances case: EC2
+# already torn down but NAT/EIP/zone still billing), and under `set -euo pipefail` that
+# rc-1 would ABORT teardown right here, BEFORE the plan/confirm/delete phases — i.e. the
+# script would refuse to run in the exact leak scenario it exists to clean up (2nd-pass
+# cross-review P1). The `|| true` makes an empty result a clean empty string.
+ALL_INSTANCES="$( { printf '%s\n' ${INDEX_SERVICE_INSTANCE:-} ${INDEX_OLD_INSTANCE:-} $TAGGED_INSTANCES | grep -vE '^(None)?$' | sort -u | tr '\n' ' '; } || true )"
+# (No separate EC2_ID: the full deduped ALL_INSTANCES set is both displayed in the plan
+# and terminated in the loop below; the SG/ENI-drain later discovers the SG by group-name,
+# not via an instance id, so no single "primary" id is needed.)
 VPC="${VPC_ID:-}"; is_set "$VPC" || VPC="$(by_tag vpcs source-truth-vpc Vpcs VpcId)"
 NAT="${NAT_GATEWAY:-}"; is_set "$NAT" || NAT="$(Q describe-nat-gateways --filter "Name=tag:Name,Values=source-truth-nat" "Name=state,Values=available,pending" --query 'NatGateways[0].NatGatewayId' --output text 2>/dev/null || echo "")"
 ZONE_ID="${INDEX_DNS_ZONE_ID:-}"
@@ -159,7 +164,18 @@ done
 # `source-truth.internal` PRIVATE zone in the same account is implausible and still only
 # deletes a zone matching THIS project's name.)
 is_set "$ZONE_ID" || { is_set "$VPC" && ZONE_ID="$(aws route53 list-hosted-zones-by-vpc --vpc-id "$VPC" --vpc-region "$REGION" --query "HostedZoneSummaries[?Name=='source-truth.internal.'].HostedZoneId | [0]" --output text 2>/dev/null || echo "")"; }
-is_set "$ZONE_ID" || ZONE_ID="$(aws route53 list-hosted-zones --query "HostedZones[?Name=='source-truth.internal.' && Config.PrivateZone].Id | [0]" --output text 2>/dev/null | sed 's#/hostedzone/##' || echo "")"
+if ! is_set "$ZONE_ID"; then
+  # Name fallback, but REGION-SCOPED: source-truth.internal is account-global, so a
+  # multi-region/same-account setup could have several. Only adopt a candidate whose VPC
+  # associations include one in THIS region — otherwise `teardown --region A` could delete
+  # region B's still-live zone (2nd-pass cross-review P2). Walk each same-named private
+  # zone and check its GetHostedZone VPCs for a match on $REGION.
+  for cand in $(aws route53 list-hosted-zones --query "HostedZones[?Name=='source-truth.internal.' && Config.PrivateZone].Id" --output text 2>/dev/null | sed 's#/hostedzone/##'); do
+    if aws route53 get-hosted-zone --id "$cand" --query 'VPCs[].VPCRegion' --output text 2>/dev/null | grep -qw "$REGION"; then
+      ZONE_ID="$cand"; break
+    fi
+  done
+fi
 if is_set "$ZONE_ID"; then
   # Delete every non-SOA/NS record set, then the zone (Route53 refuses a non-empty zone).
   recs="$(aws route53 list-resource-record-sets --hosted-zone-id "$ZONE_ID" --query "ResourceRecordSets[?Type!='SOA' && Type!='NS']" --output json 2>/dev/null || echo "[]")"
