@@ -933,6 +933,10 @@ async function runStreamingInvoke(
       && /\b(?:mcp__)?codegraph_[a-z_]+\b|^\s*\**tool[ _]call\b/im.test(bodyNoEvidence + "\n" + evidence);
     if (isToolCallLeakDominant(bodyNoEvidence + "\n" + evidence) || zeroToolLeak) {
       log({ event: "toolcall_leak_dominant", card: cardId, chars: bodyNoEvidence.length, zeroToolLeak });
+      // CARD HEALTH (diagnostic, traceId-keyed): a cold-start tool-call leak dominated the
+      // turn — user-visible bad card, alarm-worthy. Reuses THIS existing detection point
+      // (no new detection logic, plan stage 3).
+      emitMetric("card_health", { kind: "toolcall_leak_detected" }, { traceId, sessionId });
       bodyNoEvidence = t("msg.fail.toolcallLeak");
       charts = []; evidence = ""; leakFailed = true;
     } else {
@@ -1125,6 +1129,9 @@ async function runStreamingInvoke(
     // we must not throw out of the emergency path. closeStreaming is attempted too
     // in case finalizeCard's PUT itself fails (so streaming_mode is cleared either way).
     tlog({ event: "finalize_error", card: cardId, error: redactSensitive(String(finalizeErr)).slice(0, 300) });
+    // CARD HEALTH (diagnostic): finalize threw — the card would freeze without the
+    // emergency force-finalize below; this is the highest-severity bad-card signal, alarm it.
+    emitMetric("card_health", { kind: "finalize_failed" }, { traceId, sessionId });
     try { writer.dropLanes("status", "content", "evidence"); } catch { /* best-effort */ }
     await writer.write((seq) =>
       finalizeCard(cardId, t("msg.serviceError"), [], seq, isFollowUp, false, true, "", question, "", false, false, false, traceId),
@@ -1341,6 +1348,11 @@ async function main(): Promise<void> {
         const cbTtlMs = realIdemKey ? undefined : 90_000;
         if (isDuplicate(`cb:${cbId}`, cbTtlMs)) {
           log({ event: "callback_duplicate", action: value?.action ?? "", keyed: realIdemKey ? "idem" : "composite" });
+          // CARD HEALTH (infra counter): a re-delivered button callback was caught by the
+          // cb: dedup (prevented a double-answer/double-action). No traceId/hashUserId here —
+          // a dropped duplicate has no invoke + no user-aggregation meaning; it's pure infra
+          // health (reuses this existing detection point, plan stage 3).
+          emitMetric("card_health", { kind: "dedup_hit" });
           return {};
         }
         if (value?.action === "stop") {
