@@ -41,6 +41,9 @@ export type FeedbackReasonCode =
   | "no_evidence"
   | "off_topic"
   | "outdated"
+  | "too_slow"
+  | "hard_to_understand"
+  | "too_shallow"
   | "other";
 
 // A CardKit streaming-architecture health event (the user directly sees a bad card).
@@ -56,7 +59,8 @@ const FAIL_REASONS: ReadonlySet<string> = new Set<FailReason>([
   "upstream_throttle", "encoding_error", "unknown",
 ]);
 const FEEDBACK_REASON_CODES: ReadonlySet<string> = new Set<FeedbackReasonCode>([
-  "inaccurate", "no_evidence", "off_topic", "outdated", "other",
+  "inaccurate", "no_evidence", "off_topic", "outdated",
+  "too_slow", "hard_to_understand", "too_shallow", "other",
 ]);
 const CARD_HEALTH_KINDS: ReadonlySet<string> = new Set<CardHealthKind>([
   "toolcall_leak_detected", "finalize_failed", "heartbeat_stall", "dedup_hit", "idempotent_resend",

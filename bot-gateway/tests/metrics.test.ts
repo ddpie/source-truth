@@ -76,6 +76,14 @@ describe("emitMetric — enum whitelist (no free-text / PII leak)", () => {
     expect(records[1].kind).toBe("toolcall_leak_detected");
   });
 
+  it("accepts the new non-technical-audience reason codes (too_slow / hard_to_understand / too_shallow)", () => {
+    for (const code of ["too_slow", "hard_to_understand", "too_shallow"]) {
+      records = [];
+      emitMetric("feedback_reason", { reasonCode: code }, { hashUserId: "u_1" });
+      expect(records[0].reasonCode).toBe(code);   // whitelisted, not dropped to "other"
+    }
+  });
+
   it("accepts all wired card_health kinds (leak/finalize/dedup); dedup_hit is keyless infra", () => {
     emitMetric("card_health", { kind: "finalize_failed" }, { traceId: "st-2" });
     expect(records[0].kind).toBe("finalize_failed");
