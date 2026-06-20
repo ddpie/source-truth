@@ -645,7 +645,10 @@ async function runStreamingInvoke(
         // evidence off first confines each extractor to its own partition.
         const split = splitEvidence(textSoFar);
         const body = stripFollowUps(split.body);
-        liveEvidence = split.evidence;
+        // Strip the followup trailer from evidence too (it often follows 供研发复核 in
+        // the model output) so the live dev-review panel never shows it — mirrors the
+        // finalize path; the real buttons render separately.
+        liveEvidence = stripFollowUps(split.evidence);
         // Drop a planning preamble ("现在我整理答案…" + ---) that leaked into the
         // conclusion block so the typewriter shows 结论先行 from the first line. Marker-
         // keyed + conservative: no-op until the preamble's `---` has streamed.
@@ -806,7 +809,12 @@ async function runStreamingInvoke(
     // 供研发复核 (stripFollowUps' greedy tail-eat). Confine each extractor to its partition.
     const split = splitEvidence(ex.text);
     const body = stripFollowUps(split.body);
-    const ev = split.evidence;
+    // Strip the "💡 你可能还想问" trailer from the EVIDENCE partition too. The model
+    // commonly emits it AFTER 供研发复核 (供研发复核 … --- 💡 你可能还想问 …), so it lands
+    // in split.evidence and gets folded INTO the dev-review panel — redundant noise,
+    // since the real follow-up BUTTONS render separately below (user-reported). Strip
+    // it from both partitions; the buttons still come from extractFollowUps(answer).
+    const ev = stripFollowUps(split.evidence);
     evidence = ev;
     // Drop a planning preamble ("现在我整理答案…" + ---) that the model wrote into
     // the conclusion block, so the finalized body leads with the answer (结论先行).

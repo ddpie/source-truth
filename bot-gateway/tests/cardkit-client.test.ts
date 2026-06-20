@@ -240,6 +240,14 @@ describe("follow-up buttons (clickable, with element_id)", () => {
     const md = els.filter((e) => (e as { tag: string }).tag === "markdown") as Array<{ content: string }>;
     expect(md.every((m) => !m.content.includes("回复本条消息"))).toBe(true);
   });
+
+  it("shows a 'not listed? reply directly' hint AFTER the follow-up buttons (user-requested)", () => {
+    // The buttons are only suggestions — guide the user they can ask anything else by
+    // replying to the card directly.
+    const els = buildFollowUpElements(["Q1", "Q2"]);
+    const md = els.filter((e) => (e as { tag: string }).tag === "markdown") as Array<{ content: string }>;
+    expect(md.some((m) => m.content.includes("直接回复本条消息"))).toBe(true);
+  });
 });
 
 describe("buildClickedButton", () => {

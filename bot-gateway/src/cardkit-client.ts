@@ -481,6 +481,9 @@ export function buildFollowUpElements(followUps: string[], actions: ActionButton
         value: { action: "follow_up", text: q, eid },
       });
     });
+    // After the suggested buttons, guide the user that they can ask ANYTHING not
+    // listed by replying to the card directly (the buttons are just suggestions).
+    elements.push({ tag: "markdown", content: t("card.footer.followup.replyHintWithButtons") });
   } else if (actions.length === 0) {
     // No suggested follow-ups AND no action buttons. Tell the user HOW to continue
     // with context: reply to this card. A bare "继续追问即可" was misleading —
