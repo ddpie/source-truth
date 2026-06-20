@@ -114,6 +114,14 @@
       "purpose": "每答工具错误数 (is_error 的 tool_result，已恢复非致命) — 高于 ToolCalls 一定比例=检索抖动/工具入参差"
     },
     {
+      "name": "TurnCount",
+      "event": "answer_completed",
+      "filterPattern": "{ $.metric IS TRUE && $.event = \"answer_completed\" }",
+      "metricValue": "$.turnCount",
+      "unit": "Count",
+      "purpose": "每答 agent 循环轮次 (num_turns) — 与 ToolCalls 一起区分慢答是『少而深的模型轮次』还是『多次工具往返』"
+    },
+    {
       "name": "AnswerFailed",
       "event": "answer_failed",
       "filterPattern": "{ $.metric IS TRUE && $.event = \"answer_failed\" }",
