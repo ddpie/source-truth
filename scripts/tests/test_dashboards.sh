@@ -93,6 +93,15 @@ python3 "$RENDER" "$TMP/empty.json" --region us-east-1 --namespace X/Y >/dev/nul
 sre_out="$(python3 "$RENDER" "$SRE" --region us-east-1 --namespace X/Y)"
 printf '%s' "$sre_out" | grep -q 'p95' && printf '%s' "$sre_out" | grep -q 'p99'; check "SRE keeps p95/p99 extended stats" $?
 
+# --- SRE has the TraceID → Logs-Insights lookup shortcut (text widget, NOT a type:log widget) ---
+printf '%s' "$sre_out" | grep -q 'logs-insights' && printf '%s' "$sre_out" | grep -q 'traceId'
+check "SRE has the TraceID log-lookup shortcut" $?
+# it must be a text widget (cost-free), never type:log (renderer would reject, but assert intent)
+printf '%s' "$sre_out" | python3 -c 'import json,sys; d=json.load(sys.stdin); w=[x for x in d["widgets"] if "logs-insights" in json.dumps(x)]; assert w and all(x["type"]=="text" for x in w), "traceId shortcut must be a text widget"'
+check "TraceID shortcut is a text widget (no live log re-scan)" $?
+# the console link must carry the substituted region (a real deep-link, not a placeholder)
+printf '%s' "$sre_out" | grep -q 'us-east-1.console.aws.amazon.com'; check "TraceID shortcut link has the substituted region" $?
+
 # --- apply wrapper: --dry-run names both dashboards, no AWS ---
 dry="$("$APPLY" --dry-run --region us-east-1 2>&1)"; rc=$?
 check "apply --dry-run exits 0" "$rc"
