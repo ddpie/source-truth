@@ -11,17 +11,17 @@
 # Idempotent: every resource is "describe-or-create". Re-running reconciles.
 # State persists to .local/deploy-config (gitignored); later runs read it back.
 #
-# Phases (each skippable with --skip <phase>):
-#   1 artifacts  : build/stage codegraph-server bin + index-service code + repo → S3
-#   2 iam        : execution + index-service instance roles/policies (describe-or-create)
-#   3 network    : VPC, public+private subnet, IGW, NAT, route tables (or reuse)
-#   4 index-svc  : security groups + ARM EC2 (Ubuntu 24.04) running bootstrap.sh
-#   5 image      : build the agent container (ARM64) and push to ECR
-#   6 runtime    : AgentCore runtime in VPC mode, CODEGRAPH_MCP_URL set
-#   7 gateway    : write /etc/bot-gateway.env + start bot-gateway.service (co-located
-#                  on the index host) via SSM — once the runtime ARN exists
-#   8 monitoring : CloudWatch metric-filters + dashboards + alarms + DAU lambda
-#                  (best-effort, after the gateway logs to /source-truth/bot-gateway)
+# Phases (numbers match the operator-visible `say step "Phase N"` labels; --skip <name>):
+#   1  artifacts  : build/stage codegraph-server bin + index-service code + repo → S3
+#   1b iam        : execution + index-service instance roles/policies (describe-or-create)
+#   2  network    : VPC, public+private subnet, IGW, NAT, route tables (or reuse)
+#   3  index-svc  : security groups + ARM EC2 (Ubuntu 24.04) running bootstrap.sh
+#   4  image      : build the agent container (ARM64) and push to ECR
+#   5  runtime    : AgentCore runtime in VPC mode, CODEGRAPH_MCP_URL set
+#   6  gateway    : write /etc/bot-gateway.env + start bot-gateway.service (co-located
+#                   on the index host) via SSM — once the runtime ARN exists
+#   7  monitoring : CloudWatch metric-filters + dashboards + alarms + DAU lambda
+#                   (best-effort, after the gateway logs to /source-truth/bot-gateway)
 #
 # NO EFS: the agent microVM mounts no filesystem; it reads all source code over
 # the index-service HTTP bridge (read_file/glob_files/search_files/codegraph_*).
@@ -743,13 +743,20 @@ fi
 # Phase 7: monitoring (CloudWatch metric-filters + dashboards + alarms + DAU lambda)
 # ============================================================
 # Runs AFTER the gateway phase so the gateway has (begun to) log to /source-truth/bot-gateway
-# — the metric-filters + DAU lambda target that group. BEST-EFFORT: the backend + gateway are
-# already up by here, so a monitoring hiccup (e.g. the log group not created yet because the
-# gateway hasn't logged its first line) must WARN, never fail the deploy. The four apply
-# scripts are each idempotent + self-guarding; re-running the deploy reconciles them. Skipped
-# on --dry-run and --skip monitoring (or when the gateway itself was skipped — no log group
-# to attach to). Dashboards put fine even before data; metric-filters/DAU may no-op until the
-# gateway's first log line creates the group (re-run picks them up).
+# — the metric-filters target that group. BEST-EFFORT: the backend + gateway are already up by
+# here, so a monitoring hiccup must WARN, never fail the deploy. All four applies are
+# idempotent; re-running the deploy reconciles them. Skipped on --dry-run, --skip monitoring,
+# and when the gateway wasn't activated this run (FEISHU_SECRET_ID empty → no log group yet).
+#
+# EXACT fresh-deploy behavior when the gateway hasn't written its FIRST log line yet (so the
+# log group doesn't exist): dashboards PUT FINE (no data dependency); apply-metric-filters
+# FAILS (its put-metric-filter calls error on the missing group) and is warned; apply-alarms
+# ABORTS before creating the SNS topic or any alarm (it applies its backing filters first and
+# bails on their failure) → so a fresh one-click deploy creates NO alarms yet; apply-dau-lambda
+# SUCCEEDS (role/function/schedule don't need the group; only its scheduled query is idle until
+# logs accrue). A deploy RE-RUN after the gateway has logged once creates the filters + alarms
+# (idempotent) — that re-run is how alarm coverage is established. The runbook's manual 4-step
+# is the same reconcile path.
 if skip monitoring; then
   say warn "skip monitoring"
 elif [[ "$DRY_RUN" == true ]]; then
@@ -761,8 +768,10 @@ elif [[ -z "${FEISHU_SECRET_ID:-}" ]]; then
   say warn "skip monitoring (gateway not active yet — run monitoring after the gateway logs once; see runbook)"
 else
   say step "Phase 7: monitoring (best-effort)"
-  # Dashboards first (they put regardless of data); then metric-filters; then alarms (which
-  # auto-applies its own dense filters); then the DAU lambda. Each warns on failure, never aborts.
+  # Dashboards first (put regardless of data); then a-class metric-filters; then alarms
+  # (applies its own dense backing filters first, then creates the SNS topic + alarms — so it
+  # only succeeds once the log group exists); then the DAU lambda. Each warns on failure,
+  # never aborts (the deploy is already past the point where the bot works).
   bash "$SCRIPT_DIR/apply-dashboards.sh" --region "$REGION" \
     || say warn "  apply-dashboards failed (non-fatal) — re-run ./scripts/apply-dashboards.sh --region $REGION"
   bash "$SCRIPT_DIR/apply-metric-filters.sh" --region "$REGION" \
