@@ -250,6 +250,14 @@ async function streamingCardInvoke(
   } catch (e) {
     if ("messageId" in target) forget(`msg:${target.messageId}`);
     if (eventId) forget(eventId);
+    // Surface the traceId on the thrown error: if the card NEVER rendered (token/Feishu
+    // failure in createCard/send), the caller falls back to a plain-text reply that has
+    // no card to carry the trace — so it reads `traceId` off the error to put it in the
+    // fallback text + logs. The user can still report an id even when no card appears
+    // (the exact "card ended early, can't see the traceId" worry).
+    // Guard: assigning a property to a non-object throw value (string/undefined) would
+    // itself TypeError in strict/ESM and swallow the original error — annotate only objects.
+    if (e && typeof e === "object") (e as { traceId?: string }).traceId = traceId;
     throw e;
   }
 
@@ -1124,7 +1132,10 @@ async function main(): Promise<void> {
       // (non-200 / stream error), so reaching here means something unexpected
       // broke (e.g. the initial card create/send). Fall back to plain text and
       // keep the message neutral — it is NOT necessarily a card-render issue.
-      log({ event: "card_fallback", error: redactSensitive(String(cardErr)).slice(0, 300) });
+      // The traceId (attached to the error when the card never rendered) lets the user
+      // still report an id even with NO card, and ties these logs to that request.
+      const fbTrace = (cardErr as { traceId?: string }).traceId;
+      log({ event: "card_fallback", trace: fbTrace, error: redactSensitive(String(cardErr)).slice(0, 300) });
       // If streamingCardInvoke threw BEFORE it removed the "processing" reaction
       // (e.g. the initial createCard / card-send failed at index.ts:97-109), that
       // emoji is still stuck on the user's message. Clear it here so a failed
@@ -1139,8 +1150,10 @@ async function main(): Promise<void> {
       // would otherwise leak verbatim into the group here. redactSensitive is
       // idempotent, so re-redacting the already-safe chain part of a follow-up
       // blob is harmless while it covers the raw new-question segment.
-      await sendReply({ messageId: res.messageId, answer: `${t("msg.serviceError")}\n\n${redactSensitive(prompt)}` })
-        .catch((e) => log({ event: "fallback_error", error: redactSensitive(String(e)).slice(0, 300) }));
+      // Append the traceId so the user can report it even though no card rendered.
+      const traceLine = fbTrace ? `\n\n${t("card.trace.prefix")}${fbTrace}` : "";
+      await sendReply({ messageId: res.messageId, answer: `${t("msg.serviceError")}${traceLine}\n\n${redactSensitive(prompt)}` })
+        .catch((e) => log({ event: "fallback_error", trace: fbTrace, error: redactSensitive(String(e)).slice(0, 300) }));
     }
     log({ event: "replied", message: hashUserId(res.messageId), session: sessionId });
   };
