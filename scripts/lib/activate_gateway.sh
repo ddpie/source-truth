@@ -58,6 +58,9 @@ fi
 PROJECT_ID="${PROJECT_ID:-}"
 if [[ -z "$PROJECT_ID" && -f "$SCRIPT_DIR/../../.local/deploy-config" ]]; then
   PROJECT_ID="$(grep -E '^PROJECT_ID=' "$SCRIPT_DIR/../../.local/deploy-config" 2>/dev/null | head -1 | cut -d= -f2- || echo "")"
+  # Strip surrounding single/double quotes if a human hand-wrote PROJECT_ID='x' (deploy
+  # writes unquoted, but be robust): the value is re-quoted on the env line below.
+  PROJECT_ID="${PROJECT_ID#[\"\']}"; PROJECT_ID="${PROJECT_ID%[\"\']}"
 fi
 [[ -n "$PROJECT_ID" ]] && ENV_BODY="${ENV_BODY}
 PROJECT_ID='${PROJECT_ID}'"
