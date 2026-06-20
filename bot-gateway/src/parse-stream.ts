@@ -41,6 +41,14 @@ export interface StreamState {
    *  run "few deep model turns" or "many tool round-trips"? — different fixes. */
   toolCalls: number;
   toolCallsByName: Record<string, number>;
+  /** Count of tool RESULTS that came back with is_error:true INSIDE content[] — a
+   *  per-tool failure (codegraph error, a read of a missing path, a denied write under
+   *  the read-only dontAsk boundary, …). This is DISTINCT from state.error (a stream-
+   *  LEVEL failure that invalidates the whole answer): a healthy run can still have a few
+   *  recovered tool errors. Telemetry only (toolErrorCount on answer_completed) — it does
+   *  NOT flip the answer to an error. A high ratio vs toolCalls flags a flaky retrieval /
+   *  bad tool args pattern worth investigating. */
+  toolErrors: number;
   /** True once we've seen a partial-message StreamEvent (token deltas). When the
    *  agent runs with include_partial_messages, the conclusion streams token-by-
    *  token via content_block_delta events INSTEAD of arriving as one complete
@@ -60,7 +68,7 @@ export interface StreamState {
 }
 
 export function newStreamState(): StreamState {
-  return { texts: [], sawToolAfterLastText: true /* first text starts a fresh block */, error: null, toolCalls: 0, toolCallsByName: {}, sawStreamEvent: false, sawResult: false };
+  return { texts: [], sawToolAfterLastText: true /* first text starts a fresh block */, error: null, toolCalls: 0, toolCallsByName: {}, toolErrors: 0, sawStreamEvent: false, sawResult: false };
 }
 
 /** Tally one tool_use by name (perf accounting). */
@@ -112,6 +120,17 @@ export function applyEvent(state: StreamState, evt: Record<string, unknown>): vo
   if (state.error === null) {
     const err = detectEventError(evt);
     if (err !== null) state.error = err;
+  }
+  // Tally per-tool failures (is_error:true items INSIDE content[]). These are NOT stream
+  // errors (detectEventError correctly ignores them) — a healthy run can recover from a
+  // few. Counted across ALL content items (a message can carry multiple tool_results), so
+  // it's independent of the content[0] tool-gating below. Telemetry only.
+  if (Array.isArray(evt.content)) {
+    for (const item of evt.content as Array<Record<string, unknown>>) {
+      if (item && typeof item === "object" && item.is_error === true && item.tool_use_id !== undefined) {
+        state.toolErrors++;
+      }
+    }
   }
   // Terminal ResultMessage = clean run completion. It has NO `content` array and
   // carries a RUN-SUMMARY field (num_turns / result / is_error / a real

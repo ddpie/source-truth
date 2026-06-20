@@ -1135,6 +1135,7 @@ async function runStreamingInvoke(
       latencyMs: timing.totalMs,
       ttfbMs: timing.ttfbMs,
       numToolCalls: timing.toolCalls ?? 0,
+      toolErrorCount: timing.toolErrors ?? 0,
       hasCharts: charts.length > 0,
       evidenceCitationCount,
       coldStart,
