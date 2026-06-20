@@ -35,9 +35,51 @@ from codegraph_session import CodegraphSession, IndexUnhealthy
 # codegraph process per query is the corruption-risk pattern the resident
 # session replaced, so it must never re-enter the production path.
 
-# Process-lifetime singleton lock fd (set in main()); module-global so the GC can't
-# collect it and release the flock mid-run. See main()'s SINGLE-WRITER HARD GUARD.
+# Process-lifetime singleton lock fd; module-global so the GC can't collect it and
+# release the flock mid-run. See acquire_singleton_writer_lock().
 _SINGLETON_FD: Any = None
+
+
+class SingleWriterConflict(RuntimeError):
+    """Raised when another process already holds this workspace's writer flock."""
+
+
+def acquire_singleton_writer_lock(workspace: str) -> None:
+    """SINGLE-WRITER HARD GUARD (do NOT rely on a comment). The whole no-corruption
+    invariant rests on exactly ONE process owning the codegraph-server that writes
+    graph.db. Take a process-lifetime exclusive flock keyed to the workspace BEFORE
+    the worker starts; if another bridge already holds it, raise instead of becoming
+    a second writer.
+
+    Called from build_bridge() (NOT just main()) so it also guards an app-factory
+    launch — `gunicorn http_bridge:app --workers N` imports `app` and bypasses main()
+    entirely, so a flock only in main() would let N forked workers each spawn a writer
+    → concurrent graph.db writers → silent 0-node corruption (cross-review H1, deepened).
+    Idempotent: if THIS process already holds the lock (main() took it, or a re-entrant
+    build), it's a no-op — re-flock'ing an fd we already own succeeds and we keep the
+    same fd. A DIFFERENT process gets BlockingIOError on the non-blocking acquire.
+    """
+    global _SINGLETON_FD
+    if _SINGLETON_FD is not None:
+        return  # this process already owns it (main() or a prior build_bridge call)
+    import fcntl
+    # Workspace-keyed lock file (stable across restarts; one per indexed repo). Lives
+    # next to the repo copy so it shares the graph.db's local disk (a real fs, not a
+    # tmpfs a container restart wipes). The held fd is module-global so it is not GC'd
+    # (which would release the lock) for the process lifetime.
+    lock_path = workspace.rstrip("/") + ".bridge.lock"
+    fd = open(lock_path, "w")  # noqa: SIM115 - held for process life
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (OSError, BlockingIOError) as exc:
+        fd.close()
+        logger.error(json.dumps({"event": "bridge_singleton_conflict", "lock": lock_path,
+                                 "detail": "another bridge already owns this workspace; refusing to start a second graph.db writer",
+                                 "error": str(exc)}))
+        raise SingleWriterConflict(lock_path) from exc
+    fd.write(str(os.getpid()))
+    fd.flush()
+    _SINGLETON_FD = fd
 
 logger = logging.getLogger("codegraph-bridge")
 
@@ -161,6 +203,10 @@ def build_bridge(
     # max_files must match the build phase, or the resident session re-scans
     # with a different limit and rebuilds instead of loading the warm graph.
     max_files = int(os.environ.get("CODEGRAPH_MAX_FILES", "10000"))
+    # SINGLE-WRITER GUARD — acquired HERE (before the worker spawns codegraph-server),
+    # not just in main(), so an app-factory launch (gunicorn http_bridge:app --workers N)
+    # can't bypass it and spawn N writers. Idempotent if main() already took it.
+    acquire_singleton_writer_lock(workspace)
     session = CodegraphSession(workspace, max_files=max_files)
 
     app = FastMCP(
@@ -453,33 +499,14 @@ def main() -> int:
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 
-    # SINGLE-WRITER HARD GUARD (do NOT rely on a comment). The whole no-corruption
-    # invariant rests on exactly ONE process owning the codegraph-server that writes
-    # graph.db. uvicorn's single-worker default gives us that today, but a future
-    # `--workers N` / gunicorn deploy would fork N bridges, each spawning its own
-    # writer → concurrent graph.db writers → silent 0-node corruption (cross-review
-    # H1). Take a process-lifetime exclusive flock keyed to the workspace BEFORE we
-    # start the worker; if another bridge already holds it, die LOUDLY instead of
-    # becoming a second writer. A forked worker re-running main() gets a fresh open
-    # fd → separate lock attempt → fails the non-blocking acquire → exits. The fd is
-    # intentionally leaked (held until process exit); the OS releases it on exit.
-    import fcntl
-    # Workspace-keyed lock file (stable across restarts; one per indexed repo). Lives
-    # next to the repo copy so it shares the graph.db's local disk (a real fs, not a
-    # tmpfs that a container restart wipes). The held fd is module-global so it is not
-    # GC'd (which would release the lock) for the process lifetime.
-    lock_path = args.workspace.rstrip("/") + ".bridge.lock"
+    # SINGLE-WRITER HARD GUARD — take the workspace flock early so a conflict exits
+    # cleanly (return 1) before any worker work. build_bridge() re-calls this (it's
+    # idempotent — no-op when this process already holds it) so an app-factory launch
+    # that bypasses main() is still guarded. See acquire_singleton_writer_lock().
     try:
-        global _SINGLETON_FD
-        _SINGLETON_FD = open(lock_path, "w")  # noqa: SIM115 - held for process life
-        fcntl.flock(_SINGLETON_FD, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        _SINGLETON_FD.write(str(os.getpid()))
-        _SINGLETON_FD.flush()
-    except (OSError, BlockingIOError) as exc:
-        logger.error(json.dumps({"event": "bridge_singleton_conflict", "lock": lock_path,
-                                 "detail": "another bridge already owns this workspace; refusing to start a second graph.db writer",
-                                 "error": str(exc)}))
-        return 1
+        acquire_singleton_writer_lock(args.workspace)
+    except SingleWriterConflict:
+        return 1  # the helper already logged bridge_singleton_conflict
 
     logger.info(json.dumps({"event": "bridge_start", "workspace": args.workspace,
                             "host": args.host, "port": args.port,

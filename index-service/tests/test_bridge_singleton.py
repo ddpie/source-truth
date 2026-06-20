@@ -50,3 +50,50 @@ def test_different_workspaces_do_not_collide():
     fcntl.flock(fdb, fcntl.LOCK_EX | fcntl.LOCK_NB)  # different key → no conflict
     fda.close()
     fdb.close()
+
+
+def test_acquire_singleton_writer_lock_is_idempotent_in_process():
+    # acquire_singleton_writer_lock() is called from BOTH main() and build_bridge()
+    # (so an app-factory launch is guarded too). A second call IN THE SAME PROCESS
+    # must be a no-op (not raise / not re-open), since this process already owns it.
+    import http_bridge
+
+    saved = http_bridge._SINGLETON_FD
+    http_bridge._SINGLETON_FD = None
+    try:
+        ws = tempfile.mkdtemp() + "/repo"
+        http_bridge.acquire_singleton_writer_lock(ws)
+        fd_after_first = http_bridge._SINGLETON_FD
+        assert fd_after_first is not None, "first call must acquire the lock"
+        # Second call (e.g. build_bridge after main already took it) — no-op, same fd.
+        http_bridge.acquire_singleton_writer_lock(ws)
+        assert http_bridge._SINGLETON_FD is fd_after_first, "re-acquire in-process must keep the same fd"
+    finally:
+        if http_bridge._SINGLETON_FD is not None and http_bridge._SINGLETON_FD is not saved:
+            http_bridge._SINGLETON_FD.close()
+        http_bridge._SINGLETON_FD = saved
+
+
+def test_acquire_singleton_writer_lock_raises_on_foreign_holder():
+    # When ANOTHER holder (simulated by a pre-held fd on the same path) owns the lock,
+    # acquire_singleton_writer_lock must raise SingleWriterConflict — never silently
+    # become a second writer.
+    import http_bridge
+
+    saved = http_bridge._SINGLETON_FD
+    http_bridge._SINGLETON_FD = None
+    ws = tempfile.mkdtemp() + "/repo"
+    foreign = open(ws.rstrip("/") + ".bridge.lock", "w")  # noqa: SIM115 - stands in for another process
+    fcntl.flock(foreign, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    try:
+        raised = False
+        try:
+            http_bridge.acquire_singleton_writer_lock(ws)
+        except http_bridge.SingleWriterConflict:
+            raised = True
+        assert raised, "must refuse when another holder owns the workspace lock"
+        assert http_bridge._SINGLETON_FD is None, "a refused acquire must not set the module fd"
+    finally:
+        fcntl.flock(foreign, fcntl.LOCK_UN)
+        foreign.close()
+        http_bridge._SINGLETON_FD = saved

@@ -283,6 +283,23 @@ preflight_quota() {
   if [[ "$vpcs" =~ ^[0-9]+$ && "$vpcs" -ge 4 ]]; then
     say warn "已有 $vpcs 个 VPC（默认配额 5）——若 create-vpc 失败，先提额或清理。"
   fi
+  # vCPU (On-Demand Standard family, quota L-1216C47A): a BRAND-NEW account often caps
+  # standard On-Demand vCPUs low (historically as low as 5, sometimes 0 until raised). The
+  # index instance is a Standard-family Graviton (t4g.large = 2 vCPU). Without this, a fresh
+  # account fails LATE in Phase 3 with a raw VcpuLimitExceeded instead of an early WARN like
+  # EIP/VPC. Best-effort: service-quotas may be unavailable/denied → silently skip (return 0).
+  local vcpu_quota
+  vcpu_quota="$(aws service-quotas get-service-quota --region "$REGION" \
+    --service-code ec2 --quota-code L-1216C47A \
+    --query 'Quota.Value' --output text 2>/dev/null || echo "")"
+  # Value comes back like "5.0"; compare the integer part. Only WARN when implausibly low
+  # for one t4g.large (need ≥2 vCPU; warn at <4 to leave headroom + flag near-zero caps).
+  if [[ "$vcpu_quota" =~ ^([0-9]+) ]]; then
+    local vcpu_int="${BASH_REMATCH[1]}"
+    if [[ "$vcpu_int" -lt 4 ]]; then
+      say warn "On-Demand Standard vCPU 配额仅 ${vcpu_int}（quota L-1216C47A）——index 实例需 2 vCPU（t4g.large）。若 run-instances 报 VcpuLimitExceeded，去 Service Quotas 提额。"
+    fi
+  fi
   return 0
 }
 if [[ "$DRY_RUN" != true ]]; then preflight_boto3; preflight_model_access; preflight_agentcore; preflight_quota; fi
@@ -703,6 +720,15 @@ else
       say warn "  → grant the deploy identity secretsmanager:CreateSecret on source-truth/*, or create the secret manually, then re-run."
     fi
     unset GW_SALT  # never keep the value around — run.sh fetches it host-side
+  fi
+  # PROJECT ROUTING (multi-repo 阶段1): if .local/projects.json exists, activate_gateway.sh
+  # ships it to the host + sets PROJECTS_CONFIG_PATH so metrics carry a projectId dimension.
+  # Absent = the gateway runs fine WITHOUT a projectId (soft path) — fine for a single-project
+  # deploy. But a multi-project operator who forgot it gets no on-screen hint otherwise, so
+  # say it explicitly here (the gateway only logs it host-side).
+  if [[ ! -f "$SCRIPT_DIR/../.local/projects.json" ]]; then
+    say info "no .local/projects.json — gateway runs single-project (no projectId metric dimension)."
+    say info "  → for multi-project routing: cp config/projects.example.json .local/projects.json, edit it, re-run."
   fi
   bash "$SCRIPT_DIR/lib/activate_gateway.sh" \
     "$REGION" "$GW_INSTANCE" "$GW_RUNTIME_ARN" "$FEISHU_SECRET_ID" \
