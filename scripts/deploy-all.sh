@@ -30,6 +30,8 @@ ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 source "$SCRIPT_DIR/lib/common.sh"
 # shellcheck source=lib/env-utils.sh
 source "$SCRIPT_DIR/lib/env-utils.sh"
+# shellcheck source=lib/resolve_repo.sh
+source "$SCRIPT_DIR/lib/resolve_repo.sh"
 
 CONFIG_DIR="$ROOT/.local"
 CONFIG_FILE="$CONFIG_DIR/deploy-config"
@@ -37,7 +39,8 @@ mkdir -p "$CONFIG_DIR"
 
 # --- defaults / flags ---
 REGION=""
-REPO_PATH=""
+REPO_PATH=""             # --repo source: local dir | git URL | s3:// tarball/prefix (resolve_repo.sh)
+REPO_REF=""              # --repo-ref: git branch/tag/commit (git sources only)
 REPO_SUBDIR=""           # name the repo lives under on the index host (defaults to basename)
 # These three honor a persist-and-read-back contract (flag > persisted > default)
 # so a flagless reconcile re-run does NOT silently revert an operator's earlier
@@ -61,10 +64,18 @@ Usage: ./scripts/deploy-all.sh --region <r> --repo <path> [options]
 
 Required (first run):
   --region <r>        AWS region (e.g. ap-northeast-1)
-  --repo <path>       Local path to the code repo to index + serve
+  --repo <src>        Code repo to index + serve. Accepts ANY of:
+                        • local dir   /path/to/repo
+                        • git URL     https://github.com/org/repo(.git),
+                                      https://gitlab.com/org/repo.git, git@host:org/repo.git
+                        • S3 tarball  s3://bucket/key.tar.gz (or .tgz)
+                        • S3 prefix   s3://bucket/prefix/
+                      Git/S3 sources are fetched to a local temp dir, then staged
+                      exactly like a local dir (idempotency unchanged).
 
 Options:
-  --repo-subdir <n>   Name to place the repo under on the index host (default: basename of --repo)
+  --repo-ref <r>      Git branch / tag / commit to clone (git sources only; default: default branch)
+  --repo-subdir <n>   Name to place the repo under on the index host (default: derived from --repo)
   --instance-type <t> index-service EC2 type, ARM (default: t4g.large)
   --max-files <n>     codegraph max files to index (default: 10000)
   --root-volume-gb <n> index-service root EBS size in GiB (default: 30). Grow for a
@@ -95,6 +106,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --region) REGION="$2"; shift 2 ;;
     --repo) REPO_PATH="$2"; shift 2 ;;
+    --repo-ref) REPO_REF="$2"; shift 2 ;;
     --repo-subdir) REPO_SUBDIR="$2"; shift 2 ;;
     --instance-type) INSTANCE_TYPE="$2"; shift 2 ;;
     --max-files) MAX_FILES="$2"; shift 2 ;;
@@ -126,9 +138,32 @@ export DEPLOY_INSTANCE_TYPE="$INSTANCE_TYPE"
 MAX_FILES="${MAX_FILES:-${DEPLOY_MAX_FILES:-$DEFAULT_MAX_FILES}}"
 ROOT_VOLUME_GB="${ROOT_VOLUME_GB:-${DEPLOY_ROOT_VOLUME_GB:-$DEFAULT_ROOT_VOLUME_GB}}"
 ACCOUNT="$(aws sts get-caller-identity --query Account --output text)"
-[[ -n "$REPO_SUBDIR" ]] || REPO_SUBDIR="$(basename "${REPO_PATH:-${REPO_SUBDIR:-repo}}")"
+
+# --- resolve the --repo source (local dir | git URL | s3:// tarball/prefix) ---
+# Classify + derive the on-host subdir name here (network-free, dry-run safe). The
+# ACTUAL fetch (git clone / s3 download) is deferred to the artifacts phase so it
+# is skipped on --dry-run and `--skip artifacts`, and so a reconcile re-run with no
+# --repo (REPO_PATH empty, subdir read back from persisted config) does no network.
+REPO_KIND=""
+if [[ -n "$REPO_PATH" ]]; then
+  REPO_KIND="$(classify_repo_source "$REPO_PATH")"
+  if [[ "$REPO_KIND" == "unknown" ]]; then
+    say err "--repo '$REPO_PATH' is not a local path, git URL, or s3:// URI."
+    say err "  local dir: /path/to/repo   git: https://github.com/org/repo(.git)   s3: s3://bucket/key.tar.gz"
+    exit 2
+  fi
+  [[ -n "$REPO_SUBDIR" ]] || REPO_SUBDIR="$(repo_subdir_from_source "$REPO_PATH" "$REPO_KIND")"
+  if [[ "$REPO_KIND" == "git" ]]; then
+    require_cmd git "install git to clone a git --repo source" || exit 1
+  fi
+else
+  # No --repo this run: reuse the persisted subdir (reconcile path). Keep the old
+  # basename fallback so a config that predates this resolver still works.
+  [[ -n "$REPO_SUBDIR" ]] || REPO_SUBDIR="repo"
+fi
+
 BUCKET="source-truth-repo-${ACCOUNT}-$(echo "$REGION" | tr -d '-')"
-say info "account=$ACCOUNT region=$REGION bucket=$BUCKET repo_subdir=$REPO_SUBDIR model=$MODEL"
+say info "account=$ACCOUNT region=$REGION bucket=$BUCKET repo=${REPO_PATH:-<reuse>} kind=${REPO_KIND:-n/a} repo_subdir=$REPO_SUBDIR model=$MODEL"
 
 # Bedrock model-access preflight. On a BRAND-NEW account the IAM grant
 # (bedrock:InvokeModel) is NOT enough — the account owner must separately ENABLE
@@ -255,7 +290,7 @@ skip() { [[ -n "${SKIP[$1]:-}" ]]; }
 # ============================================================
 if skip artifacts; then say warn "skip artifacts"; elif [[ "$DRY_RUN" == true ]]; then
   say step "Phase 1: artifacts → S3"
-  say info "[dry-run] ensure bucket $BUCKET; upload codegraph-server bin + index-service.tar.gz + ${REPO_SUBDIR}.tar.gz"
+  say info "[dry-run] ensure bucket $BUCKET; upload codegraph-server bin + index-service.tar.gz + ${REPO_SUBDIR}.tar.gz + bot-gateway.tar.gz"
 else
   say step "Phase 1: artifacts → S3"
   # Create the bucket if absent. us-east-1 is special: the S3 API REJECTS a
@@ -306,13 +341,41 @@ else
   # the most likely fresh-account hard-stop on a real repo with a multi-GB .git
   # history. Excluding them keeps the staged artifact == what codegraph indexes.
   if [[ -n "$REPO_PATH" ]]; then
+    # Resolve a git/s3 source into a LOCAL dir named after REPO_SUBDIR, then stage it
+    # exactly like a local dir. Done HERE (not at flag-parse) so it's skipped on
+    # --dry-run / `--skip artifacts` and a flagless reconcile re-run does no network.
+    STAGE_REPO_PATH="$REPO_PATH"
+    if [[ "$REPO_KIND" == "git" || "$REPO_KIND" == "s3" ]]; then
+      REPO_FETCH_ROOT="$(mktemp -d /tmp/st-repo-src.XXXX)"
+      # cleanup on exit: a fetched repo can be GBs — don't leak it under /tmp.
+      trap '[[ -n "${REPO_FETCH_ROOT:-}" ]] && rm -rf "$REPO_FETCH_ROOT"' EXIT
+      STAGE_REPO_PATH="$REPO_FETCH_ROOT/$REPO_SUBDIR"
+      fetch_repo_source "$REPO_PATH" "$REPO_KIND" "$REGION" "$STAGE_REPO_PATH" "$REPO_REF" \
+        || { say err "failed to fetch --repo source ($REPO_KIND): $REPO_PATH"; exit 1; }
+    elif [[ ! -d "$REPO_PATH" ]]; then
+      say err "--repo local path does not exist or is not a directory: $REPO_PATH"; exit 1
+    fi
     TMP_REPO="$(mktemp /tmp/repo.XXXX.tar.gz)"
     tar czf "$TMP_REPO" \
       --exclude='.git' --exclude='node_modules' --exclude='.venv' \
       --exclude='*.tmp' --exclude='__pycache__' \
-      -C "$(dirname "$REPO_PATH")" "$(basename "$REPO_PATH")"
+      -C "$(dirname "$STAGE_REPO_PATH")" "$(basename "$STAGE_REPO_PATH")"
     run aws s3 cp "$TMP_REPO" "s3://$BUCKET/${REPO_SUBDIR}.tar.gz" --region "$REGION"
+    rm -f "$TMP_REPO"
   fi
+
+  # bot-gateway source (built ON the index host, not here): ship src + the
+  # package manifests + tsconfig, NOT node_modules/dist (the host runs
+  # `npm ci --omit=dev` then `npm run build`). package-lock.json is REQUIRED for
+  # `npm ci` (it hard-fails without a lockfile), so a missing lock is a hard
+  # error here rather than a confusing bootstrap failure minutes later.
+  if [[ ! -f "$ROOT/bot-gateway/package-lock.json" ]]; then
+    say err "bot-gateway/package-lock.json missing — required for reproducible 'npm ci' on the index host."
+    [[ "$DRY_RUN" == true ]] || exit 1
+  fi
+  TMP_GW="$(mktemp /tmp/bot-gateway.XXXX.tar.gz)"
+  ( cd "$ROOT/bot-gateway" && tar czf "$TMP_GW" src tsconfig.json package.json package-lock.json run.sh )
+  run aws s3 cp "$TMP_GW" "s3://$BUCKET/bot-gateway.tar.gz" --region "$REGION"
   say ok "artifacts staged"
 fi
 
@@ -368,6 +431,22 @@ else
     "$SCRIPT_DIR/lib/wait_index_health.sh" "$REGION" "$INDEX_SERVICE_INSTANCE" || {
       say err "index-service never became healthy — aborting before runtime wiring."
       say err "  inspect: aws ssm start-session --target $INDEX_SERVICE_INSTANCE ; tail /var/log/index-svc-bootstrap.log"
+      # FAILED BLUE-GREEN REFRESH cleanup (cross-review P1): when this is a --refresh-index
+      # run, INDEX_OLD_INSTANCE holds the still-HEALTHY old host (DNS still points at it),
+      # and INDEX_SERVICE_INSTANCE is the BROKEN new one we just launched. If we just exit,
+      # the broken new instance (a) bills forever and (b) — because its ArtifactSig ==
+      # CURRENT_SIG — gets RE-SELECTED and reused by every later run's deterministic
+      # selector, so the deploy never converges and the healthy old host bills in parallel.
+      # So terminate the broken NEW instance and restore INDEX_SERVICE_INSTANCE to the old
+      # healthy one, leaving the service exactly as it was before this failed refresh.
+      if [[ -n "${INDEX_OLD_INSTANCE:-}" && "$INDEX_OLD_INSTANCE" != "${INDEX_SERVICE_INSTANCE:-}" ]]; then
+        say warn "failed refresh: terminating the unhealthy NEW instance ${INDEX_SERVICE_INSTANCE} and keeping the healthy old one ${INDEX_OLD_INSTANCE} (still DNS target)"
+        aws ec2 terminate-instances --region "$REGION" --instance-ids "$INDEX_SERVICE_INSTANCE" >/dev/null 2>&1 \
+          && say ok "unhealthy new instance ${INDEX_SERVICE_INSTANCE} terminated" \
+          || say warn "could not terminate unhealthy new instance ${INDEX_SERVICE_INSTANCE} — terminate manually to avoid a paid orphan"
+        update_env "$CONFIG_FILE" INDEX_SERVICE_INSTANCE "$INDEX_OLD_INSTANCE"
+        update_env "$CONFIG_FILE" INDEX_OLD_INSTANCE ""
+      fi
       exit 1
     }
   fi
