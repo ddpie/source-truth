@@ -17,14 +17,14 @@ bot-gateway/            飞书 Bot 长连接事件网关 + CardKit 流式渲染�
   README.md             长连接 / 事件去重 / 会话→runtimeSessionId 映射 / 卡片更新频控
   src/                  事件消费入口、SigV4 调 AgentCore、会话映射、CardKit 渲染、SSE 解析、脱敏日志
   run.sh                服务启动器：source /etc/bot-gateway.env + 从 Secrets Manager 取飞书凭证（不落盘）→ node dist
-index-service/          常驻 CodeGraph 索引服务 + MCP-over-HTTP 桥
-  README.md             常驻会话（独占写入 graph.db） / CodeGraph / HTTP 桥（定位 + 读文件） / 本地仓库副本 / bootstrap
-  http_bridge.py        FastMCP HTTP 桥（包根，非 src/）：暴露 codegraph 定位 + 读文件工具，路径对齐为仓库相对
+index-service/          常驻 CodeGraph 索引服务 + MCP-over-HTTP 接口
+  README.md             常驻会话（独占写入 graph.db） / CodeGraph / HTTP 接口（定位 + 读文件） / 本地仓库副本 / bootstrap
+  http_bridge.py        FastMCP HTTP 接口（包根，非 src/）：暴露 codegraph 定位 + 读文件工具，路径对齐为仓库相对
   codegraph_session.py  常驻 codegraph-server 会话，独占写入 graph.db（worker 线程 + 私有 loop，健康自愈，带超时）
-  file_search.py        本地副本 ripgrep/grep 检索工具（全仓搜索远程 EFS/NFS 比本地副本慢 ~225x：远程 20–47s vs 本地 0.2s，故内置 Grep 禁用、改走本地副本；命中按内容去重；MCP 暴露）
-  file_read.py          本地副本按行/按点读文件工具（read_file，路径对齐为仓库相对；MCP 暴露）
+  file_search.py        本地副本 ripgrep/grep 检索工具（在本地副本上检索，内置 Grep 禁用、改走本地副本；命中按内容去重；MCP 暴露）
+  file_read.py          本地副本按行 / 按位置读取文件的工具（read_file，路径对齐为仓库相对；MCP 暴露）
   file_table.py         结构化配置表读取（Excel/CSV/TSV/SQLite → 文本，read_table；只读、带 DoS 上限；MCP 暴露）
-  path_align.py         索引路径 ↔ 仓库相对路径词法对齐（拒越界；mount_root 默认空，遗留 /mnt/repo 仍兼容）
+  path_align.py         索引路径 ↔ 仓库相对路径词法对齐（拒越界；mount_root 默认空）
   codegraph_client.py   codegraph-server 客户端封装（休眠：仅测试用，独占写入 tripwire 守护，绝不进常驻服务路径）
   perf.py               结构化耗时日志
   bootstrap.sh          EC2 user-data：装依赖 / 解包仓库到本地 /data/repo / 快照 stamp 重解压 / systemd build→bridge
@@ -61,7 +61,7 @@ docs/
     architecture.md     工作原理：一次提问如何在系统里流转
     invariants.md       源 → 生成物映射 + 改 X 必改 Y 的耦合（7 条不变量）
     playbooks.md        有序变更配方（7 个配方）
-    *-spike.md          调研记录（cardkit 流式 / 索引性能 / EFS 对比 / 性能对比 / 模板）
+    *-spike.md          调研记录（cardkit 流式 / 索引性能 / 存储选型 / 性能对比 / 模板）
 .local/                 （已 gitignore）账号特定部署状态：deploy-config、deploy-output.md
 ```
 

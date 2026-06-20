@@ -45,7 +45,7 @@ node_modules/.bin/ts-node --transpile-only src/index.ts
 [`../docs/runbook.md`](../docs/runbook.md)。
 
 > `package.json` 的 `build`/`lint`/`test` 是开发用脚本；启动用上面的 `ts-node` 命令直接跑入口。
-> **同一个飞书应用只能跑一个网关实例**（长连接集群模式，事件只投给一个 client；多实例会抢事件、表现出旧行为）。
+> **同一个飞书应用只能跑一个网关实例**（长连接集群模式，事件只投给一个 client；多实例会争抢事件、表现出旧行为）。
 
 ## 运行载体
 

@@ -21,7 +21,7 @@
 | 事实源 | 以代码为唯一依据 | 文档常滞后；配置与源数据基本在工程内 |
 | 范围 | MVP 仅查主分支 | 诉求是了解已上线功能；多分支后置 |
 | 运行环境 | AgentCore Runtime 会话隔离 | 每会话独立容器，秒级冷启、空闲约 15 分钟回收；Session Storage 约 14 天过期 |
-| 存储 | 共享存储，默认 EFS（待实测）<br>**现状已变更**：实测后废弃 EFS，改为 index-service 本地副本 + HTTP 桥（会话 microVM 不挂任何文件系统），见 [`../agent/efs-codegraph-sharing-spike.md`](../agent/efs-codegraph-sharing-spike.md) | 关注读延迟，先实测，瓶颈出现再换 EBS/SSD |
+| 存储 | index-service 本地磁盘持唯一代码副本 + HTTP 接口（会话 microVM 不挂任何文件系统），选型论证见 [`../agent/efs-codegraph-sharing-spike.md`](../agent/efs-codegraph-sharing-spike.md) | 关注读延迟；本地盘检索快，瓶颈出现再换更快介质 |
 | 索引 | 项目级索引，程序自动生成 | 后端多仓，需先定位查哪个工程；工程内检索交给 Claude Code |
 | 模型 | MVP 用 Claude Code | 先走 API 计费，后续评估订阅 |
 | 机器人 | 每个游戏项目一个机器人 | 机器人内按会话隔离 |
@@ -68,7 +68,7 @@ Code 在工程内检索；目标是叠加索引后速度快于本地，待 POC �
 | 2 | 提供高频问题清单以划定能力边界 | 晨哥 | 高频问题列表（验收时用） |
 | 3 | 搭建 MVP，跑通主流程与飞书交互 | 曹豹 | 可演示的 MVP |
 | 4 | 评估 Claude Code 订阅接入可行性 | 曹豹 | 评估结论 |
-| 5 | POC 性能基准测试：测 EFS 读性能、并发、冷启动、索引召回 | 曹豹 | 性能基准报告 |
+| 5 | POC 性能基准测试：测本地盘检索/读文件性能、并发、冷启动、索引召回 | 曹豹 | 性能基准报告 |
 | 6 | 本地与云端联合评测：同一组问题对比速度与质量 | 曹豹、晨哥 | 联合评测结论 |
 
 ## 待验证技术点与风险
@@ -77,9 +77,9 @@ Code 在工程内检索；目标是叠加索引后速度快于本地，待 POC �
 
 - CodeGraph 对前端 C# 与后端 Node.js 的索引召回率；
 - push 到索引的端到端时延与首次全量索引耗时；
-- CodeGraph stdio 到 HTTP 桥接的稳定性与并发；
-- EFS 同卷并发挂载，及 NFS 上 inotify 增量的可靠性；
-- EFS 读取性能（索引定位加点名读取 与 全仓兜底两条路径）；
+- CodeGraph stdio 到 HTTP 转换的稳定性与并发；
+- 本地副本上 inotify 增量索引的可靠性（post-MVP）；
+- 经 HTTP 接口读文件的性能（索引定位后精准读取 与 全仓兜底两条路径）；
 - 飞书流式卡片频控、图表组件边界、动态组件回调路由。
 
 ### 风险

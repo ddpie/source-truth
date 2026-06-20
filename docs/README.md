@@ -33,6 +33,6 @@ source-truth 的文档按**受众**分层：每类读者从自己的入口进，
 |------|------|
 | [`agent/cardkit-streaming-spike.md`](agent/cardkit-streaming-spike.md) | CardKit「会生长的答案卡」流式更新可行性 |
 | [`agent/indexing-performance-spike.md`](agent/indexing-performance-spike.md) | 为何必须建索引：全仓冷扫 grep vs 索引查询基准 |
-| [`agent/efs-codegraph-sharing-spike.md`](agent/efs-codegraph-sharing-spike.md) | 为何不挂 EFS、改用 index-service 本地副本 |
+| [`agent/efs-codegraph-sharing-spike.md`](agent/efs-codegraph-sharing-spike.md) | 代码副本与共享存储方案选型 |
 | [`agent/perf-comparison.md`](agent/perf-comparison.md) | source-truth vs 原生 Claude Code 的耗时对比 |
 | [`agent/TEMPLATE-spike.md`](agent/TEMPLATE-spike.md) | 写新调研记录的模板 |

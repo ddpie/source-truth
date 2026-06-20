@@ -8,7 +8,7 @@
 **bedrock-agentcore** runtime（`@app.entrypoint` 异步流式 handler）跑一个 agent 循环：理解策划的问题 →
 调远程 CodeGraph MCP 定位代码 → 经 index-service 的文件工具（`codegraph_read_file` / `codegraph_glob_files` /
 `codegraph_search_files` / `codegraph_read_table`）读最新主分支源码与配置表（含 Excel/CSV/SQLite 数值表）→
-生成结构化答案并逐步 `yield`。microVM 本身不挂任何文件系统，所有代码都经 index-service 的 MCP-over-HTTP 桥读取。
+生成结构化答案并逐步 `yield`。microVM 本身不挂任何文件系统，所有代码都经 index-service 的 MCP-over-HTTP 接口读取。
 
 模型走 Bedrock 计费（`CLAUDE_CODE_USE_BEDROCK=1`）。MVP 单引擎 Claude Code（Codex 第二引擎后置）。
 
@@ -17,7 +17,7 @@
 | 项 | 约定 |
 |----|------|
 | 入参 payload | `{ "prompt": <问题文本>, "session": <会话上下文> }`（由 bot-gateway 注入） |
-| CodeGraph + 文件读取 | 远程 MCP-over-HTTP 端点（由 index-service 暴露），通过 env / option 注入；定位与读文件（`codegraph_read_file` / `codegraph_glob_files` / `codegraph_search_files` / `codegraph_read_table`）都走此桥 |
+| CodeGraph + 文件读取 | 远程 MCP-over-HTTP 端点（由 index-service 暴露），通过 env / option 注入；定位与读文件（`codegraph_read_file` / `codegraph_glob_files` / `codegraph_search_files` / `codegraph_read_table`）都走此接口 |
 | 代码与配置 | 经 index-service 文件工具读取（**仓库副本只在 index-service 本地磁盘**；microVM 不挂文件系统）；路径为仓库相对（如 `Assets/Scripts/Foo.cs`） |
 | 临时文件 | Session Storage 可写挂载在 `/mnt/workspace`（每会话隔离） |
 | 出参 | 流式 `yield` AssistantMessage / ResultMessage，由网关渲染回 CardKit |
@@ -52,7 +52,7 @@
 
 ## 模块构成
 
-- `Dockerfile`（ARM64）、`agent.py`（流式 entrypoint 薄壳）、`agent_lib.py`（纯函数
+- `Dockerfile`（ARM64）、`agent.py`（流式 entrypoint 薄封装）、`agent_lib.py`（纯函数
   `build_options` / `run_agent`，可单测）、`prompts/system.md`。
 - `requirements.txt`（人读意图，`claude-agent-sdk==0.2.103` 钉死）+ `requirements.lock`（完整传递依赖锁，
   Dockerfile 按它 `uv pip install --no-deps` 安装）。
@@ -60,7 +60,7 @@
 ## 关键设计决策
 
 - **CodeGraph MCP 接入＝方案 A**：`ClaudeAgentOptions.mcp_servers` 原生支持 `McpHttpServerConfig`
-  （`{type:"http", url, headers?}`，对照 SDK 0.2.103 核实），不需 streamablehttp 桥。
+  （`{type:"http", url, headers?}`，对照 SDK 0.2.103 核实），不需 streamablehttp 转换层。
 - **走 Bedrock 计费**：`CLAUDE_CODE_USE_BEDROCK=1`，默认模型 `global.anthropic.claude-opus-4-8`。
-- **取证全经 index-service 文件工具**：无 EFS、microVM 不挂任何文件系统。
+- **取证全经 index-service 文件工具**：microVM 不挂任何文件系统。
 - 部署见 `scripts/deploy-all.sh`（canonical）+ `.local/deploy-config`。

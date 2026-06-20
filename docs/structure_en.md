@@ -21,10 +21,10 @@ index-service/          Standalone CodeGraph index service + MCP-over-HTTP bridg
   README.md             Resident single-writer session / CodeGraph / HTTP bridge (locate + read files) / local repo copy / bootstrap
   http_bridge.py        FastMCP HTTP bridge (package root, not src/): exposes codegraph locate + read-file tools, aligns paths to repo-relative
   codegraph_session.py  Resident codegraph-server single-writer session (worker thread + private loop, health self-heal, timeouts)
-  file_search.py        Local-copy ripgrep/grep search tool (whole-repo search is ~225x slower on a remote EFS/NFS mount than on the local copy: ~20-47s remote vs ~0.2s local, so builtin Grep is disabled and search runs on the local copy; content-dedups hits; MCP-exposed)
+  file_search.py        Local-copy ripgrep/grep search tool (searches the local copy; builtin Grep disabled in favor of the local copy; content-dedups hits; MCP-exposed)
   file_read.py          Local-copy by-line/by-point file reader (read_file, paths aligned to repo-relative; MCP-exposed)
   file_table.py         Structured config-table reader (Excel/CSV/TSV/SQLite → text, read_table; read-only, DoS-bounded; MCP-exposed)
-  path_align.py         Index path ↔ repo-relative lexical alignment (rejects escapes; mount_root defaults to "", legacy /mnt/repo still accepted)
+  path_align.py         Index path ↔ repo-relative lexical alignment (rejects escapes; mount_root defaults to "")
   codegraph_client.py   codegraph-server client wrapper (dormant: tests only, single-writer tripwire-guarded, never on the resident serving path)
   perf.py               Structured latency logging
   bootstrap.sh          EC2 user-data: install deps / extract repo to local /data/repo / snapshot-stamp re-extract / systemd build→bridge
@@ -61,7 +61,7 @@ docs/
     architecture.md     Mental model: how one question crosses the system
     invariants.md       source → generated map + change-X-must-change-Y couplings (7 invariants)
     playbooks.md        ordered change recipes (7 recipes)
-    *-spike.md          Research notes (cardkit streaming / indexing perf / EFS comparison / perf comparison / template)
+    *-spike.md          Research notes (cardkit streaming / indexing perf / storage selection / perf comparison / template)
 .local/                 (gitignored) account-specific deploy state: deploy-config, deploy-output.md
 ```
 
