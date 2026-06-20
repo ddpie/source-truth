@@ -216,6 +216,11 @@ async function streamingCardInvoke(
   // follow-up/callback path leaves it undefined (those are deliberate user clicks,
   // never event_id-deduped).
   eventId?: string,
+  // True when this turn's session was freshly minted (AgentCore cold start). Only the IM
+  // path knows it (from getSessionState); follow-up/reply turns reuse a warm session so
+  // they pass false. Drives cold-start telemetry (frequency + duration) + the coldStart
+  // dimension on answer metrics. Low-cardinality (boolean) → safe as a metric dimension.
+  coldStart = false,
 ): Promise<void> {
   // Dedup only IM messages (Feishu re-delivers them on restart). Follow-up
   // clicks (chatId target) are deliberate user actions — never dedup them, or a
@@ -283,7 +288,7 @@ async function streamingCardInvoke(
     // Hold a GLOBAL concurrency slot only around the heavy AgentCore invoke (the card
     // was already sent eagerly above, so a queued caller still shows 排队中/思考). This
     // caps distinct-session stampede without delaying the user-visible card.
-    return invokeGate.run(() => runStreamingInvoke(card, sessionId, finalPrompt, credentials));
+    return invokeGate.run(() => runStreamingInvoke({ ...card, coldStart }, sessionId, finalPrompt, credentials));
   }).finally(() => {
     // SOLE point of AbortController removal. The controller is registered at card-send
     // so 停止 works while the turn is still QUEUED and all through streaming +
@@ -418,7 +423,7 @@ async function sendStreamingCard(
  *  and finalizes it. Runs inside the per-session serializer, so at most one body
  *  per runtimeSessionId is live at a time. */
 async function runStreamingInvoke(
-  card: { cardId: string; abort: AbortController; startSeq: number; isFollowUp: boolean; sentMessageId?: string; question: string; statusSeeded: boolean; stopButtonSeeded: boolean; traceId: string },
+  card: { cardId: string; abort: AbortController; startSeq: number; isFollowUp: boolean; sentMessageId?: string; question: string; statusSeeded: boolean; stopButtonSeeded: boolean; traceId: string; coldStart?: boolean },
   sessionId: string,
   prompt: string,
   // A credential PROVIDER, not a snapshot: SignatureV4 re-resolves it on every
@@ -426,7 +431,7 @@ async function runStreamingInvoke(
   // going stale and 403-ing every invoke after a few hours of uptime.
   credentials: () => Promise<AwsCredentials>,
 ): Promise<void> {
-  const { cardId, abort, isFollowUp, sentMessageId, question, traceId } = card;
+  const { cardId, abort, isFollowUp, sentMessageId, question, traceId, coldStart = false } = card;
   // Trace-bound logger: every line for THIS invoke carries the same `trace` id shown
   // on the card, so an operator can grep all logs for a user-reported request.
   const tlog = traceLogger(traceId);
@@ -687,7 +692,17 @@ async function runStreamingInvoke(
       // Diagnostic event → traceId-keyed, no hashUserId (metrics.ts §4). best-effort.
       if (!firstTokenEmitted && textSoFar.length > 0) {
         firstTokenEmitted = true;
-        emitMetric("answer_first_token", { ttfbMs: Math.round(performance.now() - monoStart) }, { traceId, sessionId });
+        const ttfbMs = Math.round(performance.now() - monoStart);
+        // coldStart dimension (boolean, low-cardinality → safe metric dimension): lets the
+        // latency widget split warm vs cold ttfb instead of one blended p95.
+        emitMetric("answer_first_token", { ttfbMs, coldStart }, { traceId, sessionId });
+        // On a COLD session, the first-token time folds in AgentCore microVM spin-up +
+        // routing — emit it as the cold-start DURATION signal (separate event so cold-start
+        // frequency = count(runtime_cold_start) and duration = its spinupMs percentiles,
+        // both independent of warm latency). Once per cold invoke (gated by firstTokenEmitted).
+        if (coldStart) {
+          emitMetric("runtime_cold_start", { spinupMs: ttfbMs }, { traceId, sessionId });
+        }
       }
       if (now - lastUpdate < THROTTLE_MS) return;
       lastUpdate = now;
@@ -1122,6 +1137,7 @@ async function runStreamingInvoke(
       numToolCalls: timing.toolCalls ?? 0,
       hasCharts: charts.length > 0,
       evidenceCitationCount,
+      coldStart,
     }, { traceId, sessionId });
   }
   } catch (finalizeErr) {
@@ -1184,6 +1200,10 @@ async function main(): Promise<void> {
     let prompt = question;
     let parentId: string | undefined;
     let sessionId = res.sessionId;
+    // Cold-start flag for telemetry. res.coldStart reflects the freshly-DERIVED session;
+    // if we override to the parent's warm session below, this turn is NOT a cold start, so
+    // reset it (else a reply to an existing card would be miscounted as cold).
+    let coldStart = res.coldStart ?? false;
     if (res.parentId) {
       const parentEntry = lookupCard(res.parentId);
       if (parentEntry) {
@@ -1196,7 +1216,7 @@ async function main(): Promise<void> {
         // Reuse the parent card's warm session (mirrors the follow-up button path),
         // not a freshly-derived one — a threaded reply whose thread_id differs from
         // the parent's would otherwise pin a different, cold microVM.
-        sessionId = parentEntry.sessionId ?? res.sessionId;
+        if (parentEntry.sessionId) { sessionId = parentEntry.sessionId; coldStart = false; }
         const chain = collectChain(res.parentId);
         if (chain.length > 0) {
           prompt = composeFollowUpPrompt(question, chain);
@@ -1223,7 +1243,7 @@ async function main(): Promise<void> {
         }
       : undefined;
     try {
-      await streamingCardInvoke(sessionId, prompt, { messageId: res.messageId }, credentials, question, parentId, res.senderId, composePrompt, res.eventId);
+      await streamingCardInvoke(sessionId, prompt, { messageId: res.messageId }, credentials, question, parentId, res.senderId, composePrompt, res.eventId, coldStart);
     } catch (cardErr) {
       // streamingCardInvoke now finalizes the card itself on backend failure
       // (non-200 / stream error), so reaching here means something unexpected
