@@ -67,13 +67,18 @@ describe("decideFinalize", () => {
 });
 
 describe("hardFailureMessage", () => {
-  it("gives the model-access hint when accessDenied", () => {
-    expect(hardFailureMessage(true)).toContain("Model access");
+  it("gives the model-invoke (permission/region) message when accessDenied — distinct from the generic outage", () => {
+    const m = hardFailureMessage(true);
+    // AWS no longer has a per-model "Model access" console toggle, so the message must NOT
+    // tell the user to go enable it; it points at dev/ops for a config problem instead.
+    expect(m).not.toContain("Model access");
+    expect(m).not.toContain("开通");
+    expect(m).toContain("研发");          // routes to dev/ops
+    expect(m).not.toBe(hardFailureMessage(false));   // still distinct from the generic outage
   });
   it("gives the generic outage message otherwise", () => {
     const m = hardFailureMessage(false);
     expect(m).toContain("查询失败");
-    expect(m).not.toContain("Model access");
   });
 });
 

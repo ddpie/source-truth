@@ -184,14 +184,13 @@ fi
 BUCKET="source-truth-repo-${ACCOUNT}-$(echo "$REGION" | tr -d '-')"
 say info "account=$ACCOUNT region=$REGION bucket=$BUCKET repo=${REPO_PATH:-<reuse>} kind=${REPO_KIND:-n/a} repo_subdir=$REPO_SUBDIR model=$MODEL"
 
-# Bedrock model-access preflight. On a BRAND-NEW account the IAM grant
-# (bedrock:InvokeModel) is NOT enough — the account owner must separately ENABLE
-# model access in the Bedrock console. Without it, deploy still goes green (the
-# runtime reaches READY without ever invoking the model) and only the first real
-# question fails with AccessDeniedException. We probe with a minimal invoke and
-# WARN loudly + actionably on denial — non-blocking, because the probe can fail
-# for unrelated reasons (deploy identity lacking bedrock-runtime, model-id form,
-# transient) and must never block an otherwise-working deploy. Skipped on dry-run.
+# Bedrock invoke preflight. AWS no longer requires per-model "Model access" enablement,
+# so a denial here is NOT a console toggle — it's a real config problem: the deploy
+# identity lacks bedrock:InvokeModel, or the model-id / inference-profile form isn't
+# offered in this region. Deploy still goes READY without invoking the model, so the
+# first real question would fail; we probe with a minimal invoke and WARN actionably on
+# denial — non-blocking (the probe can fail for unrelated/transient reasons and must never
+# block an otherwise-working deploy). Skipped on dry-run.
 preflight_model_access() {
   command -v aws >/dev/null || return 0
   local body resp err rc
@@ -211,9 +210,9 @@ preflight_model_access() {
     rc=$?
     case "$err" in
       *AccessDenied*|*"don't have access"*|*"not authorized"*|*not\ enabled*|*ValidationException*|*"not found"*|*"inference profile"*)
-        say warn "Bedrock model '$MODEL' is unavailable in $REGION (access disabled OR the"
-        say warn "  inference-profile form isn't offered here)."
-        say warn "  → Enable it in the Bedrock console → Model access (per participating region)."
+        say warn "Bedrock model '$MODEL' couldn't be invoked in $REGION (an IAM/region/"
+        say warn "  inference-profile-form issue — note: AWS no longer requires per-model"
+        say warn "  'Model access' enablement, so this is a config problem, not a console toggle)."
         case "$MODEL" in
           global.*)
             say warn "  → '$MODEL' is a GLOBAL inference profile, only carried in a SUBSET of"
