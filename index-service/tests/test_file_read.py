@@ -193,3 +193,38 @@ def test_glob_files_drops_symlink_escape(repo, tmp_path):
     os.symlink(str(outside), str(repo / "src" / "evil.cs"))
     out = file_read.glob_files("**/*.cs", local_root=str(repo), mount_root=MOUNT)
     assert out["paths"] == [f"{MOUNT}/src/A.cs"]  # evil.cs (symlink-out) excluded
+
+
+def test_read_file_decodes_gbk_chinese_faithfully(tmp_path):
+    # CROSS-REVIEW HIGH regression: a GBK/GB2312 Chinese source must be read as real
+    # Chinese, NOT mojibake (the prior hardcoded utf-8+replace corrupted it). decode_bytes
+    # detects GB18030. Also surfaces the non-utf-8 encoding so the agent knows.
+    root = tmp_path / "repo"
+    (root / "src").mkdir(parents=True)
+    (root / "src" / "Skill.cs").write_bytes("// 火球术 伤害=500 冷却=3秒\nclass Fireball {}".encode("gbk"))
+    out = file_read.read_file("src/Skill.cs", local_root=str(root), mount_root="")
+    assert "火球术" in out["content"]
+    assert "伤害=500" in out["content"]
+    assert "�" not in out["content"]      # no replacement chars
+    assert out.get("encoding") == "gb18030"
+
+
+def test_read_file_strips_utf8_bom(tmp_path):
+    root = tmp_path / "repo"
+    (root / "c").mkdir(parents=True)
+    (root / "c" / "x.json").write_bytes("﻿{\"k\":1}".encode("utf-8"))
+    out = file_read.read_file("c/x.json", local_root=str(root), mount_root="")
+    assert out["content"].startswith("{")     # phantom BOM char gone from line 1
+
+
+def test_read_file_line_numbers_match_newline_only_split(tmp_path):
+    # read_file must count lines by \n (like ripgrep/file_search), not splitlines()'s
+    # full Unicode boundary set — else offset/limit paging diverges from cited line nums.
+    root = tmp_path / "repo"
+    (root / "s").mkdir(parents=True)
+    # A form-feed (\f) is a splitlines() boundary but NOT a \n. One logical line here.
+    (root / "s" / "f.txt").write_text("alpha\fbeta\ngamma\n")
+    out = file_read.read_file("s/f.txt", local_root=str(root), mount_root="")
+    # 2 lines by \n-count ("alpha\fbeta", "gamma"), not 3 by splitlines().
+    assert out["lines"] == 2
+    assert "alpha\fbeta" in out["content"]

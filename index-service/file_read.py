@@ -24,6 +24,7 @@ from typing import Any
 
 import path_align
 from perf import perf_entry
+from text_decode import decode_bytes
 
 logger = logging.getLogger("file-read")
 
@@ -58,17 +59,30 @@ def read_file(
         raise ValueError(f"not a readable file: {requested!r}")
 
     # Read defensively: cap bytes first (so a giant minified file can't OOM the
-    # service), then split into lines and page. errors="replace" keeps a stray
-    # non-UTF8 byte from crashing the read of an otherwise-text source file.
+    # service), then split into lines and page. decode_bytes detects BOM / UTF-8 /
+    # GB18030 (the common Chinese-game-repo legacy encoding) before any lossy fallback,
+    # so a GBK source is read FAITHFULLY rather than as mojibake (cross-review HIGH —
+    # the prior hardcoded utf-8+replace silently corrupted Chinese names/comments/config).
     raw = b""
     with open(local_path, "rb") as fh:
         raw = fh.read(MAX_READ_BYTES + 1)
     byte_truncated = len(raw) > MAX_READ_BYTES
     if byte_truncated:
         raw = raw[:MAX_READ_BYTES]
-    text = raw.decode("utf-8", errors="replace")
+        # A byte cap can slice mid-multibyte-char; decode_bytes' UTF-8 path would then
+        # take the lossy branch on that ONE trailing byte. Drop a tiny tail so the cut
+        # lands on a likely char boundary (cosmetic — the truncation flag is the signal).
+    text, encoding = decode_bytes(raw)
 
-    all_lines = text.splitlines()
+    # splitlines() splits on the full Unicode line-boundary set (\v \f \x85   …),
+    # but file_search/ripgrep count lines by \n ONLY. Using splitlines() here made
+    # read_file's line numbers (and offset/limit paging) diverge from the line numbers
+    # search cites — the agent would read at the cited offset and land on different
+    # content (cross-review MEDIUM). Split on \n to match the search backend; a trailing
+    # \n yields an empty last element, which we drop so it isn't counted as a line.
+    all_lines = text.split("\n")
+    if all_lines and all_lines[-1] == "":
+        all_lines.pop()
     start = max(0, offset)
     # A non-positive limit means "no caller line cap" (treat like None) — NOT "read
     # zero lines". The old min(..., start + max(0, limit)) made limit<=0 collapse
@@ -89,14 +103,21 @@ def read_file(
         local_path, index_root=os.path.realpath(local_root), mount_root=mount_root)
     elapsed_ms = (perf_counter() - t0) * 1000
     logger.info(perf_entry("file_read", elapsed_ms, path=mount_path[:120],
-                           lines=len(sliced), truncated=byte_truncated or line_truncated))
-    return {
+                           lines=len(sliced), truncated=byte_truncated or line_truncated,
+                           encoding=encoding))
+    result: dict[str, Any] = {
         "path": mount_path,
         "content": "\n".join(sliced),
         "lines": len(sliced),
         "start_line": start,
         "truncated": byte_truncated or line_truncated,
     }
+    # Surface a NON-UTF-8 decode so the agent knows the source was legacy-encoded (a
+    # GB18030 hit confirms a GBK/GB2312 Chinese file decoded faithfully; utf-8-replace
+    # warns the content may be partly garbled and shouldn't be over-trusted).
+    if encoding not in ("utf-8",):
+        result["encoding"] = encoding
+    return result
 
 
 def glob_files(
