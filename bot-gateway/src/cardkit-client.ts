@@ -601,72 +601,43 @@ export function buildClickedButtonElement(elementId: string, question: string): 
 // reveals these; clicking one emits feedback_reason{reasonCode} then disables them.
 export const FEEDBACK_REASON_CODES = ["inaccurate", "no_evidence", "off_topic", "outdated", "other"] as const;
 
-// Stable element_id for the whole feedback row, so a vote can PUT-replace the entire
-// row (the column_set) with the "thanks" line in one update — buttons inside a column_set
-// can't each be addressed by element_id for an in-place disable, so we swap the container.
-export const FEEDBACK_ROW_EID = "feedback_row";
-
-/** The 👍/👎 vote row (a column_set with element_id FEEDBACK_ROW_EID). value.action=
- *  "feedback" keeps it disjoint from follow_up/stop and from the marker emoji the body
- *  parser keys on. NOT asker-scoped: anyone in the group may rate the answer. */
+/** The 👍/👎 vote buttons as TWO TOP-LEVEL buttons (element_ids fb_up / fb_down), NOT
+ *  inside a column_set — so each can be disabled in place by element_id via the PROVEN
+ *  same-tag button-replacement path (disableFollowUpButton), instead of a cross-tag
+ *  column_set→markdown PUT whose behavior is unverified and fails silently (cross-review
+ *  #6). value.action="feedback" keeps them disjoint from follow_up/stop and from the marker
+ *  emoji the body parser keys on. NOT asker-scoped: anyone in the group may rate. */
 export function buildFeedbackButtons(): unknown[] {
-  return [{
-    tag: "column_set",
-    element_id: FEEDBACK_ROW_EID,
-    columns: [
-      { tag: "column", width: "weighted", weight: 1, elements: [{
-        tag: "button", element_id: "fb_up",
-        text: { tag: "plain_text", content: t("card.feedback.up") },
-        type: "default", size: "small", width: "fill",
-        value: { action: "feedback", vote: "up", eid: "fb_up" },
-      }] },
-      { tag: "column", width: "weighted", weight: 1, elements: [{
-        tag: "button", element_id: "fb_down",
-        text: { tag: "plain_text", content: t("card.feedback.down") },
-        type: "default", size: "small", width: "fill",
-        value: { action: "feedback", vote: "down", eid: "fb_down" },
-      }] },
-    ],
-  }];
+  return [
+    {
+      tag: "button", element_id: "fb_up",
+      text: { tag: "plain_text", content: t("card.feedback.up") },
+      type: "default", size: "small", width: "fill",
+      value: { action: "feedback", vote: "up", eid: "fb_up" },
+    },
+    {
+      tag: "button", element_id: "fb_down",
+      text: { tag: "plain_text", content: t("card.feedback.down") },
+      type: "default", size: "small", width: "fill",
+      value: { action: "feedback", vote: "down", eid: "fb_down" },
+    },
+  ];
 }
 
-/** PUT-replace the whole vote row (or the reason row) with a disabled ✓-thanks line.
- *  Prevents re-voting + acknowledges the click. Best-effort. */
-export async function replaceWithThanks(cardId: string, rowEid: string, sequence: number): Promise<void> {
-  await larkApi("PUT", `/open-apis/cardkit/v1/cards/${cardId}/elements/${rowEid}`, JSON.stringify({
-    element: buildFeedbackThanksElement(rowEid),
-    sequence,
-  }));
-}
-
-export const FEEDBACK_REASON_ROW_EID = "feedback_reason_row";
-
-/** After a 👎, append a reason block (a vertical column_set with element_id
- *  FEEDBACK_REASON_ROW_EID so a reason click can PUT-replace the whole block with thanks)
- *  of enumerated reason buttons (no free text → no PII). Each carries reasonCode. */
+/** After a 👎, append a prompt + enumerated reason buttons (TOP-LEVEL buttons so each is
+ *  disable-in-place addressable by element_id; no free text → no PII). Each carries an
+ *  enumerated reasonCode. */
 export function buildFeedbackReasonElements(): unknown[] {
-  const buttons = FEEDBACK_REASON_CODES.map((code) => ({
-    tag: "column", width: "weighted", weight: 1, elements: [{
+  const elements: unknown[] = [{ tag: "markdown", content: t("card.feedback.reason.prompt") }];
+  FEEDBACK_REASON_CODES.forEach((code) => {
+    elements.push({
       tag: "button", element_id: `fbr_${code}`,
       text: { tag: "plain_text", content: t(`card.feedback.reason.${code}`) },
       type: "default", size: "small", width: "fill",
       value: { action: "feedback_reason", reasonCode: code, eid: `fbr_${code}` },
-    }],
-  }));
-  return [{
-    tag: "column_set",
-    element_id: FEEDBACK_REASON_ROW_EID,
-    flex_mode: "stretch",
-    columns: buttons,
-  }, { tag: "markdown", content: t("card.feedback.reason.prompt") }];
-}
-
-/** A disabled, ✓-marked confirmation line shown in place of the vote/reason buttons
- *  after the user clicks (prevents re-voting; gives immediate acknowledgement). */
-export function buildFeedbackThanksElement(elementId: string): string {
-  return JSON.stringify({
-    tag: "markdown", element_id: elementId, content: `✓ ${t("card.feedback.thanks")}`,
+    });
   });
+  return elements;
 }
 
 /** Append the 👍/👎 feedback row to a finalized (successful) card. Its own write so it
