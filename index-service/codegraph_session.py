@@ -67,6 +67,9 @@ LIVENESS_TIMEOUT_S = 8.0
 # A real subprocess death fails every probe, so it's still caught within
 # THRESHOLD × probe_every (~10s) — fast enough for /health to track reality.
 LIVENESS_FAILURE_THRESHOLD = 2
+# After this many CONSECUTIVE blocked restarts (wedged thread / unverifiable orphan),
+# self-exit so systemd (Restart=always) brings up a clean process — see _blocked_restarts.
+MAX_BLOCKED_RESTARTS = 5
 
 
 class IndexUnhealthy(RuntimeError):
@@ -118,6 +121,15 @@ class CodegraphSession:
         # serve when this is False (never answers on a broken/empty index).
         self._healthy = False
         self._health_detail = "starting"
+        # Count CONSECUTIVE restarts that were BLOCKED (old thread won't die, or the
+        # orphan set couldn't be verified). Such a block is usually PERSISTENT — the
+        # worker thread is wedged in a C call join() can't interrupt — so every later
+        # /health poll re-hits the same block and the service stays 503 FOREVER. The
+        # bridge's systemd unit is Restart=always but only watches the python PROCESS,
+        # which is still alive, so it can't recover a wedged thread. After
+        # MAX_BLOCKED_RESTARTS in a row we self-exit so systemd restarts the whole
+        # process clean — the only thing that can clear a wedged thread (cross-review F2).
+        self._blocked_restarts = 0
 
     def _params(self) -> StdioServerParameters:
         args = ["--mcp", "--workspace", self._workspace]
@@ -533,6 +545,7 @@ class CodegraphSession:
                     self._health_detail = "old worker still alive; refusing to spawn a second writer"
                     logger.error(json.dumps({"event": "restart_blocked",
                                              "detail": "old worker did not exit; not starting a second writer"}))
+                    self._note_blocked_restart("wedged_thread")
                     raise IndexUnhealthy(self._health_detail)
             self._thread = None
             self._healthy = False
@@ -558,10 +571,36 @@ class CodegraphSession:
                 self._health_detail = "orphan check unverifiable; refusing to spawn a second writer"
                 logger.error(json.dumps({"event": "restart_blocked",
                                          "detail": "orphan reaper could not verify; not starting a second writer"}))
+                self._note_blocked_restart("unverifiable_orphan")
                 raise IndexUnhealthy(self._health_detail)
+            # Got past both single-writer guards → a fresh worker is about to start.
+            # Clear the blocked-restart streak (the wedge cleared).
+            self._blocked_restarts = 0
             self.start()
         finally:
             self._restart_lock.release()
+
+    def _note_blocked_restart(self, reason: str) -> None:
+        """A restart was refused by a single-writer guard. Such blocks are usually
+        PERSISTENT (a thread wedged in a C call, or pgrep persistently failing), so
+        every later /health poll re-hits it and the service stays 503 forever while
+        systemd's Restart=always (it only watches the live python process) can't help.
+        After MAX_BLOCKED_RESTARTS in a row, self-exit so systemd restarts the whole
+        process clean — the only way to clear a wedged thread. SIGTERM first (lets the
+        unit stop gracefully), os._exit as a hard backstop (cross-review F2)."""
+        self._blocked_restarts += 1
+        if self._blocked_restarts >= MAX_BLOCKED_RESTARTS:
+            logger.error(json.dumps({
+                "event": "restart_blocked_giving_up",
+                "detail": "%d consecutive blocked restarts (%s); self-exiting for a clean systemd restart"
+                          % (self._blocked_restarts, reason),
+            }))
+            # Best-effort graceful stop, then hard exit if the signal doesn't take.
+            try:
+                os.kill(os.getpid(), signal.SIGTERM)
+            except Exception:  # noqa: BLE001
+                pass
+            os._exit(1)
 
     def _reap_orphan_servers(self) -> bool:
         """SIGKILL any stray codegraph-server still bound to OUR workspace. Best-effort
