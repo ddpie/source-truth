@@ -1,6 +1,6 @@
 # index-service
 
-常驻 **CodeGraph 索引服务** + **MCP-over-HTTP 桥**。
+常驻 **CodeGraph 索引服务** + **MCP-over-HTTP 接口**。
 
 ## 职责
 
@@ -8,7 +8,7 @@
 **本服务本地磁盘** `/data/repo/<subdir>` → `index-build` 一次性建图 → `codegraph-server --mcp` 常驻只读。
 对会话容器只暴露一件事——
 
-**MCP-over-HTTP 桥**（`http_bridge.py`）：CodeGraph 原生仅 stdio MCP，本服务把它暴露为 streamable HTTP，
+**MCP-over-HTTP 接口**（`http_bridge.py`）：CodeGraph 原生仅 stdio MCP，本服务把它暴露为 streamable HTTP，
 供会话容器远程**定位 + 读文件**——定位类 `codegraph_symbol_search` / `codegraph_get_callers` /
 `codegraph_analyze_impact`，文本检索 `codegraph_search_files`，读文件 `codegraph_read_file` /
 `codegraph_glob_files`，以及读数值表 `codegraph_read_table`（Excel/CSV/TSV/SQLite，对应 `file_table.py`）
@@ -17,8 +17,7 @@
 ## 存储模型（唯一一份代码，本地副本）
 
 仓库副本只在本服务的**本地磁盘** `/data/repo/<subdir>`；codegraph-server 索引该本地副本，文件读取工具
-也直接读它。会话 microVM **不挂任何文件系统**，全部源码经本服务的 HTTP 桥读取——既无 EFS、也无 `/mnt/repo`
-共享挂载，因此不存在副本同步问题。代码与索引是**部署时快照**，刷新靠重部署。
+也直接读它。会话 microVM **不挂任何文件系统**，全部源码经本服务的 HTTP 接口读取，没有共享挂载，因此不存在副本同步问题。代码与索引是**部署时快照**，刷新靠重部署。
 
 ## codegraph-server 二进制来源（部署前置）
 
@@ -35,7 +34,7 @@ CodeGraph 引擎是一个独立的原生二进制 `codegraph-server`，**不在�
 
 ## 模块构成
 
-资源化于包根（**不在 `src/`**）：`http_bridge.py`（FastMCP streamable-HTTP 桥，用 `mcp`
+资源化于包根（**不在 `src/`**）：`http_bridge.py`（FastMCP streamable-HTTP 接口，用 `mcp`
 内置的 `mcp.server.fastmcp.FastMCP`）、`codegraph_session.py`（常驻会话，独占写入 graph.db：worker 线程 + 私有
 事件循环 + 健康自愈 + liveness 连续失败容忍）、`codegraph_client.py`（定位类工具的 stdio 调用封装）、
 `file_read.py` / `file_search.py` / `file_table.py`（三个文件工具：读文件 / 文本检索 / 读数值表）、

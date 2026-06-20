@@ -94,7 +94,7 @@ aws ssm start-session --region <r> --target <INDEX_SERVICE_INSTANCE>
 ```
 
 > **只能有一个网关实例连同一个飞书应用**：飞书长连接是集群模式，每个事件只投给一个 client，
-> 同 app 跑两个网关（如又在本地起了一个）会互相抢事件、表现异常。本地调试时先停掉实例上的服务。
+> 同 app 跑两个网关（如又在本地起了一个）会互相争抢事件、表现异常。本地调试时先停掉实例上的服务。
 
 本地起网关（开发调试用）见 [附录 A](#附录-a本地手动起网关开发调试)。
 
@@ -171,7 +171,7 @@ aws ssm start-session --region <r> --target <INDEX_SERVICE_INSTANCE>
 |------|----------|------|
 | 卡片一直「正在分析…」不收尾 | 后端流被中断 / finalize 异常 | 看网关日志 `finalize_error` / `card_closed failed:true`；偶发则重问；持续则查 runtime/index 健康 |
 | 答案里出现原始 `<invoke>` XML 等标记 | 冷 microVM 首次 invoke 时 MCP 工具未注册（冷启动竞速） | 网关会自动重试一次；暖机后消失。看日志 `num_turns`/`cache_read` 确认是冷启动 |
-| 机器人在群里**完全不回** | 网关没起 / 没 @ 到机器人 / 同 app 跑了两个网关抢事件 | 进实例 `systemctl status bot-gateway` 确认 active + 日志 `sdk_wsclient_connected`；确认 @ 的是 `FEISHU_BOT_OPEN_ID`；杀掉多余网关只留一个 |
+| 机器人在群里**完全不回** | 网关没起 / 没 @ 到机器人 / 同 app 跑了两个网关争抢事件 | 进实例 `systemctl status bot-gateway` 确认 active + 日志 `sdk_wsclient_connected`；确认 @ 的是 `FEISHU_BOT_OPEN_ID`；杀掉多余网关只留一个 |
 | 网关 `condition failed` 未启动 | `/etc/bot-gateway.env` 还没写（runtime 未就绪 / gateway 阶段被跳过） | 重跑 `install.sh` 或 `deploy-all.sh`（不跳 gateway）；确认 `FEISHU_SECRET_ID` 已配 |
 | 卡片回「查询失败」/ 日志 `AccessDenied` | Bedrock 模型未在该区域开通 | 去 Bedrock 控制台开通模型访问；跨区域改用区域级推理档（见前置条件 2） |
 | 部署在 index-service 阶段超时 | 全新账号 NAT 路由未收敛 / 实例还在冷建索引 | 多等一轮（bootstrap 对网络操作有重试）；看 `/var/log/` 与 `journalctl -u index-build` |
@@ -229,4 +229,4 @@ node_modules/.bin/ts-node --transpile-only src/index.ts
 ```
 
 > ⚠️ 同一飞书 app 只能有一个网关连接。本地起之前，先停掉 index 主机上的服务
-> （`sudo systemctl stop bot-gateway`），否则两个网关会抢事件。
+> （`sudo systemctl stop bot-gateway`），否则两个网关会争抢同一批事件。
