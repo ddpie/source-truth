@@ -21,6 +21,7 @@ import argparse
 import json
 import logging
 import os
+import posixpath
 import sys
 from typing import Any
 
@@ -28,6 +29,7 @@ from mcp.server.fastmcp import FastMCP
 
 import path_align
 from codegraph_session import CodegraphSession, IndexUnhealthy
+from repo_router import RepoRouter, RepoOutOfScope
 
 # NOTE: the bridge uses the RESIDENT CodegraphSession exclusively. The older
 # per-call spawner codegraph_client.py still exists (exercised by its own
@@ -91,18 +93,18 @@ EXPOSED_TOOLS = (
 )
 
 
-def _align_one(path: Any, *, index_root: str, mount_root: str) -> Any:
+def _align_one(path: Any, *, index_root: str, mount_root: str, repo: str = "") -> Any:
     """Rewrite a single path into mount space, or None if it escapes the repo."""
     if not isinstance(path, str) or not path:
         return path
     try:
-        return path_align.to_container_path(path, index_root=index_root, mount_root=mount_root)
+        return path_align.to_container_path(path, index_root=index_root, mount_root=mount_root, repo=repo)
     except ValueError:
         # Path escaped repo root — drop it rather than leak an out-of-repo path.
         return None
 
 
-def _align_paths(raw_json: str, tool_name: str, *, index_root: str, mount_root: str) -> str:
+def _align_paths(raw_json: str, tool_name: str, *, index_root: str, mount_root: str, repo: str = "") -> str:
     """Rewrite every file path in a codegraph result into mount space.
 
     Tool-aware: each of the three exposed tools returns a DIFFERENT envelope
@@ -129,11 +131,11 @@ def _align_paths(raw_json: str, tool_name: str, *, index_root: str, mount_root: 
         sym = item.get("symbol") if isinstance(item, dict) else None
         loc = sym.get("location") if isinstance(sym, dict) else None
         if isinstance(loc, dict) and "file" in loc:
-            loc["file"] = _align_one(loc.get("file"), index_root=index_root, mount_root=mount_root)
+            loc["file"] = _align_one(loc.get("file"), index_root=index_root, mount_root=mount_root, repo=repo)
         # get_callers entries also carry a call_site with its own file path.
         call_site = item.get("call_site") if isinstance(item, dict) else None
         if isinstance(call_site, dict) and "file" in call_site:
-            call_site["file"] = _align_one(call_site.get("file"), index_root=index_root, mount_root=mount_root)
+            call_site["file"] = _align_one(call_site.get("file"), index_root=index_root, mount_root=mount_root, repo=repo)
 
     if tool_name == "codegraph_symbol_search":
         for item in data.get("results", []) if isinstance(data.get("results"), list) else []:
@@ -147,7 +149,7 @@ def _align_paths(raw_json: str, tool_name: str, *, index_root: str, mount_root: 
             if isinstance(seq, list):
                 for item in seq:
                     if isinstance(item, dict) and "path" in item:
-                        item["path"] = _align_one(item.get("path"), index_root=index_root, mount_root=mount_root)
+                        item["path"] = _align_one(item.get("path"), index_root=index_root, mount_root=mount_root, repo=repo)
     return json.dumps(data, ensure_ascii=False)
 
 
@@ -209,6 +211,23 @@ def build_bridge(
     acquire_singleton_writer_lock(workspace)
     session = CodegraphSession(workspace, max_files=max_files)
 
+    # SERVER-SIDE SCOPE ENFORCEMENT (multi-repo 不变量1 / 阶段3 gate): the repo NAME this
+    # bridge serves is the workspace basename (e.g. /data/repo/code-5x → "code-5x"). Every
+    # tool takes an optional `repo` arg routed through this router BEFORE touching the
+    # session: an out-of-scope repo is rejected here, never routed (the cross-project leak
+    # this stops). Today N=1 (one workspace) so it resolves to the sole repo or rejects a
+    # wrong name; it generalizes unchanged to N workspaces once bootstrap builds them.
+    repo_name = posixpath.basename(workspace.rstrip("/"))
+    router = RepoRouter([repo_name])
+
+    def _route(repo: str | None) -> str:
+        """Resolve the agent's `repo` arg to an in-scope repo (or raise RepoOutOfScope,
+        a ValueError the per-query handler turns into a clean 'no such repo')."""
+        resolved = router.resolve(repo)
+        # N=1: resolve() returns the sole repo for None; for N>1 a None means fan-out, not
+        # yet wired (single workspace today), so treat None as the sole/first repo.
+        return resolved if resolved is not None else router.repos[0]
+
     app = FastMCP(
         name="codegraph-bridge", host=host, port=port,
         stateless_http=True,
@@ -243,18 +262,26 @@ def build_bridge(
         # (get_callers, analyze_impact) the bridge resolves query→uri+line via
         # symbol_search internally (see _build_args) — the agent can't supply an
         # index-space uri because it only ever sees repo-relative paths.
-        async def _tool(query: str) -> str:
+        async def _tool(query: str, repo: str | None = None) -> str:
             # Wait for warmup (don't refuse mid-startup), then refuse only on a
             # genuinely unhealthy (empty/corrupt) index. Returning an explicit
             # error — not empty results — keeps the agent from answering "not
             # found" off a broken graph (POC rule: code is the only truth).
             try:
+                # SERVER-SIDE SCOPE GATE FIRST: reject an out-of-scope `repo` before any
+                # session work (不变量1). Raises RepoOutOfScope (a ValueError) → the handler
+                # below turns it into a clean "no such repo" result, never a fallback.
+                resolved_repo = _route(repo)
                 arguments = await _build_args(tool_name, query)
                 raw = await session.call_tool(tool_name, arguments)
                 # Path alignment is INSIDE the try so an unexpected envelope shape
                 # can't escape this per-query isolation boundary into FastMCP — it
-                # falls to the generic handler below and returns an error JSON.
-                return _align_paths(raw, tool_name, index_root=workspace, mount_root=mount_root)
+                # falls to the generic handler below and returns an error JSON. The
+                # resolved repo prefixes returned paths as <repo>/… (path honesty §4.4).
+                return _align_paths(raw, tool_name, index_root=workspace, mount_root=mount_root, repo=resolved_repo)
+            except RepoOutOfScope as exc:
+                logger.warning(json.dumps({"event": "repo_out_of_scope", "tool": tool_name, "detail": str(exc)}))
+                return json.dumps({"error": "repo not in scope", "detail": str(exc)})
             except IndexUnhealthy as exc:
                 logger.error(json.dumps({"event": "refuse_unhealthy", "tool": tool_name,
                                          "detail": str(exc)}))
