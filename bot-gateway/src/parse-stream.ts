@@ -65,10 +65,18 @@ export interface StreamState {
    *  accumulated text is a TRUNCATED answer that must NOT be shown as a finished
    *  conclusion — the caller flips it to an error. */
   sawResult: boolean;
+  /** The agent-loop turn count from the terminal ResultMessage's `num_turns` (one model
+   *  ↔ tool round-trip = one turn). 0 until the terminal message arrives. Telemetry only
+   *  (turnCount on answer_completed): together with toolCalls it disambiguates a slow run —
+   *  "few deep model turns" (reasoning-heavy) vs "many tool round-trips" (retrieval-heavy) —
+   *  which have different fixes. The gateway sees this directly on the SSE stream (the
+   *  ResultMessage carries num_turns), so NO agent-side change / image rebuild is needed —
+   *  the telemetry plan's "⚠️ needs a path" note for num_turns is outdated. */
+  numTurns: number;
 }
 
 export function newStreamState(): StreamState {
-  return { texts: [], sawToolAfterLastText: true /* first text starts a fresh block */, error: null, toolCalls: 0, toolCallsByName: {}, toolErrors: 0, sawStreamEvent: false, sawResult: false };
+  return { texts: [], sawToolAfterLastText: true /* first text starts a fresh block */, error: null, toolCalls: 0, toolCallsByName: {}, toolErrors: 0, sawStreamEvent: false, sawResult: false, numTurns: 0 };
 }
 
 /** Tally one tool_use by name (perf accounting). */
@@ -150,6 +158,12 @@ export function applyEvent(state: StreamState, evt: Record<string, unknown>): vo
     // later-truncated stream render as a finished answer. Matches the type-checked
     // strictness of the other three predicates (cross-review).
     state.sawResult = true;
+    // Capture the agent-loop turn count off the SAME terminal ResultMessage (telemetry).
+    // Only on the terminal message (guarded by the run-summary predicate above) so an
+    // intermediate event can't overwrite it; ignore a non-number/negative.
+    if (typeof evt.num_turns === "number" && evt.num_turns >= 0) {
+      state.numTurns = evt.num_turns;
+    }
   }
   // Partial-message path: when the agent runs with include_partial_messages, the
   // AgentCore SDK yields StreamEvent objects — serialized as {uuid, session_id,

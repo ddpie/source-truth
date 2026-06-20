@@ -111,6 +111,7 @@
         "period": 300,
         "metrics": [
           ["${NAMESPACE}", "ToolCalls", {"label": "平均工具调用/答", "stat": "Average", "color": "#1f77b4"}],
+          ["${NAMESPACE}", "TurnCount", {"label": "平均循环轮次/答", "stat": "Average", "color": "#9467bd"}],
           ["${NAMESPACE}", "ToolErrors", {"label": "工具错误数(已恢复)", "stat": "Sum", "color": "#d62728"}],
           ["${NAMESPACE}", "ClarifyShown", {"label": "澄清触发数", "stat": "Sum", "color": "#bcbd22", "yAxis": "right"}]
         ]
