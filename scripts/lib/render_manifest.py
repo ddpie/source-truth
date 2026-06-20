@@ -26,7 +26,11 @@ import json
 import re
 import sys
 
-SUBDIR_RE = re.compile(r"^[a-z0-9-]+$")
+# \A…\Z anchors the WHOLE string — NOT ^…$, whose $ also matches just before a trailing
+# newline, so "code-5x\n" would slip through and carry a newline into useradd/path/unit/pgrep
+# (cross-review CRITICAL). Must start with an alphanumeric (no leading '-'), or a name like
+# "-rf" becomes a CLI option flag instead of a value (option injection, cross-review MEDIUM).
+SUBDIR_RE = re.compile(r"\A[a-z0-9][a-z0-9-]*\Z")
 
 
 def parse_manifest(raw: str):
