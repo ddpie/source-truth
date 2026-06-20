@@ -52,26 +52,76 @@ def test_different_workspaces_do_not_collide():
     fdb.close()
 
 
+def _reset_locks(http_bridge):
+    """Snapshot + clear the module lock state for an isolated test, returning a restorer."""
+    saved_fds = dict(http_bridge._WRITER_LOCK_FDS)
+    saved_single = http_bridge._SINGLETON_FD
+    http_bridge._WRITER_LOCK_FDS.clear()
+    http_bridge._SINGLETON_FD = None
+
+    def restore():
+        # Close only fds WE acquired in the test (not the pre-existing ones).
+        for k, fd in list(http_bridge._WRITER_LOCK_FDS.items()):
+            if k not in saved_fds:
+                try:
+                    fd.close()
+                except Exception:  # noqa: BLE001
+                    pass
+        http_bridge._WRITER_LOCK_FDS.clear()
+        http_bridge._WRITER_LOCK_FDS.update(saved_fds)
+        http_bridge._SINGLETON_FD = saved_single
+
+    return restore
+
+
 def test_acquire_singleton_writer_lock_is_idempotent_in_process():
     # acquire_singleton_writer_lock() is called from BOTH main() and build_bridge()
     # (so an app-factory launch is guarded too). A second call IN THE SAME PROCESS
-    # must be a no-op (not raise / not re-open), since this process already owns it.
+    # for the SAME workspace must be a no-op (not raise / not re-open).
     import http_bridge
 
-    saved = http_bridge._SINGLETON_FD
-    http_bridge._SINGLETON_FD = None
+    restore = _reset_locks(http_bridge)
     try:
         ws = tempfile.mkdtemp() + "/repo"
         http_bridge.acquire_singleton_writer_lock(ws)
-        fd_after_first = http_bridge._SINGLETON_FD
+        fd_after_first = http_bridge._WRITER_LOCK_FDS[ws.rstrip("/")]
         assert fd_after_first is not None, "first call must acquire the lock"
         # Second call (e.g. build_bridge after main already took it) — no-op, same fd.
         http_bridge.acquire_singleton_writer_lock(ws)
-        assert http_bridge._SINGLETON_FD is fd_after_first, "re-acquire in-process must keep the same fd"
+        assert http_bridge._WRITER_LOCK_FDS[ws.rstrip("/")] is fd_after_first, "re-acquire in-process must keep the same fd"
     finally:
-        if http_bridge._SINGLETON_FD is not None and http_bridge._SINGLETON_FD is not saved:
-            http_bridge._SINGLETON_FD.close()
-        http_bridge._SINGLETON_FD = saved
+        restore()
+
+
+def test_acquire_takes_distinct_locks_per_workspace_in_one_process():
+    # MULTI-REPO REGRESSION: a single process serving N workspaces must take N DISTINCT
+    # flocks. The old single-fd early-return locked workspace A then SILENTLY skipped B —
+    # leaving repo B's graph.db unguarded against a concurrent writer. Assert both keys
+    # are held and the fds differ.
+    import http_bridge
+
+    restore = _reset_locks(http_bridge)
+    try:
+        a = tempfile.mkdtemp() + "/repoA"
+        b = tempfile.mkdtemp() + "/repoB"
+        http_bridge.acquire_singleton_writer_lock(a)
+        http_bridge.acquire_singleton_writer_lock(b)
+        ka, kb = a.rstrip("/"), b.rstrip("/")
+        assert ka in http_bridge._WRITER_LOCK_FDS, "workspace A lock missing"
+        assert kb in http_bridge._WRITER_LOCK_FDS, "workspace B lock missing (the silent-skip bug)"
+        assert http_bridge._WRITER_LOCK_FDS[ka] is not http_bridge._WRITER_LOCK_FDS[kb], "each workspace needs its OWN fd"
+        # Each lock file must actually be flocked: a foreign re-open must be refused.
+        for k in (ka, kb):
+            foreign = open(k + ".bridge.lock", "w")  # noqa: SIM115
+            refused = False
+            try:
+                fcntl.flock(foreign, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except (OSError, BlockingIOError):
+                refused = True
+            foreign.close()
+            assert refused, f"workspace {k} lock not actually held"
+    finally:
+        restore()
 
 
 def test_acquire_singleton_writer_lock_raises_on_foreign_holder():
@@ -80,8 +130,7 @@ def test_acquire_singleton_writer_lock_raises_on_foreign_holder():
     # become a second writer.
     import http_bridge
 
-    saved = http_bridge._SINGLETON_FD
-    http_bridge._SINGLETON_FD = None
+    restore = _reset_locks(http_bridge)
     ws = tempfile.mkdtemp() + "/repo"
     foreign = open(ws.rstrip("/") + ".bridge.lock", "w")  # noqa: SIM115 - stands in for another process
     fcntl.flock(foreign, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -92,8 +141,8 @@ def test_acquire_singleton_writer_lock_raises_on_foreign_holder():
         except http_bridge.SingleWriterConflict:
             raised = True
         assert raised, "must refuse when another holder owns the workspace lock"
-        assert http_bridge._SINGLETON_FD is None, "a refused acquire must not set the module fd"
+        assert ws.rstrip("/") not in http_bridge._WRITER_LOCK_FDS, "a refused acquire must not register the fd"
     finally:
         fcntl.flock(foreign, fcntl.LOCK_UN)
         foreign.close()
-        http_bridge._SINGLETON_FD = saved
+        restore()
