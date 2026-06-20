@@ -141,6 +141,17 @@ aws ssm start-session --region <r> --target <INDEX_SERVICE_INSTANCE>
 
 **重启网关**：先杀旧进程（同 app 只能一个），再按第四节重新起。
 
+**拆除整套（停止计费）**：试用完、或某次部署中途失败留下计费资源（NAT ~$32/月、EIP、EC2）时，一条命令按反依赖顺序清干净：
+
+```bash
+./scripts/teardown.sh --region <r> --dry-run     # 先看要删什么，不动资源
+./scripts/teardown.sh --region <r>               # 交互确认后删除（输入 yes）
+./scripts/teardown.sh --region <r> --include-shared   # 连 IAM 角色 + S3 桶（账号共享）一起删
+```
+
+资源从 `.local/deploy-config` 读、读不到则按 `source-truth-*` tag 发现（所以中途崩溃的残留也能清）。
+删完会提示一条核对命令确认没有遗留的计费 NAT。破坏性、不可逆。
+
 ---
 
 ## 七、排错（症状 → 原因 → 处置）

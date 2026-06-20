@@ -284,6 +284,44 @@ def test_reap_orphan_unverified_when_kill_fails(monkeypatch):
     assert sess._reap_orphan_servers() is False  # found-but-unkillable → unverified
 
 
+def test_note_blocked_restart_self_exits_after_threshold(monkeypatch):
+    # F2: a PERSISTENTLY blocked restart (wedged thread / unverifiable orphan) keeps
+    # /health at 503 forever while systemd (Restart=always, watches only the live
+    # python process) can't help. After MAX_BLOCKED_RESTARTS in a row the session must
+    # self-exit so systemd restarts a clean process. Below threshold: NO exit.
+    import codegraph_session as cs
+
+    sess = cs.CodegraphSession("/data/repo/ws")
+    monkeypatch.setattr(cs, "MAX_BLOCKED_RESTARTS", 3)
+    killed, exited = [], []
+    monkeypatch.setattr(cs.os, "kill", lambda pid, sig: killed.append(sig))
+    monkeypatch.setattr(cs.os, "_exit", lambda code: exited.append(code))
+
+    sess._note_blocked_restart("wedged_thread")  # 1
+    sess._note_blocked_restart("wedged_thread")  # 2
+    assert exited == [], "must NOT exit below the threshold"
+    sess._note_blocked_restart("wedged_thread")  # 3 → threshold
+    assert exited == [1], "must self-exit at the threshold"
+    assert cs.signal.SIGTERM in killed, "graceful SIGTERM before the hard exit"
+
+
+def test_note_blocked_restart_resets_streak_after_a_clean_run(monkeypatch):
+    # Below-threshold blocks then a NON-blocked restart must reset the streak, so
+    # isolated blocks across unrelated incidents don't accumulate toward self-exit.
+    import codegraph_session as cs
+
+    sess = cs.CodegraphSession("/data/repo/ws")
+    monkeypatch.setattr(cs, "MAX_BLOCKED_RESTARTS", 3)
+    monkeypatch.setattr(cs.os, "_exit", lambda code: (_ for _ in ()).throw(AssertionError("must not exit")))
+    sess._note_blocked_restart("wedged_thread")
+    sess._note_blocked_restart("wedged_thread")
+    sess._blocked_restarts = 0  # a clean restart resets (mirrors _restart before start())
+    # Two MORE blocks must not exit (streak restarted from 0).
+    sess._note_blocked_restart("wedged_thread")
+    sess._note_blocked_restart("wedged_thread")
+    assert sess._blocked_restarts == 2
+
+
 def test_acquire_restart_lock_is_cooperative_not_executor_bound():
     # F1 regression: _acquire_restart_lock must NOT submit a blocking acquire() to the
     # default executor (that parked one pool thread per waiter → a restart storm
