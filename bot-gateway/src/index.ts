@@ -27,7 +27,7 @@ import { invokeRuntimeStreaming, classifyInvokeOutcome, isTurnCapError, type Aws
 import { decideFinalize, hardFailureMessage, shapeBody } from "./finalize-decision";
 import { createCard, updateContent, closeStreaming, finalizeCard, appendFooter, appendClarify, buildSendCardContent, disableFollowUpButton, appendReasoningPanel, updateReasoningPanel, appendEvidencePanel, updateEvidencePanel, appendOneChart, MAX_CHARTS, appendStopButton, appendStatusLine, updateStatusLine, formatElapsed, appendFeedbackButtons, appendFeedbackReasons, disableFeedbackRow, disableFeedbackReasonRow, type ActionButton } from "./cardkit-client";
 import { extractCharts } from "./extract-charts";
-import { rememberCard, rememberAnswer, lookupCard, collectChain, claimCardUiFlag } from "./card-registry";
+import { rememberCard, rememberAnswer, lookupCard, collectChain, claimCardUiFlag, isAskerAction } from "./card-registry";
 import { composeFollowUpPrompt } from "./followup-context";
 import { removeReaction } from "./reaction";
 import { redactSensitive, redactSteps, redactDeep } from "./redact";
@@ -1436,7 +1436,7 @@ async function main(): Promise<void> {
           // asker. (Follow-up buttons stay group-open by the same decision — clicking
           // one only spends a fresh invoke, it doesn't disrupt an in-flight stream.)
           const stopAsker = stopEntry?.askerOpenId;
-          const stopAllowed = !!stopAsker && !!operatorOpenId && operatorOpenId === stopAsker;
+          const stopAllowed = isAskerAction(stopAsker, operatorOpenId);
           if (!stopCardId) {
             log({ event: "stop_unresolved", message: messageId ? hashUserId(messageId) : "" });
           } else if (!stopAllowed) {
@@ -1509,19 +1509,32 @@ async function main(): Promise<void> {
           }
           // No toast — the in-place button disable (✓ + greyed) is feedback enough.
         } else if (value?.action === "feedback" && (value.vote === "up" || value.vote === "down")) {
-          // 👍/👎 vote. NOT asker-scoped (anyone may rate — more feedback is better; do
-          // NOT copy stop's fail-closed asker gate here). User-level metric → hashUserId,
-          // no traceId (metrics.ts §4).
+          // 👍/👎 vote. ASKER-SCOPED (operator decision 2026-06-20): only the user who ASKED
+          // may rate. WHY: a Feishu card has ONE shared UI — there is no per-user button state,
+          // so the first click disables the row for EVERYONE. That makes "anyone may rate" a
+          // first-come-wins lottery (only one vote per card ever lands), NOT the per-user signal
+          // the metric key implied. Gating to the asker makes "one vote per card" CORRECT: the
+          // card owner is exactly who should give that single quality signal, and it aligns with
+          // stop / bare-reply (both asker-gated). User-level metric → hashUserId, no traceId.
           const fbVote: "up" | "down" = value.vote;   // capture the narrowed literal (the async closure below widens value.vote back to string|undefined)
           const fbEntry = lookupCard(messageId);
           const fbCardId = value.card_id || fbEntry?.cardId;
           const fbSession = fbEntry?.sessionId;
           const voterHash = hashUserId(operatorOpenId);
+          // FAIL CLOSED (mirror stop): only the known asker may vote. If the card's asker is
+          // unknown (askerOpenId empty — pre-restart card / callback without operator id) we
+          // CANNOT verify, so refuse rather than let any member vote via the empty branch.
+          const fbAsker = fbEntry?.askerOpenId;
+          const fbAllowed = isAskerAction(fbAsker, operatorOpenId);
+          if (!fbAllowed) {
+            log({ event: "feedback_denied", card: fbCardId ?? null, reason: fbAsker ? "not_asker" : "asker_unknown" });
+            return {};
+          }
           // PER-CARD-PER-USER VOTE GUARD (cross-review P1 #1/#1b): the cb: key only catches a
           // re-delivered callback, and the row-replacement UI is best-effort/racy — neither
-          // stops one user voting twice (👍 then 👎 have different eids → both counted, and a
+          // stops the asker voting twice (👍 then 👎 have different eids → both counted, and a
           // re-tap after the 90s composite TTL re-counts). So gate the metric on a STABLE
-          // per-(card,user) key: a user's FIRST vote on a card counts; any later vote (either
+          // per-(card,user) key: the asker's FIRST vote on a card counts; any later vote (either
           // button, any time) is dropped. Card-scoped, so different cards still each get a vote.
           const voteKey = `vote:${fbCardId || messageId}:${voterHash}`;
           const firstVote = !isDuplicate(voteKey);
@@ -1590,6 +1603,14 @@ async function main(): Promise<void> {
           // guard so a reason can't be double-submitted; disable the chosen reason button in place.
           const frEntry = lookupCard(messageId);
           const frCardId = value.card_id || frEntry?.cardId;
+          // ASKER-SCOPED, FAIL CLOSED (same as the vote above): the reason grid is a card-global
+          // element revealed by the asker's 👎, so without this gate any member could pick the
+          // reason. Only the asker may. Unknown asker → refuse (can't verify).
+          const frAsker = frEntry?.askerOpenId;
+          if (!isAskerAction(frAsker, operatorOpenId)) {
+            log({ event: "feedback_reason_denied", card: frCardId ?? null, reason: frAsker ? "not_asker" : "asker_unknown" });
+            return {};
+          }
           const reasonHash = hashUserId(operatorOpenId);
           const reasonKey = `reason:${frCardId || messageId}:${reasonHash}`;
           const firstReason = !isDuplicate(reasonKey);

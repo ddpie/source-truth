@@ -86,6 +86,16 @@ export function claimCardUiFlag(messageId: string, flag: "voteRowPainted" | "rea
   return true;
 }
 
+/** FAIL-CLOSED asker check shared by the asker-scoped card actions (stop / feedback /
+ *  feedback_reason): true ONLY when the card's asker is known AND equals the operator who
+ *  clicked. Returns false if either id is empty/undefined — a card whose asker we can't
+ *  verify must NOT let any member act (one card can't become a lever for the whole group:
+ *  stop = abort someone's stream, feedback = the single per-card vote a shared-UI card holds).
+ *  Pure (no registry access) so it's trivially unit-testable; callers pass entry?.askerOpenId. */
+export function isAskerAction(askerOpenId: string | undefined, operatorOpenId: string | undefined): boolean {
+  return !!askerOpenId && !!operatorOpenId && askerOpenId === operatorOpenId;
+}
+
 /** One prior turn in a replayed conversation chain (oldest→newest order). */
 export interface ChainTurn { question?: string; answer?: string }
 
