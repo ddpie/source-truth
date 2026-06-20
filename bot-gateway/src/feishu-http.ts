@@ -149,6 +149,18 @@ export async function feishuApi(
     const tokenExpired = status === 401 || (code !== undefined && TOKEN_EXPIRY_CODES.has(code));
     const throttled = status === 429 || (code !== undefined && THROTTLE_CODES.has(code));
 
+    // RETRY-SAFETY (cross-review weighed the "retry double-posts a non-idempotent
+    // CardKit append" concern): the two retried conditions below — token-expiry and
+    // throttle — are both rejected by Feishu at INGRESS, BEFORE the write is processed
+    // (auth + rate-limit gate the request, they don't fire after a commit). So a retried
+    // POST/append cannot duplicate a server-side-committed element on these paths. The
+    // one genuinely "committed-but-response-lost" case is a transport timeout/abort
+    // (the .catch above) — and that is deliberately NOT retried (it throws straight out),
+    // so it can't double-post either. IM send/reply additionally carry a `uuid` idempotency
+    // key as belt-and-suspenders. Conclusion: NO speculative uuid was added to CardKit
+    // appends (CardKit's append idempotency contract is undocumented; adding an unrecognized
+    // body field risks breaking every card write for a dup that ingress-rejection precludes).
+
     if (tokenExpired) {
       invalidateToken();
       if (!tokenRetried) { tokenRetried = true; continue; }

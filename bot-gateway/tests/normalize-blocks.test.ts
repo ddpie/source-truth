@@ -123,4 +123,39 @@ describe("normalizeBlocks — must NOT touch well-formed / protected content", (
     // was silently DELETED, dropping a token from the rendered answer.
     expect(normalizeBlocks("正则里写 FENCE9 会怎样？")).toBe("正则里写 FENCE9 会怎样？");
   });
+
+  it("does NOT corrupt an inline `code` span containing --- (cross-review MEDIUM)", () => {
+    // An inline config/flag value with a dash-run adjacent to punctuation must NOT have
+    // its `---` promoted to a horizontal rule mid-sentence (which also breaks the span).
+    const input = "参数 `--opt：---` 表示默认。";
+    const out = normalizeBlocks(input);
+    expect(out).toBe(input);                  // untouched — span protected
+    expect(out).not.toContain("\n\n---");   // no HR injected
+  });
+
+  it("does NOT corrupt an inline `code` span containing a dotted dash run", () => {
+    const input = "正则 `a.---b` 匹配。";
+    expect(normalizeBlocks(input)).toBe(input);
+  });
+
+  it("does NOT treat a # inside an inline span as a heading", () => {
+    const input = "标志 `#FF0000` 是红色。";
+    expect(normalizeBlocks(input)).toBe(input);
+  });
+
+  it("STILL fixes a genuine jammed ### on a line that also has an inline span", () => {
+    // The inline span is protected, but real surrounding prose must still normalize:
+    // a jammed heading elsewhere on the line is repaired.
+    const input = "用 `crit_rate` 那列：### 暴击";
+    const out = normalizeBlocks(input);
+    expect(out).toContain("`crit_rate`");     // span intact
+    expect(out).toMatch(/\n\n### 暴击/);     // heading split out
+  });
+
+  it("does NOT leak the NUL sentinel when an inline span and prose coexist", () => {
+    const out = normalizeBlocks("见 `x=1` 与 `y=2` 两处。");
+    expect(out).toBe("见 `x=1` 与 `y=2` 两处。");
+    expect(out).not.toContain("\x00");
+  });
+
 });
