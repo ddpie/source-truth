@@ -151,3 +151,84 @@ def test_requires_at_least_one_workspace(monkeypatch):
     monkeypatch.setattr(http_bridge, "acquire_singleton_writer_lock", lambda ws: None)
     with pytest.raises(ValueError):
         http_bridge.build_bridge(workspaces=[], port=8954)
+
+
+# ── file-tool per-repo routing (read_file/read_table by path prefix; search/glob fan-out) ──
+def _build_multi_with_local(monkeypatch, tmp_path, names=("alpha", "beta")):
+    """build_bridge over REAL on-disk local copies (so file tools register + run) with a
+    fake graph session. Each repo gets a distinct file so routing is observable."""
+    _PerRepoFake.registry.clear()
+    monkeypatch.setattr(http_bridge, "CodegraphSession", lambda ws, **kw: _PerRepoFake(ws, **kw))
+    monkeypatch.setattr(http_bridge, "acquire_singleton_writer_lock", lambda ws: None)
+    workspaces = []
+    for n in names:
+        root = tmp_path / n
+        (root / "src").mkdir(parents=True)
+        (root / "src" / f"{n}_only.cs").write_text(f"// {n} marker TOKEN_{n.upper()}\n")
+        (root / "shared.json").write_text(f'{{"repo": "{n}"}}\n')
+        workspaces.append((str(root), str(root)))
+    app = http_bridge.build_bridge(workspaces=workspaces, host="127.0.0.1", port=8961)
+    return app
+
+
+def test_read_file_routes_by_repo_prefix(monkeypatch, tmp_path):
+    app = _build_multi_with_local(monkeypatch, tmp_path)
+    fn = _fn(app, "codegraph_read_file")
+    out = json.loads(asyncio.run(fn(path="beta/shared.json")))
+    assert out.get("path") == "beta/shared.json", out
+    assert '"repo": "beta"' in out["content"], out
+    # alpha's copy is NOT read for a beta-prefixed path
+    out_a = json.loads(asyncio.run(fn(path="alpha/src/alpha_only.cs")))
+    assert "TOKEN_ALPHA" in out_a["content"]
+
+
+def test_read_file_unprefixed_path_in_multi_refuses(monkeypatch, tmp_path):
+    # With multiple repos and no recognizable <repo>/ prefix, refuse rather than guess.
+    app = _build_multi_with_local(monkeypatch, tmp_path)
+    out = json.loads(asyncio.run(_fn(app, "codegraph_read_file")(path="shared.json")))
+    assert "error" in out and "which repo" in out["detail"], out
+
+
+def test_read_file_out_of_scope_prefix_rejected(monkeypatch, tmp_path):
+    app = _build_multi_with_local(monkeypatch, tmp_path)
+    # "evil/x" — evil is not in scope; the seg isn't in scope so it's an un-routable path.
+    out = json.loads(asyncio.run(_fn(app, "codegraph_read_file")(path="evil/x.cs")))
+    assert "error" in out, out
+
+
+def test_search_files_fans_out_across_repos(monkeypatch, tmp_path):
+    app = _build_multi_with_local(monkeypatch, tmp_path)
+    # "marker" appears once per repo → fan-out returns both, each <repo>/-prefixed.
+    out = json.loads(asyncio.run(_fn(app, "codegraph_search_files")(pattern="marker")))
+    paths = sorted(m["path"].split("/")[0] for m in out["matches"])
+    assert paths == ["alpha", "beta"], out
+
+
+def test_search_files_scoped_to_one_repo(monkeypatch, tmp_path):
+    app = _build_multi_with_local(monkeypatch, tmp_path)
+    out = json.loads(asyncio.run(_fn(app, "codegraph_search_files")(pattern="marker", repo="alpha")))
+    assert all(m["path"].startswith("alpha/") for m in out["matches"]), out
+    assert out["matches"], "expected alpha hits"
+
+
+def test_search_files_out_of_scope_repo_rejected(monkeypatch, tmp_path):
+    app = _build_multi_with_local(monkeypatch, tmp_path)
+    out = json.loads(asyncio.run(_fn(app, "codegraph_search_files")(pattern="marker", repo="ghost")))
+    assert '"repo not in scope"' in json.dumps(out)
+
+
+def test_glob_fans_out_across_repos(monkeypatch, tmp_path):
+    app = _build_multi_with_local(monkeypatch, tmp_path)
+    out = json.loads(asyncio.run(_fn(app, "codegraph_glob_files")(pattern="**/*.cs")))
+    prefixes = sorted(p.split("/")[0] for p in out["paths"])
+    assert prefixes == ["alpha", "beta"], out
+
+
+def test_read_table_routes_by_repo_prefix(monkeypatch, tmp_path):
+    # add a csv to beta only
+    (tmp_path / "beta" / "Config").mkdir(parents=True)
+    (tmp_path / "beta" / "Config" / "t.csv").write_text("a,b\n1,2\n")
+    app = _build_multi_with_local(monkeypatch, tmp_path)
+    out = json.loads(asyncio.run(_fn(app, "codegraph_read_table")(path="beta/Config/t.csv")))
+    assert out.get("path") == "beta/Config/t.csv", out
+    assert out.get("kind") == "csv"
