@@ -1186,6 +1186,16 @@ async function main(): Promise<void> {
   // is cluster mode and delivers each event to just one random client, so a
   // stray lark-cli event-bus daemon would steal events. Verified live.)
   if (!APP_ID || !APP_SECRET) throw new Error("FEISHU_APP_ID and FEISHU_APP_SECRET required");
+  // WARN LOUD if the bot's own open_id is unset: the group @-gate then can't tell which
+  // mention is the bot and degrades to "ANY mention triggers an answer" — so @-ing a
+  // human colleague in a group would make the bot answer unsolicited (noise + cost). Not
+  // fatal (p2p still works; a single-bot group is usually fine), but the operator must
+  // know the gate is weakened (cross-review P2). Deploy prints a reminder; this catches a
+  // gateway started without the env regardless.
+  if (!BOT_OPEN_ID) {
+    log({ event: "bot_open_id_unset", level: "warn",
+          detail: "FEISHU_BOT_OPEN_ID is empty — group @-gate falls back to 'any mention triggers'; set it so only @bot is answered" });
+  }
   const lark = await import("@larksuiteoapi/node-sdk");
   const dispatcher = new lark.EventDispatcher({}).register({
     "im.message.receive_v1": (data: unknown) => {

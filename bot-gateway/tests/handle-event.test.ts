@@ -175,6 +175,38 @@ describe("handleMessageEvent", () => {
     expect(out.handled).toBe(true);
   });
 
+  it("FAILS CLOSED on an UNKNOWN chat_type: requires the @-gate, not un-gated p2p (cross-review P1)", async () => {
+    // A future/unknown chat_type (e.g. a topic-group) must NOT be answered without an
+    // @-mention. Gating on `!== "p2p"` means anything non-p2p needs the gate.
+    const out = await handleMessageEvent(
+      evt({ chat_type: "topic" as unknown as "group", content: "大家随便聊", mentions: [] }),
+      { invoke: async () => "ok" },
+      { botOpenId: "ou_bot" },
+    );
+    expect(out.handled).toBe(false);
+    expect(out.reason).toBe("not_mentioned");
+  });
+
+  it("an UNKNOWN chat_type WITH an @bot mention IS answered (gate satisfied)", async () => {
+    const out = await handleMessageEvent(
+      evt({ chat_type: "topic" as unknown as "group", content: "@_user_1 看下", mentions: [{ key: "@_user_1", open_id: "ou_bot" }] }),
+      { invoke: async () => "ok" },
+      { botOpenId: "ou_bot" },
+    );
+    expect(out.handled).toBe(true);
+  });
+
+  it("ignores a message whose sender IS the bot itself (self-loop defense-in-depth)", async () => {
+    // Even mislabeled sender_type="user", an open_id match to the bot must be dropped.
+    const out = await handleMessageEvent(
+      evt({ chat_type: "p2p", sender_id: "ou_bot", sender_type: "user", mentions: [] }),
+      { invoke: async () => "ok" },
+      { botOpenId: "ou_bot" },
+    );
+    expect(out.handled).toBe(false);
+    expect(out.reason).toBe("self_message");
+  });
+
   it("in a GROUP, answers the ASKER's bare reply to one of OUR bot cards (implicit mention)", async () => {
     let captured = "";
     const invoke = async (_s: string, prompt: string) => { captured = prompt; return "ok"; };
