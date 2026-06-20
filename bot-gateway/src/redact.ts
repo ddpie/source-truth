@@ -133,9 +133,18 @@ const PATTERNS: Array<[RegExp, string | ((...args: string[]) => string)]> = [
   // scrubbed.) ReDoS-safe: fixed `ip-`, bounded numeric groups, single required tail.
   [/\bip-(?:\d{1,3}-){3}\d{1,3}(?:\.[a-z0-9-]{1,40}){0,3}\.(?:compute(?:-\d)?|ec2)\.internal\b/gi, REDACTED],
   // S3 bucket URIs — internal bucket naming is reconnaissance-useful. Single bounded
-  // char-class for the bucket + an optional key path (negated class, required prefix) →
-  // no nested quantifier, no ReDoS.
-  [/\bs3:\/\/[a-z0-9][a-z0-9.-]{2,62}(?:\/[^\s"'`]*)?/gi, REDACTED],
+  // char-class for the bucket + an optional key path → no nested quantifier, no ReDoS.
+  // The path class must NOT be a broad `[^\s"'`]*`: Chinese answer text (the product's
+  // primary language) has no spaces, so a greedy class would swallow the rest of the
+  // sentence after an inline `s3://…` citation into [已隐藏] (cross-review P1 — my own
+  // test masked it with a trailing ASCII space). Restrict the path to real S3-key chars
+  // (alnum, / _ - . and a few url-safe) and STOP at CJK / commas / 。 / parens / quotes /
+  // markdown — same tight-termination discipline as the sibling presigned-URL pattern.
+  // Exclude `()` from the path class too: a markdown link `[t](s3://b/k)` would
+  // otherwise eat the closing `)`. S3 keys CAN contain parens, so this very slightly
+  // under-redacts such a key's tail — but the bucket name (the recon-sensitive part) is
+  // still scrubbed, and keeping markdown links intact matters more.
+  [/\bs3:\/\/[a-z0-9][a-z0-9.-]{2,62}(?:\/[A-Za-z0-9!_.*'/-]*)?/g, REDACTED],
 ];
 
 export function redactSensitive(text: string): string {
