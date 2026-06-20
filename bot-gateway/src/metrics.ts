@@ -74,8 +74,13 @@ const ENUM_WHITELIST: Record<string, { set: ReadonlySet<string>; fallback: strin
 // USER-LEVEL: aggregated by hashUserId (DAU/retention). NO traceId (key-split, §4).
 export type UserLevelEvent = "question_received" | "feedback_voted" | "feedback_reason";
 // DIAGNOSTIC: per-Q&A, joined by traceId to the agent's perf logs. NO hashUserId (§4).
+// answer_aborted is SEPARATE from answer_failed on purpose: a user pressing 停止 is a
+// deliberate user choice, NOT a system failure — folding it into answer_failed would
+// inflate the failure rate and mask real outages. Keeping it distinct lets CloudWatch's
+// "failure distribution" reflect only genuine faults, while abort rate is its own signal.
 export type DiagnosticEvent =
-  | "answer_first_token" | "answer_completed" | "answer_failed" | "clarify_shown" | "card_health";
+  | "answer_first_token" | "answer_completed" | "answer_failed" | "answer_aborted"
+  | "clarify_shown" | "card_health";
 
 const USER_LEVEL_EVENTS: ReadonlySet<string> = new Set<UserLevelEvent>([
   "question_received", "feedback_voted", "feedback_reason",
