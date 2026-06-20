@@ -72,6 +72,25 @@ describe("buildInvokeRequest", () => {
     expect(Object.keys(JSON.parse(req.body))).toEqual(["prompt"]);
   });
 
+  it("forwards repos in the body when provided (multi-repo 阶段1 project repo set)", () => {
+    const req = buildInvokeRequest({
+      runtimeArn: RUNTIME_ARN,
+      region: "ap-northeast-1",
+      sessionId: SESSION_ID,
+      prompt: "x",
+      traceId: "st-1",
+      repos: ["code-5x", "code-5x-svc"],
+    });
+    expect(JSON.parse(req.body)).toEqual({ prompt: "x", traceId: "st-1", repos: ["code-5x", "code-5x-svc"] });
+  });
+
+  it("omits repos when unset or empty (single-repo deploy: wire shape unchanged)", () => {
+    const bare = buildInvokeRequest({ runtimeArn: RUNTIME_ARN, region: "ap-northeast-1", sessionId: SESSION_ID, prompt: "x" });
+    expect(Object.keys(JSON.parse(bare.body))).toEqual(["prompt"]);
+    const empty = buildInvokeRequest({ runtimeArn: RUNTIME_ARN, region: "ap-northeast-1", sessionId: SESSION_ID, prompt: "x", repos: [] });
+    expect(Object.keys(JSON.parse(empty.body))).toEqual(["prompt"]);  // empty array → omitted
+  });
+
   it("rejects a runtimeSessionId shorter than the AgentCore minimum", () => {
     expect(MIN_SESSION_ID_LEN).toBeGreaterThanOrEqual(33);
     expect(() =>
