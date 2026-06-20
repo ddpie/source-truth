@@ -1,8 +1,6 @@
 # 游戏研发助手｜需求与方案评审（2026-06-16）
 
-> 需求真相源。导入自飞书会议纪要《游戏研发助手｜会议纪要汇总》。
-> 来源：https://amzn-chn.feishu.cn/wiki/BhrbwZvXtih6qckc5vIcfE2dnQh
-> 本文记录 MVP 边界与验收基准；架构方案见 [`architecture-overview_zh.md`](architecture-overview_zh.md)。
+> 需求权威依据：记录 MVP 边界与验收基准。架构方案见 [`architecture-overview_zh.md`](architecture-overview_zh.md)。
 
 ## 背景
 
@@ -49,7 +47,7 @@ Code 在工程内检索；目标是叠加索引后速度快于本地，待 POC �
 
 **规模并发。** 单项目 10 至 30 人，同时并发不超过 5，低频无规律。
 
-**会话隔离。** 上下文挂在飞书对话、按需拉取消息记录；多用户不可共用 session，否则相互串扰。
+**会话隔离。** 上下文挂在飞书对话、按需拉取消息记录；多用户不可共用会话，否则相互串扰。
 
 ### 客户环境（会上已澄清）
 
@@ -95,6 +93,6 @@ Code 在工程内检索；目标是叠加索引后速度快于本地，待 POC �
 
 ## 参考
 
-- [游戏研发智能助手 POC 方案](https://amzn-chn.feishu.cn/wiki/RqLxwMQfaikpUKko1JkcMpPKnkh)（已导入 [`architecture-overview_zh.md`](architecture-overview_zh.md)）
+- 架构方案：[`architecture-overview_zh.md`](architecture-overview_zh.md)
 - 测试样本（后端）：[mangos（魔兽开源服务端，源自 MaNGOS / TrinityCore）](https://github.com/megamage/mangos)
 - 体验参考：[GenSpark](https://www.genspark.ai/)；腾讯 WorkBuddy

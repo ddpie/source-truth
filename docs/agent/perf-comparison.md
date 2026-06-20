@@ -19,7 +19,7 @@
 | **平均** | **210s** | **58s** | **3.6×** | **21.8** | **9.0** |
 
 **结论**：source-truth 平均快 **3.6×**、轮次约一半。根因：CodeGraph 直接定位符号 + 去重的本地
-检索，避开了原生 cc 在 10× 重复副本上反复的慢全仓 grep 与盲目探索。输出更短更聚焦（cc 更啰嗦）。
+检索，避开了原生 cc 在 10× 重复副本上反复的慢全仓 grep 与盲目探索。输出更短更聚焦（cc 输出更冗长）。
 > 注：测试仓含 10 份完全相同的副本，放大了 cc 的全仓 grep 劣势；真实客户单副本仓上差距会小些，
 > 但 codegraph 直接定位带来的轮次优势是结构性的、与重复无关。
 
@@ -59,7 +59,7 @@ codegraph 侧本地查询近乎免费（cc 每问 ~$1）。这一批两问都不
 ## 2. Opus 4.8 vs Sonnet 4.6（均在 source-truth 内、同仓同 prompt）
 
 **严谨多轮测法（排除干扰）**：每个问题先发 1 次**预热**（丢弃，吃掉冷 microVM / 首次索引成本），
-再连发 **3 次计时**，**全程串行**（同一 warm microVM，排除冷启动 + 排队 + 并发污染），取**中位数**
+再连发 **3 次计时**，**全程串行**（同一 热 microVM，排除冷启动 + 排队 + 并发污染），取**中位数**
 （单次抽样噪声大——同一问题用时能从 40s 跳到 120s，取决于模型当轮走了几个工具回合）。仅切换 Runtime
 的 `ANTHROPIC_MODEL`，其余完全一致。
 
@@ -108,7 +108,7 @@ claude -p --model global.anthropic.claude-opus-4-8 \
 ./scripts/deploy-all.sh --region ap-northeast-1 --repo-subdir code-5x \
   --skip artifacts --skip iam --skip network --skip index-svc --skip image \
   --model global.anthropic.claude-opus-4-8
-# 注意：warm microVM 持旧 env 直到老化，切换后早期 invoke 可能还是旧模型，多发几条或稍等。
+# 注意：热 microVM 持旧 env 直到老化，切换后早期 invoke 可能还是旧模型，多发几条或稍等。
 # 模型 id：opus=global.anthropic.claude-opus-4-8、sonnet=global.anthropic.claude-sonnet-4-6、
 #         haiku=global.anthropic.claude-haiku-4-5-20251001-v1:0（已排除）。
 ```

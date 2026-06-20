@@ -19,14 +19,14 @@
 | 入参 payload | `{ "prompt": <问题文本>, "session": <会话上下文> }`（由 bot-gateway 注入） |
 | CodeGraph + 文件读取 | 远程 MCP-over-HTTP 端点（由 index-service 暴露），通过 env / option 注入；定位与读文件（`codegraph_read_file` / `codegraph_glob_files` / `codegraph_search_files` / `codegraph_read_table`）都走此桥 |
 | 代码与配置 | 经 index-service 文件工具读取（**仓库副本只在 index-service 本地磁盘**；microVM 不挂文件系统）；路径为仓库相对（如 `Assets/Scripts/Foo.cs`） |
-| 临时文件 | Session Storage 可写挂载在 `/mnt/workspace`（per-session 隔离） |
+| 临时文件 | Session Storage 可写挂载在 `/mnt/workspace`（每会话隔离） |
 | 出参 | 流式 `yield` AssistantMessage / ResultMessage，由网关渲染回 CardKit |
 
 ## 取证原则（代码为唯一依据）
 
 - 答案必须基于 index-service 服务的真实代码 + CodeGraph 取证；
 - 代码与文档 / 记忆冲突时**以代码为准**，并标注差异与文档时间；
-- 低置信度时建议「转研发」。
+- 低置信度时在答案中标注并建议转研发确认。
 
 ## 约束
 
@@ -50,15 +50,17 @@
 实现前必读 [`../docs/design/agent-container_zh.md`](../docs/design/agent-container_zh.md)——组件级实现契约
 （运行时形态、取证通道、鉴权、挂载契约、部署、待验证点），每条 API 论断锚定本地 SDK / 样例真实符号。
 
-## 状态
+## 模块构成
 
-p1 已落地并真实部署到 AWS（东京 ap-northeast-1）：`Dockerfile`（ARM64）、`agent.py`（流式 entrypoint 薄壳）、
-`agent_lib.py`（纯函数 `build_options`/`run_agent`，可单测）、`prompts/system.md`、`requirements.txt`
-（人读意图，`claude-agent-sdk==0.2.103` 钉死）+ `requirements.lock`（完整传递依赖锁，Dockerfile 实际按它
-`uv pip install --no-deps` 安装）。
+- `Dockerfile`（ARM64）、`agent.py`（流式 entrypoint 薄壳）、`agent_lib.py`（纯函数
+  `build_options` / `run_agent`，可单测）、`prompts/system.md`。
+- `requirements.txt`（人读意图，`claude-agent-sdk==0.2.103` 钉死）+ `requirements.lock`（完整传递依赖锁，
+  Dockerfile 按它 `uv pip install --no-deps` 安装）。
 
-**已验证（真实）：** ① CodeGraph MCP 接入定型为 **方案 A**——`ClaudeAgentOptions.mcp_servers` 原生支持
-`McpHttpServerConfig`（`{type:"http", url, headers?}`，对照真实 SDK 0.2.103 核实），不需 streamablehttp 桥；
-② Runtime 经 `InvokeAgentRuntime` 真实跑通（`CLAUDE_CODE_USE_BEDROCK=1`，当前默认模型 `global.anthropic.claude-opus-4-8`）；
-③ agent 经 index-service 的文件工具真读到源码并解释（无 EFS、microVM 不挂任何文件系统）。部署细节见 `scripts/deploy-all.sh`（canonical；
-`deploy.sh` 为已废弃转发垫片）+ `.local/deploy-config`。
+## 关键设计决策
+
+- **CodeGraph MCP 接入＝方案 A**：`ClaudeAgentOptions.mcp_servers` 原生支持 `McpHttpServerConfig`
+  （`{type:"http", url, headers?}`，对照 SDK 0.2.103 核实），不需 streamablehttp 桥。
+- **走 Bedrock 计费**：`CLAUDE_CODE_USE_BEDROCK=1`，默认模型 `global.anthropic.claude-opus-4-8`。
+- **取证全经 index-service 文件工具**：无 EFS、microVM 不挂任何文件系统。
+- 部署见 `scripts/deploy-all.sh`（canonical）+ `.local/deploy-config`。

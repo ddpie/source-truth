@@ -28,7 +28,7 @@
 > CodeGraph(v0.18.5) 用 RocksDB、**open 即写**，只读挂载会直接失败并退化为空索引（✅实测，证据最硬）。客户 EFS **可**被会话容器
 > 只读挂载（AgentCore 2026-05 GA 的 bring-your-own file system 能力，📄文档，未部署实测），承载源码；索引复用改为
 > **「索引常驻 index-service、会话经网络查询」**的远程引擎模型（Model B）——实时同步由常驻引擎自带的 file-watcher 增量提供（✅实测），
-> 唯一一份索引、无副本、无多写者腐坏；但会话经桥远程查询的**完整通路本机零次端到端验证**（见 §6），属架构推断。
+> 唯一一份索引、无副本、无多进程并发写入腐坏；但会话经桥远程查询的**完整通路本机零次端到端验证**（见 §6），属架构推断。
 
 这把 [`architecture.md`](architecture.md) 的「EFS 同时放代码+索引、会话只读挂同一卷本地查」修正为：**EFS 只放源码；
 索引留 index-service 本机盘，经一层 stdio→HTTP 桥对会话暴露**。
@@ -124,7 +124,7 @@
 ### 4.4 共享 + 实时同步方案（`--serve` 常驻引擎）
 
 - ✅实测 — `--serve` 启动后**自带 file-watcher 实时增量**：改动 workspace 文件，serve 日志即
-  `[file-watcher] Processing 1 changes ... indexes rebuilt`，**无需另跑 `--watch`**（避免双写者）。
+  `[file-watcher] Processing 1 changes ... indexes rebuilt`，**无需另跑 `--watch`**（避免两个进程同时写入）。
 - ✅实测 — `--serve` 启动后在 `--socket` 路径创建一个 **Unix domain socket**（默认 `~/.codegraph/cg-engine.sock`，本机观察到该 socket 文件存在、为 UDS 类型）。
 - 📄文档（`--help` / 源码）— `--connect` 是瘦客户端，中继本进程 stdio 到该 socket、**不加载图与模型**。
   此运行时行为**本机未实测驱通**（见 §6），仅据 `--help` 与源码描述。
@@ -135,8 +135,8 @@
 ## 5. Discussion（分析）
 
 ### 5.1 源码方案成立，且与 AWS 模型同构
-客户 EFS 只读挂载是 AgentCore 2026-05 GA 的一等能力，其「共享只读 BYO-FS vs per-session managed session storage」
-二分恰好对应 source-truth「`/mnt/repo` 共享只读源码 vs `/mnt/workspace` per-session 临时盘」。源码是普通文件 + 单写者
+客户 EFS 只读挂载是 AgentCore 2026-05 GA 的一等能力，其「共享只读 BYO-FS vs 每会话独占的 managed session storage」
+二分恰好对应 source-truth「`/mnt/repo` 共享只读源码 vs `/mnt/workspace` 每会话独占临时盘」。源码是普通文件 + 独占写入
 （仅 index-service 的 git pull 写、会话只读），NFS 对此安全。**问题 1 = 可行**。
 
 ### 5.2 索引只读复用为何 FAIL：RocksDB open 即写
@@ -149,7 +149,7 @@ RocksDB 在 open 时必须写目录（建 LOCK / 新 MANIFEST / CURRENT / `graph
 
 ### 5.3 为何只能走 Model B（远程常驻引擎）
 「共享 + 实时同步」三要素——单一份索引、跨会话可见、秒级跟随 push——恰好是常驻引擎的原生形态：
-唯一一份 graph.db 由 index-service 的 `--serve` 进程独占读写（放本机 EBS，不放 EFS，回避 RocksDB-over-NFS 多写者腐坏），
+唯一一份 graph.db 由 index-service 的 `--serve` 进程独占读写（放本机 EBS，不放 EFS，回避 RocksDB-over-NFS 多进程写入腐坏），
 file-watcher 提供实时增量；会话容器不持有索引、经网络查询。
 
 但有一道**硬约束**：v0.18.5 的 `--connect` 走本地 Unix socket（`--help` 确证 `--socket` 仅 UDS），**跨不出 Firecracker microVM**。

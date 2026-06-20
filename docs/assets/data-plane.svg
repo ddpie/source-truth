@@ -22,7 +22,7 @@
 
   <!-- stage 3 -->
   <rect x="120" y="232" width="520" height="52" rx="8" fill="#eef3fb" stroke="#b9c9e6" stroke-width="1.2"/>
-  <text x="140" y="256" font-size="13.5" font-weight="600" fill="#1f2733">③ index-build.service · systemd oneshot（flock 单写者）</text>
+  <text x="140" y="256" font-size="13.5" font-weight="600" fill="#1f2733">③ index-build.service · systemd oneshot（flock 独占写入）</text>
   <text x="140" y="275" font-size="11.5" fill="#5b6573">codegraph-server --graph-only 建图一次（索引本地副本）</text>
 
   <!-- stage 4 -->

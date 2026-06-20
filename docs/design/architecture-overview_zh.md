@@ -1,9 +1,7 @@
 # 游戏研发智能助手 POC 方案
 
-> 架构真相源。导入自飞书文档《游戏研发智能助手 POC 方案》。
-> 来源：https://amzn-chn.feishu.cn/wiki/RqLxwMQfaikpUKko1JkcMpPKnkh
-> MVP 边界与验收基准见 [`requirements_zh.md`](requirements_zh.md)；面向 AI 的实现心智模型见
-> [`../agent/architecture.md`](../agent/architecture.md)。
+> 架构权威依据：POC 架构方案。MVP 边界与验收基准见 [`requirements_zh.md`](requirements_zh.md)；
+> 面向 AI 的实现工作原理见 [`../agent/architecture.md`](../agent/architecture.md)。
 
 策划日常有大量咨询性需求（理解代码逻辑、确认数值配置、评估修改影响），这些需求不复杂但受限于研发
 排期。本方案在飞书中部署 AI 编程助手（Claude Code / Codex），让业务人员直接获得代码级别的问答和数值
@@ -122,19 +120,19 @@ AI 输出格式不固定（有时纯文字、有时带代码块、有时有表�
 
 - AI 给出多个方案 → 自动生成选项按钮，用户点选后继续对话
 - AI 输出数值结果 → 追加图表组件可视化
-- 回答置信度低 → 显示"转研发"按钮一键转人工
+- 回答置信度低 → AI 在答案正文标注低置信度并建议转研发确认（MVP 为文字建议，非一键转人工按钮）
 
 对话采用飞书话题模式，同一问答链在话题内展开，群内不会被刷屏。
 
 ### 3.3 隔离：什么共享、什么隔离
 
 - **共享只读**：项目代码（各分支 worktree）、索引——所有会话看同一组，不可写
-- **per-session 独占**：Agent 产生的临时文件——microVM 级隔离，用户间互不可见
+- **每会话独占**：Agent 产生的临时文件——microVM 级隔离，用户间互不可见
 
 **为什么这么设计**：代码和索引是项目级资源，所有人查的是同一个项目，复制 N 份既浪费存储也导致更新
 不同步。对话和临时文件是个人工作状态，必须隔离。落地方式：共享代码与索引放在索引服务本地磁盘，经其
-MCP-over-HTTP 桥（定位 + 读文件工具）服务给所有会话容器，会话容器本身不挂任何文件系统；per-session 临时
-文件走 AgentCore Session Storage（`/mnt/workspace`，按 session 自动分配独占空间），无需额外开发。
+MCP-over-HTTP 桥（定位 + 读文件工具）服务给所有会话容器，会话容器本身不挂任何文件系统；每会话独占临时
+文件走 AgentCore Session Storage（`/mnt/workspace`，按会话自动分配独占空间），无需额外开发。
 
 |  | 共享存储 | 会话存储 |
 |-|-|-|
@@ -142,7 +140,7 @@ MCP-over-HTTP 桥（定位 + 读文件工具）服务给所有会话容器，会
 | 数量 | 一组分支 worktree（全员共用） | 每 Agent 一份 |
 | 权限 | 只读 | 可读写 |
 | 可见性 | 所有 Agent | 仅本 Agent |
-| 生命周期 | 持久（push 实时增量 + 夜间兜底） | per-session 持久（14天空闲过期） |
+| 生命周期 | 持久（push 实时增量 + 夜间兜底） | 每会话独占（14天空闲过期） |
 
 ### 3.4 文档与代码冲突
 
@@ -154,7 +152,7 @@ MCP-over-HTTP 桥（定位 + 读文件工具）服务给所有会话容器，会
 
 ## 4. 安全
 
-- **隔离**：Firecracker microVM per session，进程内存会话结束擦除；Session Storage per-session 最长 14 天回收
+- **隔离**：Firecracker microVM 按会话隔离，进程内存会话结束擦除；Session Storage 按会话隔离、最长 14 天回收
 - **审计**：全量 prompt/response 记录（谁/何时/问什么/答什么）
 - **设计文档权限**：机器人作为文件夹只读协作者，未授权文档不可见
 

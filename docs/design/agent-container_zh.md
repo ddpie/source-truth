@@ -1,6 +1,6 @@
 # agent-container 组件设计
 
-> 设计概览，给人读。心智模型见 [`../agent/architecture.md`](../agent/architecture.md)，MVP 边界见
+> 设计概览，给人读。工作原理见 [`../agent/architecture.md`](../agent/architecture.md)，MVP 边界见
 > [`requirements_zh.md`](requirements_zh.md)。**实现细节**（运行时骨架、完整 env、方案对比、逐条 gotcha、
 > 全部开放问题）见工作态全稿 `.claude/specs/2026-06-16-agent-container-design.md`（gitignored，本机）。
 
@@ -40,7 +40,7 @@ bot-gateway ──InvokeAgentRuntime──▶ agent-container（本组件，micr
 | 入参 | `{ "prompt", "session" }`（bot-gateway 注入；agent 只依赖 `prompt`，`session` 当不透明上下文） |
 | 出参 | 流式 `yield` `AssistantMessage` / `ResultMessage`，由网关渲染回 CardKit |
 | 代码/配置 | 经 index-service 文件工具读取（仓库副本只在 index-service 本地磁盘；microVM 不挂文件系统；路径为仓库相对，如 `Assets/Scripts/Foo.cs`） |
-| 临时文件 | Session Storage 可写挂载 `/mnt/workspace`（per-session，约 14 天过期） |
+| 临时文件 | Session Storage 可写挂载 `/mnt/workspace`（每会话，约 14 天过期） |
 | CodeGraph + 文件读取 | index-service 暴露的 MCP-over-HTTP 端点（env 注入）；定位与读文件都走此桥 |
 | 会话标识 | 经头 `X-Amzn-Bedrock-AgentCore-Runtime-Session-Id` 到达，仅用于审计关联 |
 
