@@ -1,0 +1,40 @@
+{
+  "_doc": [
+    "ALARM-backing metric-filters (monitoring plan 阶段3). These are DEDICATED, DENSE",
+    "(defaultValue:0) filters — one per card_health kind we alarm on — SEPARATE from the sparse",
+    "dimensioned CardHealth metric in a-class-metrics.json (which is for the dashboard breakdown).",
+    "",
+    "WHY a separate dense filter per kind instead of alarming on the dimensioned CardHealth:",
+    "the dimensioned metric is SPARSE (a kind's stream only gets points when that kind fires), so a",
+    "rate/threshold alarm on it sits in INSUFFICIENT_DATA between events and can't judge stably. A",
+    "dedicated filter with defaultValue:0 emits 0 on every non-matching gateway log line → the metric",
+    "is DENSE → the alarm evaluates stably (plan 阶段3 澄清).",
+    "",
+    "Same contract + same applier as a-class-metrics.json: apply with",
+    "  scripts/apply-metric-filters.sh --defs infra/monitoring/queries/metric-filters/alarm-metrics.json",
+    "These have NO dimensions (so defaultValue:0 is legal) and metricValue 1 (a count).",
+    "toolcall_leak_detected (竞泄复发) and finalize_failed (冻卡) are the two mandatory health alarms."
+  ],
+  "metricNamespace": "SourceTruth/Gateway",
+  "logGroup": "/source-truth/bot-gateway",
+  "metrics": [
+    {
+      "name": "CardHealthToolcallLeak",
+      "event": "card_health",
+      "filterPattern": "{ $.metric IS TRUE && $.event = \"card_health\" && $.kind = \"toolcall_leak_detected\" }",
+      "metricValue": "1",
+      "defaultValue": 0,
+      "unit": "Count",
+      "purpose": "竞泄复发（agent 原始 <invoke> XML 泄漏到卡片）— 出现即异常，稠密化以便稳定告警"
+    },
+    {
+      "name": "CardHealthFinalizeFailed",
+      "event": "card_health",
+      "filterPattern": "{ $.metric IS TRUE && $.event = \"card_health\" && $.kind = \"finalize_failed\" }",
+      "metricValue": "1",
+      "defaultValue": 0,
+      "unit": "Count",
+      "purpose": "冻卡（finalize 失败，卡片停在分析中）— 出现即异常，稠密化以便稳定告警"
+    }
+  ]
+}

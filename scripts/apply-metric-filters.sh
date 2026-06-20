@@ -34,12 +34,14 @@ REGION="" LOG_GROUP="" DRY_RUN=0 DO_LIST=0
 
 usage() {
   cat <<'EOF'
-Usage: ./scripts/apply-metric-filters.sh [--region <r>] [--log-group <g>] [--dry-run] [--list]
+Usage: ./scripts/apply-metric-filters.sh [--region <r>] [--defs <f>] [--log-group <g>] [--dry-run] [--list]
 
-Creates/updates the A-class CloudWatch metric-filters from
-infra/monitoring/queries/metric-filters/a-class-metrics.json (idempotent upsert).
+Creates/updates CloudWatch metric-filters from a definitions JSON (idempotent upsert).
+Default defs: infra/monitoring/queries/metric-filters/a-class-metrics.json (the dashboard
+A-class metrics). Pass --defs alarm-metrics.json to apply the dense per-kind alarm filters.
 
   --region <r>     AWS region (default: DEPLOY_REGION from .local/deploy-config)
+  --defs <f>       metric-definitions JSON (default: a-class-metrics.json)
   --log-group <g>  log group override (default: logGroup field in the defs JSON)
   --dry-run        print the plan; make NO AWS calls
   --list           list the live metric-filters on the group after applying
@@ -50,6 +52,7 @@ EOF
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --region) REGION="$2"; shift 2 ;;
+    --defs) DEFS="$2"; shift 2 ;;
     --log-group) LOG_GROUP="$2"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
     --list) DO_LIST=1; shift ;;
@@ -138,11 +141,22 @@ done <<< "$PLAN"
 LIVE="$(aws logs describe-metric-filters --region "$REGION" \
   --log-group-name "$LOG_GROUP" \
   --query 'metricFilters[].filterName' --output text 2>/dev/null | tr '\t' '\n' | grep -v '^$' || true)"
-RENDERED_NAMES="$(printf '%s\n' "$PLAN" | while IFS= read -r l; do [[ -z "$l" ]] && continue; printf '%s' "$l" | python3 -c 'import json,sys; print(json.load(sys.stdin)["filterName"])'; done)"
+# Known names = EVERY filter name across ALL defs files in the metric-filters dir, not just
+# the one being applied — otherwise applying alarm-metrics.json would flag the 13 a-class
+# filters (and vice versa) as orphans. A name in CloudWatch but in NONE of the defs is a true
+# orphan (a metric removed from the project). Render each defs to extract names; a defs that
+# fails to render is skipped (it's not this run's job to validate the others).
+DEFS_DIR="$(dirname "$DEFS")"
+KNOWN_NAMES=""
+for d in "$DEFS_DIR"/*.json; do
+  [[ -f "$d" ]] || continue
+  names="$(python3 "$RENDER" "$d" "$LOG_GROUP" 2>/dev/null | while IFS= read -r l; do [[ -z "$l" ]] && continue; printf '%s' "$l" | python3 -c 'import json,sys; print(json.load(sys.stdin)["filterName"])'; done || true)"
+  KNOWN_NAMES="$KNOWN_NAMES"$'\n'"$names"
+done
 if [[ -n "$LIVE" ]]; then
-  ORPHANS="$(comm -23 <(printf '%s\n' "$LIVE" | sort -u) <(printf '%s\n' "$RENDERED_NAMES" | sort -u) || true)"
+  ORPHANS="$(comm -23 <(printf '%s\n' "$LIVE" | sort -u) <(printf '%s\n' "$KNOWN_NAMES" | grep -v '^$' | sort -u) || true)"
   if [[ -n "$ORPHANS" ]]; then
-    say warn "orphan metric-filters on $LOG_GROUP (in CloudWatch but NOT in the defs JSON):"
+    say warn "orphan metric-filters on $LOG_GROUP (in CloudWatch but in NO defs JSON):"
     while IFS= read -r o; do [[ -n "$o" ]] && say warn "  $o  — prune: aws logs delete-metric-filter --region $REGION --log-group-name $LOG_GROUP --filter-name $o"; done <<< "$ORPHANS"
   fi
 fi

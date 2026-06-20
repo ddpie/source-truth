@@ -33,15 +33,17 @@ infra/                  基础设施即代码（MVP 先 agentcore toolkit / boto
   README.md             IaC 分工：CDK 管稳定层 / deploy-all.sh 用 boto3 配 AgentCore Runtime
   monitoring/           监控（CloudWatch 侧；scripts/boto3，非 CDK stack）
     queries/metric-filters/a-class-metrics.json  A 类指标口径单一事实源（计数/分位/分布 → metric-filter）
+    queries/metric-filters/alarm-metrics.json    告警专用稠密 filter（每 card_health kind 一条，defaultValue:0）
     queries/insights/*.logsinsights              B 类去重/留存的 Insights 查询（DAU 等，配定时预聚合 Lambda）
     dashboard.product.json / dashboard.sre.json  看板模板（${REGION}/${NAMESPACE} 占位；产品用量 / SRE 健康两页）
   (p2) lib/             runtime / codegraph(index-service) / gateway 各 stack
-config/                 配置驱动：i18n.json（卡片 / 告警 / 错误文案）、(p1) alarm-thresholds.json（阈值待落地）
+config/                 配置驱动：i18n.json（卡片 / 告警 / 错误文案）、alarm-thresholds.json（告警阈值，运维可调）
 scripts/                运维生命周期
   check-invariants.sh   快速结构 lint（AGENTS / CLAUDE / structure / 双语配对 / 顶层目录存在性）
-  lib/                  common.sh（格式化 + 依赖检查）、env-utils.sh（.env / deploy-config 共享 helper）、render_metric_filters.py（指标定义→put-metric-filter 计划）、render_dashboard.py（看板模板渲染 + 禁 type:log 校验）
-  apply-metric-filters.sh  把 infra/monitoring 的 A 类指标定义应用到 CloudWatch（幂等 upsert；--dry-run 离线打印）
+  lib/                  common.sh（格式化 + 依赖检查）、env-utils.sh（.env / deploy-config 共享 helper）、render_metric_filters.py（指标定义→put-metric-filter 计划）、render_dashboard.py（看板模板渲染 + 禁 type:log 校验）、render_alarms.py（阈值→put-metric-alarm 计划）
+  apply-metric-filters.sh  把 infra/monitoring 的指标定义应用到 CloudWatch（幂等 upsert；--defs 切 A 类/告警；--dry-run）
   apply-dashboards.sh   渲染看板模板并 put-dashboard（幂等；--dry-run；读 metric-filters 同源 namespace）
+  apply-alarms.sh       建 SNS topic + 从 config/alarm-thresholds.json 建 CloudWatch 告警（幂等；订阅需手动确认）
   test.sh               单一分层测试入口（离线默认 / --full）
   check-versions.sh     版本钉死防漂移守卫（base digest / requirements pin / Node / claude-code npm）
   install.sh            交互式一键安装（查依赖→飞书凭证→配置→确认→调 deploy-all；重跑预填）

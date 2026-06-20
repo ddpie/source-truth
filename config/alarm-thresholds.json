@@ -1,0 +1,80 @@
+{
+  "_doc": [
+    "Alarm thresholds (monitoring plan 阶段3). Operator-tunable knobs — change a threshold here,",
+    "re-run scripts/apply-alarms.sh, NO code change. Each alarm reads a CloudWatch metric created",
+    "by a metric-filter (a-class-metrics.json or alarm-metrics.json) and notifies the SNS topic.",
+    "",
+    "TWO alarm semantics (plan 阶段3, never mix on one alarm):",
+    "  - SPARSE 'appears == anomaly': metric only has points when the event fires; alarm on >=1 in a",
+    "    window with treatMissingData=notBreaching (missing = fine, a point = page). Used for the",
+    "    dense-but-rare health counters where ANY occurrence is worth a look.",
+    "  - DENSE rate: metric is dense (defaultValue:0), alarm on a rate/count over threshold;",
+    "    treatMissingData is near-moot but set to notBreaching.",
+    "  - LIVENESS backstop: a dense, always-emitting metric (QuestionsReceived) with",
+    "    treatMissingData=breaching → if the log pipeline dies (CloudWatch agent down / gateway",
+    "    silent), the metric goes missing and the alarm fires, instead of every health alarm",
+    "    silently sitting quiet. MUST point at a stable dense metric, not a sparse one (else it",
+    "    sits in INSUFFICIENT_DATA forever). See plan 阶段3 验收点.",
+    "",
+    "metricName must match a metric emitted by an applied filter. statistic Sum for counts.",
+    "comparisonOperator/threshold/evaluationPeriods/datapointsToAlarm/periodSeconds map 1:1 to",
+    "put-metric-alarm. treatMissingData ∈ {notBreaching, breaching, ignore, missing}."
+  ],
+  "alarms": [
+    {
+      "name": "ToolcallLeakDetected",
+      "metricName": "CardHealthToolcallLeak",
+      "statistic": "Sum",
+      "periodSeconds": 300,
+      "evaluationPeriods": 1,
+      "datapointsToAlarm": 1,
+      "threshold": 1,
+      "comparisonOperator": "GreaterThanOrEqualToThreshold",
+      "treatMissingData": "notBreaching",
+      "severity": "critical",
+      "alarmDescription": "竞泄复发：agent 原始 <invoke> XML 泄漏到用户卡片。出现即异常（dense metric, >=1/5min 即告警）。查 num_turns/cache_read 冷启动竞速。"
+    },
+    {
+      "name": "FinalizeFailed",
+      "metricName": "CardHealthFinalizeFailed",
+      "statistic": "Sum",
+      "periodSeconds": 300,
+      "evaluationPeriods": 1,
+      "datapointsToAlarm": 1,
+      "threshold": 1,
+      "comparisonOperator": "GreaterThanOrEqualToThreshold",
+      "treatMissingData": "notBreaching",
+      "severity": "critical",
+      "alarmDescription": "冻卡：finalize 失败，卡片停在“分析中”不收尾。出现即异常（dense metric, >=1/5min 即告警）。"
+    },
+    {
+      "name": "AnswerFailedBurst",
+      "metricName": "AnswerCompleted",
+      "comment": "NOTE: AnswerFailed is dimensioned (by reason) → SPARSE, can't alarm stably. This burst alarm watches the DENSE AnswerCompleted as a proxy floor is wrong; instead we alarm on the dense failure proxy only once a dedicated dense AnswerFailedTotal filter exists. Until then this entry is DISABLED (enabled:false) so apply-alarms skips it — documented gap, not a silent miss.",
+      "enabled": false,
+      "statistic": "Sum",
+      "periodSeconds": 300,
+      "evaluationPeriods": 1,
+      "datapointsToAlarm": 1,
+      "threshold": 5,
+      "comparisonOperator": "GreaterThanThreshold",
+      "treatMissingData": "notBreaching",
+      "severity": "warning",
+      "alarmDescription": "（待 dense AnswerFailedTotal filter）失败突增。"
+    },
+    {
+      "name": "LogPipelineStalled",
+      "metricName": "QuestionsReceived",
+      "statistic": "Sum",
+      "periodSeconds": 3600,
+      "evaluationPeriods": 3,
+      "datapointsToAlarm": 3,
+      "threshold": 1,
+      "comparisonOperator": "LessThanThreshold",
+      "treatMissingData": "breaching",
+      "severity": "critical",
+      "_liveness": "LOG-PIPELINE LIVENESS BACKSTOP (plan 阶段3): QuestionsReceived is dense (defaultValue:0, emits 0 every window) AND stably present in normal operation. If the CloudWatch agent dies or the gateway goes silent, the metric goes MISSING → treatMissingData=breaching fires. The <threshold also catches a genuinely-dead bot (0 questions for 3h). Pointed at a DENSE metric so cold-start doesn't strand it in INSUFFICIENT_DATA. Tune periodSeconds/evaluationPeriods to your traffic floor.",
+      "alarmDescription": "日志管道存活兜底：3 小时内 QuestionsReceived 缺失或为 0 → 可能是 CloudWatch agent 挂了 / 网关静默 / 机器人真死。健康类告警靠日志管道，管道一断会静默漏报，故此兜底。"
+    }
+  ]
+}
