@@ -255,3 +255,38 @@ def test_read_file_strips_crlf_trailing_cr(tmp_path):
     assert "\r" not in out["content"]
     assert out["content"] == "line1\nline2\nline3"
     assert out["lines"] == 3
+
+
+# --- multi-repo repo= round-trip (REGRESSION: scope-gate prefixes graph paths) ---
+# The graph/search tools return paths as "<repo>/<rel>" (path honesty). The agent passes
+# that path back verbatim, so the file tools MUST strip the leading "<repo>/" before
+# resolving against this repo's local copy, and re-prefix the returned path. Without the
+# repo= plumbing, read_file("code-5x/Config/bag.json", ...) resolved to
+# <root>/code-5x/Config/bag.json → ENOENT (the regression this guards).
+def test_read_file_strips_and_reprefixes_repo(repo):
+    out = file_read.read_file("code-5x/Config/bag.json", local_root=str(repo), mount_root="", repo="code-5x")
+    assert out["path"] == "code-5x/Config/bag.json", out["path"]  # round-trips with the agent's view
+    assert '"default_capacity": 30' in out["content"]
+
+
+def test_read_file_repo_unset_is_unchanged(repo):
+    # repo="" (single repo / no prefix) keeps the pre-multi-repo behavior byte-for-byte.
+    out = file_read.read_file("Config/bag.json", local_root=str(repo), mount_root="", repo="")
+    assert out["path"] == "Config/bag.json"
+
+
+def test_glob_strips_and_reprefixes_repo(repo):
+    out = file_read.glob_files("code-5x/**/*.cs", local_root=str(repo), mount_root="", repo="code-5x")
+    assert out["paths"] == ["code-5x/src/A.cs"], out["paths"]
+
+
+def test_glob_bare_pattern_with_repo_prefixes_results(repo):
+    # A pattern WITHOUT the prefix still works; results are still <repo>/-prefixed.
+    out = file_read.glob_files("**/*.json", local_root=str(repo), mount_root="", repo="code-5x")
+    assert out["paths"] == ["code-5x/Config/bag.json"], out["paths"]
+
+
+def test_repo_prefixed_path_cannot_escape_via_traversal(repo):
+    # The repo strip must not become an escape lever: "<repo>/../../etc/passwd" still blocked.
+    with pytest.raises(ValueError):
+        file_read.read_file("code-5x/../../etc/passwd", local_root=str(repo), mount_root="", repo="code-5x")

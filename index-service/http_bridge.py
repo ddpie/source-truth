@@ -364,7 +364,7 @@ def build_bridge(
             narrows by filename (e.g. "*.cs", "*.json"). Use this instead of shell grep."""
             try:
                 return file_search.search_to_json(
-                    pattern, local_root=local_workspace, mount_root=mount_root, glob=glob,
+                    pattern, local_root=local_workspace, mount_root=mount_root, glob=glob, repo=repo_name,
                 )
             except ValueError as exc:
                 # ValueError only echoes the agent-supplied pattern (no host path) → safe to return.
@@ -394,7 +394,7 @@ def build_bridge(
             `limit` page large files. Use this instead of a shell `cat` or builtin Read."""
             try:
                 return file_read.read_to_json(
-                    path, local_root=local_workspace, mount_root=mount_root, offset=offset, limit=limit,
+                    path, local_root=local_workspace, mount_root=mount_root, offset=offset, limit=limit, repo=repo_name,
                 )
             except ValueError as exc:
                 # ValueError echoes only the agent-supplied path (no host path) → safe.
@@ -411,7 +411,7 @@ def build_bridge(
             (e.g. `Assets/Scripts/Foo.cs`). Use this instead of a shell `ls`/`find`
             or builtin Glob."""
             try:
-                return file_read.glob_to_json(pattern, local_root=local_workspace, mount_root=mount_root)
+                return file_read.glob_to_json(pattern, local_root=local_workspace, mount_root=mount_root, repo=repo_name)
             except ValueError as exc:
                 return json.dumps({"error": "bad glob pattern", "detail": str(exc)})
             except Exception as exc:  # noqa: BLE001 - isolate one query's failure
@@ -430,7 +430,7 @@ def build_bridge(
             Use this when the data lives in a spreadsheet/database config file (common
             for game numeric tables); for plain-text source/config use read_file."""
             try:
-                return file_table.read_table_to_json(path, local_root=local_workspace, mount_root=mount_root)
+                return file_table.read_table_to_json(path, local_root=local_workspace, mount_root=mount_root, repo=repo_name)
             except ValueError as exc:
                 return json.dumps({"error": "cannot read table", "detail": str(exc)})
             except Exception as exc:  # noqa: BLE001 - isolate one query's failure

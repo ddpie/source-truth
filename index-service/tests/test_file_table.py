@@ -245,3 +245,11 @@ def test_csv_overlong_cell_does_not_error_whole_table(repo):
     out = file_table.read_table("Config/desc.csv", local_root=str(repo), mount_root=MOUNT)
     assert out["kind"] == "csv"
     assert "short" in out["content"]            # the table is readable, not an error
+
+
+# --- multi-repo repo= round-trip ---
+def test_read_table_strips_and_reprefixes_repo(repo):
+    out = file_table.read_table("code-5x/Config/items.csv", local_root=str(repo), mount_root="", repo="code-5x")
+    assert out["path"] == "code-5x/Config/items.csv", out["path"]
+    assert out["kind"] == "csv"
+    assert "sword" in out["content"]

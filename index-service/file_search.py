@@ -98,12 +98,18 @@ def run_search(
     mount_root: str,
     glob: str | None = None,
     max_matches: int = MAX_MATCHES,
+    repo: str = "",
 ) -> dict[str, Any]:
     """Search the LOCAL repo copy for `pattern`. Returns
     {"matches": [{"path", "line", "text"}], "truncated": bool} with paths in the
     agent's namespace (repo-relative by default). Never raises for a no-match
     (returns empty matches); raises only on a genuine execution failure so the
-    bridge reports it honestly."""
+    bridge reports it honestly.
+    ``repo`` (multi-repo): returned match paths are prefixed with ``<repo>/`` so the agent
+    can tell which repo a hit came from. Applied ONLY to the final stored path — the
+    duplicate-folding key below runs on the repo-RELATIVE path so its top-level-dir strip
+    still folds vendored copies (prefixing first would make it strip the repo segment
+    instead of the copy dir). ``repo=""`` is unchanged (single repo)."""
     if not pattern or not pattern.strip():
         raise ValueError("search pattern must be non-empty")
     t0 = perf_counter()
@@ -183,7 +189,10 @@ def run_search(
             duplicates += 1
         else:
             seen.add(key)
-            matches.append({"path": mount_path, "line": line_no, "text": text[:300]})
+            # Prefix the repo AFTER dedup (which keyed on the repo-relative path): the
+            # agent sees <repo>/<rel> so it can tell repos apart in fan-out results.
+            stored_path = f"{repo.rstrip('/')}/{mount_path}" if repo else mount_path
+            matches.append({"path": stored_path, "line": line_no, "text": text[:300]})
             if len(matches) >= max_matches:
                 truncated = True
                 break
@@ -208,6 +217,6 @@ def run_search(
     return {"matches": matches, "truncated": truncated, "count": len(matches), "deduped": duplicates}
 
 
-def search_to_json(pattern: str, *, local_root: str, mount_root: str, glob: str | None = None) -> str:
+def search_to_json(pattern: str, *, local_root: str, mount_root: str, glob: str | None = None, repo: str = "") -> str:
     """run_search → JSON string (the MCP tool return shape)."""
-    return json.dumps(run_search(pattern, local_root=local_root, mount_root=mount_root, glob=glob), ensure_ascii=False)
+    return json.dumps(run_search(pattern, local_root=local_root, mount_root=mount_root, glob=glob, repo=repo), ensure_ascii=False)
