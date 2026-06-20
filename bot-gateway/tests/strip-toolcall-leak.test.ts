@@ -159,6 +159,18 @@ describe("isToolCallLeakDominant", () => {
     const body = "游泳速度由耐力决定，负重不拖慢，这是一段完整真实的答案，逐项核对无误足够长不应判为泄漏。\n> 🔍 **供研发复核**\n> 见 SwimController.cs:42 的 calc";
     expect(isToolCallLeakDominant(body)).toBe(false);
   });
+
+  it("does NOT strip a legit citation line that names a tool next to 调用链 / call (P1)", () => {
+    // The dropped `call|调用` cues used to delete whole legit lines via the greedy
+    // [^\n]*$ tail. 调用链 (call chain) / "the call returns" are normal review words.
+    const a = "codegraph_search_files 调用链在 SearchService.cs:30，研发可据此核对。";
+    expect(stripToolCallLeak(a)).toBe(a);          // line survives intact
+    const b = "the codegraph_search_files call returns the matching files.";
+    expect(stripToolCallLeak(b)).toBe(b);
+    // …and such a citation-heavy answer is NOT judged a dominant leak.
+    const body = "暴击倍率 1.5 倍，数据齐全逐项核对无误这是一段足够长的真实答案不应判为泄漏主导。\n> 见 codegraph_search_files 调用链 / the call returns the list";
+    expect(isToolCallLeakDominant(body)).toBe(false);
+  });
 });
 
 describe("no ReDoS on many unclosed invoke opens", () => {
