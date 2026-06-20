@@ -55,7 +55,7 @@ aws iam put-role-policy --role-name "$INDEX_ROLE" --policy-name feishu-secret --
 aws iam put-role-policy --role-name "$INDEX_ROLE" --policy-name cloudwatch-logs --policy-document "{
   \"Version\":\"2012-10-17\",\"Statement\":[
     {\"Effect\":\"Allow\",\"Action\":[\"logs:CreateLogGroup\"],\"Resource\":\"*\"},
-    {\"Effect\":\"Allow\",\"Action\":[\"logs:CreateLogStream\",\"logs:PutLogEvents\",\"logs:DescribeLogStreams\"],
+    {\"Effect\":\"Allow\",\"Action\":[\"logs:CreateLogStream\",\"logs:PutLogEvents\",\"logs:DescribeLogStreams\",\"logs:PutRetentionPolicy\"],
      \"Resource\":[\"arn:aws:logs:${REGION}:${ACCOUNT}:log-group:/source-truth/*\",
                    \"arn:aws:logs:${REGION}:${ACCOUNT}:log-group:/source-truth/*:*\"]}]}" >/dev/null
 if ! aws iam get-instance-profile --instance-profile-name "$INDEX_PROFILE" >/dev/null 2>&1; then
