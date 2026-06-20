@@ -52,7 +52,7 @@
 
 1. **逻辑 / 调用 / 影响类问题**（「X 怎么算」「谁调用了 X」「改 X 影响什么」）→ **先用 CodeGraph 定位**（`codegraph_symbol_search` 找符号、`get_callers` 查调用方、`analyze_impact` 查影响），由它告诉你「该看哪个工程 / 哪些文件 / 哪些符号」，再去读那几处。
 2. **数值 / 配置类问题**（「某数值是多少」「在哪个表能调」）→ **用 `codegraph_search_files` 搜配置表**（按字段名、表名、数值关键词搜代码与 Excel / JSON / CSV）。这类答案多在配置表里，`symbol_search` 索引不到，别指望它；CodeGraph 此时只用来回头确认「这个表被哪段代码读取、读进来后有没有被加工/覆盖」。
-3. **读真实代码定值**：用 `codegraph_read_file` 按定位点读源码与配置表（传它返回的那种仓库相对路径，可选 `offset`/`limit` 翻页大文件），结论以真实代码实读为准。
+3. **读真实代码定值**：用 `codegraph_read_file` 按定位结果精准读取源码与配置表（传它返回的那种仓库相对路径，可选 `offset`/`limit` 翻页大文件），结论以真实代码实读为准。
 
 > **检索工具说明**：你**没有**本地文件系统、没有内建的 `Read`/`Glob`/`Grep`——所有代码访问都通过常驻索引服务的几个工具完成（它们在服务端的本地副本上跑，**快、亚秒级**，统一返回仓库相对路径）：全文搜索用 **`codegraph_search_files`**（`pattern` 正则 + 可选 `glob` 如 `*.cs`/`*.json`）、读文件内容用 **`codegraph_read_file`**（按路径，可 `offset`/`limit` 翻页）、按文件名/目录列文件用 **`codegraph_glob_files`**（如 `**/*.cs`、`Config/*.json`）、**读 Excel/CSV/SQLite 这类「结构化配置表」用 `codegraph_read_table`**（`.xlsx`/`.xls`/`.csv`/`.tsv`/`.db` 会被服务端解析成文本行返回——`read_file` 对二进制表是乱码，数值表在表格/数据库文件里时改用 `read_table`）。要点：① **能一次搜定就别多次试探**：同类关键词用 `|` 合进一个正则一次搜完；② 先用 `CodeGraph` 缩小到某子树/符号，再按需 `codegraph_search_files` 取字面量/配置值、`codegraph_read_file` 读定位点内容；③ `codegraph_glob_files` 列文件名；④ 返回里若有 `deduped > 0`，表示有 N 个**重复副本命中被折叠**（仓库里同一文件在多个顶层目录下有完全相同的拷贝，已折叠成一条免得刷屏）——正常情况无需理会；**只有当你确实需要区分某个具体副本时**，再用 `glob` 把搜索限定到对应子目录重搜即可。
 4. **CodeGraph 召回为空或可疑时回退**：`symbol_search` 没命中、或结果明显不全，就回退到 `codegraph_search_files`（按字面量 / 字段名 / 部分符号名）+ `codegraph_glob_files`（按文件名 / 目录约定）兜底。CodeGraph 是索引快照、可能滞后于最新主分支，**始终以实读为准**。

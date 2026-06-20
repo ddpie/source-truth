@@ -24,9 +24,9 @@ structure）描述系统*是什么*；本文描述*一次提问如何在系统�
           · @app.entrypoint 异步流式 handler（bedrock_agentcore.runtime.BedrockAgentCoreApp）
           · Claude Code Agent SDK（claude_agent_sdk.query / ClaudeAgentOptions），
             CLAUDE_CODE_USE_BEDROCK=1 走 Bedrock 计费
-          · 取证只读通道（全部经 index-service 的 MCP-over-HTTP 桥；microVM 不挂任何文件系统）：
+          · 取证只读通道（全部经 index-service 的 MCP-over-HTTP 接口；microVM 不挂任何文件系统）：
               (1) CodeGraph 定位 → 先查"哪个工程/哪些文件"（symbol_search / get_callers / analyze_impact）
-              (2) 文件读取 → 按定位点读最新主分支源码与工程内配置表（Excel/JSON/CSV）：
+              (2) 文件读取 → 按定位结果精准读取最新主分支源码与工程内配置表（Excel/JSON/CSV）：
                   codegraph_read_file / codegraph_glob_files / codegraph_search_files（仓库相对路径）
           · 每会话写盘走 Session Storage /mnt/workspace（microVM 级隔离的临时文件）
           · 逐步流式产出（AssistantMessage / ResultMessage）
@@ -45,8 +45,7 @@ structure）描述系统*是什么*；本文描述*一次提问如何在系统�
 ![数据面五段管线：deploy-all 打包→S3，bootstrap 解包，index-build 建图，index-bridge 常驻只读，会话 microVM 远程取证](../assets/data-plane.svg)
 
 **唯一一份代码、本地副本**：仓库只在 index-service 的**本地磁盘** `/data/repo/<subdir>`；codegraph-server
-索引该本地副本，文件读取工具也直接读它。**会话 microVM 不挂任何文件系统**——既无 EFS、也无 `/mnt/repo`
-共享挂载，全部源码经 index-service 的 HTTP 桥读取，故没有副本同步问题。**刷新方式**：代码与索引都冻结在
+索引该本地副本，文件读取工具也直接读它。**会话 microVM 不挂任何文件系统**——全部源码经 index-service 的 HTTP 接口读取，没有共享挂载，故没有副本同步问题。**刷新方式**：代码与索引都冻结在
 部署时的 S3 tarball 快照，**要更新主分支代码 / 索引必须重新部署**（替换 index-service 实例重跑 bootstrap）——
 当前没有随 git push 自动刷新的链路。注：codegraph-server 的 `--serve` 带 file-watcher 增量是已实测的
 引擎能力，但 MVP 用 `--mcp` 未启用，留作 post-MVP。
@@ -56,7 +55,7 @@ structure）描述系统*是什么*；本文描述*一次提问如何在系统�
 | | 共享只读 | 每会话独占 |
 |-|-|-|
 | 内容 | 项目代码（主分支）+ CodeGraph 索引 | Agent 产生的临时文件 |
-| 载体 | index-service 本地副本，经 HTTP 桥服务给所有会话 | AgentCore Session Storage `/mnt/workspace` |
+| 载体 | index-service 本地副本，经 HTTP 接口服务给所有会话 | AgentCore Session Storage `/mnt/workspace` |
 | 可见性 | 所有会话 | 仅本 microVM |
 | 生命周期 | 持久（部署时构建一次，重部署刷新） | 每会话独占（约 14 天空闲过期） |
 
@@ -70,9 +69,9 @@ structure）描述系统*是什么*；本文描述*一次提问如何在系统�
 基础设施**不全归 CDK**，且 MVP 阶段刻意先不 CDK 化：
 
 - **MVP（当前）**：用 `agentcore` starter toolkit / boto3 直接配 AgentCore Runtime + 手工建 index-service，
-  先跑通主流程与 POC 性能基准。CodeGraph 召回率、经 HTTP 桥读文件的延迟是主要待验证点——验证前不固化 IaC，
-  避免返工。「为何必须建索引而非让 Agent 逐文件 grep」已有实测基准，见
-  [`indexing-performance-spike.md`](indexing-performance-spike.md)（全仓冷扫 grep 本地盘约 127s、已废弃 EFS 方案最坏 265s，索引后查询恒 1–5ms）。
+  先跑通主流程与 POC 性能基准。CodeGraph 召回率、经 HTTP 接口读文件的延迟是主要待验证点——验证前不固化 IaC，
+  避免返工。「为何必须建索引而非让 Agent 逐文件搜索」已有实测基准，见
+  [`indexing-performance-spike.md`](indexing-performance-spike.md)（全仓冷扫描约 127s，建索引后定位查询恒 1–5ms）。
 - **post-MVP（p2，渐进）**：CDK 管**稳定层**——会话容器镜像（DockerImageAsset，`Platform.LINUX_ARM64`）、
   AgentCore 执行 IAM 角色、index-service 常驻计算（含其本地仓库副本卷）、网关基础设施；
   而 **AgentCore Runtime 本身**（其 env、idle timeout、网络模式、请求头 allowlist）由 `scripts/deploy-all.sh`
@@ -94,10 +93,10 @@ source-truth 不同于「在容器外把 AI 当远程 MCP 客户端」的常见�
    OAuth 体系；上下文挂在飞书对话上、按需拉取。**部署形态**：网关与 index-service **同主机**（那台 EC2 上
    的第二个 systemd 服务 `bot-gateway.service`），由 deploy 的 gateway 阶段经 SSM 写 `/etc/bot-gateway.env`
    + 启动；飞书凭证运行时从 Secrets Manager 取（不落盘）。注意飞书长连接是**全局单例**（同 app 只能一个
-   client，否则抢事件）——故蓝绿换 index 实例时，gateway 走 **break-before-make**（先停旧实例网关、确认长连接断，
+   client，否则争抢事件）——故蓝绿换 index 实例时，gateway 走 **break-before-make**（先停旧实例网关、确认长连接断，
    再在新实例启），与 index/codegraph 的 make-before-break 相反。
-3. **独立 CodeGraph 索引服务**——常驻服务，建图时独占写入 graph.db（部署时建图一次）、stdio→streamable-HTTP 桥，对会话容器暴露只读**定位 + 读文件**查询。（持 clone / inotify 增量为 post-MVP，未实现）
-4. **代码仓只在 index-service 本地**——它在本地磁盘持唯一一份代码副本（部署时落代码+建索引），既供 codegraph 索引、又经 HTTP 桥的文件工具服务给会话容器；会话 microVM 不挂任何文件系统（无 EFS、无共享挂载）。
+3. **独立 CodeGraph 索引服务**——常驻服务，建图时独占写入 graph.db（部署时建图一次）、stdio→streamable-HTTP 接口，对会话容器暴露只读**定位 + 读文件**查询。（持 clone / inotify 增量为 post-MVP，未实现）
+4. **代码仓只在 index-service 本地**——它在本地磁盘持唯一一份代码副本（部署时落代码+建索引），既供 codegraph 索引、又经 HTTP 接口的文件工具服务给会话容器；会话 microVM 不挂任何文件系统（无共享挂载）。
 
 通用运维惯例：ARM64 容器 + DockerImageAsset、CDK / boto3 混合 IaC 分工、飞书 SDK / CardKit 生态、
 空闲缩零按量计费、按游戏项目隔离机器人、结构化 JSON 日志 + hashUserId 脱敏、`deploy/ops/test` 三件套。
@@ -106,9 +105,9 @@ source-truth 不同于「在容器外把 AI 当远程 MCP 客户端」的常见�
 
 - CodeGraph 对前端 Unity 风格 C# 与后端 Node.js（及 Lua 元表等动态模式）的索引召回率；
 - push→索引端到端时延 + 首次全量索引耗时（社区 13 万文件约 1 小时量级）；
-- CodeGraph stdio→HTTP 桥（mcp-proxy 类）的稳定性、并发、路径对齐（工具返回仓库相对路径，如 `Assets/Scripts/Foo.cs`）；
+- CodeGraph stdio→HTTP 转换（mcp-proxy 类）的稳定性、并发、路径对齐（工具返回仓库相对路径，如 `Assets/Scripts/Foo.cs`）；
 - 本地仓库副本上 inotify 增量索引的可靠性（post-MVP）；
-- 经 HTTP 桥读文件的延迟（索引定位点读 vs 全仓文本检索兜底两条路径）；
+- 经 HTTP 接口读文件的延迟（索引精准读取 vs 全仓文本检索兜底两条路径）；
 - 飞书流式卡片频控、VChart 图表组件边界、动态组件回调路由。
 
 细节见 `docs/design/architecture-overview_zh.md` 与 `requirements_zh.md`。

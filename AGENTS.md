@@ -15,7 +15,7 @@ source-truth 是「代码为唯一依据」的飞书游戏研发代码问答助�
 
 核心架构特征：AI 引擎在 microVM **内**自主运行（不是容器外的远程 MCP 客户端），并新增飞书 Bot 网关与
 独立 CodeGraph 索引服务两个有状态组件——后者既持有唯一一份代码仓本地副本、又把定位 + 读文件全部经
-HTTP 桥暴露（无 EFS、无共享挂载）。架构工作原理见 `docs/agent/architecture.md`。
+HTTP 接口暴露（不挂任何共享文件系统）。架构工作原理见 `docs/agent/architecture.md`。
 
 语言：Python（`agent-container/`）、TypeScript / Node 20（`bot-gateway/`、未来 `infra/` CDK）、
 Bash（`scripts/`）。会话容器 ARM64-only。
@@ -46,7 +46,7 @@ MVP 阶段 Runtime 用 `agentcore` starter toolkit / boto3 配，不强求 CDK�
 ## Project structure
 
 完整目录树见 `docs/structure_zh.md`（权威，改顶层目录必须同步）。顶层：`agent-container/`（Python
-Agent）、`bot-gateway/`（TS 网关 + CardKit）、`index-service/`（CodeGraph 索引 + MCP 桥）、
+Agent）、`bot-gateway/`（TS 网关 + CardKit）、`index-service/`（CodeGraph 索引 + MCP 接口）、
 `infra/`（IaC）、`config/`（i18n / 阈值）、`scripts/`（运维）、
 `docs/`（人面向）+ `docs/agent/`（AI 面向）+ `docs/design/`（导入的设计权威依据）。
 
