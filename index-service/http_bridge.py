@@ -407,6 +407,15 @@ def build_bridge(
             probe_ok = False
             logger.warning(json.dumps({"event": "repo_probe_failed", "error": str(exc)}))
         # Track consecutive failures on the app object (survives across requests).
+        # CONCURRENCY: this read-modify-write is NOT guarded by a lock, and is safe ONLY
+        # because the bridge runs a SINGLE uvicorn worker = ONE event loop, and there is
+        # NO `await` between the read and the write below (the only await in this handler
+        # is maybe_self_heal() far above). Concurrent stateless_http handlers are asyncio
+        # tasks on that one loop; without an await between them they cannot interleave, so
+        # the RMW is effectively atomic (cross-review flagged a race assuming truly-parallel
+        # handlers — there aren't any here). If a future change adds an await between these
+        # lines, or moves the bridge to threaded/multi-worker serving, guard this with a
+        # lock. (Same single-loop assumption the CodegraphSession single-writer rests on.)
         fails = getattr(app, "_repo_probe_fails", 0)
         fails = 0 if probe_ok else fails + 1
         app._repo_probe_fails = fails  # type: ignore[attr-defined]
