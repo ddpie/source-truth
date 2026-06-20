@@ -15,7 +15,7 @@ source-truth 是「代码为唯一依据」的飞书游戏研发代码问答助�
 
 核心架构特征：AI 引擎在 microVM **内**自主运行（不是容器外的远程 MCP 客户端），并新增飞书 Bot 网关与
 独立 CodeGraph 索引服务两个有状态组件——后者既持有唯一一份代码仓本地副本、又把定位 + 读文件全部经
-HTTP 桥暴露（无 EFS、无共享挂载）。架构心智模型见 `docs/agent/architecture.md`。
+HTTP 桥暴露（无 EFS、无共享挂载）。架构工作原理见 `docs/agent/architecture.md`。
 
 语言：Python（`agent-container/`）、TypeScript / Node 20（`bot-gateway/`、未来 `infra/` CDK）、
 Bash（`scripts/`）。会话容器 ARM64-only。
@@ -47,8 +47,8 @@ MVP 阶段 Runtime 用 `agentcore` starter toolkit / boto3 配，不强求 CDK�
 
 完整目录树见 `docs/structure_zh.md`（权威，改顶层目录必须同步）。顶层：`agent-container/`（Python
 Agent）、`bot-gateway/`（TS 网关 + CardKit）、`index-service/`（CodeGraph 索引 + MCP 桥）、
-`infra/`（IaC）、`shared/`（共享日志 / 契约）、`config/`（i18n / 阈值）、`scripts/`（运维）、
-`docs/`（人面向）+ `docs/agent/`（AI 面向）+ `docs/design/`（导入的设计真相源）。
+`infra/`（IaC）、`config/`（i18n / 阈值）、`scripts/`（运维）、
+`docs/`（人面向）+ `docs/agent/`（AI 面向）+ `docs/design/`（导入的设计权威依据）。
 
 **生成物 / 不可手改：** `infra/cdk.out/`、`node_modules/`、`.venv/`、构建产物。源 → 生成物映射表见
 `docs/agent/invariants.md`。
@@ -58,7 +58,7 @@ Agent）、`bot-gateway/`（TS 网关 + CardKit）、`index-service/`（CodeGrap
 - TypeScript（`bot-gateway/`、`infra/`）：ESLint 即格式化器，不另配 Prettier；strict 模式；未用参数前缀 `_`。
 - Python（`agent-container/`、可能的 `index-service/`）：遵循 `ruff` / `black` 默认；类型标注。
 - 结构化 JSON 日志（`console.log(JSON.stringify({...}))` / 等价），用户标识用 `hashUserId` 脱敏，
-  见 `shared/`。
+  实现见 `bot-gateway/src/log.ts`。
 - 工具 / MCP 命名清晰、动宾式。
 
 ## Testing
@@ -86,8 +86,8 @@ Agent）、`bot-gateway/`（TS 网关 + CardKit）、`index-service/`（CodeGrap
 ## Boundaries
 
 **Never:**
-- 提交密钥 / token（gitleaks pre-commit；密钥走 Secrets Manager / SSM，**当前需手工在 CDK 外创建**——
-  编排脚本尚未自动建密钥，bot-gateway 启动需 `FEISHU_APP_ID/SECRET` 环境变量）。
+- 提交密钥 / token（gitleaks pre-commit；飞书凭证走 Secrets Manager——`install.sh` 交互式创建
+  `source-truth/feishu-app` 密钥，bot-gateway 的 `run.sh` 启动时取出注入进程环境，不落盘、不入仓库）。
 - 手改生成物。
 - 让 MVP 越过只读边界（写回代码、跑引擎、提交）。
 
@@ -106,10 +106,10 @@ Agent）、`bot-gateway/`（TS 网关 + CardKit）、`index-service/`（CodeGrap
 
 ## Key resources
 
-- 架构心智模型：`docs/agent/architecture.md`
+- 架构工作原理：`docs/agent/architecture.md`
 - CardKit「会生长的答案卡」调研（`bot-gateway` 核心能力）：`docs/agent/cardkit-streaming-spike.md`
-- 不变量与真相源映射：`docs/agent/invariants.md`
+- 不变量与权威依据映射：`docs/agent/invariants.md`
 - 变更配方：`docs/agent/playbooks.md`
 - 部署 / 连飞书 / 运维 / 排错：`docs/runbook.md`
 - 目录结构：`docs/structure_zh.md` · `docs/structure_en.md`
-- 需求 / 架构设计真相源：`docs/design/requirements_zh.md` · `docs/design/architecture-overview_zh.md`
+- 需求 / 架构设计权威依据：`docs/design/requirements_zh.md` · `docs/design/architecture-overview_zh.md`
