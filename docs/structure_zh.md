@@ -37,7 +37,7 @@ infra/                  基础设施即代码（MVP 先 agentcore toolkit / boto
     queries/insights/*.logsinsights              B 类去重/留存的 Insights 查询（DAU 等，配定时预聚合 Lambda）
     dashboard.product.json / dashboard.sre.json  看板模板（${REGION}/${NAMESPACE} 占位；产品用量 / SRE 健康两页）
   (p2) lib/             runtime / codegraph(index-service) / gateway 各 stack
-config/                 配置驱动：i18n.json（卡片 / 告警 / 错误文案）、alarm-thresholds.json（告警阈值，运维可调）
+config/                 配置驱动：i18n.json（卡片 / 告警 / 错误文案）、alarm-thresholds.json（告警阈值，运维可调）、projects.example.json（项目路由 schema 模板；真实配置在 .local/projects.json，部署相关、gitignore）
 scripts/                运维生命周期
   check-invariants.sh   快速结构 lint（AGENTS / CLAUDE / structure / 双语配对 / 顶层目录存在性）
   lib/                  common.sh（格式化 + 依赖检查）、env-utils.sh（.env / deploy-config 共享 helper）、render_metric_filters.py（指标定义→put-metric-filter 计划）、render_dashboard.py（看板模板渲染 + 禁 type:log 校验）、render_alarms.py（阈值→put-metric-alarm 计划）
@@ -70,7 +70,7 @@ docs/
     invariants.md       源 → 生成物映射 + 改 X 必改 Y 的耦合（7 条不变量）
     playbooks.md        有序变更配方（7 个配方）
     *-spike.md          调研记录（cardkit 流式 / 索引性能 / 存储选型 / 性能对比 / 模板）
-.local/                 （已 gitignore）账号特定部署状态：deploy-config、deploy-output.md
+.local/                 （已 gitignore）账号特定部署状态：deploy-config、projects.json（项目路由）、deploy-output.md
 ```
 
 标注 `(p1)` / `(p2)` 的条目为后续阶段产出，当前仅占位或尚未创建；未标注者均已落地。
