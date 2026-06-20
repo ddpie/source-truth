@@ -82,11 +82,14 @@ function log(obj: Record<string, unknown>): void {
 function newTraceId(): string {
   return "st-" + randomUUID().replace(/-/g, "");
 }
-/** Build a logger that auto-stamps `trace` on every line for one request. The traceId
- *  is spread LAST so it always wins — a logged object that happens to carry its own
- *  `trace` key (e.g. a future timing field) can't silently shadow the request id. */
+/** Build a logger that auto-stamps `traceId` on every line for one request. UNIFIED field
+ *  name: operational logs and metric events both use `traceId` now (was `trace` on logs,
+ *  `traceId` on metrics — a split that forced log queries to search both). The id is spread
+ *  LAST so it always wins — a logged object carrying its own `traceId` can't shadow the
+ *  request id. The agent side (_plog/_perf) emits `traceId` too, so a single
+ *  `filter traceId = "st-..."` joins both sides of the gateway↔microVM boundary. */
 function traceLogger(traceId: string): (obj: Record<string, unknown>) => void {
-  return (obj) => log({ ...obj, trace: traceId });
+  return (obj) => log({ ...obj, traceId });
 }
 
 // Per-field caps for the finalized card body. A Feishu interactive card has a
@@ -1289,7 +1292,7 @@ async function main(): Promise<void> {
       // The traceId (attached to the error when the card never rendered) lets the user
       // still report an id even with NO card, and ties these logs to that request.
       const fbTrace = (cardErr as { traceId?: string }).traceId;
-      log({ event: "card_fallback", trace: fbTrace, error: redactSensitive(String(cardErr)).slice(0, 300) });
+      log({ event: "card_fallback", traceId: fbTrace, error: redactSensitive(String(cardErr)).slice(0, 300) });
       // If streamingCardInvoke threw BEFORE it removed the "processing" reaction
       // (e.g. the initial createCard / card-send failed at index.ts:97-109), that
       // emoji is still stuck on the user's message. Clear it here so a failed
@@ -1307,7 +1310,7 @@ async function main(): Promise<void> {
       // Append the traceId so the user can report it even though no card rendered.
       const traceLine = fbTrace ? `\n\n${t("card.trace.prefix")}${fbTrace}` : "";
       await sendReply({ messageId: res.messageId, answer: `${t("msg.serviceError")}${traceLine}\n\n${redactSensitive(prompt)}` })
-        .catch((e) => log({ event: "fallback_error", trace: fbTrace, error: redactSensitive(String(e)).slice(0, 300) }));
+        .catch((e) => log({ event: "fallback_error", traceId: fbTrace, error: redactSensitive(String(e)).slice(0, 300) }));
     }
     log({ event: "replied", message: hashUserId(res.messageId), session: sessionId });
   };

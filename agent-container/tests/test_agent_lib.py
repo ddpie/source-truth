@@ -693,5 +693,5 @@ def test_run_agent_stamps_traceid_on_logs(monkeypatch, caplog):
     # The retry warn line must carry the trace id.
     retry_lines = [r.getMessage() for r in caplog.records if "mcp_init_race_retry" in r.getMessage()]
     assert retry_lines, "a cold-start retry must have been logged"
-    assert any('"trace": "st-abc123"' in line for line in retry_lines), \
-        "the traceId must be stamped on the agent's retry log"
+    assert any('"traceId": "st-abc123"' in line for line in retry_lines), \
+        "the traceId must be stamped on the agent's retry log (unified field name: traceId, not trace)"

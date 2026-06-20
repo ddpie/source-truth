@@ -363,7 +363,7 @@ async def run_agent(
         """Structured warning line, trace-stamped. Mirrors _perf's swallow-all
         contract — diagnostics must never break the streaming hot path."""
         try:
-            logger.warning(json.dumps({"event": event, "trace": trace_id, **ctx}))
+            logger.warning(json.dumps({"event": event, "traceId": trace_id, **ctx}))
         except Exception:  # noqa: BLE001 - diagnostics are best-effort
             pass
 
@@ -421,7 +421,7 @@ async def run_agent(
         async for message in qfn(prompt=p, options=options):
             if not first_emitted:
                 first_emitted = True
-                _perf("agent_first_message", (time.perf_counter() - t0) * 1000, trace=trace_id)
+                _perf("agent_first_message", (time.perf_counter() - t0) * 1000, traceId=trace_id)
             _track_tool_latency(message, pending)
             _maybe_log_result(message)
             if _message_has_tool_use(message):
@@ -502,7 +502,7 @@ async def run_agent(
                 if n > 0:
                     raise
                 retry_due_to_raise = True
-                _perf("agent_attempt_raised", (time.perf_counter() - t0) * 1000, attempt=attempt, trace=trace_id)
+                _perf("agent_attempt_raised", (time.perf_counter() - t0) * 1000, attempt=attempt, traceId=trace_id)
                 _plog("agent_attempt_raised", attempt=attempt,
                       detail="cold-start exception before any output", error=str(exc)[:200])
 
@@ -515,7 +515,7 @@ async def run_agent(
                 # gateway classifies as a failure (honest 查询失败 card + retry button),
                 # rather than leaving the card with no answer and no error signal.
                 _perf("mcp_init_race_exhausted", (time.perf_counter() - t0) * 1000,
-                      attempts=attempt + 1, num_turns=last_num_turns, trace=trace_id)
+                      attempts=attempt + 1, num_turns=last_num_turns, traceId=trace_id)
                 _plog("mcp_init_race_exhausted", attempts=attempt + 1, num_turns=last_num_turns,
                       detail="cold-start MCP tools never registered after all retries; emitting error")
                 n += 1
@@ -526,7 +526,7 @@ async def run_agent(
             # Back off BEFORE the next attempt so the MCP handshake has time to finish.
             backoff_s = COLD_START_BACKOFF_BASE_S * (2 ** attempt)
             _perf("mcp_init_race_retry", (time.perf_counter() - t0) * 1000,
-                  attempt=attempt, num_turns=last_num_turns, backoff_s=backoff_s, trace=trace_id)
+                  attempt=attempt, num_turns=last_num_turns, backoff_s=backoff_s, traceId=trace_id)
             _plog("mcp_init_race_retry", attempt=attempt, num_turns=last_num_turns,
                   backoff_s=backoff_s, reason=("thrown" if retry_due_to_raise else "leak_shape"),
                   detail="cold-start tools not registered; backing off then retrying")
@@ -544,7 +544,7 @@ async def run_agent(
             pending.clear()  # drop the cold attempt's unclosed tool timers so they can't mis-pair
             attempt += 1
     finally:
-        _perf("agent_run_total", (time.perf_counter() - t0) * 1000, messages=n, trace=trace_id)
+        _perf("agent_run_total", (time.perf_counter() - t0) * 1000, messages=n, traceId=trace_id)
 
 
 # Matches the tool-call markup/leak the model emits as TEXT when MCP tools aren't
