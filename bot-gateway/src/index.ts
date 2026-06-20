@@ -1465,12 +1465,22 @@ async function main(): Promise<void> {
           } else {
             log({ event: "feedback_revote_ignored", card: fbCardId ?? null });
           }
-          // UI + reason-append ONLY on the FIRST vote. A re-click is a no-op: re-appending the
-          // reason buttons would 300315-conflict on the existing fbr_* ids, and re-disabling is
-          // pointless. Disabling the buttons NESTED in the column_set returns 200 but does NOT
-          // take effect in the Feishu client (👎 stayed clickable — observed live), so we
-          // replace the WHOLE row (disableFeedbackRow, same-tag column_set PUT by its own
-          // top-level element_id) to render both buttons inert with a ✓ on the chosen one.
+          // UI mutations are gated PER-CARD, not per-user. The metric is per-user (firstVote
+          // above — anyone may rate), but the vote row + reason grid are CARD-scoped elements:
+          // the row replacement and the reason-grid append must happen AT MOST ONCE per card.
+          // If we gated the UI on firstVote (per-user), two DIFFERENT users down-voting the
+          // same card would each be their own "first vote" and BOTH call appendFeedbackReasons
+          // → the second 300315-conflicts on the existing fbr_* ids (the very class of bug this
+          // path fixes), and their two row-disables would race for an arbitrary ✓. The first
+          // interaction paints the row with that voter's choice and disables it for EVERYONE
+          // (the row is card-global, so no one can click after), which is the correct behavior.
+          const uiKey = `voteui:${fbCardId}`;
+          const firstCardUi = !!fbCardId && !isDuplicate(uiKey);
+          //
+          // Disabling the buttons NESTED in the column_set returns 200 but does NOT take effect
+          // in the Feishu client (👎 stayed clickable — observed live), so we replace the WHOLE
+          // row (disableFeedbackRow, same-tag column_set PUT by its own top-level element_id) to
+          // render both buttons inert with a ✓ on the chosen one.
           //
           // CRITICAL — these two writes MUST be SERIALIZED, not fired concurrently. CardKit
           // enforces a per-card monotonic `sequence` watermark: the disable takes seq N, the
@@ -1479,7 +1489,7 @@ async function main(): Promise<void> {
           // 200 with NO visual effect, so the vote buttons stay clickable forever (observed
           // live: 👍/👎 infinitely re-clickable). Awaiting disable→append applies them in seq
           // order so both stick.
-          if (fbCardId && firstVote) {
+          if (fbCardId && firstCardUi) {
             void (async () => {
               try {
                 await disableFeedbackRow(fbCardId, fbVote, nextCallbackSeq());
@@ -1512,12 +1522,14 @@ async function main(): Promise<void> {
           } else {
             log({ event: "feedback_reason_dup_ignored", card: frCardId ?? null });
           }
-          // Disable the WHOLE reason grid in place ONLY on the first pick: replace the column_set
-          // by its own top-level element_id (reliable same-tag PUT) so every button goes inert
-          // with a ✓ on the chosen one. A re-pick is a no-op (the count guard already dropped the
-          // metric, and re-disabling/re-rendering would 300315-conflict). element_ids are the
-          // SHORT index form fbr_<i> (feedbackReasonEid) — fbr_<code> overflowed Feishu's 20-char limit.
-          if (frCardId && firstReason) {
+          // Disable the WHOLE reason grid in place AT MOST ONCE PER CARD (card-scoped, not
+          // per-user — same reasoning as the vote row): the grid is a card-global element, so
+          // the first picker's choice paints the ✓ and disables it for everyone. Gating per-user
+          // would let a second user's pick race/re-disable the grid (higher seq wins, arbitrary
+          // ✓). The metric stays per-user above. element_ids are the SHORT index form fbr_<i>
+          // (feedbackReasonEid) — fbr_<code> overflowed Feishu's 20-char limit.
+          const reasonUiKey = `reasonui:${frCardId}`;
+          if (frCardId && !isDuplicate(reasonUiKey)) {
             void disableFeedbackReasonRow(frCardId, value.reasonCode, nextCallbackSeq())
               .catch((e) => log({ event: "feedback_render_error", op: "disable_reason_row", error: redactSensitive(String(e)).slice(0, 200) }));
           } else if (!frCardId) {

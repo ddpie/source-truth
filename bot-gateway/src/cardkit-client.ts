@@ -597,30 +597,6 @@ export function buildClickedButtonElement(elementId: string, question: string): 
   });
 }
 
-/** A disabled button keeping its ORIGINAL label, no ✓ (greyed-but-not-chosen). Used to
- *  disable the SIBLING buttons in a mutually-exclusive group when one is picked — e.g.
- *  after a 👍 vote, the 👎 button must also go disabled so the user can't then also vote
- *  👎 (the count guard already drops the 2nd vote, but the buttons looked clickable). */
-export function buildDisabledButtonElement(elementId: string, label: string): string {
-  return JSON.stringify({
-    tag: "button",
-    element_id: elementId,
-    text: { tag: "plain_text", content: label },
-    type: "default",
-    size: "small",
-    width: "fill",
-    disabled: true,
-    value: { action: "noop", eid: elementId },
-  });
-}
-
-/** Disable a button in place WITHOUT the ✓ (sibling of a chosen button). Best-effort. */
-export async function disableButtonPlain(cardId: string, elementId: string, label: string, sequence: number): Promise<void> {
-  await larkApi("PUT", `/open-apis/cardkit/v1/cards/${cardId}/elements/${elementId}`, JSON.stringify({
-    element: buildDisabledButtonElement(elementId, label),
-    sequence,
-  }));
-}
 
 // The negative-feedback reason codes (mirror metrics.ts FeedbackReasonCode). A 👎 reveals
 // these; clicking one emits feedback_reason{reasonCode} then disables them. too_slow /
