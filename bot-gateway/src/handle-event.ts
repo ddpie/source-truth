@@ -11,7 +11,7 @@
  */
 
 import { isDuplicate } from "./dedup";
-import { getSessionId } from "./session-map";
+import { getSessionState } from "./session-map";
 import { ackWithReaction } from "./reaction";
 
 /** One @-mention inside a message: `key` is the inline placeholder token in
@@ -45,6 +45,10 @@ export interface HandleResult {
   handled: boolean;
   answer?: string;
   sessionId?: string;
+  /** True when this turn's sessionId was freshly minted (no warm microVM behind it
+   *  → AgentCore cold start: spin-up + routing folded into the first response). Used
+   *  for cold-start telemetry (frequency + duration). A reused (warm) session is false. */
+  coldStart?: boolean;
   messageId?: string;
   /** message_id this message replied to (for follow-up context replay), if any. */
   parentId?: string;
@@ -167,9 +171,10 @@ export async function handleMessageEvent(
   if (event.message_id) ackWithReaction(event.message_id);
 
   // 4. Route to a stable session (same chat+thread reuses one warm microVM).
-  const sessionId = getSessionId(event.chat_id, event.thread_id);
+  //    `cold` = freshly minted session → AgentCore cold start (no warm VM yet).
+  const { sessionId, cold } = getSessionState(event.chat_id, event.thread_id);
 
   // 4. Invoke the agent.
   const answer = await deps.invoke(sessionId, prompt);
-  return { handled: true, answer, sessionId, messageId: event.message_id, parentId: event.parent_id, senderId: event.sender_id, eventId: event.event_id };
+  return { handled: true, answer, sessionId, coldStart: cold, messageId: event.message_id, parentId: event.parent_id, senderId: event.sender_id, eventId: event.event_id };
 }

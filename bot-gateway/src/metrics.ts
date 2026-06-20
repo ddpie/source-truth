@@ -91,7 +91,12 @@ export type DiagnosticEvent =
   // "alive but idle" (heartbeat still arriving) from "pipeline dead" (heartbeat stops).
   // A traffic-driven metric (question_received) can't make that distinction — an idle
   // night and a dead agent both look like no data. See monitoring plan 阶段3 liveness.
-  | "gateway_heartbeat";
+  | "gateway_heartbeat"
+  // RUNTIME COLD START — emitted once per invoke that landed on a freshly-minted session
+  // (no warm microVM behind it), carrying spinupMs = time-to-first-token (which on a cold
+  // invoke folds in AgentCore microVM spin-up + routing). Lets CloudWatch chart cold-start
+  // FREQUENCY (count) and DURATION (spinupMs p50/p95) separately from warm latency.
+  | "runtime_cold_start";
 
 const USER_LEVEL_EVENTS: ReadonlySet<string> = new Set<UserLevelEvent>([
   "question_received", "feedback_voted", "feedback_reason",
