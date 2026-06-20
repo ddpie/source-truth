@@ -89,6 +89,7 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
 fi
 
 require_cmd aws "install/configure the AWS CLI" || exit 1
+require_cmd zip "install zip (used to package the Lambda)" || exit 1
 ACCOUNT="$(aws sts get-caller-identity --query Account --output text)"
 ROLE_ARN="arn:aws:iam::${ACCOUNT}:role/${ROLE_NAME}"
 FN_ARN="arn:aws:lambda:${REGION}:${ACCOUNT}:function:${FN_NAME}"
@@ -104,12 +105,17 @@ if ! aws iam get-role --role-name "$ROLE_NAME" >/dev/null 2>&1; then
   say ok "created role $ROLE_NAME"
   sleep 10  # let the role propagate before create-function
 fi
-# Inline policy (upsert every run → repairs drift). StartQuery is account/region-scoped (it
-# can't be resource-scoped to one log group), so it's "*"; GetQueryResults/StopQuery likewise.
-# PutMetricData can't be resource-scoped either; constrain by namespace condition.
+# Inline policy (upsert every run → repairs drift), least-privilege:
+#  - StartQuery/StopQuery authorize on the LOG-GROUP resource type → scope to THIS group's
+#    ARN (so the role can't query arbitrary account log groups, e.g. another team's PII).
+#  - GetQueryResults authorizes only on "*" (keyed by queryId, no log-group resource) — it
+#    genuinely cannot be log-group-scoped, so "*" is required, not over-broad.
+#  - PutMetricData has no resource ARN; constrain by the namespace condition (the only lever).
+LG_ARN="arn:aws:logs:${REGION}:${ACCOUNT}:log-group:${LOG_GROUP}:*"
 aws iam put-role-policy --role-name "$ROLE_NAME" --policy-name dau-insights --policy-document "{
   \"Version\":\"2012-10-17\",\"Statement\":[
-    {\"Effect\":\"Allow\",\"Action\":[\"logs:StartQuery\",\"logs:GetQueryResults\",\"logs:StopQuery\"],\"Resource\":\"*\"},
+    {\"Effect\":\"Allow\",\"Action\":[\"logs:StartQuery\",\"logs:StopQuery\"],\"Resource\":\"${LG_ARN}\"},
+    {\"Effect\":\"Allow\",\"Action\":[\"logs:GetQueryResults\"],\"Resource\":\"*\"},
     {\"Effect\":\"Allow\",\"Action\":[\"cloudwatch:PutMetricData\"],\"Resource\":\"*\",
      \"Condition\":{\"StringEquals\":{\"cloudwatch:namespace\":\"SourceTruth/Gateway\"}}}]}" >/dev/null
 say ok "role policy dau-insights applied"
@@ -121,8 +127,14 @@ ENV_VARS="Variables={LOG_GROUP=$LOG_GROUP,TZ_NAME=$TZ_NAME}"
 if aws lambda get-function --region "$REGION" --function-name "$FN_NAME" >/dev/null 2>&1; then
   aws lambda update-function-code --region "$REGION" --function-name "$FN_NAME" \
     --zip-file "fileb://$ZIP" >/dev/null
-  # wait for the code update to settle before configuration update (avoids ResourceConflict)
-  aws lambda wait function-updated --region "$REGION" --function-name "$FN_NAME" 2>/dev/null || true
+  # MUST settle the code update before the config update or update-function-configuration
+  # throws ResourceConflictException ("an update is in progress"). `wait function-updated`
+  # blocks until LastUpdateStatus != InProgress. Do NOT `|| true` it — a swallowed wait
+  # failure would let the config update race the conflict it exists to prevent. If `wait`
+  # is genuinely unsupported on an old CLI, fall back to a short fixed sleep.
+  if ! aws lambda wait function-updated --region "$REGION" --function-name "$FN_NAME" 2>/dev/null; then
+    sleep 8  # old-CLI fallback: give the code update time to settle
+  fi
   aws lambda update-function-configuration --region "$REGION" --function-name "$FN_NAME" \
     --runtime "$RUNTIME" --handler "$HANDLER" --timeout 180 --environment "$ENV_VARS" >/dev/null
   say ok "updated function $FN_NAME"
