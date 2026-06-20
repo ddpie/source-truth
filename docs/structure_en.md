@@ -34,12 +34,14 @@ infra/                  Infrastructure as code (MVP starts with agentcore toolki
   monitoring/           Monitoring (CloudWatch side; scripts/boto3, not a CDK stack)
     queries/metric-filters/a-class-metrics.json  Single source of A-class metric intent (counts/percentiles/distributions → metric-filter)
     queries/insights/*.logsinsights              B-class dedup/retention Insights queries (DAU etc., paired with a scheduled pre-aggregation Lambda)
+    dashboard.product.json / dashboard.sre.json  Dashboard templates (${REGION}/${NAMESPACE} placeholders; product-usage / SRE-health pages)
   (p2) lib/             runtime / codegraph(index-service) / gateway stacks
 config/                 Config-driven: i18n.json (card / alarm / error copy), (p1) alarm-thresholds.json (thresholds TBD)
 scripts/                Operational lifecycle
   check-invariants.sh   Fast structural lint (AGENTS / CLAUDE / structure / bilingual pairing / top-level dir existence)
-  lib/                  common.sh (formatting + dep checks), env-utils.sh (.env / deploy-config shared helper), render_metric_filters.py (metric defs → put-metric-filter plan, pure & testable)
+  lib/                  common.sh (formatting + dep checks), env-utils.sh (.env / deploy-config shared helper), render_metric_filters.py (metric defs → put-metric-filter plan), render_dashboard.py (dashboard template render + no-type:log guard)
   apply-metric-filters.sh  Apply the infra/monitoring A-class metric definitions to CloudWatch (idempotent upsert; --dry-run prints offline)
+  apply-dashboards.sh   Render dashboard templates and put-dashboard (idempotent; --dry-run; reads metric-filters' namespace as the single source)
   test.sh               Single tiered test entrypoint (offline default / --full)
   check-versions.sh     Pinned-version drift guard (base digest / requirements pin / Node / claude-code npm)
   install.sh            Interactive one-click install (check deps→Feishu creds→config→confirm→deploy-all; pre-fills on re-run)

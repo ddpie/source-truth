@@ -1,0 +1,119 @@
+{
+  "_doc": [
+    "SRE / HEALTH dashboard (monitoring plan §2.B, 受众: 工程 / 运维).",
+    "TEMPLATE — placeholders ${REGION} and ${NAMESPACE} rendered by scripts/render_dashboard.py",
+    "before put-dashboard. Edit THIS template, not the rendered output (源在 git — plan 原则1).",
+    "",
+    "HARD CONSTRAINT (plan 阶段2): every widget is type:metric. NO type:log Insights widgets.",
+    "",
+    "Latency uses metric EXTENDED STATISTICS (p50/p95/p99) — NOT averages (plan 原则5); the latency",
+    "metric is extracted by the metric-filter ($.latencyMs / $.ttfbMs) so percentiles are computed",
+    "on the metric, alarmable in 阶段3 (Logs-Insights pct() can only draw, not alarm — plan 风险表).",
+    "",
+    "失败 vs 中止 separated (plan §2 note): AnswerFailed (real failures, by reason via SEARCH) and",
+    "AnswerAborted (user pressed 停止) are DIFFERENT widgets — folding aborts into failures inflates",
+    "the failure rate and hides real outages. CardHealth by kind is sparse (dimensioned); SEARCH()",
+    "auto-discovers the kinds present."
+  ],
+  "widgets": [
+    {
+      "type": "text",
+      "x": 0, "y": 0, "width": 24, "height": 2,
+      "properties": {
+        "markdown": "# source-truth · SRE / 健康看板\n延迟分位、失败分布、中止率、卡片健康。延迟看 **p95/p99 不看平均**。失败与中止分开（中止=用户主动停，非故障）。"
+      }
+    },
+    {
+      "type": "metric",
+      "x": 0, "y": 2, "width": 12, "height": 6,
+      "properties": {
+        "title": "总延迟分位（p50 / p95 / p99）",
+        "region": "${REGION}",
+        "view": "timeSeries",
+        "period": 300,
+        "yAxis": {"left": {"label": "ms", "showUnits": false, "min": 0}},
+        "metrics": [
+          ["${NAMESPACE}", "AnswerLatencyMs", {"label": "p50", "stat": "p50", "color": "#2ca02c"}],
+          ["...", {"label": "p95", "stat": "p95", "color": "#ff7f0e"}],
+          ["...", {"label": "p99", "stat": "p99", "color": "#d62728"}]
+        ]
+      }
+    },
+    {
+      "type": "metric",
+      "x": 12, "y": 2, "width": 12, "height": 6,
+      "properties": {
+        "title": "首字延迟分位（p50 / p95 / p99）— 体感关键",
+        "region": "${REGION}",
+        "view": "timeSeries",
+        "period": 300,
+        "yAxis": {"left": {"label": "ms", "showUnits": false, "min": 0}},
+        "metrics": [
+          ["${NAMESPACE}", "FirstTokenMs", {"label": "p50", "stat": "p50", "color": "#2ca02c"}],
+          ["...", {"label": "p95", "stat": "p95", "color": "#ff7f0e"}],
+          ["...", {"label": "p99", "stat": "p99", "color": "#d62728"}]
+        ]
+      }
+    },
+    {
+      "type": "metric",
+      "x": 0, "y": 8, "width": 12, "height": 6,
+      "properties": {
+        "title": "失败分布 by reason（仅真故障，不含中止）",
+        "region": "${REGION}",
+        "view": "timeSeries",
+        "stacked": true,
+        "period": 300,
+        "stat": "Sum",
+        "metrics": [
+          [{"expression": "SEARCH('{${NAMESPACE},reason} MetricName=\"AnswerFailed\"', 'Sum', 300)", "label": "", "id": "fails"}]
+        ]
+      }
+    },
+    {
+      "type": "metric",
+      "x": 12, "y": 8, "width": 12, "height": 6,
+      "properties": {
+        "title": "成功 / 失败 / 中止（计数）",
+        "region": "${REGION}",
+        "view": "timeSeries",
+        "period": 300,
+        "stat": "Sum",
+        "metrics": [
+          ["${NAMESPACE}", "AnswerCompleted", {"label": "成功", "color": "#2ca02c"}],
+          ["${NAMESPACE}", "AnswerFailed", {"label": "失败（合计）", "color": "#d62728"}],
+          ["${NAMESPACE}", "AnswerAborted", {"label": "中止（用户停止）", "color": "#7f7f7f"}]
+        ]
+      }
+    },
+    {
+      "type": "metric",
+      "x": 0, "y": 14, "width": 12, "height": 6,
+      "properties": {
+        "title": "卡片健康 by kind（泄漏剥离 / 冻卡 / 双答 / 幂等重发 / 心跳停滞）",
+        "region": "${REGION}",
+        "view": "timeSeries",
+        "stacked": true,
+        "period": 300,
+        "stat": "Sum",
+        "metrics": [
+          [{"expression": "SEARCH('{${NAMESPACE},kind} MetricName=\"CardHealth\"', 'Sum', 300)", "label": "", "id": "health"}]
+        ]
+      }
+    },
+    {
+      "type": "metric",
+      "x": 12, "y": 14, "width": 12, "height": 6,
+      "properties": {
+        "title": "工具调用 / 答（取证强度）与澄清触发数",
+        "region": "${REGION}",
+        "view": "timeSeries",
+        "period": 300,
+        "metrics": [
+          ["${NAMESPACE}", "ToolCalls", {"label": "平均工具调用/答", "stat": "Average", "color": "#1f77b4"}],
+          ["${NAMESPACE}", "ClarifyShown", {"label": "澄清触发数", "stat": "Sum", "color": "#bcbd22", "yAxis": "right"}]
+        ]
+      }
+    }
+  ]
+}
