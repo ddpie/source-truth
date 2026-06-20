@@ -40,5 +40,3 @@
 
 对 `source` 了其他脚本的文件，用 `shellcheck -x`（跟随 source）以消除 SC1091 误报；脚本内已带
 `# shellcheck source=...` 指令。
-
-状态：p0/p1 部分已落地（见上表 ✅），其余随阶段补全。
