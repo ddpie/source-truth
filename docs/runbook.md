@@ -159,8 +159,13 @@ aws ssm start-session --region <r> --target <INDEX_SERVICE_INSTANCE>
 `install.sh`（或 deploy 的 gateway 阶段）会重写 `/etc/bot-gateway.env` 并重启服务。
 
 **监控：指标 / 看板 / 告警**（CloudWatch 侧，部署期身份需 `logs:PutMetricFilter` /
-`cloudwatch:PutDashboard,PutMetricAlarm` / `sns:CreateTopic`；不是运行时角色）。三步幂等、可重跑、
-换区域只改 `--region`。**顺序固定：先指标 filter，再看板/告警**（告警引用 metric，metric 由 filter 产出）：
+`cloudwatch:PutDashboard,PutMetricAlarm` / `sns:CreateTopic`；不是运行时角色）。
+
+> **`deploy-all.sh` 的 Phase 8（monitoring）已自动跑这四步**（best-effort：网关日志组还没建好时只告警不中断
+> 部署，重跑 deploy 即补上）。**所以正常一键部署无需手动跑**；下面的手动命令用于：单独刷新看板/阈值、
+> deploy 时 monitoring 被 `--skip monitoring`、或首次部署网关刚起还没写第一行日志（log group 未生成）后补跑。
+
+幂等、可重跑、换区域只改 `--region`。**顺序固定：先指标 filter，再看板/告警**（告警引用 metric，metric 由 filter 产出）：
 
 ```bash
 # 1. A 类指标 filter（看板读的计数/分位/分布）
