@@ -29,7 +29,10 @@ source "$ROOT/scripts/lib/env-utils.sh"
 
 RENDER="$ROOT/scripts/lib/render_alarms.py"
 THRESHOLDS="$ROOT/config/alarm-thresholds.json"
-DEFS="$ROOT/infra/monitoring/queries/metric-filters/a-class-metrics.json"
+# Namespace is read from the ALARM metric defs (the metrics these alarms actually consume),
+# not the a-class dashboard defs — so a future namespace split can't silently point the
+# alarms at a namespace with no data (cross-review). Both files currently share the namespace.
+DEFS="$ROOT/infra/monitoring/queries/metric-filters/alarm-metrics.json"
 CONFIG_FILE="$ROOT/.local/deploy-config"
 
 REGION="" NAMESPACE="" PREFIX="source-truth" TOPIC_NAME="source-truth-alarms" DRY_RUN=0

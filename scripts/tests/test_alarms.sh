@@ -43,16 +43,19 @@ check "each alarm has required put-metric-alarm fields" "$bad"
 printf '%s' "$out" | python3 -c 'import json,sys; assert all(json.loads(l)["alarmName"].startswith("source-truth-") for l in sys.stdin if l.strip())'
 check "default prefix applied to alarm names" $?
 
-# the liveness backstop uses treatMissingData=breaching on a dense metric
+# the liveness backstop watches the HEARTBEAT (not a traffic metric), fires only on MISSING
+# data: GatewayHeartbeat >= 1 with treatMissingData=breaching → alive→OK, pipeline dead→ALARM.
+# Watching a traffic-driven metric would false-page on a quiet night (cross-review HIGH).
 printf '%s\n' "$out" | python3 -c '
 import json,sys
 rows=[json.loads(l) for l in sys.stdin if l.strip()]
 live=[r for r in rows if r["alarmName"].endswith("LogPipelineStalled")]
 assert len(live)==1, "LogPipelineStalled missing"
 assert live[0]["treatMissingData"]=="breaching", "liveness must be breaching"
-assert live[0]["metricName"]=="QuestionsReceived", "liveness must watch a dense metric"
+assert live[0]["metricName"]=="GatewayHeartbeat", "liveness MUST watch the heartbeat, not a traffic metric"
+assert live[0]["comparisonOperator"]=="GreaterThanOrEqualToThreshold", "liveness fires on MISSING data, not low-but-present"
 '
-check "liveness backstop = breaching on dense QuestionsReceived" $?
+check "liveness backstop = breaching on GatewayHeartbeat (fires only on missing)" $?
 
 # topic arn wired into actions when provided
 printf '%s' "$(python3 "$RENDER" "$THRESH" --namespace X/Y --topic-arn arn:aws:sns:r:1:t)" | python3 -c 'import json,sys; r=json.loads(sys.stdin.readline()); assert r["alarmActions"]==["arn:aws:sns:r:1:t"] and r["okActions"]==["arn:aws:sns:r:1:t"]'
@@ -85,6 +88,12 @@ python3 "$RENDER" "$TMP/t.json" --namespace X/Y >/dev/null 2>/dev/null; [[ $? -n
 
 mk '{ "alarms": [ { "name": "A", "metricName": "M", "comparisonOperator": "GreaterThanThreshold", "threshold": 1 } ] }'
 python3 "$RENDER" "$TMP/t.json" --namespace X/Y >/dev/null 2>/dev/null; [[ $? -ne 0 ]]; check "missing statistic rejected" $?
+
+mk '{ "alarms": [ { "name": "A", "metricName": "M", "statistic": "Sum", "comparisonOperator": "GreaterThanThreshold", "threshold": 1, "periodSeconds": 45 } ] }'
+python3 "$RENDER" "$TMP/t.json" --namespace X/Y >/dev/null 2>/dev/null; [[ $? -ne 0 ]]; check "period not 10/30/multiple-of-60 rejected" $?
+
+mk '{ "alarms": [ { "name": "A", "metricName": "M", "statistic": "Sum", "comparisonOperator": "GreaterThanThreshold", "threshold": 1, "evaluationPeriods": true } ] }'
+python3 "$RENDER" "$TMP/t.json" --namespace X/Y >/dev/null 2>/dev/null; [[ $? -ne 0 ]]; check "bool-as-int evaluationPeriods rejected" $?
 
 # missing namespace fails
 python3 "$RENDER" "$THRESH" >/dev/null 2>/dev/null; [[ $? -ne 0 ]]; check "missing --namespace rejected" $?

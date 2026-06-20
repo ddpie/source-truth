@@ -64,17 +64,17 @@
     },
     {
       "name": "LogPipelineStalled",
-      "metricName": "QuestionsReceived",
+      "metricName": "GatewayHeartbeat",
       "statistic": "Sum",
-      "periodSeconds": 3600,
+      "periodSeconds": 300,
       "evaluationPeriods": 3,
       "datapointsToAlarm": 3,
       "threshold": 1,
-      "comparisonOperator": "LessThanThreshold",
+      "comparisonOperator": "GreaterThanOrEqualToThreshold",
       "treatMissingData": "breaching",
       "severity": "critical",
-      "_liveness": "LOG-PIPELINE LIVENESS BACKSTOP (plan 阶段3): QuestionsReceived is dense (defaultValue:0, emits 0 every window) AND stably present in normal operation. If the CloudWatch agent dies or the gateway goes silent, the metric goes MISSING → treatMissingData=breaching fires. The <threshold also catches a genuinely-dead bot (0 questions for 3h). Pointed at a DENSE metric so cold-start doesn't strand it in INSUFFICIENT_DATA. Tune periodSeconds/evaluationPeriods to your traffic floor.",
-      "alarmDescription": "日志管道存活兜底：3 小时内 QuestionsReceived 缺失或为 0 → 可能是 CloudWatch agent 挂了 / 网关静默 / 机器人真死。健康类告警靠日志管道，管道一断会静默漏报，故此兜底。"
+      "_liveness": "LOG-PIPELINE LIVENESS BACKSTOP (plan 阶段3). Watches GatewayHeartbeat — the gateway emits gateway_heartbeat every 60s REGARDLESS of traffic, so this metric is NONZERO in normal operation even on an idle night. Semantics: alive → Sum>=1 every 5min window → OK; pipeline dead (CloudWatch agent down / gateway crashed / silent) → metric goes MISSING → treatMissingData=breaching fires after 3 missing windows (~15min). CRITICAL: this MUST watch the heartbeat, NOT a traffic-driven metric like QuestionsReceived — a traffic metric reads 0/absent on a legitimately quiet night, which is indistinguishable from a dead pipeline and would false-page (cross-review HIGH). The >=1-with-breaching design means the alarm only fires on MISSING data, never on a low-but-present heartbeat.",
+      "alarmDescription": "日志管道存活兜底：网关心跳（每 60s 一次，与流量无关）连续 ~15 分钟缺失 → CloudWatch agent 挂了 / 网关崩了 / 日志停流。健康类告警全靠日志管道，管道一断会静默漏报，故此兜底。空闲夜晚心跳照发，不会误报。"
     }
   ]
 }
