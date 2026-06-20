@@ -17,6 +17,7 @@
     "card.title.failed": "查询失败",
     "card.title.aborted": "已停止",
     "card.title.turnCapped": "部分结论（步数受限）",
+    "card.title.timedOut": "部分结论（分析超时）",
     "card.title.clarify": "请选择你想问的",
     "card.title.followup.done": "追问 · 已回答",
     "card.title.elapsed": "用时 {elapsed}",
@@ -39,6 +40,7 @@
     "msg.aborted.withBody": "\n\n*（已停止，以上为已生成内容）*",
     "msg.aborted.noBody": "已停止。",
     "msg.timeout": "分析超时，请缩小问题范围后重试。",
+    "msg.timeout.withBody": "\n\n*（分析超时，未在限定时间内跑完；以上为已得到的部分结论，建议把问题缩小后再问，例如只问某一个符号 / 某一处影响）*",
     "msg.empty": "(无内容)",
     "msg.serviceError": "暂时无法回答（服务异常），请稍后重试：",
     "summary.followup.prefix": "追问："
@@ -53,6 +55,7 @@
     "card.title.failed": "Query failed",
     "card.title.aborted": "Stopped",
     "card.title.turnCapped": "Partial answer (step limit reached)",
+    "card.title.timedOut": "Partial answer (analysis timed out)",
     "card.title.clarify": "Please pick what you meant",
     "card.title.followup.done": "Follow-up · answered",
     "card.title.elapsed": "took {elapsed}",
@@ -75,6 +78,7 @@
     "msg.aborted.withBody": "\n\n*(Stopped; the above is what was generated.)*",
     "msg.aborted.noBody": "Stopped.",
     "msg.timeout": "Analysis timed out. Please narrow the question and retry.",
+    "msg.timeout.withBody": "\n\n*(Analysis timed out before finishing. The above is the partial result — try narrowing the question, e.g. ask about one symbol / one impact.)*",
     "msg.empty": "(no content)",
     "msg.serviceError": "Temporarily unable to answer (service error). Please retry shortly:",
     "summary.followup.prefix": "Follow-up: "
