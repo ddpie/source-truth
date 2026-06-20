@@ -58,14 +58,26 @@ SQLITE_EXT = (".db", ".sqlite", ".sqlite3")
 
 def _clip(s: Any) -> str:
     t = "" if s is None else str(s)
+    # Flatten newlines/CR inside a cell: a quoted CSV cell (or an Excel cell) can hold
+    # an embedded newline (game configs do this in description/dialogue columns). Left
+    # raw, it would split one record across multiple physical output lines in the
+    # pipe-delimited block → the reader sees phantom rows + misaligned columns
+    # (cross-review). Replace with a visible \n marker so the cell stays one line.
+    t = t.replace("\r\n", "\\n").replace("\n", "\\n").replace("\r", "\\n")
     return t[:MAX_CELL]
 
 
-def _rows_to_text(rows: list[list[Any]], *, label: str) -> tuple[str, bool]:
-    """Render rows as a compact pipe-delimited block. Returns (text, truncated)."""
+def _rows_to_text(rows: list[list[Any]], *, label: str, has_header: bool = True) -> tuple[str, bool]:
+    """Render rows as a compact pipe-delimited block. Returns (text, truncated).
+
+    MAX_ROWS bounds the DATA rows, not the header: callers pass [header, ...data], so
+    counting the header against MAX_ROWS dropped the MAX_ROWS-th data row AND falsely
+    flagged TRUNCATED on a table with exactly MAX_ROWS data rows (cross-review). With
+    has_header, the cap is header + MAX_ROWS data."""
     truncated = False
-    if len(rows) > MAX_ROWS:
-        rows = rows[:MAX_ROWS]
+    limit = MAX_ROWS + 1 if has_header else MAX_ROWS  # +1 reserves the header line
+    if len(rows) > limit:
+        rows = rows[:limit]
         truncated = True
     out_lines = []
     for r in rows:
@@ -74,7 +86,10 @@ def _rows_to_text(rows: list[list[Any]], *, label: str) -> tuple[str, bool]:
             truncated = True
         out_lines.append(" | ".join(_clip(c) for c in cells))
     body = "\n".join(out_lines)
-    header = f"### {label} ({len(rows)} row(s){' — TRUNCATED' if truncated else ''})"
+    # Report DATA-row count (exclude the header) so "(N row(s))" matches what a planner
+    # would count, and TRUNCATED means "more DATA rows exist".
+    n_data = len(rows) - 1 if (has_header and rows) else len(rows)
+    header = f"### {label} ({n_data} row(s){' — TRUNCATED' if truncated else ''})"
     return f"{header}\n{body}", truncated
 
 
@@ -89,7 +104,10 @@ def _read_csv(local_path: str, *, delimiter: str) -> tuple[str, bool]:
                 # huge list per row before _rows_to_text clips it → memory DoS in the
                 # resident index process. Keep only MAX_COLS+1 (the +1 flags "wide").
                 rows.append(row[:MAX_COLS + 1])
-                if i >= MAX_ROWS:  # +1 read so we can flag truncation
+                # Read header + (MAX_ROWS+1) data rows: the extra data row lets
+                # _rows_to_text detect "more than MAX_ROWS data" and flag TRUNCATED
+                # without dropping a legitimate MAX_ROWS-th row (cross-review).
+                if i >= MAX_ROWS + 1:
                     break
         except csv.Error as e:
             # An over-long single field trips csv.field_size_limit (default 128KB) and
@@ -134,20 +152,77 @@ def _read_excel(local_path: str) -> tuple[str, bool]:
     # return computed values rather than formula strings (planners want the numbers).
     _check_zip_inflate(local_path)  # zip-bomb guard: reject if entries inflate past the ceiling
     wb = openpyxl.load_workbook(local_path, read_only=True, data_only=True)
+    cap = MAX_ROWS + 2  # header + (MAX_ROWS+1) data rows (see _rows_to_text truncation)
     try:
         blocks, truncated = [], False
+        saw_blank_in_data = False
         for ws in wb.worksheets:
             rows = []
             for i, row in enumerate(ws.iter_rows(values_only=True)):
-                rows.append(list(row))
-                if i >= MAX_ROWS:
+                cells = list(row)
+                rows.append(cells)
+                # A None cell amid non-empty neighbours is the FORMULA-WITHOUT-CACHED-
+                # VALUE case: data_only returns None for a formula cell that Excel never
+                # computed+cached (e.g. a script-generated .xlsx). Flag it so we can do a
+                # one-shot formula-recovery pass below — else the cell silently vanishes
+                # and a planner sees "(empty)" where a formula lives (cross-review P0).
+                if i > 0 and any(c is None for c in cells) and any(c is not None for c in cells):
+                    saw_blank_in_data = True
+                if i >= cap - 1:
                     break
             block, t = _rows_to_text(rows, label=f"sheet '{ws.title}'")
-            blocks.append(block)
+            blocks.append((ws.title, rows, block))
             truncated = truncated or t
-        return ("\n\n".join(blocks) if blocks else "(workbook has no sheets)"), truncated
+        if not blocks:
+            return "(workbook has no sheets)", False
+        # Formula-recovery pass: only when a blank-amid-data cell was seen (cheap path
+        # for the common all-cached workbook). Re-render any sheet whose cells we can
+        # backfill from the formula view.
+        if saw_blank_in_data:
+            blocks = _recover_excel_formulas(openpyxl, local_path, blocks, cap)
+        return "\n\n".join(b for _, _, b in blocks), truncated
     finally:
         wb.close()
+
+
+def _recover_excel_formulas(openpyxl: Any, local_path: str, blocks: list, cap: int) -> list:
+    """For sheets with None (uncached-formula) cells, overlay the formula string from a
+    data_only=False read so a formula cell renders as e.g. `=A2*2` instead of vanishing.
+    Best-effort: any failure leaves the value-pass block unchanged."""
+    try:
+        fwb = openpyxl.load_workbook(local_path, read_only=True, data_only=False)
+    except Exception:  # noqa: BLE001 - recovery is best-effort; keep the value-pass output
+        return blocks
+    try:
+        by_title = {ws.title: ws for ws in fwb.worksheets}
+        out = []
+        for title, rows, block in blocks:
+            ws = by_title.get(title)
+            if ws is None:
+                out.append((title, rows, block))
+                continue
+            frows = []
+            for i, row in enumerate(ws.iter_rows(values_only=True)):
+                frows.append(list(row))
+                if i >= cap - 1:
+                    break
+            # Overlay: where the value pass is None but the formula pass has content, use
+            # the formula string (a str starting with '='); else keep the value.
+            merged = []
+            for r in range(len(rows)):
+                vrow = rows[r]
+                frow = frows[r] if r < len(frows) else []
+                merged.append([
+                    (f"{frow[c]} (未计算)" if (c < len(frow) and vrow[c] is None
+                                              and isinstance(frow[c], str) and frow[c].startswith("="))
+                     else vrow[c])
+                    for c in range(len(vrow))
+                ])
+            new_block, _ = _rows_to_text(merged, label=f"sheet '{title}'")
+            out.append((title, merged, new_block))
+        return out
+    finally:
+        fwb.close()
 
 
 def _read_sqlite(local_path: str) -> tuple[str, bool]:
@@ -159,10 +234,20 @@ def _read_sqlite(local_path: str) -> tuple[str, bool]:
     # NOT an escape — '..' is already rejected upstream — but a correctness bug).
     # quote() keeps '/' so the absolute path stays intact; only special chars escape.
     uri = f"file:{urllib.parse.quote(local_path)}?mode=ro&immutable=1"
-    con = sqlite3.connect(uri, uri=True)
+    try:
+        con = sqlite3.connect(uri, uri=True)
+    except sqlite3.Error as exc:
+        raise ValueError(f"not a valid SQLite database (corrupt or encrypted): {exc}") from exc
     try:
         cur = con.cursor()
-        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
+        try:
+            cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
+        except sqlite3.DatabaseError as exc:
+            # A non-sqlite/corrupt/encrypted file opens fine but fails on first read
+            # ("file is not a database"). Surface a clean, actionable ValueError (the
+            # bridge passes ValueError detail through) instead of a generic "internal
+            # error" the agent can't explain to the user (cross-review).
+            raise ValueError(f"not a valid SQLite database (corrupt or encrypted): {exc}") from exc
         tables = [r[0] for r in cur.fetchall()]
         truncated = False
         if len(tables) > MAX_TABLES:
@@ -171,7 +256,10 @@ def _read_sqlite(local_path: str) -> tuple[str, bool]:
         blocks = []
         for tbl in tables:
             # Identifier can't be parameterized; quote it to neutralize odd names.
-            q = f'SELECT * FROM "{tbl.replace(chr(34), chr(34) * 2)}" LIMIT {MAX_ROWS + 1}'
+            # LIMIT MAX_ROWS+2 data rows: _rows_to_text caps at header + MAX_ROWS data,
+            # so fetching one extra lets it flag TRUNCATED without dropping a legitimate
+            # MAX_ROWS-th data row (cross-review).
+            q = f'SELECT * FROM "{tbl.replace(chr(34), chr(34) * 2)}" LIMIT {MAX_ROWS + 2}'
             cur.execute(q)
             cols = [d[0] for d in cur.description] if cur.description else []
             data = cur.fetchall()
