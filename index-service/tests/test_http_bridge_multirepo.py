@@ -267,3 +267,44 @@ def test_glob_fanout_one_repo_error_does_not_blank_others(monkeypatch, tmp_path)
     out = json.loads(asyncio.run(_fn(app, "codegraph_glob_files")(pattern="**/*.cs")))
     assert "error" not in out, out
     assert out["paths"] and all(p.startswith("beta/") for p in out["paths"]), out
+
+
+# ── main() arg pairing: repeatable --workspace / --local-workspace (CLI glue) ──
+def test_pair_workspaces_single_repo():
+    from http_bridge import pair_workspaces
+    assert pair_workspaces(["/data/repo/x"], ["/data/repo/x"]) == [("/data/repo/x", "/data/repo/x")]
+
+
+def test_pair_workspaces_single_no_local():
+    from http_bridge import pair_workspaces
+    assert pair_workspaces(["/data/repo/x"], []) == [("/data/repo/x", None)]
+
+
+def test_pair_workspaces_multi_by_position():
+    from http_bridge import pair_workspaces
+    out = pair_workspaces(["/data/repo/a", "/data/repo/b"], ["/data/repo/a", "/data/repo/b"])
+    assert out == [("/data/repo/a", "/data/repo/a"), ("/data/repo/b", "/data/repo/b")]
+
+
+def test_pair_workspaces_fewer_locals_pad_none():
+    from http_bridge import pair_workspaces
+    out = pair_workspaces(["/data/repo/a", "/data/repo/b"], ["/data/repo/a"])
+    assert out == [("/data/repo/a", "/data/repo/a"), ("/data/repo/b", None)]
+
+
+def test_pair_workspaces_requires_at_least_one():
+    from http_bridge import pair_workspaces
+    with pytest.raises(ValueError):
+        pair_workspaces([], [])
+
+
+def test_pair_workspaces_rejects_excess_locals():
+    from http_bridge import pair_workspaces
+    with pytest.raises(ValueError):
+        pair_workspaces(["/data/repo/a"], ["/data/repo/a", "/data/repo/b"])
+
+
+def test_pair_workspaces_rejects_duplicate_workspace():
+    from http_bridge import pair_workspaces
+    with pytest.raises(ValueError):
+        pair_workspaces(["/data/repo/a", "/data/repo/a/"], ["/data/repo/a", "/data/repo/a"])
