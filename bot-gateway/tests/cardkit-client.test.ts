@@ -72,6 +72,26 @@ describe("feedback buttons (👍/👎 + reason)", () => {
     expect(el.value.action).toBe("noop");           // a click does nothing even if it fired
   });
 
+  it("EVERY feedback button element_id is within Feishu's 20-char limit (regression: 300315)", () => {
+    // fbr_hard_to_understand (22 chars) overflowed the element_id limit → the whole reason
+    // append was rejected (code 300315) and NO reason buttons showed. element_ids must be
+    // letter-start, [A-Za-z0-9_], <=20 chars. Guard ALL feedback button ids.
+    const allEls = [...(buildFeedbackButtons() as unknown[]), ...(buildFeedbackReasonElements() as unknown[])];
+    const ids: string[] = [];
+    const walk = (n: unknown): void => {
+      if (!n || typeof n !== "object") return;
+      const o = n as Record<string, unknown>;
+      if (o.tag === "button" && typeof o.element_id === "string") ids.push(o.element_id);
+      for (const v of Object.values(o)) { if (Array.isArray(v)) v.forEach(walk); else if (v && typeof v === "object") walk(v); }
+    };
+    allEls.forEach(walk);
+    expect(ids.length).toBeGreaterThan(0);
+    for (const id of ids) {
+      expect(id.length).toBeLessThanOrEqual(20);
+      expect(id).toMatch(/^[A-Za-z][A-Za-z0-9_]*$/);
+    }
+  });
+
   it("reason buttons are top-level, one per enumerated reasonCode, action=feedback_reason, no free text", () => {
     const els = buildFeedbackReasonElements() as Array<Record<string, unknown>>;
     const vals = collectButtonValues(els);
