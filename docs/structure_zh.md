@@ -35,6 +35,7 @@ infra/                  基础设施即代码（MVP 先 agentcore toolkit / boto
     queries/metric-filters/a-class-metrics.json  A 类指标口径单一事实源（计数/分位/分布 → metric-filter）
     queries/metric-filters/alarm-metrics.json    告警专用稠密 filter（每 card_health kind 一条，defaultValue:0）
     queries/insights/*.logsinsights              B 类去重/留存的 Insights 查询（DAU 等，配定时预聚合 Lambda）
+    lambda/dau_preaggregate.py                   B 类 DAU 预聚合 Lambda（每日 StartQuery→PutMetricData，纯 stdlib+boto3）
     dashboard.product.json / dashboard.sre.json  看板模板（${REGION}/${NAMESPACE} 占位；产品用量 / SRE 健康两页）
   (p2) lib/             runtime / codegraph(index-service) / gateway 各 stack
 config/                 配置驱动：i18n.json（卡片 / 告警 / 错误文案）、alarm-thresholds.json（告警阈值，运维可调）、projects.example.json（项目路由 schema 模板；真实配置在 .local/projects.json，部署相关、gitignore）
@@ -44,6 +45,7 @@ scripts/                运维生命周期
   apply-metric-filters.sh  把 infra/monitoring 的指标定义应用到 CloudWatch（幂等 upsert；--defs 切 A 类/告警；--dry-run）
   apply-dashboards.sh   渲染看板模板并 put-dashboard（幂等；--dry-run；读 metric-filters 同源 namespace）
   apply-alarms.sh       建 SNS topic + 从 config/alarm-thresholds.json 建 CloudWatch 告警（幂等；订阅需手动确认）
+  apply-dau-lambda.sh   部署 B 类 DAU 预聚合 Lambda + 每日 EventBridge 调度（角色/打包/触发，幂等；--dry-run）
   test.sh               单一分层测试入口（离线默认 / --full）
   check-versions.sh     版本钉死防漂移守卫（base digest / requirements pin / Node / claude-code npm）
   install.sh            交互式一键安装（查依赖→飞书凭证→配置→确认→调 deploy-all；重跑预填）
