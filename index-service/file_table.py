@@ -19,6 +19,7 @@ sheet/table can't blow the agent's context (mirrors file_read's caps).
 from __future__ import annotations
 
 import csv
+import io
 import json
 import logging
 import os
@@ -29,6 +30,7 @@ from typing import Any
 
 import path_align
 from perf import perf_entry
+from text_decode import decode_bytes
 
 logger = logging.getLogger("file-table")
 
@@ -94,8 +96,22 @@ def _rows_to_text(rows: list[list[Any]], *, label: str, has_header: bool = True)
 
 
 def _read_csv(local_path: str, *, delimiter: str) -> tuple[str, bool]:
-    with open(local_path, encoding="utf-8", errors="replace", newline="") as fh:
-        reader = csv.reader(fh, delimiter=delimiter)
+    # Decode via decode_bytes (BOM / UTF-8 / GB18030) — a Chinese config CSV is very often
+    # GBK/GB2312, which the old hardcoded utf-8+replace returned as mojibake (every name
+    # column garbled → the planner's actual data is unusable; cross-review HIGH). Read the
+    # bytes (already byte-capped upstream at MAX_FILE_BYTES) then parse from a StringIO.
+    with open(local_path, "rb") as fh:
+        raw = fh.read()
+    text, _enc = decode_bytes(raw)
+    # Raise the csv field-size limit to the file's byte ceiling so a single legitimately
+    # large quoted cell (a long localized description/dialogue blob — exactly what game
+    # config columns hold) doesn't make the WHOLE table unreadable. It's bounded by
+    # MAX_FILE_BYTES (64 MiB) upstream, and _clip trims each cell to 200 chars anyway, so
+    # this can't blow memory (cross-review LOW). Save/restore so we don't perturb global state.
+    prev_limit = csv.field_size_limit()
+    try:
+        csv.field_size_limit(MAX_FILE_BYTES)
+        reader = csv.reader(io.StringIO(text, newline=""), delimiter=delimiter)
         rows = []
         try:
             for i, row in enumerate(reader):
@@ -110,9 +126,11 @@ def _read_csv(local_path: str, *, delimiter: str) -> tuple[str, bool]:
                 if i >= MAX_ROWS + 1:
                     break
         except csv.Error as e:
-            # An over-long single field trips csv.field_size_limit (default 128KB) and
-            # raises — surface a clean error, not a raw csv.Error traceback.
-            raise ValueError(f"CSV parse error (likely an over-long field): {e}") from e
+            # A malformed CSV (e.g. NUL bytes) can still trip csv — surface a clean error,
+            # not a raw csv.Error traceback.
+            raise ValueError(f"CSV parse error: {e}") from e
+    finally:
+        csv.field_size_limit(prev_limit)
     return _rows_to_text(rows, label="sheet")
 
 
