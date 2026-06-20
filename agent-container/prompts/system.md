@@ -130,11 +130,11 @@
       - `y`（饼图 `val`）的值必须是**纯数字**，不是 `"100点"`/`"1.5倍"` 这种带单位的字符串（带单位图就画不出来）；单位写进轴标题。
       - 注：`x`/`y`/`cat`/`val` 是**图表内部给 VChart 读的机器字段名**、从不显示给人看，所以用 ASCII 不违反「正文/旁白用中文业务词」那条——人看到的标签全在 `title`/`axes` 的中文里。
       - **出图前过一遍这张自检表，四条都对再出**：① 每条记录都恰有 `x`、`y` 两个键（饼图 `cat`、`val`）；② 所有 `y`（`val`）都是纯数字、无单位；③ `"xField":"x","yField":"y"`（饼图 `"valueField":"val","categoryField":"cat"`）一字未改；④ JSON 合法。**任何一条没把握，就别出图、直接用表格**——表格永远画得出，是更稳的兜底。
-  - **业务名全部放进标题和坐标轴**（数据键是 `x`/`y` 这种通用名，正是靠这里翻成人话）：`title.text` 写「各等级暴击倍率」；给轴配坐标轴标题——⚠️ **VChart 的轴标题默认隐藏，必须显式写 `"visible": true` 才会显示**（这是漏写就「图上没有横纵轴说明」的根因）。格式：`"axes":[{"orient":"bottom","title":{"visible":true,"text":"等级"}},{"orient":"left","title":{"visible":true,"text":"暴击倍率（倍）"}}]`，单位也写在这（因为 `y` 只放纯数字）。直角坐标系（bar/line）**两条轴都要给** `orient:"bottom"`（横轴 = x 的含义）和 `orient:"left"`（纵轴 = y 的含义），这样图脱离正文也能看懂。
+  - **业务名全部放进标题和坐标轴**（数据键是 `x`/`y` 这种通用名，正是靠这里翻成人话）：`title.text` 写「各等级暴击倍率」；给轴配坐标轴标题——⚠️ **VChart 的轴标题默认隐藏，必须显式写 `"visible": true` 才会显示**（这是漏写就「图上没有横纵轴说明」的根因）。格式：`"axes":[{"orient":"bottom","type":"band","title":{"visible":true,"text":"等级"}},{"orient":"left","type":"linear","title":{"visible":true,"text":"暴击倍率（倍）"}}]`，单位也写在这（因为 `y` 只放纯数字）。直角坐标系（bar/line）**两条轴都要给**：横轴 `orient:"bottom"`+`type:"band"`（= x 的含义）、纵轴 `orient:"left"`+`type:"linear"`（= y 的含义），这样图脱离正文也能看懂。
   - 数据必须来自你**真实读到的配置表数值**，不要编造。直接照这两个模板改数字和中文标签即可（真实输出只用三个反引号，下面外层四反引号仅为展示）：
   ````
   ```chart
-  {"type":"line","title":{"text":"各等级攻击成长"},"data":{"values":[{"x":"Lv1","y":100},{"x":"Lv2","y":150}]},"xField":"x","yField":"y","axes":[{"orient":"bottom","title":{"visible":true,"text":"等级"}},{"orient":"left","title":{"visible":true,"text":"攻击力"}}]}
+  {"type":"line","title":{"text":"各等级攻击成长"},"data":{"values":[{"x":"Lv1","y":100},{"x":"Lv2","y":150}]},"xField":"x","yField":"y","axes":[{"orient":"bottom","type":"band","title":{"visible":true,"text":"等级"}},{"orient":"left","type":"linear","title":{"visible":true,"text":"攻击力"}}]}
   ```
   ````
   ````
