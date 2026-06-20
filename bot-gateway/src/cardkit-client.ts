@@ -302,26 +302,39 @@ export async function updateReasoningPanel(cardId: string, steps: string[], sequ
   }));
 }
 
-/** Force every axis title that has `text` to be VISIBLE. VChart hides axis titles by
- *  DEFAULT (`title.visible` defaults to false), so an agent spec that writes
- *  `axes:[{orient,title:{text:"等级"}}]` (no `visible`) renders a chart with NO
- *  horizontal/vertical axis description — the user can't tell what the axes mean
- *  (user-reported). The prompt now asks for `visible:true`, but enforce it gateway-side
- *  too so a spec that omits it still shows labels (defense-in-depth, mirrors the chart
- *  field-binding backstop). Pure: returns a shallow-cloned spec, only touching axis titles.*/
+/** Make agent-authored chart axes render reliably. Two backstops, both confirmed against
+ *  the FEISHU OFFICIAL chart doc's own example (`axes[].title.{visible:true,text}` + each
+ *  axis carries `type`):
+ *   1. AXIS TITLE VISIBILITY — VChart hides axis titles by DEFAULT (`title.visible` is
+ *      false unless set), so an agent spec `axes:[{orient,title:{text:"等级"}}]` rendered a
+ *      chart with NO x/y axis description (user-reported). Force `visible:true` on any axis
+ *      whose title has non-empty text.
+ *   2. AXIS TYPE — if the axis `type` is missing, VChart usually infers band(x)/linear(y),
+ *      but a missing/mismatched type is a separate reason an axis (and thus its title) can
+ *      fail to render. Default the cartesian axes by orient: bottom→band (category),
+ *      left→linear (value); leave top/right/explicit-type untouched.
+ *  The prompt now emits both, but enforce gateway-side too so a spec that omits them still
+ *  renders (defense-in-depth, mirrors the chart field-binding backstop). An explicit value
+ *  the agent set always wins (spread AFTER the default). Pure: shallow-clones, only axes. */
 export function ensureAxisTitlesVisible<T extends { [k: string]: unknown }>(spec: T): T {
   const axes = (spec as { axes?: unknown }).axes;
   if (!Array.isArray(axes)) return spec;
+  const TYPE_BY_ORIENT: Record<string, string> = { bottom: "band", left: "linear" };
   const fixedAxes = axes.map((ax) => {
     if (!ax || typeof ax !== "object") return ax;
-    const title = (ax as { title?: unknown }).title;
-    // Only force-visible when a non-empty text label is present; an axis with no title
-    // text is left untouched (don't draw an empty title box).
+    const a = ax as { title?: unknown; orient?: unknown; type?: unknown };
+    let out: Record<string, unknown> = { ...(ax as object) };
+    // 1. force the title visible when it has non-empty text (explicit visible wins).
+    const title = a.title;
     if (title && typeof title === "object" && typeof (title as { text?: unknown }).text === "string"
         && (title as { text: string }).text.trim() !== "") {
-      return { ...(ax as object), title: { visible: true, ...(title as object) } };
+      out = { ...out, title: { visible: true, ...(title as object) } };
     }
-    return ax;
+    // 2. default a cartesian axis `type` by orient when the agent omitted it.
+    if (a.type === undefined && typeof a.orient === "string" && a.orient in TYPE_BY_ORIENT) {
+      out = { ...out, type: TYPE_BY_ORIENT[a.orient] };
+    }
+    return out;
   });
   return { ...spec, axes: fixedAxes };
 }
