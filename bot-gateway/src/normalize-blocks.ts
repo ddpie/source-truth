@@ -38,6 +38,14 @@ const FENCE_RE = /```[\s\S]*?```/g;
 // model that forgets the closing fence both produce these; their content must be
 // protected too, or in-code ###/--- get wrongly promoted.
 const UNCLOSED_FENCE_RE = /```[\s\S]*$/;
+// INLINE code spans (single backtick pair, SAME line — markdown inline code never
+// spans a newline). A code-QA answer routinely quotes a config value / regex / flag
+// inside `…` that contains `:`/`.` adjacent to a `---` run (e.g. `--opt：---`, `a.---b`)
+// or a `#` heading-looking token; without protecting these, the HR/heading rules below
+// rip the `---`/`#` out of the span mid-sentence and break the inline code (cross-review
+// MEDIUM). Stashed AFTER the triple-fence stash so a ``` is already removed and a lone
+// ` here is a genuine inline delimiter. `[^`\n]+` keeps it to one line + non-empty.
+const INLINE_CODE_RE = /`[^`\n]+`/g;
 
 /** True if a line is (part of) a markdown table — has a leading/contained pipe. */
 function isTableLine(line: string): boolean {
@@ -67,14 +75,28 @@ export function normalizeBlocks(text: string): string {
     fences.push(m);
     return `${FENCE_OPEN}${fences.length - 1}${FENCE_CLOSE}`;
   };
-  let work = text.replace(FENCE_RE, stash).replace(UNCLOSED_FENCE_RE, stash);
+  // Triple-fence FIRST (so a ``` block's inner content — which may contain lone
+  // backticks — is removed before inline-span detection), then inline `…` spans. Both
+  // share the same NUL-delimited placeholder pool + restore pass. The inline stash
+  // protects a quoted config value / regex / flag from the HR & heading rules below.
+  let work = text
+    .replace(FENCE_RE, stash)
+    .replace(UNCLOSED_FENCE_RE, stash)
+    .replace(INLINE_CODE_RE, stash);
 
   // Process line by line so a table row / pipe line is never touched by the HR rule,
   // and an HR / heading is only split out of genuine prose (or off a table row, for
   // a heading).
   const out: string[] = [];
   for (const line of work.split("\n")) {
-    const isFence = line.includes(FENCE_OPEN);
+    // A line is "fence-only" when, after removing placeholders, nothing prose-like
+    // remains — that's a stashed BLOCK fence occupying its own line, skip the rules.
+    // A line with an INLINE-code placeholder still has real surrounding prose, so it
+    // must NOT be skipped (the prose may carry a genuine jammed ###/--- to fix); the
+    // placeholder itself contains no #/-/* so the rules can't corrupt it. (cross-review)
+    const isFenceOnly = line.includes(FENCE_OPEN)
+      && line.replace(FENCE_RESTORE_RE, "").trim() === "";
+    const isFence = isFenceOnly;
     const isTable = isTableLine(line);
     let repaired = line;
 
