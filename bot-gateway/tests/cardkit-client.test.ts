@@ -20,7 +20,57 @@ import {
   buildClickedButtonElement,
   formatElapsed,
   buildQuestionElement,
+  buildFeedbackButtons,
+  buildFeedbackReasonElements,
+  buildFeedbackThanksElement,
+  FEEDBACK_ROW_EID,
+  FEEDBACK_REASON_ROW_EID,
+  FEEDBACK_REASON_CODES,
 } from "../src/cardkit-client";
+
+// Collect every {action, vote?, reasonCode?} on a button inside an element tree.
+function collectButtonValues(els: unknown[]): Array<Record<string, unknown>> {
+  const out: Array<Record<string, unknown>> = [];
+  const walk = (node: unknown): void => {
+    if (!node || typeof node !== "object") return;
+    const n = node as Record<string, unknown>;
+    if (n.tag === "button" && n.value) out.push(n.value as Record<string, unknown>);
+    for (const v of Object.values(n)) {
+      if (Array.isArray(v)) v.forEach(walk);
+      else if (v && typeof v === "object") walk(v);
+    }
+  };
+  els.forEach(walk);
+  return out;
+}
+
+describe("feedback buttons (👍/👎 + reason)", () => {
+  it("vote row has fb_up/fb_down with action=feedback and the row carries a stable element_id", () => {
+    const els = buildFeedbackButtons() as Array<Record<string, unknown>>;
+    expect(els[0].element_id).toBe(FEEDBACK_ROW_EID);   // row replaceable in place
+    const vals = collectButtonValues(els);
+    const votes = vals.filter((v) => v.action === "feedback").map((v) => v.vote);
+    expect(votes).toEqual(expect.arrayContaining(["up", "down"]));
+    // every feedback button uses action="feedback" — never collides with follow_up/stop
+    expect(vals.every((v) => v.action === "feedback")).toBe(true);
+  });
+
+  it("reason block has one button per enumerated reasonCode, all action=feedback_reason, no free text", () => {
+    const els = buildFeedbackReasonElements() as Array<Record<string, unknown>>;
+    expect(els[0].element_id).toBe(FEEDBACK_REASON_ROW_EID);
+    const vals = collectButtonValues(els);
+    expect(vals).toHaveLength(FEEDBACK_REASON_CODES.length);
+    expect(vals.map((v) => v.reasonCode).sort()).toEqual([...FEEDBACK_REASON_CODES].sort());
+    expect(vals.every((v) => v.action === "feedback_reason")).toBe(true);
+  });
+
+  it("thanks element targets the given row id and is a markdown ✓ line (re-vote prevented)", () => {
+    const el = JSON.parse(buildFeedbackThanksElement(FEEDBACK_ROW_EID));
+    expect(el.element_id).toBe(FEEDBACK_ROW_EID);
+    expect(el.tag).toBe("markdown");
+    expect(el.content).toContain("✓");
+  });
+});
 
 describe("buildQuestionElement", () => {
   it("renders the question as a non-markdown plain_text div so metachars can't corrupt the card", () => {
