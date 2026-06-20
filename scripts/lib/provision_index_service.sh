@@ -205,7 +205,10 @@ if [ -z "$AMI" ] || [ "$AMI" = "None" ]; then
   say err "this region may not carry that image (or uses a different owner, e.g. GovCloud/China)."
   say err "set an explicit AMI via the SSM public parameter, e.g.:"
   say err "  aws ssm get-parameter --region $REGION --name /aws/service/canonical/ubuntu/server/24.04/stable/current/arm64/hvm/ebs-gp3/ami-id"
-  return 1
+  # exit, NOT return: this script is EXECUTED (deploy-all runs it via $(...)), not sourced.
+  # `return` outside a function then fails with rc=2 + a confusing "can only return from a
+  # function" message that buries the actionable AMI guidance above (cross-review LOW).
+  exit 1
 fi
 
 # user-data: write env file, FETCH bootstrap.sh from S3 via curl, run it. We stage
