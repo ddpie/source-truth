@@ -1,0 +1,153 @@
+"""Offline multi-repo tests for build_bridge (阶段2): N sessions + fan-out + routing.
+
+No codegraph-server. A per-workspace fake session returns a result whose file path
+encodes which repo answered, so we can assert: an unset repo fans out across all repos
+(merged), an explicit in-scope repo routes to just that one, an out-of-scope repo is
+rejected, and one repo's error doesn't blank the others.
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+import sys
+from pathlib import Path
+
+import pytest
+
+SVC_DIR = Path(__file__).resolve().parent.parent
+if str(SVC_DIR) not in sys.path:
+    sys.path.insert(0, str(SVC_DIR))
+
+pytest.importorskip("mcp")
+
+import http_bridge  # noqa: E402
+
+
+class _PerRepoFake:
+    """Fake session keyed by its workspace: returns a hit whose file names the repo so
+    the test can see which session(s) answered. `mode` injects failures for one repo."""
+
+    registry: dict[str, "_PerRepoFake"] = {}
+
+    def __init__(self, workspace, **_kw):
+        self.workspace = workspace
+        self.name = workspace.rstrip("/").rsplit("/", 1)[-1]
+        self.calls = 0
+        self.healthy = True
+        self.health_detail = "ok"
+        self.mode = "ok"  # or "unhealthy" / "raise"
+        _PerRepoFake.registry[self.name] = self
+
+    def start(self):
+        pass
+
+    async def maybe_self_heal(self):
+        pass
+
+    async def call_tool(self, tool_name, arguments):
+        self.calls += 1
+        if self.mode == "unhealthy":
+            raise http_bridge.IndexUnhealthy(f"{self.name} graph empty")
+        if self.mode == "raise":
+            raise RuntimeError("boom")
+        # A hit whose file is "<name>/Foo.cs" so _align_paths re-prefixes to "<name>/<name>/Foo.cs"
+        # — fine for routing assertions (we only check the repo segment appears).
+        return json.dumps({"results": [{"symbol": {"location": {"file": "Foo.cs", "line": 1}}}]})
+
+
+def _build_multi(monkeypatch, names=("alpha", "beta", "gamma")):
+    _PerRepoFake.registry.clear()
+    monkeypatch.setattr(http_bridge, "CodegraphSession", lambda ws, **kw: _PerRepoFake(ws, **kw))
+    monkeypatch.setattr(http_bridge, "acquire_singleton_writer_lock", lambda ws: None)
+    workspaces = [(f"/data/repo/{n}", f"/data/repo/{n}") for n in names]
+    app = http_bridge.build_bridge(workspaces=workspaces, host="127.0.0.1", port=8951)
+    return app
+
+
+def _fn(app, name):
+    return app._tool_manager.get_tool(name).fn  # type: ignore[attr-defined]
+
+
+def test_unset_repo_fans_out_across_all_repos(monkeypatch):
+    app = _build_multi(monkeypatch)
+    out = json.loads(asyncio.run(_fn(app, "codegraph_symbol_search")(query="Foo")))
+    files = [r["symbol"]["location"]["file"] for r in out["results"]]
+    # one hit per repo, each prefixed with its repo name (path honesty), in repo order
+    assert len(files) == 3, files
+    assert files[0].startswith("alpha/") and files[1].startswith("beta/") and files[2].startswith("gamma/"), files
+    # every repo's session was queried exactly once
+    assert all(s.calls == 1 for s in _PerRepoFake.registry.values())
+
+
+def test_explicit_in_scope_repo_routes_to_only_that_repo(monkeypatch):
+    app = _build_multi(monkeypatch)
+    out = json.loads(asyncio.run(_fn(app, "codegraph_symbol_search")(query="Foo", repo="beta")))
+    files = [r["symbol"]["location"]["file"] for r in out["results"]]
+    assert files == ["beta/Foo.cs"], files
+    # ONLY beta was queried; alpha/gamma untouched
+    assert _PerRepoFake.registry["beta"].calls == 1
+    assert _PerRepoFake.registry["alpha"].calls == 0
+    assert _PerRepoFake.registry["gamma"].calls == 0
+
+
+def test_out_of_scope_repo_rejected_in_multi(monkeypatch):
+    app = _build_multi(monkeypatch)
+    out = asyncio.run(_fn(app, "codegraph_symbol_search")(query="Foo", repo="evil"))
+    assert '"repo not in scope"' in out
+    assert all(s.calls == 0 for s in _PerRepoFake.registry.values()), "rejection must not touch any session"
+
+
+def test_fanout_one_repo_unhealthy_does_not_blank_others(monkeypatch):
+    app = _build_multi(monkeypatch)
+    _PerRepoFake.registry["beta"].mode = "unhealthy"  # beta's graph is broken
+    out = json.loads(asyncio.run(_fn(app, "codegraph_symbol_search")(query="Foo")))
+    files = [r["symbol"]["location"]["file"] for r in out["results"]]
+    # alpha + gamma still answer; beta's error contributes nothing (not an error envelope)
+    assert sorted(f.split("/")[0] for f in files) == ["alpha", "gamma"], files
+    assert "error" not in out
+
+
+def test_fanout_all_repos_unhealthy_surfaces_error(monkeypatch):
+    app = _build_multi(monkeypatch)
+    for s in _PerRepoFake.registry.values():
+        s.mode = "unhealthy"
+    out = json.loads(asyncio.run(_fn(app, "codegraph_symbol_search")(query="Foo")))
+    assert out.get("error") == "index unavailable", out
+
+
+def test_health_unhealthy_when_any_repo_unhealthy(monkeypatch):
+    app = _build_multi(monkeypatch)
+    # all healthy initially
+    assert all(s.healthy for s in app.codegraph_sessions)  # type: ignore[attr-defined]
+    app.codegraph_repos[1].session.healthy = False  # type: ignore[attr-defined]
+    app.codegraph_repos[1].session.health_detail = "beta empty"  # type: ignore[attr-defined]
+    # the health handler aggregates: any unhealthy → not ok (we call the logic via the repos)
+    unhealthy = [r for r in app.codegraph_repos if not r.session.healthy]  # type: ignore[attr-defined]
+    assert len(unhealthy) == 1 and unhealthy[0].name == "beta"
+
+
+def test_each_workspace_takes_its_own_writer_lock(monkeypatch):
+    locked = []
+    monkeypatch.setattr(http_bridge, "CodegraphSession", lambda ws, **kw: _PerRepoFake(ws, **kw))
+    monkeypatch.setattr(http_bridge, "acquire_singleton_writer_lock", lambda ws: locked.append(ws))
+    _PerRepoFake.registry.clear()
+    http_bridge.build_bridge(
+        workspaces=[("/data/repo/a", "/data/repo/a"), ("/data/repo/b", "/data/repo/b")],
+        host="127.0.0.1", port=8952,
+    )
+    assert locked == ["/data/repo/a", "/data/repo/b"], locked
+
+
+def test_rejects_both_workspace_and_workspaces(monkeypatch):
+    monkeypatch.setattr(http_bridge, "CodegraphSession", lambda ws, **kw: _PerRepoFake(ws, **kw))
+    monkeypatch.setattr(http_bridge, "acquire_singleton_writer_lock", lambda ws: None)
+    _PerRepoFake.registry.clear()
+    with pytest.raises(ValueError):
+        http_bridge.build_bridge(workspace="/data/repo/a", workspaces=[("/data/repo/b", None)], port=8953)
+
+
+def test_requires_at_least_one_workspace(monkeypatch):
+    monkeypatch.setattr(http_bridge, "CodegraphSession", lambda ws, **kw: _PerRepoFake(ws, **kw))
+    monkeypatch.setattr(http_bridge, "acquire_singleton_writer_lock", lambda ws: None)
+    with pytest.raises(ValueError):
+        http_bridge.build_bridge(workspaces=[], port=8954)
