@@ -5,10 +5,10 @@
 ## 职责
 
 在 AgentCore Runtime 的 Firecracker microVM 内，用 **Claude Code Agent SDK**（`claude_agent_sdk`）+
-**bedrock-agentcore** runtime（`@app.entrypoint` 异步流式 handler）跑一个 agent 循环：理解策划的问题 →
+**bedrock-agentcore** runtime（`@app.entrypoint` 异步流式 handler）执行 agent 循环：理解策划的问题 →
 调远程 CodeGraph MCP 定位代码 → 经 index-service 的文件工具（`codegraph_read_file` / `codegraph_glob_files` /
 `codegraph_search_files` / `codegraph_read_table`）读最新主分支源码与配置表（含 Excel/CSV/SQLite 数值表）→
-生成结构化答案并逐步 `yield`。microVM 本身不挂任何文件系统，所有代码都经 index-service 的 MCP-over-HTTP 接口读取。
+生成结构化答案并流式 `yield`。microVM 本身不挂任何文件系统，所有代码都经 index-service 的 MCP-over-HTTP 接口读取。
 
 模型走 Bedrock 计费（`CLAUDE_CODE_USE_BEDROCK=1`）。MVP 单引擎 Claude Code（Codex 第二引擎后置）。
 
@@ -30,13 +30,13 @@
 
 ## 约束
 
-- **ARM64-only** 容器；基础镜像与 Claude Agent SDK 版本钉死（pin，`claude-agent-sdk==0.2.103`）。
+- **ARM64-only** 容器；基础镜像与 Claude Agent SDK 版本固定（pin，`claude-agent-sdk==0.2.103`）。
   （lark-cli 仅是开发期手测工具，不装进任何运行镜像，不在该 pin 范围内。）
 - **只读边界**：MVP 仅问答，不跑引擎、不写回、不提交。agent 内建 `Read`/`Glob`/`Grep` 全部禁用
   （`tools=[]`，不设 `cwd`），读文件只能经 index-service 的 `codegraph_*` 工具。强制手段不止 `tools=[]`：还有
   `disallowed_tools` 黑名单 + `permission_mode="dontAsk"` + `strict_mcp_config=True` + `setting_sources=[]`。
 - **模型 ID 按区域**：东京 ap-northeast-1 **不认 `us.anthropic.*`**（US cross-region），当前默认
-  `global.anthropic.claude-opus-4-8`（全球路由，资源最足；operator 可经 `ANTHROPIC_MODEL` env 调整）；`apac.*`/`jp.*` 亦可。
+  `global.anthropic.claude-opus-4-8`（全球路由，资源最足；运维可通过 `ANTHROPIC_MODEL` env 调整）；`apac.*`/`jp.*` 亦可。
 - **VPC 出站**：Runtime 须 `networkMode=VPC`（为在 VPC 内经 HTTP `:8080` 访问 index-service），而 VPC 内的
   microVM 无公网 IP，出站（Bedrock/CLI）**须经 NAT Gateway**。
 
@@ -54,7 +54,7 @@
 
 - `Dockerfile`（ARM64）、`agent.py`（流式 entrypoint 薄封装）、`agent_lib.py`（纯函数
   `build_options` / `run_agent`，可单测）、`prompts/system.md`。
-- `requirements.txt`（人读意图，`claude-agent-sdk==0.2.103` 钉死）+ `requirements.lock`（完整传递依赖锁，
+- `requirements.txt`（写明依赖意图，`claude-agent-sdk==0.2.103` 固定）+ `requirements.lock`（完整传递依赖锁，
   Dockerfile 按它 `uv pip install --no-deps` 安装）。
 
 ## 关键设计决策

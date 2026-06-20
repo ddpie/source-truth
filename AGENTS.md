@@ -6,12 +6,12 @@ docs live in `docs/` (中文为主，结构文档双语 `_en`/`_zh`)。
 
 ## Project overview
 
-source-truth 是「代码为唯一依据」的飞书游戏研发代码问答助手。端到端：策划在飞书 @机器人 →
+source-truth 是「代码为唯一依据」的飞书游戏研发代码问答助手。完整链路：策划在飞书 @机器人 →
 **bot-gateway**（TypeScript 长驻网关，长连接事件订阅，按会话路由）→ **AgentCore Runtime**
 （Firecracker microVM，会话隔离）→ microVM 内的 **agent-container**（Python，Claude Code Agent SDK，
-`CLAUDE_CODE_USE_BEDROCK=1`）→ 通过 **index-service**（常驻 CodeGraph，MCP-over-HTTP）既定位代码、
-又经其文件工具（`codegraph_read_file` / `codegraph_glob_files` / `codegraph_search_files`）读最新主分支
-源码与配置表（仓库副本只在 index-service 本地磁盘，会话 microVM 不挂任何文件系统）→ **CardKit 流式卡片**回传。
+`CLAUDE_CODE_USE_BEDROCK=1`）→ 通过 **index-service**（常驻 CodeGraph，MCP-over-HTTP）定位代码，并用
+文件工具（`codegraph_read_file` / `codegraph_glob_files` / `codegraph_search_files`）读取最新主分支源码与配置表
+（仓库副本只在 index-service 本地磁盘，会话 microVM 不挂任何文件系统）→ **CardKit 流式卡片**回传。
 
 核心架构特征：AI 引擎在 microVM **内**自主运行（不是容器外的远程 MCP 客户端），并新增飞书 Bot 网关与
 独立 CodeGraph 索引服务两个有状态组件——后者既持有唯一一份代码仓本地副本、又把定位 + 读文件全部经
@@ -48,7 +48,7 @@ MVP 阶段 Runtime 用 `agentcore` starter toolkit / boto3 配，不强求 CDK�
 完整目录树见 `docs/structure_zh.md`（权威，改顶层目录必须同步）。顶层：`agent-container/`（Python
 Agent）、`bot-gateway/`（TS 网关 + CardKit）、`index-service/`（CodeGraph 索引 + MCP 接口）、
 `infra/`（IaC）、`config/`（i18n / 阈值）、`scripts/`（运维）、
-`docs/`（人面向）+ `docs/agent/`（AI 面向）+ `docs/design/`（导入的设计权威依据）。
+`docs/`（面向人）+ `docs/agent/`（面向 AI）+ `docs/design/`（导入的设计权威依据）。
 
 **生成物 / 不可手改：** `infra/cdk.out/`、`node_modules/`、`.venv/`、构建产物。源 → 生成物映射表见
 `docs/agent/invariants.md`。
@@ -71,17 +71,17 @@ Agent）、`bot-gateway/`（TS 网关 + CardKit）、`index-service/`（CodeGrap
 
 - **代码为唯一依据**：答案必须基于 index-service 服务的最新主分支真实代码 + CodeGraph 取证；代码与文档 / 记忆
   冲突时以代码为准，并标注差异与文档时间；低置信度转研发。
-- **会话容器 ARM64-only**；基础镜像、Claude Agent SDK 版本钉死（pin），漂移由
+- **会话容器 ARM64-only**；基础镜像、Claude Agent SDK 版本固定（pin），漂移由
   `scripts/check-versions.sh`（已实现，`test.sh --lint` 调用）守卫。**例外：`@anthropic-ai/claude-code`
-  CLI（agent microVM 内 SDK spawn 的子进程）按运维决定（2026-06-19）改用 `@latest` 跟最新**——牺牲可复现换
-  最快拿到上游修复；守卫对 `@latest` 放行（仅告警），出现回归时改回 `@<version>` 即可。（注：lark-cli 仅是
+  CLI（agent microVM 内 SDK spawn 的子进程）按运维决定（2026-06-19）改用 `@latest` 跟最新**——以可复现性换取
+  更快获得上游修复；守卫对 `@latest` 放行（仅告警），出现回归时改回 `@<version>` 即可。（注：lark-cli 仅是
   开发期手测工具，不装进任何运行镜像，也不在该守卫范围内。）
 - **生成物绝不手改**——改源再重生成。
 - **改顶层目录 ⇒ 同步 `docs/structure_zh.md`（及 `_en.md`）**；**新增 `docs/*_en.md` ⇒ 补 `_zh.md`**（反之亦然）。
 - **MVP 边界**：仅主分支、仅只读问答、不跑引擎、不写回 / 提交。越界能力（设计文档读取、多分支、
   共享记忆、审计护栏、Codex、数值模拟）一律后置。
 
-`scripts/check-invariants.sh`（已实现；将在 p1 接入 pre-commit）强制其中可机检的子集。
+`scripts/check-invariants.sh`（已实现；将在 p1 接入 pre-commit）强制其中可自动检查的子集。
 
 ## Boundaries
 

@@ -1,6 +1,6 @@
 # 架构：写给 AI 的系统工作原理
 
-先读本文，再改请求如何流转、代码在哪取证、CardKit 如何回传、会话如何隔离。人面向文档（README、
+先读本文，再改请求如何流转、代码在哪取证、CardKit 如何回传、会话如何隔离。面向人的文档（README、
 structure）描述系统*是什么*；本文描述*一次提问如何在系统里流转*——这是动手改之前真正需要的。
 
 下文代码指针用「组件 + 概念锚点」表述，按名字 grep 定位，而非信任行号（行号会随代码演进漂移）。
@@ -14,8 +14,8 @@ structure）描述系统*是什么*；本文描述*一次提问如何在系统�
       · 事件去重（飞书会重投；按 event_id 幂等）
       · 解析 @提及与问题文本，open_id → 内部 userId
       · 会话路由：(chat_id / thread_id) → runtimeSessionId（src/session-map.ts，DDB+TTL）
-        —— 同一问答链复用同一 热 microVM；不同用户/会话绝不共用会话，否则上下文串扰
-      · 先创建一张 CardKit 卡片（"正在思考…"），拿到 card_id 供后续流式更新
+        —— 同一问答链复用同一暖 microVM；不同用户/会话绝不共用会话，否则上下文串扰
+      · 先创建一张 CardKit 卡片（「正在思考…」），拿到 card_id 供后续流式更新
       · SigV4 签名调 AgentCore InvokeAgentRuntime（src/sigv4.ts），
         path = /runtimes/<encodeURIComponent(runtimeArn)>/invocations，带 runtimeSessionId
   → AgentCore Runtime（Firecracker microVM，每会话独立容器）
@@ -26,12 +26,12 @@ structure）描述系统*是什么*；本文描述*一次提问如何在系统�
           · Claude Code Agent SDK（claude_agent_sdk.query / ClaudeAgentOptions），
             CLAUDE_CODE_USE_BEDROCK=1 走 Bedrock 计费
           · 取证只读通道（全部经 index-service 的 MCP-over-HTTP 接口；microVM 不挂任何文件系统）：
-              (1) CodeGraph 定位 → 先查"哪个工程/哪些文件"（symbol_search / get_callers / analyze_impact）
+              (1) CodeGraph 定位 → 先查「哪个工程 / 哪些文件」（symbol_search / get_callers / analyze_impact）
               (2) 文件读取 → 按定位结果精准读取最新主分支源码与工程内配置表（Excel/JSON/CSV）：
                   codegraph_read_file / codegraph_glob_files / codegraph_search_files（仓库相对路径）
-          · 每会话写盘走 Session Storage /mnt/workspace（microVM 级隔离的临时文件）
+          · 每会话写入使用 Session Storage /mnt/workspace（microVM 级隔离的临时文件）
           · 逐步流式产出（AssistantMessage / ResultMessage）
-  → bot-gateway 把流式输出 update 回 CardKit 卡片（src/cardkit-client.ts；SSE 解析 src/parse-stream.ts）
+  → bot-gateway 把流式输出更新到 CardKit 卡片（src/cardkit-client.ts；SSE 解析 src/parse-stream.ts）
       · 单一 markdown 组件适配所有格式；注意飞书卡片 update 有频控与 10 分钟更新窗口
       · 流式完成后按 AI 实际输出动态追加交互组件：多方案→选项按钮、数值→VChart 图表
         （低置信度时由 agent 在答案正文标注并建议转研发确认，非追加组件）
@@ -40,18 +40,18 @@ structure）描述系统*是什么*；本文描述*一次提问如何在系统�
 
 ## 数据面：代码如何进入 index-service、索引如何更新（MVP 实况）
 
-**当前 MVP 的真实管线**（一次性快照构建，靠重部署刷新——**没有** webhook / git pull / inotify
+**当前 MVP 的实际管线**（一次性快照构建，靠重部署刷新——**没有** webhook / git pull / inotify
 增量 / 夜间 CI；那是 post-MVP 目标形态，未实现）：
 
 ![数据面五段管线：deploy-all 打包→S3，bootstrap 解包，index-build 建图，index-bridge 常驻只读，会话 microVM 远程取证](../assets/data-plane.svg)
 
 **唯一一份代码、本地副本**：仓库只在 index-service 的**本地磁盘** `/data/repo/<subdir>`；codegraph-server
-索引该本地副本，文件读取工具也直接读它。**会话 microVM 不挂任何文件系统**——全部源码经 index-service 的 HTTP 接口读取，没有共享挂载，故没有副本同步问题。**刷新方式**：代码与索引都冻结在
+索引该本地副本，文件读取工具也读取该副本。**会话 microVM 不挂任何文件系统**——全部源码经 index-service 的 HTTP 接口读取，没有共享挂载，故没有副本同步问题。**刷新方式**：代码与索引都冻结在
 部署时的 S3 tarball 快照，**要更新主分支代码 / 索引必须重新部署**（替换 index-service 实例重跑 bootstrap）——
 当前没有随 git push 自动刷新的链路。注：codegraph-server 的 `--serve` 带 file-watcher 增量是已实测的
 引擎能力，但 MVP 用 `--mcp` 未启用，留作 post-MVP。
 
-## 会话隔离模型（NOT in README）
+## 会话隔离模型（README 未展开）
 
 | | 共享只读 | 每会话独占 |
 |-|-|-|
@@ -60,7 +60,7 @@ structure）描述系统*是什么*；本文描述*一次提问如何在系统�
 | 可见性 | 所有会话 | 仅本 microVM |
 | 生命周期 | 持久（部署时构建一次，重部署刷新） | 每会话独占（约 14 天空闲过期） |
 
-![会话隔离：多个 每会话独立 microVM（各自独占 /mnt/workspace 临时文件）共享同一个只读 index-service 代码副本](../assets/session-isolation.svg)
+![会话隔离：多个按会话独立的 microVM（各自独占 /mnt/workspace 临时文件）共享同一个只读 index-service 代码副本](../assets/session-isolation.svg)
 
 机器人粒度：**每个游戏项目一个机器人**，机器人内**按会话隔离**。上下文挂在飞书对话上、按需拉取消息
 记录；多用户不可共用会话。
@@ -69,8 +69,8 @@ structure）描述系统*是什么*；本文描述*一次提问如何在系统�
 
 基础设施**不全归 CDK**，且 MVP 阶段刻意先不 CDK 化：
 
-- **MVP（当前）**：用 `agentcore` starter toolkit / boto3 直接配 AgentCore Runtime + 手工建 index-service，
-  先跑通主流程与 POC 性能基准。CodeGraph 召回率、经 HTTP 接口读文件的延迟是主要待验证点——验证前不固化 IaC，
+- **MVP（当前）**：用 `agentcore` starter toolkit / boto3 直接配置 AgentCore Runtime + 创建 index-service，
+  先打通主流程与 POC 性能基准。CodeGraph 召回率、经 HTTP 接口读文件的延迟是主要待验证点——验证前不固化 IaC，
   避免返工。「为何必须建索引而非让 Agent 逐文件搜索」已有实测基准，见
   [`indexing-performance-spike.md`](indexing-performance-spike.md)（全仓冷扫描约 127s，建索引后定位查询恒 1–5ms）。
 - **post-MVP（p2，渐进）**：CDK 管**稳定层**——会话容器镜像（DockerImageAsset，`Platform.LINUX_ARM64`）、
@@ -81,7 +81,7 @@ structure）描述系统*是什么*；本文描述*一次提问如何在系统�
 
 **含义**：要改 Runtime 的 env / idle timeout / 请求头，编辑 `scripts/lib/deploy_runtime.py` 并重跑
 `deploy-all.sh`（`deploy.sh` 为已废弃转发垫片）——改 CDK 不生效。密钥（飞书 app secret、bot token）走
-Secrets Manager / SSM，**当前需手工在 CDK 外创建**（编排脚本尚未自动建密钥），重部署不覆盖真实凭证。
+Secrets Manager / SSM，**当前需手动在 CDK 外创建**（编排脚本尚未自动建密钥），重部署不覆盖真实凭证。
 
 ## Runtime 调参与成本权衡（idle / session 复用）
 
@@ -90,8 +90,8 @@ Runtime 按无状态使用：每次 invoke 都是一次全新的 SDK 会话，�
 复用 `runtimeSessionId` 的唯一作用是把同一问答链路由到同一个暖 microVM、省去冷启动，它不承载语义。
 
 这带来一条必须对齐的约束：**网关判定「会话可复用」的时间窗，不应超过 AgentCore 保留暖 microVM 的时间窗。**
-若网关的窗口更长，落在两者之间的追问会复用一个已被回收的会话 id，触发一次冷启动——功能不受影响（历史靠
-replay 不丢），但响应慢几秒。为此两个值由同一参数驱动：
+若网关的窗口更长，落在两者之间的追问会复用一个已被回收的会话 id，触发一次冷启动——功能不受影响（历史通过
+replay 保留），但响应慢几秒。为此两个值由同一参数驱动：
 
 - `idleRuntimeSessionTimeout`：暖 microVM 空闲多久后回收。在 `deploy_runtime.py` 的 `lifecycleConfiguration`
   中设置，由 `deploy-all.sh --idle-timeout` 传入，默认 900 秒（15 分钟，与 AWS 默认一致）。
@@ -109,19 +109,19 @@ replay 不丢），但响应慢几秒。为此两个值由同一参数驱动：
 source-truth 不同于「在容器外把 AI 当远程 MCP 客户端」的常见托管 MCP 形态——它把 AI 引擎放进 microVM
 内，并围绕代码取证新增了两个有状态组件。四个核心选择：
 
-1. **AI 在容器内运行**——会话 microVM 内直接跑 Claude Code Agent SDK（`agent-container/agent.py` 的
+1. **AI 在容器内运行**——会话 microVM 内直接运行 Claude Code Agent SDK（`agent-container/agent.py` 的
    agent 循环），AI 既是推理主体也是 MCP 消费端，而非外部 MCP 客户端。
-2. **飞书 Bot 网关**——机器人身份 + 长连接事件流 + 会话→runtimeSessionId 映射。MVP 不引入 每用户
+2. **飞书 Bot 网关**——机器人身份 + 长连接事件流 + 会话→runtimeSessionId 映射。MVP 不引入每用户
    OAuth 体系；上下文挂在飞书对话上、按需拉取。**部署形态**：网关与 index-service **同主机**（那台 EC2 上
    的第二个 systemd 服务 `bot-gateway.service`），由 deploy 的 gateway 阶段经 SSM 写 `/etc/bot-gateway.env`
    + 启动；飞书凭证运行时从 Secrets Manager 取（不落盘）。注意飞书长连接是**全局单例**（同 app 只能一个
-   client，否则争抢事件）——故蓝绿换 index 实例时，gateway 走 **break-before-make**（先停旧实例网关、确认长连接断，
-   再在新实例启），与 index/codegraph 的 make-before-break 相反。
+   client，否则争抢事件）——故蓝绿换 index 实例时，gateway 走 **break-before-make**（先停旧实例网关、确认长连接断开，
+   再启动新实例网关），与 index/codegraph 的 make-before-break 相反。
 3. **独立 CodeGraph 索引服务**——常驻服务，建图时独占写入 graph.db（部署时建图一次）、stdio→streamable-HTTP 接口，对会话容器暴露只读**定位 + 读文件**查询。（持 clone / inotify 增量为 post-MVP，未实现）
-4. **代码仓只在 index-service 本地**——它在本地磁盘持唯一一份代码副本（部署时落代码+建索引），既供 codegraph 索引、又经 HTTP 接口的文件工具服务给会话容器；会话 microVM 不挂任何文件系统（无共享挂载）。
+4. **代码仓只在 index-service 本地**——它在本地磁盘持唯一一份代码副本（部署时写入代码 + 建索引），既供 codegraph 索引、又经 HTTP 接口的文件工具服务给会话容器；会话 microVM 不挂任何文件系统（无共享挂载）。
 
 通用运维惯例：ARM64 容器 + DockerImageAsset、CDK / boto3 混合 IaC 分工、飞书 SDK / CardKit 生态、
-空闲缩零按量计费、按游戏项目隔离机器人、结构化 JSON 日志 + hashUserId 脱敏、`deploy/ops/test` 三件套。
+空闲缩零按量计费、按游戏项目隔离机器人、结构化 JSON 日志 + hashUserId 脱敏、`deploy/ops/test` 三类脚本。
 
 ## 待验证技术点（POC 优先，影响架构定型）
 
