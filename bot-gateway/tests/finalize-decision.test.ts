@@ -50,6 +50,20 @@ describe("decideFinalize", () => {
     const d = decideFinalize({ ...base, failed: true, httpFailed: false, turnCappedRaw: false });
     expect(d.hardFailed).toBe(true);
   });
+
+  it("timeout (partial over a 200 stream) → NOT hard-failed but does NOT remember (no poisoned context)", () => {
+    // The 9-min timeout abort returns partial text with error=null; it must still show
+    // the partial (keepCharts/footer) but must NOT be stored as context — replaying a
+    // truncated answer poisons the follow-up (cross-review).
+    const d = decideFinalize({ ...base, timedOut: true });
+    expect(d.hardFailed).toBe(false);
+    expect(d.remember).toBe(false);
+  });
+
+  it("a user 停止 (aborted) IS still remembered (user's own choice, partial may be useful)", () => {
+    const d = decideFinalize({ ...base, aborted: true });
+    expect(d.remember).toBe(true);
+  });
 });
 
 describe("hardFailureMessage", () => {
@@ -100,6 +114,13 @@ describe("shapeBody", () => {
   });
   it("timed out with no body → the timeout narrow-it message", () => {
     expect(shapeBody("", { ...flags, timedOut: true })).toContain("分析超时");
+  });
+  it("timed out WITH partial body appends the timeout disclaimer (was: rendered as a clean answer)", () => {
+    // REGRESSION: a timeout-truncated partial used to fall through to `return body`
+    // → green 回答完成 with no disclaimer. Now it appends the timeout note.
+    const out = shapeBody("部分结论到这里", { ...flags, timedOut: true });
+    expect(out).toContain("部分结论到这里");
+    expect(out).toContain("分析超时");
   });
   it("turn cap takes precedence over aborted/timedOut when several flags set", () => {
     const out = shapeBody("x", { turnCapped: true, aborted: true, timedOut: true });

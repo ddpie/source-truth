@@ -54,7 +54,12 @@ export function decideFinalize(i: FinalizeInputs): FinalizeDecision {
     turnCapped,
     keepCharts: !hardFailed,
     keepFooter: !hardFailed,
-    remember: !hardFailed, // never store a hard-failure body as future context
+    // Never store a hard-failure body as future context — NOR a timeout-truncated
+    // partial: replaying a half-finished answer as context poisons the follow-up
+    // (the agent treats the truncated text as an established fact). A user 停止
+    // (aborted) is the user's own choice and may carry a useful partial, so it's
+    // still remembered; only the involuntary timeout cut is excluded (cross-review).
+    remember: !hardFailed && !i.timedOut,
   };
 }
 
@@ -84,8 +89,15 @@ export function shapeBody(
   if (d.aborted) {
     return hasBody ? body + t("msg.aborted.withBody") : t("msg.aborted.noBody");
   }
-  if (d.timedOut && !hasBody) {
-    return t("msg.timeout");
+  if (d.timedOut) {
+    // A 9-min-timeout abort over an open 200 stream returns whatever PARTIAL text had
+    // streamed (sigv4 keeps it, error stays null). Without this branch a partial body
+    // fell through to the bare `return body` below → rendered as a confident green
+    // "回答完成" with charts + follow-ups, AND was stored as context — the exact
+    // "looks complete but isn't" + poisoned-follow-up shape the design forbids
+    // (cross-review). Append a truncation disclaimer like turnCapped/aborted; the
+    // header + remember are handled by decideFinalize/finalizeCard.
+    return hasBody ? body + t("msg.timeout.withBody") : t("msg.timeout");
   }
   return hasBody ? body : t("msg.empty");
 }

@@ -913,7 +913,7 @@ async function runStreamingInvoke(
   const elapsedLabel = formatElapsed(performance.now() - monoStart);
   // panelSteps is already cleaned (redactSteps above); finalizeCard re-redacts which
   // is idempotent (no markup/secret left to strip).
-  await writer.write((seq) => finalizeCard(cardId, finalText, redactSteps(panelSteps), seq, isFollowUp, aborted, hardFailed, finalEvidence, question, elapsedLabel, turnCapped, !!clarify));
+  await writer.write((seq) => finalizeCard(cardId, finalText, redactSteps(panelSteps), seq, isFollowUp, aborted, hardFailed, finalEvidence, question, elapsedLabel, turnCapped, !!clarify, timedOut));
   // Store the (redacted) answer in the registry BEFORE rendering the follow-up
   // buttons. rememberAnswer is pure in-memory (no card I/O), and the follow-up
   // suggestion buttons are written just below — if a user clicks one in the window
