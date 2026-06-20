@@ -35,6 +35,7 @@ import re
 import signal
 import subprocess
 import threading
+import time
 from datetime import timedelta
 from time import perf_counter
 from typing import Any
@@ -177,6 +178,14 @@ class CodegraphSession:
 
     async def _serve(self) -> None:
         """Own the subprocess + session for the thread's whole lifetime."""
+        # ORDERING INVARIANT (load-bearing for the no-concurrent-call guarantee, cross-
+        # review): _call_lock MUST be assigned here BEFORE _ready is set (below, after
+        # warmup). call_tool gates every query on wait_ready() (which blocks on _ready),
+        # so no _do_call can reach `async with self._call_lock` until _ready is set — by
+        # which point this fresh lock exists. That, plus _restart fully join()ing the old
+        # worker thread before start()ing a new one, is what guarantees two _do_call
+        # coroutines never run the codegraph call concurrently across a restart. Do NOT
+        # move _ready.set() before this line, and do NOT reset _call_lock in start().
         self._call_lock = asyncio.Lock()
         async with stdio_client(self._params()) as (read, write):
             async with ClientSession(read, write) as session:
@@ -602,12 +611,9 @@ class CodegraphSession:
                 pass
             os._exit(1)
 
-    def _reap_orphan_servers(self) -> bool:
-        """SIGKILL any stray codegraph-server still bound to OUR workspace. Best-effort
-        kill, stdlib-only (no psutil). Called only from _restart, under the restart lock,
-        AFTER the old worker thread is confirmed dead — so at this instant there is NO
-        live worker, hence ANY codegraph-server writing OUR workspace is an orphan that
-        would become a second writer → graph.db corruption.
+    def _scan_orphan_servers(self) -> tuple[set[int], bool]:
+        """ONE point-in-time scan for codegraph-server processes bound to OUR workspace.
+        Returns (pids, queried_ok). stdlib-only (no psutil); never raises.
 
         Match by TWO pgrep queries, unioned:
           (a) direct children of this pid (`-P self`), AND
@@ -616,15 +622,12 @@ class CodegraphSession:
         codegraph-server REPARENTED to init (PPID=1), which `-P self` never sees —
         that reparented orphan is exactly the silent second-writer the old code missed
         (cross-review C1). The `--workspace <ours>` anchor keeps us from touching an
-        unrelated codegraph-server serving a different repo on the same host. Never raises.
+        unrelated codegraph-server serving a different repo on the same host.
 
-        Returns True iff the orphan set was VERIFIED — at least one query ran cleanly
-        (exit 0 = no match, or 1 = no match for pgrep, both are valid empty results) AND
-        every targeted orphan was confirmed gone (killed or already dead). Returns False
-        if NO query could run (all errored/timed out) or a kill failed for a reason other
-        than ProcessLookupError — i.e. we cannot prove there's no surviving second writer,
-        so the caller must refuse to spawn. pgrep exit code 1 means "no processes
-        matched" and is NOT a failure."""
+        ``queried_ok`` is True iff at least one pgrep ran cleanly (exit 0 = matched,
+        1 = no match — both valid empty results; >=2 = a real error). If NO query could
+        run we never actually looked, so the caller must NOT treat an empty pid set as
+        proof of "no orphan"."""
         pids: set[int] = set()
         any_query_ok = False
         # pgrep -f treats the pattern as a regex; re.escape the workspace path so a
@@ -638,8 +641,6 @@ class CodegraphSession:
         for q in queries:
             try:
                 out = subprocess.run(q, capture_output=True, text=True, timeout=5)
-                # pgrep: 0 = matched, 1 = no match (both are a SUCCESSFUL query); ≥2 = a
-                # real error (bad usage / syntax). Only 0/1 count as a verified result.
                 if out.returncode in (0, 1):
                     any_query_ok = True
                 else:
@@ -655,6 +656,14 @@ class CodegraphSession:
                         pids.add(pid)
             except Exception as exc:  # noqa: BLE001 - best-effort; must never break restart
                 logger.warning(json.dumps({"event": "reap_orphan_query_failed", "error": str(exc)}))
+        return pids, any_query_ok
+
+    @staticmethod
+    def _kill_pids(pids: set[int]) -> bool:
+        """SIGKILL each pid. Returns True iff every kill succeeded or the process was
+        already gone (ProcessLookupError). A kill that fails for any OTHER reason
+        (EPERM, …) returns False — we found an orphan we could NOT remove, so we cannot
+        claim the workspace is writer-free."""
         kills_ok = True
         for pid in pids:
             try:
@@ -663,8 +672,67 @@ class CodegraphSession:
             except ProcessLookupError:
                 pass  # already gone — the normal case
             except Exception as exc:  # noqa: BLE001
-                kills_ok = False  # an orphan we found but could NOT kill → unverified
+                kills_ok = False
                 logger.warning(json.dumps({"event": "reap_orphan_kill_failed", "pid": pid, "error": str(exc)}))
-        # Verified only if we could actually look (a query ran) AND every found orphan
-        # was dealt with. If no query ran, we never looked → cannot claim "no orphan".
-        return any_query_ok and kills_ok
+        return kills_ok
+
+    def _reap_orphan_servers(self) -> bool:
+        """SIGKILL any stray codegraph-server bound to OUR workspace, then PROVE none
+        survives. Called only from _restart, under the restart lock, AFTER the old worker
+        thread is confirmed dead — so at this instant there is NO live worker, hence ANY
+        codegraph-server writing OUR workspace is an orphan that would become a second
+        writer → graph.db corruption.
+
+        SETTLE + RE-VERIFY loop (cross-review P1): a single point-in-time scan can MISS a
+        codegraph-server the dying worker's stdio_client had just fork()ed but whose execve
+        hadn't yet made it visible to pgrep — that orphan would then survive and become a
+        second writer when start() fires. So we don't scan-once-kill-once: we loop
+        scan→kill→settle→rescan and only return verified once a FRESH scan comes back EMPTY
+        (proving no late-appearing fork remains). A scan that still finds pids means we kill
+        them and loop again; a non-empty set on the LAST attempt → unverified (refuse).
+
+        Returns True iff a scan ran cleanly AND a subsequent scan confirmed zero orphans.
+        Returns False if NO query could ever run (we never looked), or orphans persist /
+        can't be killed after all attempts — i.e. we cannot prove there's no surviving
+        second writer, so the caller (_restart) must refuse to spawn."""
+        # A few short settle rounds: enough for an in-flight execve to surface in pgrep
+        # (sub-100ms in practice) without materially delaying a real restart.
+        attempts = 4
+        settle_s = 0.1
+        any_query_ever = False
+        for i in range(attempts):
+            pids, queried_ok = self._scan_orphan_servers()
+            any_query_ever = any_query_ever or queried_ok
+            if queried_ok and not pids:
+                # A clean scan that found NOTHING. On the FIRST iteration this could still
+                # race a not-yet-visible fork, so require it to hold across a settle: sleep
+                # and re-scan once more; only an empty confirmation scan returns verified.
+                if i > 0:
+                    # Safe to return without another settle: the ONLY process that could
+                    # fork a new codegraph-server is the worker's stdio_client, and the
+                    # worker thread is confirmed DEAD before the reaper runs. After round 0's
+                    # kill + trailing sleep there is no live forker left, so the population
+                    # only decays — an empty clean scan here is genuinely writer-free. (Round
+                    # 0 is the only one that can race an in-flight execve, which is exactly
+                    # where the extra settle+re-scan below sits.) Don't remove that asymmetry.
+                    return True  # already settled at least once → confirmed empty
+                time.sleep(settle_s)
+                pids2, ok2 = self._scan_orphan_servers()
+                if ok2 and not pids2:
+                    return True
+                # A fork surfaced during the settle → fall through to kill it below.
+                pids, queried_ok = pids2, ok2
+                any_query_ever = any_query_ever or queried_ok
+            if pids:
+                self._kill_pids(pids)
+            time.sleep(settle_s)  # let SIGKILL take effect + any sibling fork surface
+        # Final confirmation scan after the last kill+settle.
+        pids_final, ok_final = self._scan_orphan_servers()
+        any_query_ever = any_query_ever or ok_final
+        verified = ok_final and not pids_final
+        if not verified and pids_final:
+            logger.error(json.dumps({"event": "reap_orphan_unverified",
+                                     "detail": "orphans persist after %d attempts" % attempts,
+                                     "remaining": sorted(pids_final)}))
+        # If no query EVER ran we never looked → cannot claim writer-free.
+        return verified and any_query_ever

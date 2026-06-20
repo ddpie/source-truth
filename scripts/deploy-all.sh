@@ -441,8 +441,18 @@ else
   ECR_URI="${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com/${ECR_REPO}:latest"
   aws ecr describe-repositories --repository-names "$ECR_REPO" --region "$REGION" >/dev/null 2>&1 \
     || aws ecr create-repository --repository-name "$ECR_REPO" --region "$REGION" >/dev/null
-  aws ecr get-login-password --region "$REGION" \
-    | docker login --username AWS --password-stdin "${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com" >/dev/null 2>&1
+  # ECR login must SUCCEED before build/push. Don't swallow it with `>/dev/null 2>&1`:
+  # on a fresh account a login failure (clock skew, missing ecr:GetAuthorizationToken on
+  # the deploy identity, a region typo, an expired token) would otherwise surface only as
+  # an opaque `docker push` denied error one step later. Check the PIPELINE status
+  # (set -o pipefail makes a failed get-login-password / docker login fail the pipe) and
+  # surface stderr with an actionable message (cross-review MEDIUM: diagnosability).
+  if ! aws ecr get-login-password --region "$REGION" \
+       | docker login --username AWS --password-stdin "${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com" >/dev/null; then
+    say err "ECR docker login failed for ${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com"
+    say err "check: deploy identity has ecr:GetAuthorizationToken; clock is in sync; region/account correct; docker daemon running."
+    exit 1
+  fi
   docker build --platform linux/arm64 -t "$ECR_URI" "$ROOT/agent-container"
   docker push "$ECR_URI"
   update_env "$CONFIG_FILE" ECR_IMAGE "$ECR_URI"

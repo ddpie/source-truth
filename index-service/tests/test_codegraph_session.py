@@ -165,16 +165,28 @@ def test_liveness_exits_after_consecutive_failures():
     assert (n, should_exit) == (2, True)  # 2 consecutive → worker exits → restart
 
 
+def _O(stdout, rc):  # tiny pgrep-result stub
+    return type("O", (), {"stdout": stdout, "returncode": rc})()
+
+
 def test_reap_orphan_servers_kills_own_children(monkeypatch):
     # _reap_orphan_servers must SIGKILL codegraph-server children of THIS pid found
-    # by pgrep, and never raise. Mock pgrep output + os.kill.
+    # by pgrep, and never raise. STATEFUL mock: the first scan finds the orphans, and
+    # AFTER they're killed a re-scan comes back empty (the settle/re-verify loop then
+    # confirms writer-free). monkeypatch sleep so the loop doesn't actually wait.
     import codegraph_session as cs
 
     killed = []
     sess = cs.CodegraphSession("/data/repo/ws")
-    monkeypatch.setattr(cs.subprocess, "run", lambda *a, **k: type("O", (), {"stdout": "12345\n67890\n", "returncode": 0})())
+    monkeypatch.setattr(cs.time, "sleep", lambda _s: None)
+
+    def fake_run(cmd, **k):
+        # Once we've killed something, subsequent scans are empty (the kill worked).
+        return _O("" if killed else "12345\n67890\n", 1 if killed else 0)
+
+    monkeypatch.setattr(cs.subprocess, "run", fake_run)
     monkeypatch.setattr(cs.os, "kill", lambda pid, sig: killed.append((pid, sig)))
-    assert sess._reap_orphan_servers() is True  # queries ran + kills ok → verified
+    assert sess._reap_orphan_servers() is True  # killed then re-verified empty → verified
     assert (12345, cs.signal.SIGKILL) in killed
     assert (67890, cs.signal.SIGKILL) in killed
 
@@ -187,12 +199,15 @@ def test_reap_orphan_servers_catches_reparented_orphan_by_workspace(monkeypatch)
 
     killed = []
     sess = cs.CodegraphSession("/data/repo/ws")
+    monkeypatch.setattr(cs.time, "sleep", lambda _s: None)
 
     def fake_run(cmd, **k):
-        # `-P self` query → no children (rc=1); workspace query → the reparented orphan 4242 (rc=0).
+        if killed:  # after the kill, both queries report empty
+            return _O("", 1)
+        # `-P self` query → no children (rc=1); workspace query → the reparented orphan 4242.
         if "-P" in cmd:
-            return type("O", (), {"stdout": "", "returncode": 1})()
-        return type("O", (), {"stdout": "4242\n", "returncode": 0})()
+            return _O("", 1)
+        return _O("4242\n", 0)
 
     monkeypatch.setattr(cs.subprocess, "run", fake_run)
     monkeypatch.setattr(cs.os, "kill", lambda pid, sig: killed.append((pid, sig)))
@@ -208,10 +223,11 @@ def test_reap_orphan_workspace_regex_is_escaped(monkeypatch):
 
     sess = cs.CodegraphSession("/data/repo/code-5x+beta")  # '+' is a regex metachar
     seen_patterns = []
+    monkeypatch.setattr(cs.time, "sleep", lambda _s: None)
 
     def fake_run(cmd, **k):
         seen_patterns.append(cmd[-1])
-        return type("O", (), {"stdout": "", "returncode": 1})()
+        return _O("", 1)
 
     monkeypatch.setattr(cs.subprocess, "run", fake_run)
     monkeypatch.setattr(cs.os, "kill", lambda pid, sig: None)
@@ -228,8 +244,9 @@ def test_reap_orphan_never_targets_self(monkeypatch):
 
     killed = []
     sess = cs.CodegraphSession("/data/repo/ws")
+    monkeypatch.setattr(cs.time, "sleep", lambda _s: None)
     monkeypatch.setattr(cs.subprocess, "run",
-                        lambda *a, **k: type("O", (), {"stdout": "%d\n" % cs.os.getpid(), "returncode": 0})())
+                        lambda *a, **k: _O("%d\n" % cs.os.getpid(), 0))
     monkeypatch.setattr(cs.os, "kill", lambda pid, sig: killed.append((pid, sig)))
     sess._reap_orphan_servers()
     assert killed == []  # self excluded
@@ -239,20 +256,25 @@ def test_reap_orphan_servers_never_raises(monkeypatch):
     import codegraph_session as cs
 
     sess = cs.CodegraphSession("/data/repo/ws")
+    monkeypatch.setattr(cs.time, "sleep", lambda _s: None)
 
     # pgrep itself blowing up must be swallowed (best-effort) AND report UNVERIFIED:
     # if no query could run, we never looked, so we can't claim "no orphan survives".
     monkeypatch.setattr(cs.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(OSError("pgrep missing")))
     assert sess._reap_orphan_servers() is False  # must not raise, and is UNVERIFIED
 
-    # An already-gone pid (ProcessLookupError) is the normal case, also swallowed —
-    # and counts as VERIFIED (the orphan we found is confirmed gone).
+    # An already-gone pid (ProcessLookupError) is the normal case, also swallowed. The
+    # STATEFUL mock then reports empty on re-verify, so the reaper confirms writer-free.
+    killed = {"done": False}
+
     def _gone(pid, sig):
+        killed["done"] = True
         raise ProcessLookupError()
 
-    monkeypatch.setattr(cs.subprocess, "run", lambda *a, **k: type("O", (), {"stdout": "999999\n", "returncode": 0})())
+    monkeypatch.setattr(cs.subprocess, "run",
+                        lambda *a, **k: _O("" if killed["done"] else "999999\n", 1 if killed["done"] else 0))
     monkeypatch.setattr(cs.os, "kill", _gone)
-    assert sess._reap_orphan_servers() is True  # must not raise; found-but-already-dead = verified
+    assert sess._reap_orphan_servers() is True  # found-but-already-dead, re-verify empty = verified
 
 
 def test_reap_orphan_unverified_when_pgrep_errors(monkeypatch):
@@ -262,10 +284,52 @@ def test_reap_orphan_unverified_when_pgrep_errors(monkeypatch):
     import codegraph_session as cs
 
     sess = cs.CodegraphSession("/data/repo/ws")
-    monkeypatch.setattr(cs.subprocess, "run",
-                        lambda *a, **k: type("O", (), {"stdout": "", "returncode": 2})())
+    monkeypatch.setattr(cs.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(cs.subprocess, "run", lambda *a, **k: _O("", 2))
     monkeypatch.setattr(cs.os, "kill", lambda pid, sig: None)
     assert sess._reap_orphan_servers() is False  # rc≥2 on every query → unverified
+
+
+def test_reap_orphan_unverified_when_orphan_persists(monkeypatch):
+    # P1 fix: an orphan that KEEPS being found after repeated kills (e.g. a process the
+    # reaper can't actually kill, or a relentless re-fork) must report UNVERIFIED so
+    # _restart refuses to spawn a second writer — the settle/re-verify loop never sees
+    # an empty confirmation scan.
+    import codegraph_session as cs
+
+    sess = cs.CodegraphSession("/data/repo/ws")
+    monkeypatch.setattr(cs.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(cs.subprocess, "run", lambda *a, **k: _O("4242\n", 0))  # always present
+    monkeypatch.setattr(cs.os, "kill", lambda pid, sig: None)  # "kill" never removes it
+    assert sess._reap_orphan_servers() is False
+
+
+def test_reap_orphan_catches_fork_that_appears_during_settle(monkeypatch):
+    # P1 core scenario: the FIRST scan is clean/empty (the just-fork()ed codegraph-server
+    # isn't visible to pgrep yet), but a re-scan after the settle DOES see it. The loop
+    # must catch + kill it and only then confirm empty — proving the single-shot scan that
+    # the old code did would have missed this exact second-writer.
+    import codegraph_session as cs
+
+    sess = cs.CodegraphSession("/data/repo/ws")
+    monkeypatch.setattr(cs.time, "sleep", lambda _s: None)
+    killed = []
+    scans = {"n": 0}
+
+    def fake_run(cmd, **k):
+        scans["n"] += 1
+        # scan 1+2 (first iteration's scan + its settle re-scan): empty.
+        # scan 3: the late fork 7777 has now surfaced. After it's killed: empty.
+        if scans["n"] <= 2:
+            return _O("", 1)
+        if killed:
+            return _O("", 1)
+        return _O("7777\n", 0)
+
+    monkeypatch.setattr(cs.subprocess, "run", fake_run)
+    monkeypatch.setattr(cs.os, "kill", lambda pid, sig: killed.append((pid, sig)))
+    assert sess._reap_orphan_servers() is True
+    assert (7777, cs.signal.SIGKILL) in killed  # the late-appearing fork was caught
 
 
 def test_reap_orphan_unverified_when_kill_fails(monkeypatch):
