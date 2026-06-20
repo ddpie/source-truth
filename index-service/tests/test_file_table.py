@@ -222,3 +222,26 @@ def test_legacy_xls_explicitly_unsupported(repo):
     (repo / "Config" / "old.xls").write_bytes(b"\xd0\xcf\x11\xe0")  # OLE2 magic
     with pytest.raises(ValueError, match="does not handle"):
         file_table.read_table("Config/old.xls", local_root=str(repo), mount_root=MOUNT)
+
+
+def test_csv_gbk_chinese_decoded_faithfully(repo):
+    # CROSS-REVIEW HIGH regression: a GBK Chinese config CSV's name column must come back
+    # as real Chinese, not mojibake (the planners' actual data). decode_bytes handles it.
+    p = repo / "Config" / "skills_cn.csv"
+    p.write_bytes("技能名,伤害,冷却\n火球术,500,3\n治疗术,0,5\n".encode("gbk"))
+    out = file_table.read_table("Config/skills_cn.csv", local_root=str(repo), mount_root=MOUNT)
+    assert "火球术" in out["content"]
+    assert "技能名" in out["content"]
+    assert "�" not in out["content"]
+
+
+def test_csv_overlong_cell_does_not_error_whole_table(repo):
+    # CROSS-REVIEW LOW: a single huge quoted cell (a long localized description) used to
+    # trip csv.field_size_limit (128KB) and make the ENTIRE table unreadable. Now the
+    # limit is raised; the table reads and the cell is clipped by _clip.
+    big = "x" * (200 * 1024)  # 200KB single field, over the old 128KB default
+    p = repo / "Config" / "desc.csv"
+    p.write_text(f'id,desc\n1,"{big}"\n2,"short"\n', encoding="utf-8")
+    out = file_table.read_table("Config/desc.csv", local_root=str(repo), mount_root=MOUNT)
+    assert out["kind"] == "csv"
+    assert "short" in out["content"]            # the table is readable, not an error
