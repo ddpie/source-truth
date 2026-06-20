@@ -3,7 +3,9 @@
   "version": "0.0.0",
   "private": true,
   "scripts": {
-    "build": "tsc --noEmit",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc",
+    "start": "node dist/index.js",
     "lint": "eslint src/ tests/",
     "test": "jest -c jest.config.cjs --passWithNoTests"
   },

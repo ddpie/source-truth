@@ -42,7 +42,7 @@ shopt -u nullglob
   && ok "结构文档双语齐全" || err "缺少 docs/structure_{zh,en}.md"
 
 # 5. 顶层组件目录都在磁盘上存在（与 structure 文档对齐）
-for d in agent-container bot-gateway index-service infra shared config scripts docs; do
+for d in agent-container bot-gateway index-service infra config scripts docs; do
   [[ -d "$d" ]] && ok "顶层目录存在: $d" || err "structure 引用的顶层目录缺失: $d"
 done
 
