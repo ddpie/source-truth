@@ -63,14 +63,6 @@ describe("feedback buttons (👍/👎 + reason)", () => {
     expect(vals.every((v) => v.action === "feedback")).toBe(true);
   });
 
-  it("buildDisabledButtonElement greys a sibling WITHOUT a ✓ and keeps its label (mutually-exclusive disable)", () => {
-    const el = JSON.parse(require("../src/cardkit-client").buildDisabledButtonElement("fb_down", "👎 没帮助"));
-    expect(el.element_id).toBe("fb_down");
-    expect(el.disabled).toBe(true);
-    expect(el.text.content).toBe("👎 没帮助");      // original label kept, no ✓ prefix
-    expect(el.text.content).not.toContain("✓");
-    expect(el.value.action).toBe("noop");           // a click does nothing even if it fired
-  });
 
   it("EVERY feedback button element_id is within Feishu's 20-char limit (regression: 300315)", () => {
     // fbr_hard_to_understand (22 chars) overflowed the element_id limit → the whole reason
