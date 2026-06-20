@@ -583,7 +583,7 @@ async function runStreamingInvoke(
   let result: Awaited<ReturnType<typeof invokeRuntimeStreaming>>;
   try {
     result = await invokeRuntimeStreaming(
-    { runtimeArn: RUNTIME_ARN, region: REGION, sessionId, prompt },
+    { runtimeArn: RUNTIME_ARN, region: REGION, sessionId, prompt, traceId },
     { region: REGION, credentials },
     (textSoFar, liveSteps) => {
       // The timeoutTimer (armed above) is what enforces the deadline — it sets

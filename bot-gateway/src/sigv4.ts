@@ -38,6 +38,14 @@ export interface InvokeParams {
   region: string;
   sessionId: string;
   prompt: string;
+  // Per-request trace id, forwarded into the agent payload so the agent's own
+  // structured logs (cold-start retry / per-tool latency, emitted from inside the
+  // microVM → its OWN CloudWatch stream) carry the SAME id as the gateway's
+  // invoke_timing / card_closed lines. Without it the two sides can't be joined:
+  // diagnosing a failure card meant inferring the cold-start shape from the gateway's
+  // toolCalls=0 alone, blind to the agent's retry decision. Optional so a caller
+  // (or a test) can omit it.
+  traceId?: string;
 }
 
 export interface AwsCredentials {
@@ -106,7 +114,10 @@ export function buildInvokeRequest(p: InvokeParams): InvokeRequest {
   }
   const hostname = `${SERVICE}.${p.region}.amazonaws.com`;
   const path = `/runtimes/${encodeURIComponent(p.runtimeArn)}/invocations`;
-  const body = JSON.stringify({ prompt: p.prompt });
+  // Forward traceId in the payload (alongside prompt) so the agent stamps it on its
+  // own logs — same id both sides of the gateway↔microVM boundary. Omitted when unset
+  // so the wire shape is unchanged for callers that don't pass one.
+  const body = JSON.stringify(p.traceId ? { prompt: p.prompt, traceId: p.traceId } : { prompt: p.prompt });
   return {
     method: "POST",
     hostname,
