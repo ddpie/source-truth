@@ -59,6 +59,16 @@ export function composeFollowUpPrompt(followUp: string, prior: ChainTurn[]): str
   // The new question is the clearly-last segment, after an explicit instruction that
   // it (and only it) is what to answer — so even if a replayed turn somehow still
   // carried a marker, the agent is told the authoritative question is this final one.
-  lines.push("", "【本次追问】（只回答下面这一句，上面仅供背景参考）", followUp);
+  // The instruction line ALSO forces re-investigation: a known failure mode is the
+  // model seeing "a full prior answer + a short follow-up" and just RESTATING the
+  // replayed text with 0 tool calls (a shallow confabulated answer that still
+  // finalizes green). Demand fresh retrieval for this turn (cross-review root cause).
+  lines.push(
+    "",
+    "【本次追问】（只回答下面这一句；上面的旧对话仅供理解指代/背景，不是你这轮的证据）",
+    followUp,
+    "",
+    "（回答前请针对本次追问重新调用取证工具核实，不要直接复用上面的旧结论作答。）",
+  );
   return lines.join("\n");
 }
