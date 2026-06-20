@@ -63,12 +63,12 @@ function log(obj: Record<string, unknown>): void {
   console.log(JSON.stringify({ ts: new Date().toISOString(), ...obj }));
 }
 
-// A short per-request trace id, shown on the card (top, copyable inline-code) AND
-// stamped on every log line for that request, so when a user reports a problem the
-// operator pastes the id to grep all related logs. 8 hex chars = plenty to
-// disambiguate concurrent requests without being unwieldy on the card.
+// A per-request trace id, shown on the card top (in a copyable code block) AND stamped
+// on every log line for that request, so when a user reports a problem the operator
+// pastes the id to grep all related logs. A full UUID with the dashes stripped (32 hex
+// chars) — collision-free even at high concurrency, and a clean token to grep.
 function newTraceId(): string {
-  return randomUUID().replace(/-/g, "").slice(0, 8);
+  return randomUUID().replace(/-/g, "");
 }
 /** Build a logger that auto-stamps `trace` on every line for one request. The traceId
  *  is spread LAST so it always wins — a logged object that happens to carry its own
