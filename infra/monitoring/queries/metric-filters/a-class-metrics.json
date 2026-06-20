@@ -106,6 +106,14 @@
       "purpose": "每答工具调用数 (取证强度)"
     },
     {
+      "name": "ToolErrors",
+      "event": "answer_completed",
+      "filterPattern": "{ $.metric IS TRUE && $.event = \"answer_completed\" }",
+      "metricValue": "$.toolErrorCount",
+      "unit": "Count",
+      "purpose": "每答工具错误数 (is_error 的 tool_result，已恢复非致命) — 高于 ToolCalls 一定比例=检索抖动/工具入参差"
+    },
+    {
       "name": "AnswerFailed",
       "event": "answer_failed",
       "filterPattern": "{ $.metric IS TRUE && $.event = \"answer_failed\" }",

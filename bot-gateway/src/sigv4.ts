@@ -203,6 +203,8 @@ export interface InvokeTiming {
   toolCalls: number;    // total tool_use blocks (codegraph + Read/Glob/Grep) — the
                         // "few deep turns vs many round-trips" disambiguator
   toolCallsByName: Record<string, number>; // per-tool tally
+  toolErrors: number;   // tool_results that came back is_error:true (per-tool failures,
+                        // recovered — NOT stream errors). Telemetry: high vs toolCalls = flaky retrieval.
 }
 
 export async function invokeRuntimeStreaming(
@@ -212,7 +214,7 @@ export async function invokeRuntimeStreaming(
   signal?: AbortSignal,
 ): Promise<{ status: number; answer: string; steps: string[]; aborted: boolean; error: string | null; timing: InvokeTiming }> {
   const t0 = Date.now();
-  const timing: InvokeTiming = { signMs: 0, ttfbMs: -1, ttftMs: -1, ttfcMs: -1, lastTokenMs: -1, streamMs: -1, totalMs: 0, events: 0, chars: 0, conclusionMs: -1, toolCalls: 0, toolCallsByName: {} };
+  const timing: InvokeTiming = { signMs: 0, ttfbMs: -1, ttftMs: -1, ttfcMs: -1, lastTokenMs: -1, streamMs: -1, totalMs: 0, events: 0, chars: 0, conclusionMs: -1, toolCalls: 0, toolCallsByName: {}, toolErrors: 0 };
   const signed = await signInvoke(buildInvokeRequest(p), opts);
   timing.signMs = Date.now() - t0;
   const tReq = Date.now();
@@ -367,5 +369,6 @@ export async function invokeRuntimeStreaming(
   timing.conclusionMs = timing.ttfcMs >= 0 && timing.lastTokenMs >= 0 ? timing.lastTokenMs - timing.ttfcMs : -1;
   timing.toolCalls = state.toolCalls;
   timing.toolCallsByName = state.toolCallsByName;
+  timing.toolErrors = state.toolErrors;
   return { status: res.status, answer, steps, aborted, error: state.error, timing };
 }
