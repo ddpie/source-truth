@@ -421,6 +421,36 @@ def _collect(agen):
     return asyncio.run(_run())
 
 
+def test_run_agent_accepts_repos_payload_without_breaking(caplog):
+    # multi-repo 阶段1: the gateway forwards the project's repo set in the payload. The agent
+    # accepts it defensively (logs it, does NOT yet scope by it) and the run proceeds normally.
+    async def fake_query(prompt, options):
+        yield _MsgWith([_ToolUseBlock("t1", "codegraph_symbol_search")])
+        yield _MsgWith([_TextBlock("答案。")])
+        yield _ResultMsg(num_turns=2)
+
+    import logging
+    with caplog.at_level(logging.WARNING):
+        msgs = _collect(agent_lib.run_agent(
+            {"prompt": "负重", "repos": ["code-5x", "code-5x-svc"]}, query_fn=fake_query))
+    texts = [getattr(b, "text", "") for m in msgs for b in getattr(m, "content", []) or [] if hasattr(b, "text")]
+    assert any("答案" in s for s in texts), "run must complete normally with repos present"
+    assert any("project_repos_received" in r.message and "code-5x" in r.message for r in caplog.records), \
+        "repos must be logged so the gateway→agent contract is observable"
+
+
+def test_run_agent_tolerates_non_list_repos():
+    # A malformed repos (not a list[str]) must be dropped, never break the run.
+    async def fake_query(prompt, options):
+        yield _MsgWith([_TextBlock("答案。")])
+        yield _ResultMsg(num_turns=1)
+
+    for bad in ("not-a-list", 123, {"a": 1}, [1, 2, None]):
+        msgs = _collect(agent_lib.run_agent({"prompt": "x", "repos": bad}, query_fn=fake_query))
+        texts = [getattr(b, "text", "") for m in msgs for b in getattr(m, "content", []) or [] if hasattr(b, "text")]
+        assert any("答案" in s for s in texts), f"run must survive malformed repos={bad!r}"
+
+
 def test_run_agent_retries_once_on_mcp_init_race(monkeypatch):
     # Attempt 1: leak shape — text with <invoke> markup, NO tool_use, num_turns=1.
     # Attempt 2 (retry): real tool_use + a healthy result. The retry must fire and

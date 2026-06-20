@@ -38,16 +38,46 @@ FEISHU_API_BASE='${FEISHU_API_BASE}'"
 [[ -n "$IDLE_TIMEOUT" ]] && ENV_BODY="${ENV_BODY}
 RUNTIME_IDLE_TIMEOUT_SECS='${IDLE_TIMEOUT}'"
 
+# PROJECT ROUTING (multi-repo plan 阶段1): the gateway's project config is DEPLOYMENT-SPECIFIC
+# and lives at .local/projects.json on the DEPLOY machine (gitignored, not in the gateway
+# tarball). The gateway on the host resolves its config from PROJECTS_CONFIG_PATH (NOT a
+# relative ../../.local walk — the host layout is /opt/bot-gateway, where that would land at
+# /opt/.local). So: if .local/projects.json exists here, ship it to a fixed host path and point
+# the gateway at it. PROJECT_ID (which project this gateway serves) comes from deploy-config or
+# the env; omitted = the gateway's sole-project default. All OPTIONAL — a deploy with no
+# projects.json simply runs without a projectId dimension (the loader's soft path).
+HOST_PROJECTS_PATH="/etc/source-truth-projects.json"
+LOCAL_PROJECTS="$SCRIPT_DIR/../../.local/projects.json"
+PROJECTS_B64=""
+if [[ -f "$LOCAL_PROJECTS" ]]; then
+  PROJECTS_B64="$(base64 < "$LOCAL_PROJECTS" | tr -d '\n')"
+  ENV_BODY="${ENV_BODY}
+PROJECTS_CONFIG_PATH='${HOST_PROJECTS_PATH}'"
+fi
+# PROJECT_ID: explicit env wins; else read from deploy-config if present (best-effort).
+PROJECT_ID="${PROJECT_ID:-}"
+if [[ -z "$PROJECT_ID" && -f "$SCRIPT_DIR/../../.local/deploy-config" ]]; then
+  PROJECT_ID="$(grep -E '^PROJECT_ID=' "$SCRIPT_DIR/../../.local/deploy-config" 2>/dev/null | head -1 | cut -d= -f2- || echo "")"
+fi
+[[ -n "$PROJECT_ID" ]] && ENV_BODY="${ENV_BODY}
+PROJECT_ID='${PROJECT_ID}'"
+
 # Base64 the body so arbitrary content survives the JSON/shell trip through
 # send-command intact (no escaping games with quotes/newlines in the parameters).
 ENV_B64="$(printf '%s\n' "$ENV_BODY" | base64 | tr -d '\n')"
 
-# The remote script: write the env file (0600 — it names the secret id), then
-# restart the unit. `systemctl restart` re-evaluates ConditionPathExists (now true)
-# and (re)starts cleanly whether this is first activation or a config update.
+# The remote script: write the env file (0600 — it names the secret id), optionally write the
+# project-routing config, then restart the unit. `systemctl restart` re-evaluates
+# ConditionPathExists (now true) and (re)starts cleanly whether first activation or a config update.
 REMOTE_CMD="set -e
 echo '${ENV_B64}' | base64 -d > /etc/bot-gateway.env
-chmod 600 /etc/bot-gateway.env
+chmod 600 /etc/bot-gateway.env"
+if [[ -n "$PROJECTS_B64" ]]; then
+  REMOTE_CMD="${REMOTE_CMD}
+echo '${PROJECTS_B64}' | base64 -d > '${HOST_PROJECTS_PATH}'
+chmod 644 '${HOST_PROJECTS_PATH}'"
+fi
+REMOTE_CMD="${REMOTE_CMD}
 systemctl restart bot-gateway.service
 sleep 2
 systemctl is-active bot-gateway.service"

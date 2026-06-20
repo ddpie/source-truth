@@ -46,6 +46,10 @@ export interface InvokeParams {
   // toolCalls=0 alone, blind to the agent's retry decision. Optional so a caller
   // (or a test) can omit it.
   traceId?: string;
+  // The project's repo subdir set (multi-repo plan 阶段1). Forwarded in the payload so the
+  // agent knows which repos its project spans (project-scoped retrieval). Omitted when unset
+  // (single-repo deploy / unresolved route) so the wire shape is unchanged for that case.
+  repos?: string[];
 }
 
 export interface AwsCredentials {
@@ -114,10 +118,15 @@ export function buildInvokeRequest(p: InvokeParams): InvokeRequest {
   }
   const hostname = `${SERVICE}.${p.region}.amazonaws.com`;
   const path = `/runtimes/${encodeURIComponent(p.runtimeArn)}/invocations`;
-  // Forward traceId in the payload (alongside prompt) so the agent stamps it on its
-  // own logs — same id both sides of the gateway↔microVM boundary. Omitted when unset
-  // so the wire shape is unchanged for callers that don't pass one.
-  const body = JSON.stringify(p.traceId ? { prompt: p.prompt, traceId: p.traceId } : { prompt: p.prompt });
+  // Forward traceId + repos in the payload (alongside prompt). traceId so the agent stamps it
+  // on its own logs (same id both sides of the gateway↔microVM boundary); repos so the agent
+  // knows its project's repo set (multi-repo 阶段1). Both omitted when unset so the wire shape
+  // is unchanged for the single-repo / no-trace case. Built incrementally to keep that
+  // exact-shape guarantee (a bare {prompt} when neither is set).
+  const payload: Record<string, unknown> = { prompt: p.prompt };
+  if (p.traceId) payload.traceId = p.traceId;
+  if (p.repos && p.repos.length > 0) payload.repos = p.repos;
+  const body = JSON.stringify(payload);
   return {
     method: "POST",
     hostname,

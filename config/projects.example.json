@@ -19,9 +19,13 @@
     "NOT in this file — it is env-only, never committed.",
     "",
     "Adding a project: add a projects entry in .local/projects.json + set PROJECT_ID on that",
-    "project's gateway. repos is forwarded to the agent; per-project endpoint override on the",
-    "invoke path lands with the multi-runtime work in 阶段2+ (the live agent reads",
-    "CODEGRAPH_MCP_URL from its runtime env today)."
+    "project's gateway. At 阶段1: projectId tags every metric, and repos IS forwarded to the",
+    "agent in the invoke payload (so it knows its project's repo set). The per-project ENDPOINT",
+    "override is the only deferred piece — the live agent still reads CODEGRAPH_MCP_URL from its",
+    "runtime env; per-project endpoint routing lands with the multi-runtime work in 阶段2+.",
+    "",
+    "Path on the host: deploy ships .local/projects.json to PROJECTS_CONFIG_PATH (set by",
+    "activate_gateway.sh); the gateway reads that env, NOT a relative path."
   ],
   "projects": {
     "example-project": {
