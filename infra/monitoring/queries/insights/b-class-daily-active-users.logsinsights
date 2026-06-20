@@ -15,5 +15,5 @@
 -- (traceId is NOT a user key — key-split, metrics.ts §4). saltWeak rows are still counted but
 -- the Lambda tags the metric so a weak-salt window is flagged downstream.
 fields hashUserId
-| filter metric = 1 and event = "question_received"
+| filter event = "question_received"
 | stats count_distinct(hashUserId) as dau

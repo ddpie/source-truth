@@ -35,6 +35,7 @@ infra/                  Infrastructure as code (MVP starts with agentcore toolki
     queries/metric-filters/a-class-metrics.json  Single source of A-class metric intent (counts/percentiles/distributions → metric-filter)
     queries/metric-filters/alarm-metrics.json    Dedicated dense alarm filters (one per card_health kind, defaultValue:0)
     queries/insights/*.logsinsights              B-class dedup/retention Insights queries (DAU etc., paired with a scheduled pre-aggregation Lambda)
+    lambda/dau_preaggregate.py                   B-class DAU pre-aggregation Lambda (daily StartQuery→PutMetricData, pure stdlib+boto3)
     dashboard.product.json / dashboard.sre.json  Dashboard templates (${REGION}/${NAMESPACE} placeholders; product-usage / SRE-health pages)
   (p2) lib/             runtime / codegraph(index-service) / gateway stacks
 config/                 Config-driven: i18n.json (card / alarm / error copy), alarm-thresholds.json (alarm thresholds, operator-tunable), projects.example.json (project-routing schema template; the real config lives at .local/projects.json — deployment-specific, gitignored)
@@ -44,6 +45,7 @@ scripts/                Operational lifecycle
   apply-metric-filters.sh  Apply the infra/monitoring metric definitions to CloudWatch (idempotent upsert; --defs switches A-class/alarm; --dry-run)
   apply-dashboards.sh   Render dashboard templates and put-dashboard (idempotent; --dry-run; reads metric-filters' namespace as the single source)
   apply-alarms.sh       Ensure SNS topic + create CloudWatch alarms from config/alarm-thresholds.json (idempotent; subscription is manual)
+  apply-dau-lambda.sh   Deploy the B-class DAU pre-aggregation Lambda + daily EventBridge schedule (role/package/trigger, idempotent; --dry-run)
   test.sh               Single tiered test entrypoint (offline default / --full)
   check-versions.sh     Pinned-version drift guard (base digest / requirements pin / Node / claude-code npm)
   install.sh            Interactive one-click install (check deps→Feishu creds→config→confirm→deploy-all; pre-fills on re-run)
