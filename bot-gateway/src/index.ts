@@ -25,7 +25,7 @@ import { fromNodeProviderChain } from "@aws-sdk/credential-providers";
 
 import { invokeRuntimeStreaming, classifyInvokeOutcome, isTurnCapError, type AwsCredentials } from "./sigv4";
 import { decideFinalize, hardFailureMessage, shapeBody } from "./finalize-decision";
-import { createCard, updateContent, closeStreaming, finalizeCard, appendFooter, appendClarify, buildSendCardContent, disableFollowUpButton, appendReasoningPanel, updateReasoningPanel, appendEvidencePanel, updateEvidencePanel, appendOneChart, MAX_CHARTS, appendStopButton, appendStatusLine, updateStatusLine, formatElapsed, appendFeedbackButtons, appendFeedbackReasons, disableButtonPlain, FEEDBACK_REASON_CODES, type ActionButton } from "./cardkit-client";
+import { createCard, updateContent, closeStreaming, finalizeCard, appendFooter, appendClarify, buildSendCardContent, disableFollowUpButton, appendReasoningPanel, updateReasoningPanel, appendEvidencePanel, updateEvidencePanel, appendOneChart, MAX_CHARTS, appendStopButton, appendStatusLine, updateStatusLine, formatElapsed, appendFeedbackButtons, appendFeedbackReasons, disableButtonPlain, FEEDBACK_REASON_CODES, feedbackReasonEid, type ActionButton } from "./cardkit-client";
 import { extractCharts } from "./extract-charts";
 import { rememberCard, rememberAnswer, lookupCard, collectChain } from "./card-registry";
 import { composeFollowUpPrompt } from "./followup-context";
@@ -1477,10 +1477,17 @@ async function main(): Promise<void> {
             const up = value.vote === "up";
             const chosen = up ? "fb_up" : "fb_down";
             const other = up ? "fb_down" : "fb_up";
+            // Disable both vote buttons (✓ chosen, plain other). Best-effort.
             void disableFollowUpButton(fbCardId, chosen, up ? t("card.feedback.up") : t("card.feedback.down"), nextCallbackSeq())
               .then(() => disableButtonPlain(fbCardId, other, up ? t("card.feedback.down") : t("card.feedback.up"), nextCallbackSeq()))
-              .then(() => { if (value.vote === "down") return appendFeedbackReasons(fbCardId, nextCallbackSeq()); })
-              .catch((e) => log({ event: "feedback_render_error", error: redactSensitive(String(e)).slice(0, 200) }));
+              .catch((e) => log({ event: "feedback_render_error", op: "disable_vote", error: redactSensitive(String(e)).slice(0, 200) }));
+            // Reveal the 👎 reason buttons as an INDEPENDENT write — NOT chained after the
+            // disables. If a disable PUT fails, the reasons must STILL appear (the live bug
+            // was the reverse: a rejected append/disable in the chain swallowed the reasons).
+            if (value.vote === "down") {
+              void appendFeedbackReasons(fbCardId, nextCallbackSeq())
+                .catch((e) => log({ event: "feedback_render_error", op: "append_reasons", error: redactSensitive(String(e)).slice(0, 200) }));
+            }
           } else {
             log({ event: "feedback_card_unresolved", action: "feedback", messageId: hashUserId(messageId) });
           }
@@ -1500,12 +1507,14 @@ async function main(): Promise<void> {
           if (frCardId && value.eid) {
             // Disable ALL reason buttons (mutually exclusive): ✓ on the chosen, plain on the
             // rest — so the user can't submit a second reason (count guard already drops it).
+            // element_ids are the SHORT index form fbr_<i> (feedbackReasonEid) — fbr_<code>
+            // overflowed Feishu's 20-char element_id limit (live bug 300315).
             const picked = value.reasonCode;
             void disableFollowUpButton(frCardId, value.eid, t(`card.feedback.reason.${picked}`), nextCallbackSeq())
               .then(async () => {
                 for (const code of FEEDBACK_REASON_CODES) {
                   if (code === picked) continue;
-                  await disableButtonPlain(frCardId, `fbr_${code}`, t(`card.feedback.reason.${code}`), nextCallbackSeq());
+                  await disableButtonPlain(frCardId, feedbackReasonEid(code), t(`card.feedback.reason.${code}`), nextCallbackSeq());
                 }
               })
               .catch((e) => log({ event: "feedback_render_error", error: redactSensitive(String(e)).slice(0, 200) }));

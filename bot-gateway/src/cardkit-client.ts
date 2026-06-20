@@ -656,17 +656,30 @@ export function buildFeedbackButtons(): unknown[] {
   }];
 }
 
+/** Stable element_id for the i-th reason button. INDEX-based (fbr_0..), NOT fbr_<code>:
+ *  Feishu requires element_id ≤ 20 chars (letters/digits/underscore, letter-start) and
+ *  `fbr_hard_to_understand` is 22 → the whole append was rejected with code 300315 and NO
+ *  reason buttons showed (live bug). The reasonCode still travels in value.reasonCode for the
+ *  metric; only the DOM id is shortened. Kept as a function so the callback's disable path
+ *  derives the same id from the code's index. */
+export function feedbackReasonEid(code: string): string {
+  const i = FEEDBACK_REASON_CODES.indexOf(code as (typeof FEEDBACK_REASON_CODES)[number]);
+  return `fbr_${i}`;
+}
+
 /** After a 👎, append a prompt + enumerated reason buttons (TOP-LEVEL buttons so each is
  *  disable-in-place addressable by element_id; no free text → no PII). Each carries an
- *  enumerated reasonCode. */
+ *  enumerated reasonCode (in value, for the metric); the DOM element_id is the short
+ *  index form fbr_<i> to stay within Feishu's 20-char element_id limit. */
 export function buildFeedbackReasonElements(): unknown[] {
   const elements: unknown[] = [{ tag: "markdown", content: t("card.feedback.reason.prompt") }];
   FEEDBACK_REASON_CODES.forEach((code) => {
+    const eid = feedbackReasonEid(code);
     elements.push({
-      tag: "button", element_id: `fbr_${code}`,
+      tag: "button", element_id: eid,
       text: { tag: "plain_text", content: t(`card.feedback.reason.${code}`) },
       type: "default", size: "small", width: "fill",
-      value: { action: "feedback_reason", reasonCode: code, eid: `fbr_${code}` },
+      value: { action: "feedback_reason", reasonCode: code, eid },
     });
   });
   return elements;
