@@ -228,3 +228,30 @@ def test_read_file_line_numbers_match_newline_only_split(tmp_path):
     # 2 lines by \n-count ("alpha\fbeta", "gamma"), not 3 by splitlines().
     assert out["lines"] == 2
     assert "alpha\fbeta" in out["content"]
+
+
+def test_read_file_bytecap_midchar_cut_stays_utf8(tmp_path):
+    # CROSS-REVIEW P1: a >256KiB valid-UTF-8 file whose byte cap slices mid-multibyte-char
+    # must STILL decode as utf-8 (the partial tail trimmed), NOT flip the whole file to a
+    # gb18030 mis-decode. Build content so the 256KiB boundary lands inside a 3-byte char.
+    root = tmp_path / "repo"
+    (root / "s").mkdir(parents=True)
+    # Fill with ASCII up to 1 byte before the cap, then a 3-byte char straddling it.
+    filler = "a" * (256 * 1024 - 1)
+    (root / "s" / "big.cs").write_text(filler + "技" + "rest", encoding="utf-8")
+    out = file_read.read_file("s/big.cs", local_root=str(root), mount_root="")
+    assert out["truncated"] is True
+    # Must be clean utf-8 (no encoding key, or utf-8), NOT gb18030 — the partial char was trimmed.
+    assert out.get("encoding") in (None, "utf-8"), f"flipped to {out.get('encoding')}"
+    assert "�" not in out["content"]
+
+
+def test_read_file_strips_crlf_trailing_cr(tmp_path):
+    # CROSS-REVIEW P2: CRLF (Windows/Unity) files must not carry a stray \r on each line.
+    root = tmp_path / "repo"
+    (root / "s").mkdir(parents=True)
+    (root / "s" / "w.cs").write_bytes(b"line1\r\nline2\r\nline3\r\n")
+    out = file_read.read_file("s/w.cs", local_root=str(root), mount_root="")
+    assert "\r" not in out["content"]
+    assert out["content"] == "line1\nline2\nline3"
+    assert out["lines"] == 3
