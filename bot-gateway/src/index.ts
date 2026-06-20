@@ -50,10 +50,18 @@ import { CardWriter } from "./card-writer";
 import { hashUserId } from "./log";
 import { emitMetric, type FailReason } from "./metrics";
 import { isDuplicate, forget } from "./dedup";
+import { loadProjectsConfig, resolveRoute, ProjectsConfigMissing, type ProjectsConfig, type ResolvedRoute } from "./project-routing";
 
 const REGION = process.env.AWS_REGION ?? "ap-northeast-1";
 const RUNTIME_ARN = process.env.RUNTIME_ARN ?? "";
 const APP_ID = process.env.FEISHU_APP_ID ?? "";
+// Which project THIS gateway serves (multi-repo plan 阶段1). Optional: unset + a sole
+// declared project = that project (today's single-project deploy needs no env). Bound by
+// env (not a committed bot_id map) so the bot identity stays out of git.
+const PROJECT_ID = process.env.PROJECT_ID ?? "";
+// Loaded + resolved once at startup (a gateway serves one app = one project).
+let projectsConfig: ProjectsConfig | undefined;
+let activeRoute: ResolvedRoute | null = null;
 const APP_SECRET = process.env.FEISHU_APP_SECRET ?? "";
 // The bot's own open_id (optional). When set, group messages are answered only
 // if THIS bot was @-mentioned (precise). When unset, the gate falls back to
@@ -258,10 +266,11 @@ async function streamingCardInvoke(
   // TELEMETRY (user-level, hashUserId-keyed, no traceId — metrics.ts §4 key-split):
   // count usage / DAU / follow-up depth. isFollowup = a reply/button turn (target carries
   // chatId, not a fresh messageId). hashUserId is applied here (raw open_id never reaches
-  // emitMetric). projectId is left out until the multi-repo routing (plan 1 stage 1) lands.
+  // emitMetric). projectId (multi-repo plan 阶段1) tags every event with which project this
+  // gateway serves, so a future multi-project fleet's metrics break down by project.
   emitMetric("question_received", {
     isFollowup: "chatId" in target,
-  }, { hashUserId: hashUserId(askerOpenId), sessionId });
+  }, { hashUserId: hashUserId(askerOpenId), sessionId, projectId: activeRoute?.projectId });
   let card: Awaited<ReturnType<typeof sendStreamingCard>>;
   try {
     card = await sendStreamingCard(sessionId, target, queued, question ?? prompt, traceId, parentMessageId, askerOpenId);
@@ -695,13 +704,13 @@ async function runStreamingInvoke(
         const ttfbMs = Math.round(performance.now() - monoStart);
         // coldStart dimension (boolean, low-cardinality → safe metric dimension): lets the
         // latency widget split warm vs cold ttfb instead of one blended p95.
-        emitMetric("answer_first_token", { ttfbMs, coldStart }, { traceId, sessionId });
+        emitMetric("answer_first_token", { ttfbMs, coldStart }, { traceId, sessionId, projectId: activeRoute?.projectId });
         // On a COLD session, the first-token time folds in AgentCore microVM spin-up +
         // routing — emit it as the cold-start DURATION signal (separate event so cold-start
         // frequency = count(runtime_cold_start) and duration = its spinupMs percentiles,
         // both independent of warm latency). Once per cold invoke (gated by firstTokenEmitted).
         if (coldStart) {
-          emitMetric("runtime_cold_start", { spinupMs: ttfbMs }, { traceId, sessionId });
+          emitMetric("runtime_cold_start", { spinupMs: ttfbMs }, { traceId, sessionId, projectId: activeRoute?.projectId });
         }
       }
       if (now - lastUpdate < THROTTLE_MS) return;
@@ -956,7 +965,7 @@ async function runStreamingInvoke(
       // CARD HEALTH (diagnostic, traceId-keyed): a cold-start tool-call leak dominated the
       // turn — user-visible bad card, alarm-worthy. Reuses THIS existing detection point
       // (no new detection logic, plan stage 3).
-      emitMetric("card_health", { kind: "toolcall_leak_detected" }, { traceId, sessionId });
+      emitMetric("card_health", { kind: "toolcall_leak_detected" }, { traceId, sessionId, projectId: activeRoute?.projectId });
       bodyNoEvidence = t("msg.fail.toolcallLeak");
       charts = []; evidence = ""; leakFailed = true;
     } else {
@@ -1116,19 +1125,19 @@ async function runStreamingInvoke(
   // logs — turn-cap / abort / timeout are not "hard" failures but each has its own
   // reason; a leaked-tool-call dominant turn maps to the cold-start race.
   if (clarify) {
-    emitMetric("clarify_shown", { optionCount: clarify.options.length }, { traceId, sessionId });
+    emitMetric("clarify_shown", { optionCount: clarify.options.length }, { traceId, sessionId, projectId: activeRoute?.projectId });
   } else if (aborted) {
     // USER 停止 (aborted = rawAborted && !timedOut, so this is specifically a user-pressed
     // stop, never a timeout). This is a deliberate user choice, NOT a system failure — emit
     // a SEPARATE answer_aborted so it doesn't inflate the failure rate (user-asked design point).
-    emitMetric("answer_aborted", {}, { traceId, sessionId });
+    emitMetric("answer_aborted", {}, { traceId, sessionId, projectId: activeRoute?.projectId });
   } else if (failed || timedOut || turnCapped) {
     const reason: FailReason =
       timedOut ? "upstream_throttle"
       : turnCapped ? "turn_capped"
       : leakFailed ? "cold_start_mcp_race"
       : "unknown";
-    emitMetric("answer_failed", { reason }, { traceId, sessionId });
+    emitMetric("answer_failed", { reason }, { traceId, sessionId, projectId: activeRoute?.projectId });
   } else {
     const evidenceCitationCount = (finalEvidence.match(/[\w./-]+\.[A-Za-z0-9]+:\d+/g) || []).length;
     emitMetric("answer_completed", {
@@ -1139,7 +1148,7 @@ async function runStreamingInvoke(
       hasCharts: charts.length > 0,
       evidenceCitationCount,
       coldStart,
-    }, { traceId, sessionId });
+    }, { traceId, sessionId, projectId: activeRoute?.projectId });
   }
   } catch (finalizeErr) {
     // The finalize composition threw unexpectedly. The card is still mid-stream
@@ -1153,7 +1162,7 @@ async function runStreamingInvoke(
     tlog({ event: "finalize_error", card: cardId, error: redactSensitive(String(finalizeErr)).slice(0, 300) });
     // CARD HEALTH (diagnostic): finalize threw — the card would freeze without the
     // emergency force-finalize below; this is the highest-severity bad-card signal, alarm it.
-    emitMetric("card_health", { kind: "finalize_failed" }, { traceId, sessionId });
+    emitMetric("card_health", { kind: "finalize_failed" }, { traceId, sessionId, projectId: activeRoute?.projectId });
     try { writer.dropLanes("status", "content", "evidence"); } catch { /* best-effort */ }
     await writer.write((seq) =>
       finalizeCard(cardId, t("msg.serviceError"), [], seq, isFollowUp, false, true, "", question, "", false, false, false, traceId),
@@ -1172,6 +1181,32 @@ async function main(): Promise<void> {
   // loudly here, not mid-answer. LOCALE env selects the locale (default zh).
   initI18n();
   log({ event: "i18n_loaded", locale: currentLocale() });
+  // Load + validate project routing (config/projects.json) at startup so a bad config fails
+  // loudly here, not as a silent mis-route mid-request (multi-repo plan 阶段1). Resolve THIS
+  // gateway's bot (APP_ID) to its project once — the gateway serves a single Feishu app, so
+  // the route is fixed for the process. An unknown/unconfigured bot is FAIL-CLOSED: we refuse
+  // to derive a route and log it; the per-request path then serves with no projectId rather
+  // than guessing a project (and a future multi-project gateway would reject the request).
+  try {
+    projectsConfig = loadProjectsConfig();
+    activeRoute = resolveRoute(projectsConfig, PROJECT_ID);
+    if (activeRoute) {
+      log({ event: "project_route_resolved", projectId: activeRoute.projectId, repos: activeRoute.repos.length });
+    } else {
+      // Ambiguous (multiple projects, no PROJECT_ID) or PROJECT_ID names an undeclared
+      // project — fail closed: serve without a projectId rather than guess (logged).
+      log({ event: "project_route_unresolved", reason: PROJECT_ID ? "project_id_not_declared" : "ambiguous_no_project_id", projectId: PROJECT_ID || null });
+    }
+  } catch (e) {
+    if (e instanceof ProjectsConfigMissing) {
+      // SOFT: no routing config provisioned → serve with no projectId (metrics simply omit
+      // the dimension). Not fatal; a single-project deploy can run without the file.
+      log({ event: "project_route_unconfigured", detail: "no .local/projects.json — serving without projectId" });
+    } else {
+      // FAIL LOUD: a PRESENT-but-malformed config is an operator error that must block startup.
+      throw new Error(`project-routing: ${String(e)}`);
+    }
+  }
   // Hold the credential PROVIDER, not a one-time resolved snapshot. EC2 instance-
   // role creds (IMDS) are temporary; resolving once at startup and reusing the
   // snapshot for the lifetime of this always-on process meant every invoke 403'd
@@ -1378,7 +1413,7 @@ async function main(): Promise<void> {
           // cb: dedup (prevented a double-answer/double-action). No traceId/hashUserId here —
           // a dropped duplicate has no invoke + no user-aggregation meaning; it's pure infra
           // health (reuses this existing detection point, plan stage 3).
-          emitMetric("card_health", { kind: "dedup_hit" });
+          emitMetric("card_health", { kind: "dedup_hit" }, { projectId: activeRoute?.projectId });
           return {};
         }
         if (value?.action === "stop") {
@@ -1487,7 +1522,7 @@ async function main(): Promise<void> {
           const voteKey = `vote:${fbCardId || messageId}:${voterHash}`;
           const firstVote = !isDuplicate(voteKey);
           if (firstVote) {
-            emitMetric("feedback_voted", { vote: fbVote }, { hashUserId: voterHash, sessionId: fbSession });
+            emitMetric("feedback_voted", { vote: fbVote }, { hashUserId: voterHash, sessionId: fbSession, projectId: activeRoute?.projectId });
           } else {
             log({ event: "feedback_revote_ignored", card: fbCardId ?? null });
           }
@@ -1555,7 +1590,7 @@ async function main(): Promise<void> {
           const reasonKey = `reason:${frCardId || messageId}:${reasonHash}`;
           const firstReason = !isDuplicate(reasonKey);
           if (firstReason) {
-            emitMetric("feedback_reason", { reasonCode: value.reasonCode }, { hashUserId: reasonHash, sessionId: frEntry?.sessionId });
+            emitMetric("feedback_reason", { reasonCode: value.reasonCode }, { hashUserId: reasonHash, sessionId: frEntry?.sessionId, projectId: activeRoute?.projectId });
           } else {
             log({ event: "feedback_reason_dup_ignored", card: frCardId ?? null });
           }

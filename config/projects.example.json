@@ -1,0 +1,32 @@
+{
+  "_doc": [
+    "EXAMPLE project-routing config (multi-repo-isolation plan 阶段1). This is a COMMITTED",
+    "TEMPLATE showing the schema; the REAL config is deployment-specific (which repo subdirs,",
+    "which internal endpoint) and lives at .local/projects.json (gitignored), alongside",
+    ".local/deploy-config which already holds REPO_SUBDIR / INDEX_DNS_NAME. Copy this to",
+    ".local/projects.json and fill in your deployment's values.",
+    "",
+    "Loaded + validated at gateway startup (bot-gateway/src/project-routing.ts): a bad config",
+    "fails the gateway loudly rather than mis-routing at request time.",
+    "",
+    "Shape:",
+    "  projects.<projectId> = { endpoint: <CODEGRAPH_MCP_URL for that project's bridge>,",
+    "                           repos: [<repo subdir>, ...] }",
+    "",
+    "WHICH project a gateway serves is bound by the PROJECT_ID env var (a gateway serves one",
+    "Feishu app = one project). If PROJECT_ID is unset AND exactly one project is declared, that",
+    "sole project is used (zero-config single-project case). The bot identity (FEISHU_APP_ID) is",
+    "NOT in this file — it is env-only, never committed.",
+    "",
+    "Adding a project: add a projects entry in .local/projects.json + set PROJECT_ID on that",
+    "project's gateway. repos is forwarded to the agent; per-project endpoint override on the",
+    "invoke path lands with the multi-runtime work in 阶段2+ (the live agent reads",
+    "CODEGRAPH_MCP_URL from its runtime env today)."
+  ],
+  "projects": {
+    "example-project": {
+      "endpoint": "http://index.example.internal:8080/mcp",
+      "repos": ["example-repo"]
+    }
+  }
+}
