@@ -52,8 +52,37 @@ describe("redactSensitive", () => {
       "https://example.com/path?x=1",
       "见 config/Hero.json:42 的 ResolveMatch()",
       "暴击率约为 3:4 的比例",
-      "服务在 db.internal:3306 上",
+      "服务在 db.internal:3306 上",          // short internal hostname kept (low recon, useful in citation)
     ]) {
+      expect(redactSensitive(safe)).toBe(safe);
+    }
+  });
+
+  it("redacts an Azure Storage AccountKey (bare `key` excluded, account_key included) (cross-review)", () => {
+    const out = redactSensitive("AccountKey=Zm9vYmFyYmF6cXV4MTIzNDU2Nzg5MA== 用于存储");
+    expect(out).not.toContain("Zm9vYmFyYmF6");
+    expect(out).toContain("[已隐藏]");
+    // a benign game field whose name merely ends in `key` must SURVIVE (no bare-`key` rule)
+    expect(redactSensitive("foreign_key=hero_id")).toBe("foreign_key=hero_id");
+    expect(redactSensitive("sort_key=level_asc")).toBe("sort_key=level_asc");
+  });
+
+  it("redacts EC2 auto-assigned internal DNS (embeds the private IP) but not a plain *.internal host", () => {
+    const out = redactSensitive("backend at ip-10-0-13-42.ap-northeast-1.compute.internal:8080");
+    expect(out).not.toContain("10-0-13-42");
+    expect(out).toContain("[已隐藏]");
+    // a plain short internal hostname is intentionally kept (benign-host design decision)
+    expect(redactSensitive("服务在 db.internal:3306 上")).toBe("服务在 db.internal:3306 上");
+  });
+
+  it("redacts an internal S3 bucket URI (reconnaissance-useful naming)", () => {
+    const out = redactSensitive("artifacts in s3://source-truth-artifacts-prod/bin/codegraph-server staged");
+    expect(out).not.toContain("source-truth-artifacts-prod");
+    expect(out).toContain("[已隐藏]");
+  });
+
+  it("does NOT redact IP-like game data (versions / coordinates) — no bare RFC1918 rule", () => {
+    for (const safe of ["版本 10.0.13.42 上线", "坐标 (10.0.13.42)"]) {
       expect(redactSensitive(safe)).toBe(safe);
     }
   });
