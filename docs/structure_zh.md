@@ -16,45 +16,53 @@ agent-container/        会话 microVM 内运行的 Claude Code Agent（Python�
 bot-gateway/            飞书 Bot 长连接事件网关 + CardKit 流式渲染（TypeScript 长驻服务）
   README.md             长连接 / 事件去重 / 会话→runtimeSessionId 映射 / 卡片更新频控
   src/                  事件消费入口、SigV4 调 AgentCore、会话映射、CardKit 渲染、SSE 解析、脱敏日志
+  run.sh                服务启动器：source /etc/bot-gateway.env + 从 Secrets Manager 取飞书凭证（不落盘）→ node dist
 index-service/          常驻 CodeGraph 索引服务 + MCP-over-HTTP 桥
-  README.md             常驻单写者会话 / CodeGraph / HTTP 桥（定位 + 读文件） / 本地仓库副本 / bootstrap
+  README.md             常驻会话（独占写入 graph.db） / CodeGraph / HTTP 桥（定位 + 读文件） / 本地仓库副本 / bootstrap
   http_bridge.py        FastMCP HTTP 桥（包根，非 src/）：暴露 codegraph 定位 + 读文件工具，路径对齐为仓库相对
-  codegraph_session.py  常驻 codegraph-server 单写者会话（worker 线程 + 私有 loop，健康自愈，带超时）
+  codegraph_session.py  常驻 codegraph-server 会话，独占写入 graph.db（worker 线程 + 私有 loop，健康自愈，带超时）
   file_search.py        本地副本 ripgrep/grep 检索工具（全仓搜索远程 EFS/NFS 比本地副本慢 ~225x：远程 20–47s vs 本地 0.2s，故内置 Grep 禁用、改走本地副本；命中按内容去重；MCP 暴露）
   file_read.py          本地副本按行/按点读文件工具（read_file，路径对齐为仓库相对；MCP 暴露）
   file_table.py         结构化配置表读取（Excel/CSV/TSV/SQLite → 文本，read_table；只读、带 DoS 上限；MCP 暴露）
   path_align.py         索引路径 ↔ 仓库相对路径词法对齐（拒越界；mount_root 默认空，遗留 /mnt/repo 仍兼容）
-  codegraph_client.py   codegraph-server 客户端封装（休眠：仅测试用，单写者 tripwire 守护，绝不上常驻服务路径）
+  codegraph_client.py   codegraph-server 客户端封装（休眠：仅测试用，独占写入 tripwire 守护，绝不进常驻服务路径）
   perf.py               结构化耗时日志
   bootstrap.sh          EC2 user-data：装依赖 / 解包仓库到本地 /data/repo / 快照 stamp 重解压 / systemd build→bridge
   tests/                pytest（由 scripts/test.sh 调用）
 infra/                  基础设施即代码（MVP 先 agentcore toolkit / boto3，渐进 CDK 化）
   README.md             IaC 分工：CDK 管稳定层 / deploy-all.sh 用 boto3 配 AgentCore Runtime
   (p2) lib/             runtime / codegraph(index-service) / gateway 各 stack
-shared/                 跨包共享：结构化日志（hashUserId 脱敏）、MCP 工具 schema、卡片协议类型
 config/                 配置驱动：i18n.json（卡片 / 告警 / 错误文案）、(p1) alarm-thresholds.json（阈值待落地）
 scripts/                运维生命周期
   check-invariants.sh   快速结构 lint（AGENTS / CLAUDE / structure / 双语配对 / 顶层目录存在性）
   lib/                  common.sh（格式化 + 依赖检查）、env-utils.sh（.env / deploy-config 共享 helper）
   test.sh               单一分层测试入口（离线默认 / --full）
   check-versions.sh     版本钉死防漂移守卫（base digest / requirements pin / Node / claude-code npm）
-  deploy-all.sh         一键部署 canonical（artifacts→IAM→network→index-service→镜像→Runtime；幂等）
+  install.sh            交互式一键安装（查依赖→飞书凭证→配置→确认→调 deploy-all；重跑预填）
+  deploy-all.sh         一键部署 canonical（artifacts→IAM→network→index-service→镜像→Runtime→gateway；幂等）
   lib/provision_*.sh + deploy_runtime.py + wait_index_health.sh  deploy-all.sh 的各阶段实现
+  lib/resolve_repo.sh   --repo 多来源解析（本地 / git URL / s3://）→ 统一为本地目录
+  lib/activate_gateway.sh  经 SSM 写 /etc/bot-gateway.env + 启动 bot-gateway.service（gateway 与索引同主机）
+  lib/stop_gateway.sh   经 SSM 停旧实例 gateway（蓝绿换实例 break-before-make，防双网关抢飞书长连接）
   ⚠️ deploy.sh          已废弃兼容垫片（转发到 deploy-all.sh）
-  (p2) ops.sh           运维工具（status / logs / reindex / destroy）
-  (p2) teardown.sh      有序销毁 + 保留资源清单
+  (p2) ops.sh           运维工具（status / logs / reindex）
+  teardown.sh           有序销毁 + 保留资源清单
 docs/
+  README.md             文档总索引（按受众分类的入口地图）
   structure_zh.md       本文件（权威目录树，双语配对）
   structure_en.md       英文对照
-  design/               设计真相源（中文）
+  runbook.md            部署 / 连飞书 / 运维 / 排错（中性名，不参与双语配对）
+  design/               设计权威依据（仅中文，暂不翻译）
+    README.md                   目录说明 + 与架构 / 不变量文档的关系
     requirements_zh.md          需求与方案评审纪要（导入）
     architecture-overview_zh.md POC 架构方案（导入）
     agent-container_zh.md       agent-container 组件实现契约
   agent/                AI 面向文档
-    architecture.md     心智模型：一次提问如何穿过系统
-    invariants.md       （p1）源 → 生成物映射 + 改 X 必改 Y 的耦合
-    playbooks.md        （p1）有序变更配方
+    architecture.md     工作原理：一次提问如何在系统里流转
+    invariants.md       源 → 生成物映射 + 改 X 必改 Y 的耦合（7 条不变量）
+    playbooks.md        有序变更配方（7 个配方）
+    *-spike.md          调研记录（cardkit 流式 / 索引性能 / EFS 对比 / 性能对比 / 模板）
 .local/                 （已 gitignore）账号特定部署状态：deploy-config、deploy-output.md
 ```
 
-标注 `(p1)` / `(p2)` 的条目为后续阶段产出，当前仅占位或尚未创建。
+标注 `(p1)` / `(p2)` 的条目为后续阶段产出，当前仅占位或尚未创建；未标注者均已落地。

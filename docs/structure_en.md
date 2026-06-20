@@ -16,6 +16,7 @@ agent-container/        Claude Code Agent running inside the session microVM (Py
 bot-gateway/            Feishu Bot long-connection event gateway + CardKit streaming (TypeScript long-running service)
   README.md             Long-connection / event dedup / session→runtimeSessionId map / card update throttling
   src/                  Event consumer entry, SigV4 call to AgentCore, session map, CardKit render, SSE parse, redacted logging
+  run.sh                Service launcher: source /etc/bot-gateway.env + fetch Feishu creds from Secrets Manager (never on disk) → node dist
 index-service/          Standalone CodeGraph index service + MCP-over-HTTP bridge
   README.md             Resident single-writer session / CodeGraph / HTTP bridge (locate + read files) / local repo copy / bootstrap
   http_bridge.py        FastMCP HTTP bridge (package root, not src/): exposes codegraph locate + read-file tools, aligns paths to repo-relative
@@ -31,30 +32,37 @@ index-service/          Standalone CodeGraph index service + MCP-over-HTTP bridg
 infra/                  Infrastructure as code (MVP starts with agentcore toolkit / boto3, CDK-ified incrementally)
   README.md             IaC split: CDK owns the stable layer / deploy-all.sh provisions AgentCore Runtime via boto3
   (p2) lib/             runtime / codegraph(index-service) / gateway stacks
-shared/                 Cross-package shared: structured logging (hashUserId), MCP tool schema, card protocol types
 config/                 Config-driven: i18n.json (card / alarm / error copy), (p1) alarm-thresholds.json (thresholds TBD)
 scripts/                Operational lifecycle
   check-invariants.sh   Fast structural lint (AGENTS / CLAUDE / structure / bilingual pairing / top-level dir existence)
   lib/                  common.sh (formatting + dep checks), env-utils.sh (.env / deploy-config shared helper)
   test.sh               Single tiered test entrypoint (offline default / --full)
   check-versions.sh     Pinned-version drift guard (base digest / requirements pin / Node / claude-code npm)
-  deploy-all.sh         Canonical one-click deploy (artifacts→IAM→network→index-service→image→Runtime; idempotent)
+  install.sh            Interactive one-click install (check deps→Feishu creds→config→confirm→deploy-all; pre-fills on re-run)
+  deploy-all.sh         Canonical one-click deploy (artifacts→IAM→network→index-service→image→Runtime→gateway; idempotent)
   lib/provision_*.sh + deploy_runtime.py + wait_index_health.sh  deploy-all.sh phase implementations
+  lib/resolve_repo.sh   --repo multi-source resolver (local / git URL / s3://) → normalized local dir
+  lib/activate_gateway.sh  Write /etc/bot-gateway.env + start bot-gateway.service via SSM (gateway co-located with the index host)
+  lib/stop_gateway.sh   Stop the old instance's gateway via SSM (break-before-make on blue-green swap; prevents two gateways racing the Feishu long-connection)
   ⚠️ deploy.sh          Deprecated compatibility shim (delegates to deploy-all.sh)
-  (p2) ops.sh           Ops toolkit (status / logs / reindex / destroy)
-  (p2) teardown.sh      Ordered teardown + retained-resource list
+  (p2) ops.sh           Ops toolkit (status / logs / reindex)
+  teardown.sh           Ordered teardown + retained-resource list
 docs/
+  README.md             Documentation index (audience-grouped entry map)
   structure_zh.md       Authoritative tree (Chinese, bilingual pair)
   structure_en.md       This file (English counterpart)
-  design/               Design source of truth (Chinese)
+  runbook.md            Deploy / connect-Feishu / ops / troubleshooting (neutral name, exempt from bilingual pairing)
+  design/               Design source of truth (Chinese only, not yet translated)
+    README.md                   Directory notes + relation to architecture / invariants docs
     requirements_zh.md          Requirements & solution review notes (imported)
     architecture-overview_zh.md POC architecture plan (imported)
     agent-container_zh.md       agent-container component implementation contract
   agent/                AI-facing docs
     architecture.md     Mental model: how one question crosses the system
-    invariants.md       (p1) source → generated map + change-X-must-change-Y couplings
-    playbooks.md        (p1) ordered change recipes
+    invariants.md       source → generated map + change-X-must-change-Y couplings (7 invariants)
+    playbooks.md        ordered change recipes (7 recipes)
+    *-spike.md          Research notes (cardkit streaming / indexing perf / EFS comparison / perf comparison / template)
 .local/                 (gitignored) account-specific deploy state: deploy-config, deploy-output.md
 ```
 
-Entries tagged `(p1)` / `(p2)` are later-phase outputs; currently placeholders or not yet created.
+Entries tagged `(p1)` / `(p2)` are later-phase outputs; currently placeholders or not yet created. Untagged entries are all in place.

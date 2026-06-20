@@ -12,9 +12,9 @@
 | 文件 | 职责 |
 |------|------|
 | `src/index.ts` | 事件消费入口（长连接订阅，类比 `lark-cli event consume`）；事件去重、@提及解析 |
-| `src/session-map.ts` | 会话 (chat_id / thread_id) → runtimeSessionId 映射（DDB + TTL，复用 warm 容器） |
+| `src/session-map.ts` | 会话 (chat_id / thread_id) → runtimeSessionId 映射（DDB + TTL，复用热容器） |
 | `src/sigv4.ts` | SigV4 签名调 AgentCore `/runtimes/<arn>/invocations`（按会话注入 runtimeSessionId） |
-| `src/cardkit-client.ts` | CardKit 卡片构建 + 流式 create/update 循环；完成后动态追加按钮 / 图表 / 转研发组件 |
+| `src/cardkit-client.ts` | CardKit 卡片构建 + 流式 create/update 循环；动态追加停止按钮 / 图表 / 追问按钮 / 「供研发复核」出处面板 |
 | `src/log.ts` | 结构化日志 + `hashUserId` 脱敏（用户/会话/消息标识不落明文） |
 | `src/handle-event.ts` · `src/sdk-event.ts` | IM 事件核心：去重、@提及解析 / 群里 @ 门控、会话路由 |
 | `src/parse-stream.ts` · `src/redact.ts` · `src/extract-charts.ts` · `src/extract-followups.ts` | SSE 解析（含错误传播）/ 敏感信息脱敏 / 图表块抽取 / 追问抽取 |
@@ -51,8 +51,8 @@ node_modules/.bin/ts-node --transpile-only src/index.ts
 
 长驻服务（ECS Fargate / 常驻容器）。语言选 TypeScript：飞书官方 SDK 与 CardKit 流式卡片在 TS 生态最成熟。
 
-## 状态
+## 运行形态
 
-已实现并在东京真机联调：上述 `src/*`、`package.json`、ESLint、jest 单测齐备；本地 `ts-node` 跑，
-飞书长连接单消费者。运行所需 env：`RUNTIME_ARN` / `AWS_REGION` / `FEISHU_APP_ID` / `FEISHU_APP_SECRET`
-/ `FEISHU_BOT_OPEN_ID`（群里精确判定被 @）/ `LOG_HASH_SALT`。ECS 常驻托管为后续项（MVP 未实现）。
+本地 `ts-node` 跑，飞书长连接单消费者。运行所需 env：`RUNTIME_ARN` / `AWS_REGION` / `FEISHU_APP_ID` /
+`FEISHU_APP_SECRET` / `FEISHU_BOT_OPEN_ID`（群里精确判定被 @）/ `LOG_HASH_SALT`。
+ECS 常驻托管为 post-MVP。

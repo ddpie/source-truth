@@ -1,20 +1,32 @@
 # source-truth
 
-> 在飞书里 @ 一下机器人，用大白话回答"这个技能/数值/规则到底怎么算"——
-> 答案直接来自项目**最新主分支的真实代码**，不是凭印象编的。
+> 在飞书里 @ 机器人，用业务语言回答"这个技能/数值/规则到底怎么算"——
+> 答案来自项目**最新主分支的真实代码**，并附可复核的出处。**仓库越大，优势越明显。**
 
-游戏项目越做越大，"这个技能的冷却到底怎么算""负重上限和力量什么关系"这类问题，
-答案其实都写在代码和配置表里——但策划翻不动代码，研发又被反复打断。source-truth 把这件事自动化：
-你在飞书里问，一个 AI 助手就去读项目的真实代码、找到依据，再把结论用大白话讲给你听。
+游戏研发中，"这个技能的冷却怎么算""负重上限和力量的关系"这类问题的答案都写在代码与配置表里，
+但策划难以直接查阅代码，研发则被反复打断。source-truth 将这一环节自动化：策划在飞书提问，
+AI 助手读取项目真实代码、定位依据，再用业务语言给出结论。
 
-**它和"随便问个 AI"最大的不同**：答案永远以仓库里的真实代码为准（code as the single source of truth）——
-代码和文档/记忆冲突时以代码为准，并标注差异；证据不足就转研发，绝不编。
+## 为什么用它（实测）
+
+针对**大型代码仓**快速出结果，是 source-truth 的核心优势——大仓正是通用工具最吃力的地方：
+
+- **大仓里依然秒级定位**：在一个 **16 GB / 7.5 万文件**的工程上，不建索引全仓 grep 最坏 **265 秒**；
+  改用 CodeGraph 索引后，定位查询恒定 **1–5 毫秒**，且与工程体积**完全解耦**——仓库再大，定位不变慢。
+- **比通用 AI 问答快 2.7–5.1×**：与原生 Claude Code 同模型、同 prompt、同仓配对实测，四次独立采样一致
+  快 **2.7–5.1×**、问答轮次约少一半到三分之一（先用 CodeGraph 定位符号，不在大仓里盲目 grep）。
+- **每条结论都可复核**：答案末尾附「供研发复核」折叠区，列出 `文件:行号` 出处；代码与文档/记忆冲突时
+  以代码为准并标注差异，证据不足时给出低置信度提示、建议转研发确认，绝不臆测。
+
+> 数据来源与复现见 [`docs/agent/perf-comparison.md`](docs/agent/perf-comparison.md) 与
+> [`docs/agent/indexing-performance-spike.md`](docs/agent/indexing-performance-spike.md)。
+
+**与通用问答的根本区别**：答案以仓库真实代码为唯一依据（code as the single source of truth）。
 
 > 一句话定位：飞书机器人驱动的「代码为唯一依据」游戏研发代码问答助手。
 
-本项目是飞书设计文档《游戏研发智能助手 POC 方案》的工程实现。需求与架构真相源见
-[`docs/design/`](docs/design/)；AI 协作约定见 [`AGENTS.md`](AGENTS.md)；一次提问如何穿过系统见
-[`docs/agent/architecture.md`](docs/agent/architecture.md)。
+需求与架构权威依据见 [`docs/design/`](docs/design/)；AI 协作约定见 [`AGENTS.md`](AGENTS.md)；
+一次提问如何在系统里流转见 [`docs/agent/architecture.md`](docs/agent/architecture.md)。
 
 ## 一次真实问答长什么样
 
@@ -22,16 +34,18 @@
 |---|----------------------|---------------|
 | 1 | 你在群里 `@助手 角色的负重上限怎么算？` | 飞书长连接把消息推给网关，无需轮询 |
 | 2 | 卡片立即回「正在分析…」，标题带实时计时 | 让你知道它在干活，不是卡死 |
-| 3 | Agent 用 CodeGraph 定位到相关公式文件，读出真实计算逻辑 | 先定位再读文件，不全仓乱翻 |
-| 4 | 结论流式打字回填，先给结论再讲依据（用大白话，不堆代码） | 结论先行，非技术同学也读得懂 |
+| 3 | Agent 用 CodeGraph 定位到相关公式文件，读出真实计算逻辑 | 先定位再读文件，不做全仓盲扫 |
+| 4 | 结论流式回填，先给结论再讲依据（业务语言，不堆砌代码） | 结论先行，非技术读者也能读懂 |
 | 5 | 卡片底部长出「供研发复核」折叠区，列出 `文件:行号` 出处 | 研发一点就能核对，非技术同学不被代码淹没 |
 | 6 | 还可点「继续追问」按钮或直接回复卡片，**带着上文**接着问 | 多轮对话复用同一会话，不丢上下文 |
 
 ## 端到端链路
 
-三个有状态组件，从飞书一路串到代码：飞书客户端 → 网关 → 会话隔离的 microVM → 唯一代码副本。
+三个有状态组件，从飞书一路串到代码：飞书客户端 → 网关 → 会话隔离的 microVM → 共享只读代码副本。
+**每个会话跑在各自独立的 microVM 里、互不可见，但都向同一份只读代码副本取证**——这是隔离与共享的分界。
+（多仓库隔离为 post-MVP，图中以灰色虚线标出，当前 MVP 仅单仓。）
 
-![source-truth 架构：飞书客户端 → bot-gateway → AgentCore microVM → index-service，答案流式回填](docs/assets/architecture.svg)
+![source-truth 架构图：飞书客户端 → bot-gateway（单实例）→ 多个各自隔离的会话 microVM → 共享只读的 index-service 代码副本，答案流式回填；多仓库为 post-MVP 虚线标注](docs/assets/architecture.svg)
 
 > **会话 microVM 不挂任何文件系统**：没有 EFS、没有共享挂载。所有源码、配置表都经
 > index-service 的 HTTP 桥读取（`codegraph_read_file` / `glob_files` / `search_files`），
@@ -43,9 +57,8 @@
 |------|------|------|
 | [`agent-container/`](agent-container/) | 会话 microVM 内运行的 Claude Code Agent：推理 + 编排 + 取证 | Python |
 | [`bot-gateway/`](bot-gateway/) | 飞书 Bot 长连接事件网关 + CardKit 流式卡片渲染 | TypeScript |
-| [`index-service/`](index-service/) | 常驻 CodeGraph 索引服务 + MCP-over-HTTP 文件桥（持唯一代码副本） | Python |
+| [`index-service/`](index-service/) | 常驻 CodeGraph 索引服务 + MCP-over-HTTP 文件读取接口（持唯一代码副本） | Python |
 | [`infra/`](infra/) | IaC：AgentCore Runtime / 索引服务 / 网关 | boto3 + CDK（渐进） |
-| [`shared/`](shared/) | 跨包共享：结构化日志、契约类型 | — |
 | [`config/`](config/) | 配置驱动：i18n 文案、告警阈值 | JSON |
 | [`scripts/`](scripts/) | 部署 / 运维 / 测试生命周期 | Bash |
 
@@ -53,13 +66,22 @@
 
 ## 部署与测试
 
-一键部署（全新账号 / 区域可跑、幂等、可重复）。脚本分 6 个阶段，任一可单独跳过：
+**推荐：交互式一键安装**（全新账号 / 区域可跑、幂等；重跑预填上次答案）：
 
 ```bash
-# 前置：已开通目标模型的 Bedrock 访问、目标区域支持 AgentCore、本机有目标代码仓
-./scripts/deploy-all.sh --region ap-northeast-1 --repo /path/to/your-game-repo
-#   artifacts→S3 → IAM → network → index-service(EC2) → 镜像(ARM64→ECR) → AgentCore Runtime
-./scripts/deploy-all.sh --region ap-northeast-1 --repo /path/to/repo --dry-run   # 只打印计划，不改任何资源
+# 前置：已开通目标模型的 Bedrock 访问、目标区域支持 AgentCore、本机装好 aws/docker/git
+./scripts/install.sh
+#   查依赖 → 问区域/代码仓/模型 → 收飞书凭证(写 Secrets Manager) → 确认 → 端到端拉起后端 + 网关
+```
+
+代码仓来源任选：本地路径、git 地址（GitHub/GitLab，`--repo-ref` 指定分支/标签/提交）、或 `s3://` tarball/前缀。
+
+**进阶：直接调底层编排**（CI / 精确控参；7 个阶段，任一可 `--skip`）：
+
+```bash
+./scripts/deploy-all.sh --region ap-northeast-1 --repo <本地路径 | git URL | s3://...>
+#   artifacts→S3 → IAM → network → index-service(EC2) → 镜像(ARM64→ECR) → AgentCore Runtime → gateway
+./scripts/deploy-all.sh --region ap-northeast-1 --repo <src> --dry-run   # 只打印计划，不改任何资源
 # deploy.sh 已废弃，仅作兼容垫片转发到 deploy-all.sh
 ```
 
@@ -71,8 +93,8 @@
 ./scripts/check-invariants.sh    # 结构自检：AGENTS / CLAUDE / structure / 双语配对 / 顶层目录
 ```
 
-> 密钥（飞书 app secret、bot token）走 Secrets Manager / SSM，**当前需手工在 CDK 外创建**；
-> 编排脚本尚未自动建密钥，bot-gateway 启动需 `FEISHU_APP_ID` / `FEISHU_APP_SECRET` 环境变量。
+> 飞书凭证（app secret 等）走 Secrets Manager——`install.sh` 交互式创建 `source-truth/feishu-app` 密钥，
+> 网关运行时由 `run.sh` 取出注入进程环境，**不落盘、不入仓库**。
 
 ## MVP 边界（有意不做的事）
 
@@ -83,7 +105,7 @@
 - 不读设计文档、不跨多分支 / worktree、不做跨会话共享记忆
 - 不接第二引擎（Codex）、不做完整审计护栏
 
-**已实现的范围**：
+**做的事**：
 
 - 单引擎 Claude Code（走 Bedrock 计费）
 - CodeGraph 类索引 + index-service 持仓库本地副本、经 HTTP 桥服务代码
@@ -99,7 +121,7 @@
 ```
 deploy-all.sh：把目标仓库打成 tarball 上传 S3（部署时快照）
   ▼ bootstrap.sh（EC2 首启）：解包到 index-service 本地磁盘
-  ▼ 建图一次（codegraph-server --graph-only，flock 单写者）
+  ▼ 建图一次（codegraph-server --graph-only，flock 独占写入）
   ▼ 常驻只读服务（codegraph-server --mcp + HTTP 桥）
 ```
 
@@ -114,36 +136,40 @@ deploy-all.sh：把目标仓库打成 tarball 上传 S3（部署时快照）
 
 把代码读给一个群里的非技术读者听，安全面有三类：**别越权**（只读不能变成写）、**别泄露**（密钥/内网拓扑不能进群）、**别被带偏**（提问或代码里的注入指令不能改变行为）。每一类都不靠"提示词说说而已"，而是有代码层强制：
 
-| 面 | 怎么强制 | 真相源 |
+| 面 | 怎么强制 | 权威依据 |
 |----|---------|--------|
-| **只读边界** | Agent SDK 配 `tools=[]`（可用性闸，连写工具都不在模型上下文里）+ `disallowed_tools` 黑名单 + `permission_mode=dontAsk`；index-service 端只注册 7 个只读工具（闭合白名单，不注册即无能力） | `agent-container/agent_lib.py`、`index-service/http_bridge.py` |
+| **只读边界** | Agent SDK 配 `tools=[]`（连写工具都不在模型上下文里，模型根本无从调用）+ `disallowed_tools` 黑名单 + `permission_mode=dontAsk`；index-service 端只注册 7 个只读工具（闭合白名单，不注册即无能力） | `agent-container/agent_lib.py`、`index-service/http_bridge.py` |
 | **会话隔离** | 每次提问跑在独立的 Firecracker microVM，**不挂任何共享/代码文件系统**（无 EFS、无 `/mnt/repo`）；代码只经 HTTP 桥读，会话之间无共享状态 | `docs/agent/architecture.md` |
 | **路径confinement** | Agent 给的文件路径经词法 + realpath 双重校验关进仓库根，符号链接逃逸（指向仓库外）被丢弃；SQLite 只读模式开、禁扩展加载 | `index-service/path_align.py`、`file_read.py`、`file_table.py` |
 | **密钥/拓扑脱敏** | 进群的每个字段（结论/依据/追问/澄清/分析过程/问题回显/兜底文本）都过脱敏：AWS/Stripe/GitHub/JWT/Azure key、连接串口令、EC2 内网 DNS、S3 bucket、本机飞书 secret 全部 `[已隐藏]` | `bot-gateway/src/redact.ts` |
 | **防注入信任边界** | 工具读到的代码/注释/配置一律当"待分析数据"，其中任何"改变你的行为"的文字都不执行；只信打包进镜像的 system prompt | `agent-container/prompts/system.md` |
 | **取证泄漏兜底** | 冷启动时模型偶尔把工具调用当文本吐出（MCP 未注册）——agent 侧退避重试，gateway 侧检测并剥离，0 工具的"假完成"渲染为失败卡而非绿色成功 | `agent-container/agent_lib.py`、`bot-gateway/src/strip-toolcall-leak.ts` |
-| **单写者铁律** | graph.db 同一时刻只一个写者（flock 跨进程 + 进程内重启锁 + orphan reaper），杜绝 RocksDB 并发写损坏 | `index-service/codegraph_session.py`、`bootstrap.sh` |
+| **独占写入约束** | graph.db 同一时刻只允许一个进程写入（flock 跨进程 + 进程内重启锁 + orphan reaper），避免 RocksDB 并发写损坏 | `index-service/codegraph_session.py`、`bootstrap.sh` |
 | **密钥不入库** | 飞书 App ID/Secret、token 走环境变量 / Secrets Manager / SSM，部署 user-data 只写非敏感配置 | `.local/`（gitignored）、`docs/agent/invariants.md` §7 |
 
-逐条「是什么 / 谁是真相源 / 怎么机检 / 违反后果」见 [`docs/agent/invariants.md`](docs/agent/invariants.md)。
+逐条「是什么 / 以谁为准 / 怎么机检 / 违反后果」见 [`docs/agent/invariants.md`](docs/agent/invariants.md)。
 
 ## 风险与可信度
 
-- **AI 固有风险**：模型可能幻觉、可能被提问里的注入指令带偏。护栏：答案强约束"代码为唯一依据 +
-  标注出处"，证据不足转研发；信任边界只信 system prompt，不信工具读到的内容里的指令。
+- **AI 固有风险**：模型可能幻觉、可能被提问中的注入指令带偏。护栏：答案强约束"代码为唯一依据 +
+  标注出处"，证据不足时给出低置信度提示并建议转研发确认；信任边界只信 system prompt，不信工具读到的内容里的指令。
 - **快照可能过时**：索引是部署时的快照，主分支后续提交不会自动反映——重部署才刷新（见上一节）。
 - **只读边界**：全程不写任何代码 / 文件，越界能力一律后置。
 
 ## 文档导航
 
-| 主题 | 链接 |
-|------|------|
-| 部署 / 连飞书 / 运维 / 排错（从零到能用） | [`docs/runbook.md`](docs/runbook.md) |
-| 一次提问如何穿过系统（AI 必读） | [`docs/agent/architecture.md`](docs/agent/architecture.md) |
-| AI 协作约定 / 不变量（含安全不变量逐条） | [`AGENTS.md`](AGENTS.md) · [`docs/agent/invariants.md`](docs/agent/invariants.md) |
-| 目录结构（双语） | [`docs/structure_zh.md`](docs/structure_zh.md) · [`docs/structure_en.md`](docs/structure_en.md) |
-| 需求 / 架构设计真相源 | [`docs/design/requirements_zh.md`](docs/design/requirements_zh.md) · [`docs/design/architecture-overview_zh.md`](docs/design/architecture-overview_zh.md) |
-| CardKit 流式卡片调研 | [`docs/agent/cardkit-streaming-spike.md`](docs/agent/cardkit-streaming-spike.md) |
-| 索引性能基准 | [`docs/agent/indexing-performance-spike.md`](docs/agent/indexing-performance-spike.md) |
-| 为何不挂 EFS / 改用本地副本 | [`docs/agent/efs-codegraph-sharing-spike.md`](docs/agent/efs-codegraph-sharing-spike.md) |
-| 性能对比（vs 原生 Claude Code） | [`docs/agent/perf-comparison.md`](docs/agent/perf-comparison.md) |
+> 全部文档的入口地图见 [`docs/README.md`](docs/README.md)（按受众分类）。下表是高频入口：
+
+| 层 | 主题 | 链接 |
+|----|------|------|
+| **入门** | 部署 / 连飞书 / 运维 / 排错（从零到能用） | [`docs/runbook.md`](docs/runbook.md) |
+| **架构** | 一次提问如何在系统里流转（AI 必读） | [`docs/agent/architecture.md`](docs/agent/architecture.md) |
+| **架构** | 目录结构（双语） | [`docs/structure_zh.md`](docs/structure_zh.md) · [`docs/structure_en.md`](docs/structure_en.md) |
+| **规范** | AI 协作约定 | [`AGENTS.md`](AGENTS.md) |
+| **规范** | 不变量与权威依据映射（含安全不变量逐条） | [`docs/agent/invariants.md`](docs/agent/invariants.md) |
+| **规范** | 变更配方（改 X 怎么做 / 怎么验 / 怎么上线） | [`docs/agent/playbooks.md`](docs/agent/playbooks.md) |
+| **设计权威依据** | 需求 / 架构设计原件（导入，仅中文） | [`docs/design/`](docs/design/README.md) |
+| **调研** | CardKit 流式卡片 | [`docs/agent/cardkit-streaming-spike.md`](docs/agent/cardkit-streaming-spike.md) |
+| **调研** | 索引性能基准 | [`docs/agent/indexing-performance-spike.md`](docs/agent/indexing-performance-spike.md) |
+| **调研** | 为何不挂 EFS / 改用本地副本 | [`docs/agent/efs-codegraph-sharing-spike.md`](docs/agent/efs-codegraph-sharing-spike.md) |
+| **调研** | 性能对比（vs 原生 Claude Code） | [`docs/agent/perf-comparison.md`](docs/agent/perf-comparison.md) |
