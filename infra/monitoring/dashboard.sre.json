@@ -105,12 +105,13 @@
       "type": "metric",
       "x": 12, "y": 14, "width": 12, "height": 6,
       "properties": {
-        "title": "工具调用 / 答（取证强度）与澄清触发数",
+        "title": "工具调用/答（取证强度）、工具错误、澄清触发",
         "region": "${REGION}",
         "view": "timeSeries",
         "period": 300,
         "metrics": [
           ["${NAMESPACE}", "ToolCalls", {"label": "平均工具调用/答", "stat": "Average", "color": "#1f77b4"}],
+          ["${NAMESPACE}", "ToolErrors", {"label": "工具错误数(已恢复)", "stat": "Sum", "color": "#d62728"}],
           ["${NAMESPACE}", "ClarifyShown", {"label": "澄清触发数", "stat": "Sum", "color": "#bcbd22", "yAxis": "right"}]
         ]
       }

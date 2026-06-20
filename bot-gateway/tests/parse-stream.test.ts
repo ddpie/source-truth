@@ -319,6 +319,45 @@ describe("tool-call accounting (perf: few-deep-turns vs many-round-trips)", () =
   });
 });
 
+describe("tool-error accounting (toolErrors — per-tool is_error, telemetry only)", () => {
+  it("counts is_error:true tool_results WITHOUT flagging a stream error", () => {
+    const st = newStreamState();
+    applyEvent(st, { content: [{ tool_use_id: "t1", content: "blocked by permission", is_error: true }] });
+    applyEvent(st, { content: [{ tool_use_id: "t2", content: "no such file", is_error: true }] });
+    applyEvent(st, { content: [{ text: "最终答案。" }], stop_reason: "end_turn" });
+    expect(st.toolErrors).toBe(2);
+    expect(st.error).toBeNull();          // per-tool errors are NOT stream errors
+    expect(st.texts).toContain("最终答案。"); // the answer is still trustworthy
+  });
+
+  it("counts multiple tool_results in ONE content[] array", () => {
+    const st = newStreamState();
+    applyEvent(st, { content: [
+      { tool_use_id: "a", content: "ok", is_error: false },
+      { tool_use_id: "b", content: "err", is_error: true },
+      { tool_use_id: "c", content: "err", is_error: true },
+    ] });
+    expect(st.toolErrors).toBe(2);        // only the two is_error:true ones
+  });
+
+  it("does NOT count a healthy run (no is_error) as a tool error", () => {
+    const st = newStreamState();
+    applyEvent(st, { content: [{ name: "Read", input: {} }] });
+    applyEvent(st, { content: [{ tool_use_id: "t1", content: "file body" }] }); // success result
+    applyEvent(st, { content: [{ text: "答案" }] });
+    expect(st.toolErrors).toBe(0);
+  });
+
+  it("does NOT count a top-level is_error (stream/result error) as a tool error", () => {
+    const st = newStreamState();
+    // Terminal ResultMessage with is_error:true has NO content[] → it's a stream error,
+    // captured in state.error, NOT a per-tool error.
+    applyEvent(st, { subtype: "error_max_turns", is_error: true, result: "Maximum turns exceeded" });
+    expect(st.toolErrors).toBe(0);
+    expect(st.error).not.toBeNull();
+  });
+});
+
 describe("sawResult — bare-key result:null must not satisfy the terminal guard", () => {
   it("does NOT set sawResult on a non-terminal event carrying result:null (cross-review)", () => {
     const st = newStreamState();
