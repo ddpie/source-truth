@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+# test_dashboards.sh — offline tests for the dashboard renderer
+# (scripts/lib/render_dashboard.py) and the apply wrapper's dry-run path.
+# No AWS calls.
+set -uo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+RENDER="$ROOT/scripts/lib/render_dashboard.py"
+APPLY="$ROOT/scripts/apply-dashboards.sh"
+PROD="$ROOT/infra/monitoring/dashboard.product.json"
+SRE="$ROOT/infra/monitoring/dashboard.sre.json"
+
+_run=0 _fail=0
+check() { _run=$((_run+1)); if [[ "$2" -eq 0 ]]; then printf '  ok   %s\n' "$1"; else printf '  FAIL %s\n' "$1"; _fail=$((_fail+1)); fi; }
+
+echo "test_dashboards:"
+
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "  skip (no python3)"; exit 0
+fi
+
+TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+
+# --- both real templates render to valid JSON with no leftover placeholders ---
+for tpl in "$PROD" "$SRE"; do
+  name="$(basename "$tpl")"
+  out="$(python3 "$RENDER" "$tpl" --region ap-northeast-1 --namespace SourceTruth/Gateway 2>"$TMP/err")"; rc=$?
+  check "$name renders (rc 0)" "$rc"
+  # valid JSON
+  printf '%s' "$out" | python3 -c 'import json,sys; json.load(sys.stdin)' 2>/dev/null; check "$name output is valid JSON" $?
+  # no leftover ${...}
+  printf '%s' "$out" | grep -q '\${' && check "$name has leftover placeholder (BAD)" 1 || check "$name has no leftover placeholder" 0
+  # region + namespace substituted in
+  printf '%s' "$out" | grep -q 'ap-northeast-1'; check "$name substituted region" $?
+  printf '%s' "$out" | grep -q 'SourceTruth/Gateway'; check "$name substituted namespace" $?
+  # _doc stripped
+  printf '%s' "$out" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert "_doc" not in d'; check "$name _doc stripped" $?
+done
+
+# --- HARD CONSTRAINT: a type:"log" widget is REJECTED ---
+cat > "$TMP/bad-log.json" <<'EOF'
+{ "widgets": [
+  { "type": "log", "x": 0, "y": 0, "width": 12, "height": 6,
+    "properties": { "query": "fields @message", "region": "${REGION}" } } ] }
+EOF
+python3 "$RENDER" "$TMP/bad-log.json" --region us-east-1 --namespace X/Y >/dev/null 2>"$TMP/err"; rc=$?
+[[ "$rc" -ne 0 ]]; check "type:log widget rejected (nonzero rc)" $?
+grep -q -i "log" "$TMP/err"; check "rejection mentions the banned log widget" $?
+
+# --- unresolved placeholder (e.g. ${ACCOUNT_ID} not provided) fails ---
+cat > "$TMP/needs-acct.json" <<'EOF'
+{ "widgets": [
+  { "type": "metric", "x": 0, "y": 0, "width": 12, "height": 6,
+    "properties": { "title": "acct ${ACCOUNT_ID}", "region": "${REGION}",
+    "metrics": [["${NAMESPACE}", "X"]] } } ] }
+EOF
+python3 "$RENDER" "$TMP/needs-acct.json" --region us-east-1 --namespace X/Y >/dev/null 2>"$TMP/err"; rc=$?
+[[ "$rc" -ne 0 ]]; check "unresolved placeholder rejected" $?
+grep -q -i "placeholder\|ACCOUNT_ID" "$TMP/err"; check "rejection names the unresolved placeholder" $?
+# ...but succeeds when --account-id is given
+python3 "$RENDER" "$TMP/needs-acct.json" --region us-east-1 --namespace X/Y --account-id 123456789012 >/dev/null 2>/dev/null; rc=$?
+check "resolves once --account-id provided" "$rc"
+
+# --- missing required flags ---
+python3 "$RENDER" "$PROD" --region us-east-1 >/dev/null 2>/dev/null; rc=$?
+[[ "$rc" -ne 0 ]]; check "missing --namespace rejected" $?
+python3 "$RENDER" "$PROD" --namespace X/Y >/dev/null 2>/dev/null; rc=$?
+[[ "$rc" -ne 0 ]]; check "missing --region rejected" $?
+
+# --- empty widgets array fails ---
+echo '{ "widgets": [] }' > "$TMP/empty.json"
+python3 "$RENDER" "$TMP/empty.json" --region us-east-1 --namespace X/Y >/dev/null 2>/dev/null; rc=$?
+[[ "$rc" -ne 0 ]]; check "empty widgets array rejected" $?
+
+# --- SRE latency widget keeps p95/p99 extended statistics (not averages) ---
+sre_out="$(python3 "$RENDER" "$SRE" --region us-east-1 --namespace X/Y)"
+printf '%s' "$sre_out" | grep -q 'p95' && printf '%s' "$sre_out" | grep -q 'p99'; check "SRE keeps p95/p99 extended stats" $?
+
+# --- apply wrapper: --dry-run names both dashboards, no AWS ---
+dry="$("$APPLY" --dry-run --region us-east-1 2>&1)"; rc=$?
+check "apply --dry-run exits 0" "$rc"
+[[ "$dry" == *"product"* && "$dry" == *"sre"* ]]; check "dry-run names both dashboards" $?
+
+# --- apply wrapper: --help and unknown flag ---
+"$APPLY" --help >/dev/null 2>&1; check "apply --help exits 0" $?
+"$APPLY" --bogus >/dev/null 2>&1; rc=$?; [[ "$rc" -ne 0 ]]; check "apply unknown flag exits nonzero" $?
+
+echo "  ran=$_run failed=$_fail"
+[[ "$_fail" -eq 0 ]]
