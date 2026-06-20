@@ -25,7 +25,7 @@ import { fromNodeProviderChain } from "@aws-sdk/credential-providers";
 
 import { invokeRuntimeStreaming, classifyInvokeOutcome, isTurnCapError, type AwsCredentials } from "./sigv4";
 import { decideFinalize, hardFailureMessage, shapeBody } from "./finalize-decision";
-import { createCard, updateContent, closeStreaming, finalizeCard, appendFooter, appendClarify, buildSendCardContent, disableFollowUpButton, appendReasoningPanel, updateReasoningPanel, appendEvidencePanel, updateEvidencePanel, appendOneChart, MAX_CHARTS, appendStopButton, appendStatusLine, updateStatusLine, formatElapsed, appendFeedbackButtons, appendFeedbackReasons, disableButtonPlain, FEEDBACK_REASON_CODES, feedbackReasonEid, type ActionButton } from "./cardkit-client";
+import { createCard, updateContent, closeStreaming, finalizeCard, appendFooter, appendClarify, buildSendCardContent, disableFollowUpButton, appendReasoningPanel, updateReasoningPanel, appendEvidencePanel, updateEvidencePanel, appendOneChart, MAX_CHARTS, appendStopButton, appendStatusLine, updateStatusLine, formatElapsed, appendFeedbackButtons, appendFeedbackReasons, disableFeedbackRow, disableFeedbackReasonRow, type ActionButton } from "./cardkit-client";
 import { extractCharts } from "./extract-charts";
 import { rememberCard, rememberAnswer, lookupCard, collectChain } from "./card-registry";
 import { composeFollowUpPrompt } from "./followup-context";
@@ -1447,6 +1447,7 @@ async function main(): Promise<void> {
           // 👍/👎 vote. NOT asker-scoped (anyone may rate — more feedback is better; do
           // NOT copy stop's fail-closed asker gate here). User-level metric → hashUserId,
           // no traceId (metrics.ts §4).
+          const fbVote: "up" | "down" = value.vote;   // capture the narrowed literal (the async closure below widens value.vote back to string|undefined)
           const fbEntry = lookupCard(messageId);
           const fbCardId = value.card_id || fbEntry?.cardId;
           const fbSession = fbEntry?.sessionId;
@@ -1458,37 +1459,43 @@ async function main(): Promise<void> {
           // per-(card,user) key: a user's FIRST vote on a card counts; any later vote (either
           // button, any time) is dropped. Card-scoped, so different cards still each get a vote.
           const voteKey = `vote:${fbCardId || messageId}:${voterHash}`;
-          if (isDuplicate(voteKey)) {
+          const firstVote = !isDuplicate(voteKey);
+          if (firstVote) {
+            emitMetric("feedback_voted", { vote: fbVote }, { hashUserId: voterHash, sessionId: fbSession });
+          } else {
             log({ event: "feedback_revote_ignored", card: fbCardId ?? null });
-          } else {
-            emitMetric("feedback_voted", { vote: value.vote }, { hashUserId: voterHash, sessionId: fbSession });
           }
-          // UI (best-effort, independent of the count guard): disable the vote buttons IN PLACE
-          // (same-tag button replacement — proven by disableFollowUpButton; NOT a column_set→
-          // markdown swap, whose cross-tag PUT is unverified and fails silently, cross-review
-          // #6). On 👎 also reveal the reason buttons. A missing card (evicted/restart) is logged
-          // (cross-review #5) rather than silently skipped.
-          if (fbCardId) {
-            // Disable BOTH vote buttons (they're mutually exclusive): ✓ on the chosen one,
-            // plain-disable on the other — so after 👍 the user can't also click 👎 (the
-            // count guard already drops a 2nd vote, but the buttons LOOKED clickable — the
-            // reported bug). Chosen first, then the sibling, then (on 👎) reveal reasons;
-            // sequential nextCallbackSeq() keeps the writes strictly ordered.
-            const up = value.vote === "up";
-            const chosen = up ? "fb_up" : "fb_down";
-            const other = up ? "fb_down" : "fb_up";
-            // Disable both vote buttons (✓ chosen, plain other). Best-effort.
-            void disableFollowUpButton(fbCardId, chosen, up ? t("card.feedback.up") : t("card.feedback.down"), nextCallbackSeq())
-              .then(() => disableButtonPlain(fbCardId, other, up ? t("card.feedback.down") : t("card.feedback.up"), nextCallbackSeq()))
-              .catch((e) => log({ event: "feedback_render_error", op: "disable_vote", error: redactSensitive(String(e)).slice(0, 200) }));
-            // Reveal the 👎 reason buttons as an INDEPENDENT write — NOT chained after the
-            // disables. If a disable PUT fails, the reasons must STILL appear (the live bug
-            // was the reverse: a rejected append/disable in the chain swallowed the reasons).
-            if (value.vote === "down") {
-              void appendFeedbackReasons(fbCardId, nextCallbackSeq())
-                .catch((e) => log({ event: "feedback_render_error", op: "append_reasons", error: redactSensitive(String(e)).slice(0, 200) }));
-            }
-          } else {
+          // UI + reason-append ONLY on the FIRST vote. A re-click is a no-op: re-appending the
+          // reason buttons would 300315-conflict on the existing fbr_* ids, and re-disabling is
+          // pointless. Disabling the buttons NESTED in the column_set returns 200 but does NOT
+          // take effect in the Feishu client (👎 stayed clickable — observed live), so we
+          // replace the WHOLE row (disableFeedbackRow, same-tag column_set PUT by its own
+          // top-level element_id) to render both buttons inert with a ✓ on the chosen one.
+          //
+          // CRITICAL — these two writes MUST be SERIALIZED, not fired concurrently. CardKit
+          // enforces a per-card monotonic `sequence` watermark: the disable takes seq N, the
+          // reason append takes N+1. If they race and the APPEND (N+1) reaches CardKit first,
+          // the watermark jumps to N+1 and the disable (N) is SILENTLY rejected — it returns
+          // 200 with NO visual effect, so the vote buttons stay clickable forever (observed
+          // live: 👍/👎 infinitely re-clickable). Awaiting disable→append applies them in seq
+          // order so both stick.
+          if (fbCardId && firstVote) {
+            void (async () => {
+              try {
+                await disableFeedbackRow(fbCardId, fbVote, nextCallbackSeq());
+              } catch (e) {
+                log({ event: "feedback_render_error", op: "disable_row", error: redactSensitive(String(e)).slice(0, 200) });
+              }
+              // On 👎, reveal the reason buttons AFTER the disable (strictly higher seq).
+              if (fbVote === "down") {
+                try {
+                  await appendFeedbackReasons(fbCardId, nextCallbackSeq());
+                } catch (e) {
+                  log({ event: "feedback_render_error", op: "append_reasons", error: redactSensitive(String(e)).slice(0, 200) });
+                }
+              }
+            })();
+          } else if (!fbCardId) {
             log({ event: "feedback_card_unresolved", action: "feedback", messageId: hashUserId(messageId) });
           }
         } else if (value?.action === "feedback_reason" && typeof value.reasonCode === "string") {
@@ -1499,25 +1506,20 @@ async function main(): Promise<void> {
           const frCardId = value.card_id || frEntry?.cardId;
           const reasonHash = hashUserId(operatorOpenId);
           const reasonKey = `reason:${frCardId || messageId}:${reasonHash}`;
-          if (isDuplicate(reasonKey)) {
-            log({ event: "feedback_reason_dup_ignored", card: frCardId ?? null });
-          } else {
+          const firstReason = !isDuplicate(reasonKey);
+          if (firstReason) {
             emitMetric("feedback_reason", { reasonCode: value.reasonCode }, { hashUserId: reasonHash, sessionId: frEntry?.sessionId });
+          } else {
+            log({ event: "feedback_reason_dup_ignored", card: frCardId ?? null });
           }
-          if (frCardId && value.eid) {
-            // Disable ALL reason buttons (mutually exclusive): ✓ on the chosen, plain on the
-            // rest — so the user can't submit a second reason (count guard already drops it).
-            // element_ids are the SHORT index form fbr_<i> (feedbackReasonEid) — fbr_<code>
-            // overflowed Feishu's 20-char element_id limit (live bug 300315).
-            const picked = value.reasonCode;
-            void disableFollowUpButton(frCardId, value.eid, t(`card.feedback.reason.${picked}`), nextCallbackSeq())
-              .then(async () => {
-                for (const code of FEEDBACK_REASON_CODES) {
-                  if (code === picked) continue;
-                  await disableButtonPlain(frCardId, feedbackReasonEid(code), t(`card.feedback.reason.${code}`), nextCallbackSeq());
-                }
-              })
-              .catch((e) => log({ event: "feedback_render_error", error: redactSensitive(String(e)).slice(0, 200) }));
+          // Disable the WHOLE reason grid in place ONLY on the first pick: replace the column_set
+          // by its own top-level element_id (reliable same-tag PUT) so every button goes inert
+          // with a ✓ on the chosen one. A re-pick is a no-op (the count guard already dropped the
+          // metric, and re-disabling/re-rendering would 300315-conflict). element_ids are the
+          // SHORT index form fbr_<i> (feedbackReasonEid) — fbr_<code> overflowed Feishu's 20-char limit.
+          if (frCardId && firstReason) {
+            void disableFeedbackReasonRow(frCardId, value.reasonCode, nextCallbackSeq())
+              .catch((e) => log({ event: "feedback_render_error", op: "disable_reason_row", error: redactSensitive(String(e)).slice(0, 200) }));
           } else if (!frCardId) {
             log({ event: "feedback_card_unresolved", action: "feedback_reason", messageId: hashUserId(messageId) });
           }
