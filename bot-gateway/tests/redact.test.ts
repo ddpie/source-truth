@@ -81,6 +81,19 @@ describe("redactSensitive", () => {
     expect(out).toContain("[已隐藏]");
   });
 
+  it("S3 redaction does NOT over-consume following CJK prose / markdown (cross-review P1)", () => {
+    // Chinese has no spaces, so a broad `[^\s]*` path class would swallow the rest of the
+    // sentence after an inline s3:// citation. The path must stop at CJK punctuation.
+    const cjk = redactSensitive("构建产物上传到 s3://my-bucket/bin/server，部署脚本会从这里拉取。");
+    expect(cjk).not.toContain("my-bucket");
+    expect(cjk).toContain("部署脚本会从这里拉取");   // trailing sentence survives
+    expect(cjk).toContain("，");
+    // a markdown link's closing paren must survive (path class excludes `()`)
+    const md = redactSensitive("见 [产物](s3://my-bucket/path/file.bin) 第3行");
+    expect(md).not.toContain("my-bucket");
+    expect(md).toContain(") 第3行");
+  });
+
   it("does NOT redact IP-like game data (versions / coordinates) — no bare RFC1918 rule", () => {
     for (const safe of ["版本 10.0.13.42 上线", "坐标 (10.0.13.42)"]) {
       expect(redactSensitive(safe)).toBe(safe);
