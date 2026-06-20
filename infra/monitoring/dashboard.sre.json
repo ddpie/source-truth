@@ -13,7 +13,9 @@
     "失败 vs 中止 separated (plan §2 note): AnswerFailed (real failures, by reason via SEARCH) and",
     "AnswerAborted (user pressed 停止) are DIFFERENT widgets — folding aborts into failures inflates",
     "the failure rate and hides real outages. CardHealth by kind is sparse (dimensioned); SEARCH()",
-    "auto-discovers the kinds present."
+    "auto-discovers the kinds present. The 成功/失败/中止 count widget uses AnswerFailedTotal (the dense,",
+    "un-dimensioned failure counter from alarm-metrics.json) for the 失败（合计）series — a bare",
+    "AnswerFailed reference draws nothing because that metric only exists per-reason dimension."
   ],
   "widgets": [
     {
@@ -81,7 +83,7 @@
         "stat": "Sum",
         "metrics": [
           ["${NAMESPACE}", "AnswerCompleted", {"label": "成功", "color": "#2ca02c"}],
-          ["${NAMESPACE}", "AnswerFailed", {"label": "失败（合计）", "color": "#d62728"}],
+          ["${NAMESPACE}", "AnswerFailedTotal", {"label": "失败（合计）", "color": "#d62728"}],
           ["${NAMESPACE}", "AnswerAborted", {"label": "中止（用户停止）", "color": "#7f7f7f"}]
         ]
       }

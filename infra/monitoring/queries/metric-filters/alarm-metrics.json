@@ -44,6 +44,15 @@
       "defaultValue": 0,
       "unit": "Count",
       "purpose": "网关存活心跳：gateway 每 60s 发一次（与流量无关）。这是 LogPipelineStalled 存活告警的兜底 metric——它在正常运行中天然非零（即使空闲），所以 metric 缺失=管道断（CloudWatch agent 挂/网关静默），能区分『活着但空闲』与『死了』。绝不能用流量驱动的 QuestionsReceived 判活（空闲夜晚=0 会误判成死）。"
+    },
+    {
+      "name": "AnswerFailedTotal",
+      "event": "answer_failed",
+      "filterPattern": "{ $.metric IS TRUE && $.event = \"answer_failed\" }",
+      "metricValue": "1",
+      "defaultValue": 0,
+      "unit": "Count",
+      "purpose": "答案失败总数（不分 reason）：a-class 的 AnswerFailed 按 reason 维度拆分→稀疏，无法稳定做突增告警。这条无维度、稠密化（defaultValue:0）的总数 metric 专供 AnswerFailedBurst 告警——失败率突增时稳定触发。reason 拆分仍看 a-class 维度 metric/看板。"
     }
   ]
 }
