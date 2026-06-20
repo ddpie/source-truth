@@ -308,6 +308,12 @@ WorkingDirectory=$GW_APP
 ExecStart=$GW_APP/run.sh
 Restart=always
 RestartSec=5
+# Mirror the gateway's structured JSON logs (incl. metric:true telemetry lines) to a file
+# the CloudWatch agent tails (configured below). journald keeps them too (journalctl -u
+# bot-gateway still works); the file is the CloudWatch source. append: (not truncate:) so a
+# Restart=always restart doesn't wipe the in-flight log between agent reads.
+StandardOutput=append:/var/log/bot-gateway.log
+StandardError=append:/var/log/bot-gateway.log
 # OOM ISOLATION: the gateway shares this host with the resident codegraph index
 # (the system's reason for existing). Cap the gateway's memory via cgroup so a
 # gateway leak/spike triggers ITS OWN OOM-kill (systemd restarts it) instead of
@@ -324,6 +330,52 @@ UNIT
   # yet. The deploy starts it explicitly once the runtime exists.
   systemctl enable bot-gateway.service || true
   echo "bot-gateway installed (not started — awaiting /etc/bot-gateway.env)"
+
+  # --- CloudWatch agent: ship the gateway's metric:true / health lines to CloudWatch ----
+  # Telemetry plan 阶段0 gate 2/3 + the monitoring plan's §0 front gate: the gateway's
+  # structured logs must reach a CloudWatch log group so Logs-Insights / metric-filters /
+  # dashboards can read them. The index instance role already has the logs perms (gate 1/3,
+  # provision_iam.sh cloudwatch-logs policy) SCOPED to /source-truth/* — so the log group
+  # name MUST start with that leading-slash prefix or every PutLogEvents AccessDenies.
+  # Best-effort: a CloudWatch-agent failure must NOT fail the bootstrap (the gateway still
+  # works; only telemetry shipping is degraded). Install the official agent .deb from S3's
+  # regional bucket, write a minimal config tailing the gateway log file, start it.
+  CW_DEB=/tmp/amazon-cloudwatch-agent.deb
+  if retry_net curl -fsSL "https://amazoncloudwatch-agent-${REGION}.s3.${REGION}.amazonaws.com/ubuntu/arm64/latest/amazon-cloudwatch-agent.deb" -o "$CW_DEB"; then
+    dpkg -i -E "$CW_DEB" || apt-get install -f -y || true
+    rm -f "$CW_DEB"
+    mkdir -p /opt/aws/amazon-cloudwatch-agent/etc
+    # collect_list tails the gateway log → /source-truth/bot-gateway (leading slash: matches
+    # the IAM scope). instance-id stream so multiple hosts (blue-green) don't interleave.
+    cat > /opt/aws/amazon-cloudwatch-agent/etc/cw-config.json <<CWCFG
+{
+  "agent": { "run_as_user": "root" },
+  "logs": {
+    "logs_collected": {
+      "files": {
+        "collect_list": [
+          {
+            "file_path": "/var/log/bot-gateway.log",
+            "log_group_name": "/source-truth/bot-gateway",
+            "log_stream_name": "{instance_id}",
+            "retention_in_days": 90
+          }
+        ]
+      }
+    }
+  }
+}
+CWCFG
+    # fetch-config (not append-config) so a re-run replaces, not duplicates, the input.
+    if /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
+        -a fetch-config -m ec2 -s -c file:/opt/aws/amazon-cloudwatch-agent/etc/cw-config.json; then
+      echo "cloudwatch-agent shipping /var/log/bot-gateway.log → /source-truth/bot-gateway"
+    else
+      echo "WARN: cloudwatch-agent fetch-config failed — gateway runs, telemetry shipping degraded"
+    fi
+  else
+    echo "WARN: cloudwatch-agent download failed — gateway runs, telemetry shipping degraded"
+  fi
 else
   echo "no bot-gateway.tar.gz staged — skipping gateway setup (backend-only deploy)"
 fi
