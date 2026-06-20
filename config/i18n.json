@@ -9,7 +9,7 @@
   },
   "zh": {
     "card.question.prefix": "问：",
-    "card.trace.prefix": "TraceID（出问题时报这个）：",
+    "card.trace.prefix": "TraceID：",
     "card.summary.default": "source-truth 正在回答…",
     "card.title.thinking": "正在分析…",
     "card.title.thinking.followup": "正在分析（追问）…",
@@ -49,7 +49,7 @@
   },
   "en": {
     "card.question.prefix": "Q: ",
-    "card.trace.prefix": "TraceID (quote this if something's wrong): ",
+    "card.trace.prefix": "TraceID: ",
     "card.summary.default": "source-truth is answering…",
     "card.title.thinking": "Analyzing…",
     "card.title.thinking.followup": "Analyzing (follow-up)…",

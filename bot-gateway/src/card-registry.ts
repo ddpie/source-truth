@@ -24,6 +24,13 @@ const MAX_ENTRIES = 500;
 // follow-up's replayed context stays a reasonable size (a multi-KB answer is
 // plenty of context; we keep the head where the conclusion lives).
 const MAX_ANSWER_CHARS = 4000;
+// Clip the stored QUESTION too. A planner can paste a huge blob (a log, a whole config
+// table) as the "question"; left unclipped it bypasses the chain budget below — one
+// long question could starve the per-turn trim (squeezing out earlier turns → lost
+// context) or push the replayed prompt past AgentCore's input limit (cross-review).
+// Questions are normally short; a long one is almost always an over-paste, so a tight
+// cap is safe.
+const MAX_QUESTION_CHARS = 1500;
 
 // How many prior turns to replay at most, and the total context budget, so a
 // long conversation can't blow up the prompt. Newest turns are kept.
@@ -67,7 +74,8 @@ export function rememberCard(
   // Re-insert to keep Map insertion order = recency for eviction.
   const prev = registry.get(messageId);
   registry.delete(messageId);
-  registry.set(messageId, { cardId, sessionId, question, answer: prev?.answer, parentMessageId, askerOpenId });
+  const clippedQuestion = question === undefined ? undefined : question.slice(0, MAX_QUESTION_CHARS);
+  registry.set(messageId, { cardId, sessionId, question: clippedQuestion, answer: prev?.answer, parentMessageId, askerOpenId });
   if (registry.size > MAX_ENTRIES) {
     const oldest = registry.keys().next().value;
     if (oldest !== undefined) registry.delete(oldest);

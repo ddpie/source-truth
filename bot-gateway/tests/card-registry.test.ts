@@ -123,4 +123,16 @@ describe("collectChain (multi-turn follow-up history)", () => {
     for (let i = 0; i < 600; i++) rememberCard("y" + i, "cy", "s", "Qy", undefined); // no re-walk
     expect(collectChain("g2")).toEqual([]); // evicted — confirms the bump is what saves the active one
   });
+
+  it("clips an over-long pasted QUESTION so it can't starve the chain budget", () => {
+    // A planner pastes a 9000-char blob as the question; the stored/replayed question
+    // must be bounded (cross-review) so it can't squeeze out earlier turns or blow the
+    // prompt. The clip is well under MAX_CHAIN_CHARS.
+    const huge = "x".repeat(9000);
+    rememberCard("q1", "c1", "s", huge, undefined);
+    rememberAnswer("q1", "A1");
+    const turns = collectChain("q1");
+    expect(turns).toHaveLength(1);
+    expect(turns[0].question!.length).toBeLessThanOrEqual(1500);
+  });
 });
