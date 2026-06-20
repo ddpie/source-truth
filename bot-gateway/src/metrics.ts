@@ -84,7 +84,14 @@ export type UserLevelEvent = "question_received" | "feedback_voted" | "feedback_
 // "failure distribution" reflect only genuine faults, while abort rate is its own signal.
 export type DiagnosticEvent =
   | "answer_first_token" | "answer_completed" | "answer_failed" | "answer_aborted"
-  | "clarify_shown" | "card_health";
+  | "clarify_shown" | "card_health"
+  // SYSTEM heartbeat — emitted on a fixed timer regardless of traffic (NOT per-Q&A, no
+  // traceId/hashUserId). Its whole purpose is to be a metric that is NONZERO in normal
+  // operation even during idle periods, so the log-pipeline-liveness alarm can tell
+  // "alive but idle" (heartbeat still arriving) from "pipeline dead" (heartbeat stops).
+  // A traffic-driven metric (question_received) can't make that distinction — an idle
+  // night and a dead agent both look like no data. See monitoring plan 阶段3 liveness.
+  | "gateway_heartbeat";
 
 const USER_LEVEL_EVENTS: ReadonlySet<string> = new Set<UserLevelEvent>([
   "question_received", "feedback_voted", "feedback_reason",

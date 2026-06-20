@@ -67,8 +67,13 @@ def render(cfg: dict, namespace: str, prefix: str, topic_arn):
         eval_periods = a.get("evaluationPeriods", 1)
         dp_to_alarm = a.get("datapointsToAlarm", eval_periods)
         for fld, val in (("periodSeconds", period), ("evaluationPeriods", eval_periods), ("datapointsToAlarm", dp_to_alarm)):
-            if not isinstance(val, int) or val <= 0:
+            # bool is an int subclass in Python — reject it explicitly so a JSON `true`
+            # can't masquerade as a positive integer.
+            if isinstance(val, bool) or not isinstance(val, int) or val <= 0:
                 raise ValueError(f"{where}: {fld} must be a positive integer")
+        # CloudWatch period must be 10 or 30 (high-resolution) or a multiple of 60.
+        if period not in (10, 30) and period % 60 != 0:
+            raise ValueError(f"{where}: periodSeconds {period} invalid (must be 10, 30, or a multiple of 60)")
         if dp_to_alarm > eval_periods:
             raise ValueError(f"{where}: datapointsToAlarm ({dp_to_alarm}) > evaluationPeriods ({eval_periods})")
 

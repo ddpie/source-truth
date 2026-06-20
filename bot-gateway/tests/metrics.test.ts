@@ -47,6 +47,16 @@ describe("emitMetric — physical key split (PII discipline §4)", () => {
     expect(records[0].hashUserId).toBe("u_1");
     expect(records[0].traceId).toBeUndefined();
   });
+
+  it("gateway_heartbeat is a no-id system event (metric:true, no traceId/hashUserId)", () => {
+    // The liveness heartbeat is emitted on a timer with no context — it must still produce a
+    // clean metric:true line (that's what the GatewayHeartbeat filter + liveness alarm read).
+    emitMetric("gateway_heartbeat", {});
+    expect(records[0].event).toBe("gateway_heartbeat");
+    expect(records[0].metric).toBe(true);
+    expect(records[0].traceId).toBeUndefined();
+    expect(records[0].hashUserId).toBeUndefined();
+  });
 });
 
 describe("emitMetric — enum whitelist (no free-text / PII leak)", () => {

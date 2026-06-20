@@ -35,6 +35,15 @@
       "defaultValue": 0,
       "unit": "Count",
       "purpose": "冻卡（finalize 失败，卡片停在分析中）— 出现即异常，稠密化以便稳定告警"
+    },
+    {
+      "name": "GatewayHeartbeat",
+      "event": "gateway_heartbeat",
+      "filterPattern": "{ $.metric IS TRUE && $.event = \"gateway_heartbeat\" }",
+      "metricValue": "1",
+      "defaultValue": 0,
+      "unit": "Count",
+      "purpose": "网关存活心跳：gateway 每 60s 发一次（与流量无关）。这是 LogPipelineStalled 存活告警的兜底 metric——它在正常运行中天然非零（即使空闲），所以 metric 缺失=管道断（CloudWatch agent 挂/网关静默），能区分『活着但空闲』与『死了』。绝不能用流量驱动的 QuestionsReceived 判活（空闲夜晚=0 会误判成死）。"
     }
   ]
 }
