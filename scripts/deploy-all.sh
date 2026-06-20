@@ -681,11 +681,42 @@ elif [[ -z "${FEISHU_SECRET_ID:-}" ]]; then
   fi
 else
   say step "Phase 6: activate bot-gateway"
+  # LOG_HASH_SALT machine-enforcement (telemetry plan 阶段0 gate 3/3): hashUserId de-
+  # identification (esp. for long-retained telemetry) is only sound if the salt is a SECRET
+  # — log.ts falls back to a PUBLIC repo constant when unset, which a known-format Feishu
+  # open_id can be rainbow-tabled against. So resolve the salt from Secrets Manager
+  # `source-truth/log-hash-salt` (the instance role already has GetSecretValue to
+  # source-truth/*). Precedence: explicit env LOG_HASH_SALT > the secret > AUTO-CREATE a
+  # random one (so a fresh account is secured by default, no manual step). The salt never
+  # touches git/logs; only the resolved value is written into /etc/bot-gateway.env.
+  GW_SALT="${LOG_HASH_SALT:-}"
+  if [[ -z "$GW_SALT" ]]; then
+    GW_SALT="$(aws secretsmanager get-secret-value --region "$REGION" \
+      --secret-id source-truth/log-hash-salt --query SecretString --output text 2>/dev/null || echo "")"
+  fi
+  if [[ -z "$GW_SALT" ]]; then
+    GW_SALT="$(openssl rand -hex 32 2>/dev/null || head -c32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+    if aws secretsmanager create-secret --region "$REGION" --name source-truth/log-hash-salt \
+         --secret-string "$GW_SALT" >/dev/null 2>&1 \
+       || aws secretsmanager put-secret-value --region "$REGION" --secret-id source-truth/log-hash-salt \
+         --secret-string "$GW_SALT" >/dev/null 2>&1; then
+      say ok "created/stored a random LOG_HASH_SALT in Secrets Manager (source-truth/log-hash-salt)"
+    else
+      say warn "could not persist LOG_HASH_SALT to Secrets Manager — using a one-deploy random salt (hashes won't correlate across redeploys)"
+    fi
+  fi
+  # Assert it's NOT the public fallback before activating (plan §0c: fail-loud, don't ship
+  # weak de-identification silently). "source-truth" is log.ts's SALT_FALLBACK.
+  if [[ -z "$GW_SALT" || "$GW_SALT" == "source-truth" ]]; then
+    say err "refusing to activate the gateway with an empty/public LOG_HASH_SALT (telemetry de-identification would be reversible)."
+    say err "  → set LOG_HASH_SALT, or grant the deploy identity secretsmanager:CreateSecret/GetSecretValue on source-truth/*."
+    exit 1
+  fi
   bash "$SCRIPT_DIR/lib/activate_gateway.sh" \
     "$REGION" "$GW_INSTANCE" "$GW_RUNTIME_ARN" "$FEISHU_SECRET_ID" \
-    "${LOCALE:-zh}" "${LOG_HASH_SALT:-}" "${FEISHU_API_BASE:-}" "$IDLE_TIMEOUT" \
+    "${LOCALE:-zh}" "$GW_SALT" "${FEISHU_API_BASE:-}" "$IDLE_TIMEOUT" \
     || { say err "gateway activation failed — backend is up; fix and re-run (or --skip gateway)"; exit 1; }
-  say ok "bot-gateway activated on $GW_INSTANCE"
+  say ok "bot-gateway activated on $GW_INSTANCE (LOG_HASH_SALT enforced from Secrets Manager)"
 fi
 
 say ok "deploy-all complete"
