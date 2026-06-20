@@ -40,7 +40,21 @@ export function buildQuestionElement(question: string): Record<string, unknown> 
   };
 }
 
-export function buildCreateCardBody(opts?: { summary?: string; followUp?: boolean; question?: string }): string {
+/** A small, dim "追踪号 `<traceId>`" line shown at the very top of the card. The id
+ *  is wrapped in an inline-code span so the Feishu client's long-press-copy works on
+ *  it (cards have NO native copy button — verified against the schema 2.0 docs), and
+ *  it's the same id stamped on every log line for this request, so an operator can
+ *  paste it to grep the logs when a user reports a problem. Kept tiny (a note-style
+ *  markdown line) so it doesn't compete with the answer. */
+export function buildTraceElement(traceId: string): Record<string, unknown> {
+  return {
+    tag: "markdown",
+    element_id: "trace",
+    content: `${t("card.trace.prefix")}\`${traceId}\``,
+  };
+}
+
+export function buildCreateCardBody(opts?: { summary?: string; followUp?: boolean; question?: string; traceId?: string }): string {
   // summary.content customizes the chat-list preview (default would be "[生成中...]").
   const summary = opts?.summary ? opts.summary.slice(0, 40) : t("card.summary.default");
   // Follow-up cards (from a clicked button) get a distinct header so the chat
@@ -52,6 +66,9 @@ export function buildCreateCardBody(opts?: { summary?: string; followUp?: boolea
   // through streaming/finalize; plain_text means raw markdown in the question can't
   // corrupt the card.
   const elements: unknown[] = [];
+  // traceId line at the very top (above the echoed question) so it's the first thing
+  // visible + survives streaming (element_id="trace"). finalizeCard re-includes it.
+  if (opts?.traceId) elements.push(buildTraceElement(opts.traceId));
   const q = (opts?.question ?? "").trim();
   if (q) {
     elements.push(buildQuestionElement(q));
@@ -163,8 +180,8 @@ function larkApi(method: string, path: string, data: string): Promise<unknown> {
 }
 
 /** Create a streaming card; returns its card_id. summary = chat-list preview. */
-export async function createCard(summary?: string, followUp?: boolean, question?: string): Promise<string> {
-  const resp = await larkApi("POST", "/open-apis/cardkit/v1/cards", buildCreateCardBody({ summary, followUp, question }));
+export async function createCard(summary?: string, followUp?: boolean, question?: string, traceId?: string): Promise<string> {
+  const resp = await larkApi("POST", "/open-apis/cardkit/v1/cards", buildCreateCardBody({ summary, followUp, question, traceId }));
   // feishuApi only guarantees code===0 + a parsed object, NOT a `data.card_id`.
   // Fail LOUD with a self-describing message (this is the first call on the answer
   // hot path) instead of an opaque "Cannot read properties of undefined" TypeError,
@@ -402,11 +419,13 @@ export async function finalizeCard(
   turnCapped?: boolean,
   clarify?: boolean,
   timedOut?: boolean,
+  traceId?: string,
 ): Promise<void> {
   const panel = buildReasoningPanel(steps, false);
   const evidencePanel = buildEvidencePanel(evidence ?? "");
-  // Re-include the echoed question at the top (the full-PUT rebuilds the whole
-  // body, so it'd be wiped otherwise — must match the streaming layout).
+  // Re-include the trace line + echoed question at the top (the full-PUT rebuilds the
+  // whole body, so they'd be wiped otherwise — must match the streaming layout).
+  const traceEls = traceId ? [buildTraceElement(traceId)] : [];
   const q = (question ?? "").trim();
   const questionEls = q
     ? [buildQuestionElement(q), { tag: "hr" }]
@@ -423,6 +442,7 @@ export async function finalizeCard(
       // reorder panels at finalize: conclusion, then reasoning (appended first, during
       // tool calls), then evidence (appended later, when the 供研发复核 section streams).
       elements: [
+        ...traceEls,
         ...questionEls,
         { tag: "markdown", content: conclusion, element_id: "conclusion" },
         ...(panel ? [panel] : []),

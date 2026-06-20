@@ -78,6 +78,18 @@ describe("buildCreateCardBody", () => {
       card.body.elements.some((e: { element_id?: string }) => e.element_id === "conclusion"),
     ).toBe(true);
   });
+
+  it("renders the traceId as a copyable inline-code line at the TOP when provided", () => {
+    const card = JSON.parse(JSON.parse(buildCreateCardBody({ question: "Q", traceId: "a1b2c3d4" })).data);
+    const first = card.body.elements[0] as { element_id?: string; content?: string };
+    expect(first.element_id).toBe("trace");          // top of the card
+    expect(first.content).toContain("`a1b2c3d4`");   // inline-code → long-press-copyable
+  });
+
+  it("omits the trace line when no traceId is given", () => {
+    const card = JSON.parse(JSON.parse(buildCreateCardBody({ question: "Q" })).data);
+    expect(card.body.elements.some((e: { element_id?: string }) => e.element_id === "trace")).toBe(false);
+  });
 });
 
 describe("content update", () => {
