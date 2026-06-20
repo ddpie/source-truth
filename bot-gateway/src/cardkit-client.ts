@@ -188,14 +188,15 @@ export async function closeStreaming(cardId: string, sequence: number): Promise<
  *  history still shows a finished follow-up card as a follow-up. When an
  *  elapsedLabel is given (e.g. "用时 67s"), it's appended so the user sees the
  *  total time the answer took. */
-export function finalizeTitle(followUp?: boolean, aborted?: boolean, failed?: boolean, elapsedLabel?: string, turnCapped?: boolean, clarify?: boolean): string {
-  // turnCapped is a PARTIAL result (hit the step cap) — its header must NOT read
-  // as a confident green "回答完成" while the body says "未完成". Distinct signal.
+export function finalizeTitle(followUp?: boolean, aborted?: boolean, failed?: boolean, elapsedLabel?: string, turnCapped?: boolean, clarify?: boolean, timedOut?: boolean): string {
+  // turnCapped/timedOut are PARTIAL results — their header must NOT read as a
+  // confident green "回答完成" while the body says "未完成". Distinct signal.
   // clarify is NOT an answer — the agent is asking the user to disambiguate — so
   // its header must say so, not "回答完成".
   const base = failed ? t("card.title.failed")
     : aborted ? t("card.title.aborted")
     : turnCapped ? t("card.title.turnCapped")
+    : timedOut ? t("card.title.timedOut")
     : clarify ? t("card.title.clarify")
     : followUp ? t("card.title.followup.done")
     : t("card.title.done");
@@ -400,6 +401,7 @@ export async function finalizeCard(
   elapsedLabel?: string,
   turnCapped?: boolean,
   clarify?: boolean,
+  timedOut?: boolean,
 ): Promise<void> {
   const panel = buildReasoningPanel(steps, false);
   const evidencePanel = buildEvidencePanel(evidence ?? "");
@@ -413,8 +415,8 @@ export async function finalizeCard(
     schema: "2.0",
     config: { update_multi: true },
     header: {
-      title: { tag: "plain_text", content: finalizeTitle(followUp, aborted, failed, elapsedLabel, turnCapped, clarify) },
-      template: failed ? "red" : aborted ? "grey" : turnCapped ? "orange" : clarify ? "blue" : "green",
+      title: { tag: "plain_text", content: finalizeTitle(followUp, aborted, failed, elapsedLabel, turnCapped, clarify, timedOut) },
+      template: failed ? "red" : aborted ? "grey" : turnCapped ? "orange" : timedOut ? "orange" : clarify ? "blue" : "green",
     },
     body: {
       // Order MUST match the live-stream append order so the full-PUT doesn't visibly
