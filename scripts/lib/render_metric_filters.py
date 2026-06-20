@@ -18,6 +18,28 @@ must fail the deploy loudly, not create a silently-wrong metric.
 import json
 import sys
 
+# CloudWatch StandardUnit enum (put-metric-filter rejects anything else). A typo
+# like "Millis"/"ms" would otherwise fail LATE at apply time, per-filter and
+# partially-applied — so we reject it up front (the renderer's "fail loud before
+# any AWS call" contract). Source: CloudWatch MetricDatum.Unit.
+CLOUDWATCH_UNITS = {
+    "Seconds", "Microseconds", "Milliseconds",
+    "Bytes", "Kilobytes", "Megabytes", "Gigabytes", "Terabytes",
+    "Bits", "Kilobits", "Megabits", "Gigabits", "Terabits",
+    "Percent", "Count",
+    "Bytes/Second", "Kilobytes/Second", "Megabytes/Second", "Gigabytes/Second", "Terabytes/Second",
+    "Bits/Second", "Kilobits/Second", "Megabits/Second", "Gigabits/Second", "Terabits/Second",
+    "Count/Second", "None",
+}
+
+
+def _is_number(s: str) -> bool:
+    try:
+        float(s)
+        return True
+    except (TypeError, ValueError):
+        return False
+
 
 # The CloudWatch metricTransformation contract we enforce (mirrors the JSON _doc):
 #   - name, event, filterPattern, metricValue are required.
@@ -52,10 +74,39 @@ def render(defs: dict, log_group: str, namespace_override: str | None = None):
             raise ValueError(f"{where}: duplicate metric name '{name}'")
         seen_names.add(name)
 
+        # filterPattern must carry actual content (a non-missing but whitespace-only
+        # string passes the truthy check above but the API rejects it).
+        if not str(m["filterPattern"]).strip():
+            raise ValueError(f"{where}: filterPattern is blank/whitespace-only")
+
+        # metricValue must be a numeric literal or a $.field selector (CloudWatch
+        # rejects anything else; a bad value otherwise fails late at apply time).
+        mv = str(m["metricValue"])
+        if not (mv.startswith("$.") or _is_number(mv)):
+            raise ValueError(
+                f"{where}: metricValue '{mv}' must be a number (e.g. \"1\") or a $.field selector"
+            )
+
+        # unit, if given, must be a real CloudWatch StandardUnit (reject typos up front).
+        unit = m.get("unit")
+        if unit is not None and unit not in CLOUDWATCH_UNITS:
+            raise ValueError(
+                f"{where}: unit '{unit}' is not a CloudWatch StandardUnit "
+                f"(e.g. Count, Milliseconds, Seconds, Bytes, None)"
+            )
+
         has_default = "defaultValue" in m
         dims = m.get("dimensions")
         if dims is not None and not isinstance(dims, dict):
             raise ValueError(f"{where}: 'dimensions' must be an object")
+        # Each dimension VALUE must be a $.field selector token — a literal string
+        # would render a filter CloudWatch rejects (or a useless constant dimension).
+        if isinstance(dims, dict):
+            for dk, dv in dims.items():
+                if not (isinstance(dv, str) and dv.startswith("$.")):
+                    raise ValueError(
+                        f"{where}: dimension '{dk}' value '{dv}' must be a $.field selector"
+                    )
 
         # HARD constraint: CloudWatch forbids defaultValue + dimensions together.
         if has_default and dims:

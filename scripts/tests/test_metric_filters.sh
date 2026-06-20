@@ -83,6 +83,40 @@ check "valid dimensioned metric renders (rc 0)" "$rc"
 printf '%s' "$out2" | python3 -c 'import json,sys; t=json.load(sys.stdin)["metricTransformations"][0]; assert t["dimensions"]=={"reason":"$.reason"}; assert "defaultValue" not in t'
 check "dimension carried, no defaultValue injected" $?
 
+# --- CONTRACT: bad unit (not a CloudWatch StandardUnit) fails ---
+cat > "$TMP/bad-unit.json" <<'EOF'
+{ "metricNamespace": "X/Y", "logGroup": "/x", "metrics": [
+  { "name": "BadUnit", "event": "e", "filterPattern": "{ $.x = 1 }", "metricValue": "1",
+    "defaultValue": 0, "unit": "Millis" } ] }
+EOF
+python3 "$RENDER" "$TMP/bad-unit.json" "/x" >/dev/null 2>"$TMP/err"; rc=$?
+[[ "$rc" -ne 0 ]]; check "invalid unit rejected" $?
+grep -q -i "StandardUnit\|unit" "$TMP/err"; check "unit rejection message mentions unit" $?
+
+# --- CONTRACT: dimension value not a $.field selector fails ---
+cat > "$TMP/bad-dim.json" <<'EOF'
+{ "metricNamespace": "X/Y", "logGroup": "/x", "metrics": [
+  { "name": "BadDim", "event": "e", "filterPattern": "{ $.x = 1 }", "metricValue": "1",
+    "dimensions": { "k": "literal-not-selector" } } ] }
+EOF
+python3 "$RENDER" "$TMP/bad-dim.json" "/x" >/dev/null 2>/dev/null; rc=$?
+[[ "$rc" -ne 0 ]]; check "non-\$.field dimension value rejected" $?
+
+# --- CONTRACT: metricValue neither number nor $.field fails ---
+cat > "$TMP/bad-mv.json" <<'EOF'
+{ "metricNamespace": "X/Y", "logGroup": "/x", "metrics": [
+  { "name": "BadMV", "event": "e", "filterPattern": "{ $.x = 1 }", "metricValue": "bogus" } ] }
+EOF
+python3 "$RENDER" "$TMP/bad-mv.json" "/x" >/dev/null 2>/dev/null; rc=$?
+[[ "$rc" -ne 0 ]]; check "non-numeric non-selector metricValue rejected" $?
+
+# --- a $.field metricValue is accepted (latency-style) ---
+cat > "$TMP/ok-mv.json" <<'EOF'
+{ "metricNamespace": "X/Y", "logGroup": "/x", "metrics": [
+  { "name": "Lat", "event": "e", "filterPattern": "{ $.x = 1 }", "metricValue": "$.latencyMs", "unit": "Milliseconds" } ] }
+EOF
+python3 "$RENDER" "$TMP/ok-mv.json" "/x" >/dev/null 2>/dev/null; check "\$.field metricValue accepted" $?
+
 # --- counter WITHOUT defaultValue warns (to stderr) but still renders ---
 cat > "$TMP/sparse.json" <<'EOF'
 { "metricNamespace": "X/Y", "logGroup": "/x", "metrics": [

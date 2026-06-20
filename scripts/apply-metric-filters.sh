@@ -129,11 +129,27 @@ while IFS= read -r line; do
   fi
 done <<< "$PLAN"
 
+# ORPHAN DETECTION: the defs JSON is the single source of intent, but put is
+# additive — a metric REMOVED from the JSON leaves its filter (and emitted metric)
+# lingering in CloudWatch. Surface those so they don't silently accumulate. We WARN
+# rather than auto-delete: removing infra is destructive (AGENTS.md "Ask first"),
+# and an orphan emits a stale-but-harmless metric, not an outage. Operator prunes
+# with: aws logs delete-metric-filter --log-group-name <g> --filter-name <name>.
+LIVE="$(aws logs describe-metric-filters --region "$REGION" \
+  --log-group-name "$LOG_GROUP" \
+  --query 'metricFilters[].filterName' --output text 2>/dev/null | tr '\t' '\n' | grep -v '^$' || true)"
+RENDERED_NAMES="$(printf '%s\n' "$PLAN" | while IFS= read -r l; do [[ -z "$l" ]] && continue; printf '%s' "$l" | python3 -c 'import json,sys; print(json.load(sys.stdin)["filterName"])'; done)"
+if [[ -n "$LIVE" ]]; then
+  ORPHANS="$(comm -23 <(printf '%s\n' "$LIVE" | sort -u) <(printf '%s\n' "$RENDERED_NAMES" | sort -u) || true)"
+  if [[ -n "$ORPHANS" ]]; then
+    say warn "orphan metric-filters on $LOG_GROUP (in CloudWatch but NOT in the defs JSON):"
+    while IFS= read -r o; do [[ -n "$o" ]] && say warn "  $o  — prune: aws logs delete-metric-filter --region $REGION --log-group-name $LOG_GROUP --filter-name $o"; done <<< "$ORPHANS"
+  fi
+fi
+
 if [[ "$DO_LIST" -eq 1 ]]; then
   say step "live metric-filters on $LOG_GROUP:"
-  aws logs describe-metric-filters --region "$REGION" \
-    --log-group-name "$LOG_GROUP" \
-    --query 'metricFilters[].filterName' --output text 2>/dev/null || true
+  printf '%s\n' "$LIVE"
 fi
 
 [[ "$rc" -eq 0 ]] && say ok "all metric-filters applied" || say err "some metric-filters failed"
