@@ -48,6 +48,7 @@ import { SessionSerializer } from "./serialize-session";
 import { Semaphore } from "./semaphore";
 import { CardWriter } from "./card-writer";
 import { hashUserId } from "./log";
+import { emitMetric, type FailReason } from "./metrics";
 import { isDuplicate, forget } from "./dedup";
 
 const REGION = process.env.AWS_REGION ?? "ap-northeast-1";
@@ -244,6 +245,13 @@ async function streamingCardInvoke(
   // the session/parent links already let us walk the conversation). Stamped on the
   // card + every log line below.
   const traceId = newTraceId();
+  // TELEMETRY (user-level, hashUserId-keyed, no traceId — metrics.ts §4 key-split):
+  // count usage / DAU / follow-up depth. isFollowup = a reply/button turn (target carries
+  // chatId, not a fresh messageId). hashUserId is applied here (raw open_id never reaches
+  // emitMetric). projectId is left out until the multi-repo routing (plan 1 stage 1) lands.
+  emitMetric("question_received", {
+    isFollowup: "chatId" in target,
+  }, { hashUserId: hashUserId(askerOpenId), sessionId });
   let card: Awaited<ReturnType<typeof sendStreamingCard>>;
   try {
     card = await sendStreamingCard(sessionId, target, queued, question ?? prompt, traceId, parentMessageId, askerOpenId);
@@ -1063,6 +1071,36 @@ async function runStreamingInvoke(
   // Redact `error` before logging: on a non-200 path it now carries the raw backend
   // response body (sigv4), which could echo a token/header/connection-string.
   tlog({ event: "card_closed", card: cardId, chars: answer.length, charts: charts.length, timedOut, failed, turnCapped, error: error ? redactSensitive(error) : undefined });
+  // TELEMETRY (diagnostic, traceId-keyed, no hashUserId — metrics.ts §4 key-split):
+  // one terminal event per Q&A. emitMetric is best-effort (won't break finalize).
+  // evidenceCitationCount = file:line refs in the dev-review block (✅取现成 from the
+  // already-split finalEvidence). FailReason is mapped from the SAME flags card_closed
+  // logs — turn-cap / abort / timeout are not "hard" failures but each has its own
+  // reason; a leaked-tool-call dominant turn maps to the cold-start race.
+  if (clarify) {
+    emitMetric("clarify_shown", { optionCount: clarify.options.length }, { traceId, sessionId });
+  } else if (aborted) {
+    // USER 停止 (aborted = rawAborted && !timedOut, so this is specifically a user-pressed
+    // stop, never a timeout). This is a deliberate user choice, NOT a system failure — emit
+    // a SEPARATE answer_aborted so it doesn't inflate the failure rate (user-asked design point).
+    emitMetric("answer_aborted", {}, { traceId, sessionId });
+  } else if (failed || timedOut || turnCapped) {
+    const reason: FailReason =
+      timedOut ? "upstream_throttle"
+      : turnCapped ? "turn_capped"
+      : leakFailed ? "cold_start_mcp_race"
+      : "unknown";
+    emitMetric("answer_failed", { reason }, { traceId, sessionId });
+  } else {
+    const evidenceCitationCount = (finalEvidence.match(/[\w./-]+\.[A-Za-z0-9]+:\d+/g) || []).length;
+    emitMetric("answer_completed", {
+      latencyMs: timing.totalMs,
+      ttfbMs: timing.ttfbMs,
+      numToolCalls: timing.toolCalls ?? 0,
+      hasCharts: charts.length > 0,
+      evidenceCitationCount,
+    }, { traceId, sessionId });
+  }
   } catch (finalizeErr) {
     // The finalize composition threw unexpectedly. The card is still mid-stream
     // (header blue "正在分析…", live timer, dead 停止 button). Best-effort force it to
