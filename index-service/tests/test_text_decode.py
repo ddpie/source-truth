@@ -91,3 +91,38 @@ def test_valid_utf8_not_stolen_by_gb18030():
     # A valid UTF-8 file must stay utf-8 (strict UTF-8 is tried before GB18030).
     _text, enc = decode_bytes("攻击=10 防御=5 暴击率=0.3".encode("utf-8"))
     assert enc == "utf-8"
+
+
+def test_latin1_not_mislabeled_as_gbk():
+    # CROSS-REVIEW P1: a Latin-1 European file must NOT be decoded as plausible Chinese
+    # garbage + mislabeled gb18030. The CJK-density guard rejects it → lossy UTF-8 fallback.
+    raw = "für grün schön".encode("latin-1")
+    text, enc = decode_bytes(raw)
+    assert enc != "gb18030", f"Latin-1 wrongly labeled gb18030 as {text!r}"
+    assert enc == "utf-8-replace"
+
+
+def test_shift_jis_is_an_accepted_limitation():
+    # KNOWN LIMITATION (documented in _looks_chinese): Shift-JIS kana mis-decode into the
+    # CJK range, so a JP file is byte-indistinguishable from real Chinese and gets labeled
+    # gb18030. This is out of scope for a Chinese-game-repo tool. Asserting current behavior
+    # so a future encoding-detection upgrade (chardet) is a deliberate, visible change.
+    raw = "こんにちは世界".encode("shift-jis")
+    _text, enc = decode_bytes(raw)
+    assert enc == "gb18030"  # accepted: can't byte-distinguish JP kana from GBK
+
+
+def test_real_chinese_still_accepted_as_gb18030():
+    # The guard must not over-reject: a genuine CJK-dense GBK file is still gb18030.
+    raw = "火球术造成五百点伤害冷却三秒附带燃烧效果".encode("gbk")
+    text, enc = decode_bytes(raw)
+    assert enc == "gb18030"
+    assert "火球术" in text
+
+
+def test_mixed_chinese_with_ascii_keys_accepted():
+    # A realistic config row (ASCII field names + Chinese values) is CJK-dense enough.
+    raw = "skill=火球术,damage=500,desc=造成大量火焰伤害".encode("gbk")
+    text, enc = decode_bytes(raw)
+    assert enc == "gb18030"
+    assert "火球术" in text and "造成大量火焰伤害" in text

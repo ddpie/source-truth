@@ -36,6 +36,36 @@ MAX_READ_LINES = 4000                # …and a line ceiling (whichever hits fir
 MAX_GLOB_RESULTS = 1000              # cap glob fan-out
 
 
+def _trim_partial_utf8_tail(raw: bytes) -> bytes:
+    """Drop a trailing INCOMPLETE UTF-8 multibyte sequence (≤3 bytes) left by a byte-cap
+    cut, so the clean prefix still decodes as strict UTF-8 instead of falling through to
+    a GB18030 mis-decode. If the tail is already complete/ASCII, returns raw unchanged.
+    Only trims a genuine continuation pattern (a lead byte 0b11xxxxxx followed by fewer
+    continuation bytes 0b10xxxxxx than its length implies)."""
+    # Scan back over continuation bytes (10xxxxxx); the byte before them is the lead byte.
+    n = len(raw)
+    i = n - 1
+    # At most 3 continuation bytes precede a 4-byte lead.
+    while i >= 0 and i >= n - 3 and (raw[i] & 0xC0) == 0x80:
+        i -= 1
+    if i < 0 or i >= n:
+        return raw
+    lead = raw[i]
+    if lead < 0x80:
+        return raw  # ASCII tail — nothing partial
+    # Expected sequence length from the lead byte's high bits.
+    if (lead & 0xE0) == 0xC0:
+        need = 2
+    elif (lead & 0xF0) == 0xE0:
+        need = 3
+    elif (lead & 0xF8) == 0xF0:
+        need = 4
+    else:
+        return raw  # not a valid lead (stray continuation) — leave it for decode_bytes
+    have = n - i
+    return raw[:i] if have < need else raw  # incomplete → drop from the lead byte
+
+
 def read_file(
     requested: str,
     *,
@@ -69,9 +99,14 @@ def read_file(
     byte_truncated = len(raw) > MAX_READ_BYTES
     if byte_truncated:
         raw = raw[:MAX_READ_BYTES]
-        # A byte cap can slice mid-multibyte-char; decode_bytes' UTF-8 path would then
-        # take the lossy branch on that ONE trailing byte. Drop a tiny tail so the cut
-        # lands on a likely char boundary (cosmetic — the truncation flag is the signal).
+        # A byte cap can slice mid-multibyte-char. If we hand that dangling partial char
+        # to decode_bytes, strict-UTF-8 would FAIL on the trailing 1-2 bytes and the whole
+        # (otherwise-valid-UTF-8) buffer would fall through to GB18030 and be mis-decoded
+        # as Chinese (cross-review P1). Drop up to 3 trailing bytes that look like an
+        # incomplete UTF-8 continuation so the cut lands on a char boundary — then strict
+        # UTF-8 succeeds on the clean prefix. (≤3 dropped bytes is invisible next to a
+        # 256 KiB truncation the flag already signals.)
+        raw = _trim_partial_utf8_tail(raw)
     text, encoding = decode_bytes(raw)
 
     # splitlines() splits on the full Unicode line-boundary set (\v \f \x85   …),
@@ -83,6 +118,11 @@ def read_file(
     all_lines = text.split("\n")
     if all_lines and all_lines[-1] == "":
         all_lines.pop()
+    # Strip a trailing \r so CRLF (Windows/Unity) files don't carry a spurious \r on every
+    # line (split("\n") leaves it; splitlines() used to eat it). ripgrep/grep also drop the
+    # \r in their match text, so this keeps read_file's content consistent with search's
+    # (cross-review P2). Only the line-ending \r is removed — an intra-line \r is untouched.
+    all_lines = [ln[:-1] if ln.endswith("\r") else ln for ln in all_lines]
     start = max(0, offset)
     # A non-positive limit means "no caller line cap" (treat like None) — NOT "read
     # zero lines". The old min(..., start + max(0, limit)) made limit<=0 collapse

@@ -59,11 +59,57 @@ def decode_bytes(raw: bytes) -> tuple[str, str]:
     except UnicodeDecodeError:
         pass
     # 3. GB18030 — superset of GBK/GB2312, decodes legacy Simplified-Chinese losslessly.
-    #    GB18030 maps every byte sequence rather permissively, so try it only AFTER strict
-    #    UTF-8 (a valid UTF-8 file must stay UTF-8) and verify it actually round-trips.
+    #    GB18030 is EXTREMELY permissive: it decodes almost any byte sequence without
+    #    raising, so a non-Chinese legacy file (Latin-1 European é/ü, Shift-JIS Japanese,
+    #    a binary-ish blob) would "succeed" into PLAUSIBLE-LOOKING Chinese garbage and get
+    #    mislabeled "gb18030" — worse than a visible replacement char, because it reads as
+    #    a confident faithful decode (cross-review P1). So accept gb18030 ONLY when the
+    #    result is actually Chinese-DOMINANT: a genuine GBK/GB2312 source is full of CJK
+    #    code points, whereas mis-decoded Latin-1/Shift-JIS yields a scatter of random CJK
+    #    among latin/punctuation. Require a meaningful CJK fraction before trusting it.
     try:
-        return raw.decode("gb18030"), "gb18030"
+        candidate = raw.decode("gb18030")
+        if _looks_chinese(candidate):
+            return candidate, "gb18030"
     except UnicodeDecodeError:
         pass
-    # 4. Last resort: never fail a read — return UTF-8 with replacement chars.
+    # 4. Last resort: never fail a read — return UTF-8 with replacement chars. Reached when
+    #    the bytes are neither valid UTF-8 nor convincingly-Chinese GB18030 (binary, or a
+    #    non-Chinese legacy encoding we don't claim to handle — better a visible � than
+    #    confident garbage mislabeled as a real encoding).
     return raw.decode("utf-8", errors="replace"), "utf-8-replace"
+
+
+# CJK Unified Ideographs (the bulk of Chinese text) + common fullwidth/CJK-symbol ranges.
+def _looks_chinese(text: str) -> bool:
+    """True when ``text`` is Chinese-DOMINANT enough to trust a GB18030 decode over the
+    lossy UTF-8 fallback. Heuristic: CJK ideographs must be a meaningful fraction of the
+    WHOLE text (not just of the non-ASCII subset). Rationale:
+      - A Latin-1 European file (`für grün schön`) is mostly ASCII with a FEW accented
+        bytes; each accent mis-decodes to one CJK char, so "CJK / non-ASCII" would be 100%
+        and wrongly pass — but "CJK / total" is low (~20%), so a total-fraction gate
+        rejects it → falls through to the visible-� UTF-8 fallback (better than confident
+        garbage mislabeled gb18030).
+      - A real GBK/GB2312 config or source is CJK-DENSE over the whole content (a name
+        column, a comment, a description) → easily clears the gate.
+    DISCRIMINATOR: real Chinese comes in RUNS of consecutive ideographs (词语/句子 — e.g.
+    `火球术`, `造成伤害`), whereas a Latin-1 European mis-decode produces only ISOLATED CJK
+    chars (each accented byte → one lone ideograph wedged between ASCII letters/spaces). So
+    we require a run of >= MIN_RUN consecutive CJK somewhere — `火球术` (3-run) in ASCII code
+    passes; `f黵 gr黱 sch鰊` (all 1-runs) fails → falls to the visible-� UTF-8 fallback.
+    KNOWN LIMITATION (accepted): a Shift-JIS / EUC-JP *Japanese* file's kana also mis-decode
+    into the CJK range AND form runs, so this gate cannot byte-distinguish it from real
+    Chinese and will label it gb18030. Out of scope for a Chinese-game-repo tool; the
+    gb18030 label at least flags "legacy decode, verify" rather than silent UTF-8."""
+    if not text:
+        return False
+    MIN_RUN = 2  # two consecutive ideographs = a real Chinese word, not an accent scatter
+    run = 0
+    for c in text:
+        if "一" <= c <= "鿿" or "㐀" <= c <= "䶿":
+            run += 1
+            if run >= MIN_RUN:
+                return True
+        else:
+            run = 0
+    return False
