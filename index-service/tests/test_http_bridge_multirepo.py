@@ -232,3 +232,38 @@ def test_read_table_routes_by_repo_prefix(monkeypatch, tmp_path):
     out = json.loads(asyncio.run(_fn(app, "codegraph_read_table")(path="beta/Config/t.csv")))
     assert out.get("path") == "beta/Config/t.csv", out
     assert out.get("kind") == "csv"
+
+
+def test_search_fanout_one_repo_error_does_not_blank_others(monkeypatch, tmp_path):
+    # One repo's search raises (e.g. disk fault); the other must still return its hits.
+    app = _build_multi_with_local(monkeypatch, tmp_path)
+    import file_search
+    real = file_search.search_to_json
+
+    def flaky(pattern, *, local_root, mount_root, glob=None, repo=""):
+        if repo == "alpha":
+            raise OSError("simulated disk fault on alpha")
+        return real(pattern, local_root=local_root, mount_root=mount_root, glob=glob, repo=repo)
+
+    monkeypatch.setattr(file_search, "search_to_json", flaky)
+    out = json.loads(asyncio.run(_fn(app, "codegraph_search_files")(pattern="marker")))
+    # beta still answers; alpha's error contributes nothing (not an error envelope to the agent)
+    assert "error" not in out, out
+    assert out["matches"], "beta's hits must survive alpha's failure"
+    assert all(m["path"].startswith("beta/") for m in out["matches"]), out
+
+
+def test_glob_fanout_one_repo_error_does_not_blank_others(monkeypatch, tmp_path):
+    app = _build_multi_with_local(monkeypatch, tmp_path)
+    import file_read
+    real = file_read.glob_to_json
+
+    def flaky(pattern, *, local_root, mount_root, repo=""):
+        if repo == "alpha":
+            raise OSError("simulated disk fault on alpha")
+        return real(pattern, local_root=local_root, mount_root=mount_root, repo=repo)
+
+    monkeypatch.setattr(file_read, "glob_to_json", flaky)
+    out = json.loads(asyncio.run(_fn(app, "codegraph_glob_files")(pattern="**/*.cs")))
+    assert "error" not in out, out
+    assert out["paths"] and all(p.startswith("beta/") for p in out["paths"]), out

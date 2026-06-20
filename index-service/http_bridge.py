@@ -477,6 +477,22 @@ def build_bridge(
             merged["count"] = len(merged[list_key])
             return json.dumps(merged, ensure_ascii=False)
 
+        def _safe_file_call(fn, repo_name: str, what: str):
+            """Run one repo's file-tool call inside the fan-out, isolating its failure into
+            an error envelope (mirrors the graph fan-out's _run_on_repo). Without this, one
+            repo raising would abort the whole list comprehension and blank the HEALTHY repos'
+            results — violating "one repo's error must not blank the others"."""
+            try:
+                return fn()
+            except ValueError as exc:
+                # Recoverable input error (bad pattern) — echoes only agent input, safe.
+                return json.dumps({"error": f"bad {what} pattern", "detail": str(exc)})
+            except Exception as exc:  # noqa: BLE001 - isolate one repo's failure
+                # str(exc) may carry a host path → log it, return a generic detail only.
+                logger.error(json.dumps({"event": f"{what}_error", "repo": repo_name, "error": str(exc)}))
+                return json.dumps({"error": f"{what} failed on {repo_name}",
+                                   "detail": "internal error (see service logs)"})
+
         async def codegraph_search_files(pattern: str, glob: str | None = None, repo: str | None = None) -> str:
             """Fast text search across the codebase (paths returned repo-relative,
             e.g. `Assets/Scripts/Foo.cs`; multi-repo prefixes them `<repo>/...`). `pattern`
@@ -494,8 +510,13 @@ def build_bridge(
                     return file_search.search_to_json(
                         pattern, local_root=t.local, mount_root=mount_root, glob=glob, repo=t.name,
                     )
+                # FAN-OUT: each repo isolated via _safe_file_call so one repo's failure can't
+                # blank the others (merge drops error envelopes; all-errored surfaces first).
                 per_repo = [
-                    file_search.search_to_json(pattern, local_root=t.local, mount_root=mount_root, glob=glob, repo=t.name)
+                    _safe_file_call(
+                        lambda t=t: file_search.search_to_json(
+                            pattern, local_root=t.local, mount_root=mount_root, glob=glob, repo=t.name),
+                        t.name, "search")
                     for t in targets
                 ]
                 return _merge_file_fanout("matches", per_repo)
@@ -547,8 +568,11 @@ def build_bridge(
                 if len(targets) == 1:
                     t = targets[0]
                     return file_read.glob_to_json(pattern, local_root=t.local, mount_root=mount_root, repo=t.name)
+                # FAN-OUT: per-repo isolation so one repo's failure can't blank the others.
                 per_repo = [
-                    file_read.glob_to_json(pattern, local_root=t.local, mount_root=mount_root, repo=t.name)
+                    _safe_file_call(
+                        lambda t=t: file_read.glob_to_json(pattern, local_root=t.local, mount_root=mount_root, repo=t.name),
+                        t.name, "glob")
                     for t in targets
                 ]
                 return _merge_file_fanout("paths", per_repo)
