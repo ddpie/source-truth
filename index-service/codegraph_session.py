@@ -633,10 +633,18 @@ class CodegraphSession:
         # pgrep -f treats the pattern as a regex; re.escape the workspace path so a
         # metachar in it (e.g. a '.' or '+') can't broaden the match to a sibling
         # workspace (…/code-5x matching …/code-5x.bak) — exact-anchor to OUR server.
+        #
+        # END-ANCHOR (multi-repo 不变量2): re.escape alone is NOT enough. The workspace
+        # token is a PREFIX of a sibling's — `--workspace /data/repo/code-5x` substring-
+        # matches a process running `--workspace /data/repo/code-5x-svc`, so reaping
+        # code-5x would kill code-5x-svc's healthy server (cross-VM mis-kill that breaks
+        # "refresh one repo doesn't touch the others"). Anchor the end with (\s|$): the
+        # real cmdline always has more args after the path (--max-files …, see _params),
+        # so \s matches in practice; $ covers the defensive last-arg case.
         ws_re = re.escape(self._workspace)
         queries = (
             ["pgrep", "-P", str(os.getpid()), "-f", "codegraph-server"],
-            ["pgrep", "-f", "codegraph-server.*--workspace %s" % ws_re],
+            ["pgrep", "-f", r"codegraph-server.*--workspace %s(\s|$)" % ws_re],
         )
         for q in queries:
             try:

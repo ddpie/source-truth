@@ -237,6 +237,30 @@ def test_reap_orphan_workspace_regex_is_escaped(monkeypatch):
     assert "code-5x+beta" not in ws_query  # the raw unescaped path must NOT appear
 
 
+def test_reap_orphan_workspace_pattern_is_end_anchored(monkeypatch):
+    # 多仓 不变量2: the workspace query must be END-ANCHORED so a repo whose path is a
+    # PREFIX of a sibling's (code-5x vs code-5x-svc) does NOT mis-match — else reaping
+    # code-5x would kill code-5x-svc's healthy server (cross-VM mis-kill). We capture the
+    # actual pattern the reaper builds and run it (as pgrep -f would, via re.search) against
+    # real cmdlines.
+    import re
+    import codegraph_session as cs
+
+    sess = cs.CodegraphSession("/data/repo/code-5x")
+    seen = []
+    monkeypatch.setattr(cs.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(cs.subprocess, "run", lambda cmd, **k: (seen.append(cmd[-1]), _O("", 1))[1])
+    monkeypatch.setattr(cs.os, "kill", lambda pid, sig: None)
+    sess._reap_orphan_servers()
+
+    pat = [p for p in seen if "--workspace" in p][0]
+    # OUR server (more args follow the path, as in _params) → matches.
+    assert re.search(pat, "codegraph-server --mcp --workspace /data/repo/code-5x --max-files 10000")
+    # A SIBLING whose path has ours as a prefix → must NOT match (the bug this guards).
+    assert not re.search(pat, "codegraph-server --mcp --workspace /data/repo/code-5x-svc --max-files 10000")
+    assert not re.search(pat, "codegraph-server --mcp --workspace /data/repo/code-5x.bak --max-files 10000")
+
+
 def test_reap_orphan_never_targets_self(monkeypatch):
     # The workspace regex could match this very python process's cmdline; must never
     # SIGKILL os.getpid().
