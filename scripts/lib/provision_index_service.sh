@@ -26,9 +26,14 @@ log() { say "$@" >&2; }
 # instance booted, that instance is serving STALE code/index. ETag is S3's
 # content hash, so this changes iff the staged content changed.
 artifact_signature() {
-  local idx repo
+  local idx repo gw
   idx="$(QS head-object --bucket "$BUCKET" --key index-service.tar.gz --query ETag --output text 2>/dev/null || echo none)"
   repo="$(QS head-object --bucket "$BUCKET" --key "${REPO_SUBDIR}.tar.gz" --query ETag --output text 2>/dev/null || echo none)"
+  # bot-gateway runs ON this instance now, so its tarball is part of what a fresh
+  # bootstrap installs — include it so a gateway-only code change is detected as
+  # STALE and (with --refresh-index) replaces the instance. Absent (backend-only
+  # deploy) → "none", stable, so it doesn't perturb the signature.
+  gw="$(QS head-object --bucket "$BUCKET" --key bot-gateway.tar.gz --query ETag --output text 2>/dev/null || echo none)"
   # S3 returns ETags WITH literal surrounding double-quotes (e.g. "abc123"). They
   # must be stripped before this value lands in the run-instances
   # --tag-specifications SHORTHAND: a Value= starting with `"` makes the shorthand
@@ -38,7 +43,8 @@ artifact_signature() {
   # human-readable tag value. Comparison stays consistent (both sides quote-free).
   idx="${idx//\"/}"
   repo="${repo//\"/}"
-  echo "${idx}|${repo}"
+  gw="${gw//\"/}"
+  echo "${idx}|${repo}|${gw}"
 }
 
 # Authorize an ingress rule idempotently: tolerate ONLY the benign "rule already

@@ -29,6 +29,15 @@ aws iam put-role-policy --role-name "$INDEX_ROLE" --policy-name s3-artifacts --p
   \"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",
   \"Action\":[\"s3:GetObject\",\"s3:ListBucket\"],
   \"Resource\":[\"arn:aws:s3:::${BUCKET}\",\"arn:aws:s3:::${BUCKET}/*\"]}]}" >/dev/null
+# Inline policy: read the Feishu app credentials from Secrets Manager. The
+# co-located bot-gateway's run.sh fetches the secret at start (creds never touch
+# disk). Scoped to this project's secret-name prefix (source-truth/*) so the
+# instance can't read unrelated secrets. The 6-char suffix Secrets Manager appends
+# is covered by the trailing wildcard.
+aws iam put-role-policy --role-name "$INDEX_ROLE" --policy-name feishu-secret --policy-document "{
+  \"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",
+  \"Action\":[\"secretsmanager:GetSecretValue\"],
+  \"Resource\":[\"arn:aws:secretsmanager:${REGION}:${ACCOUNT}:secret:source-truth/*\"]}]}" >/dev/null
 if ! aws iam get-instance-profile --instance-profile-name "$INDEX_PROFILE" >/dev/null 2>&1; then
   aws iam create-instance-profile --instance-profile-name "$INDEX_PROFILE" >/dev/null
   aws iam add-role-to-instance-profile --instance-profile-name "$INDEX_PROFILE" --role-name "$INDEX_ROLE" >/dev/null

@@ -255,4 +255,77 @@ if [ "$BUILD_RESULT" != "success" ]; then
   exit 1
 fi
 systemctl enable --now index-bridge.service  # then the resident reader comes up
+
+# --- bot-gateway: co-located Feishu long-connection gateway -----------------
+# The gateway runs ON this same host (a second resident service alongside the
+# index bridge). It is BUILT + INSTALLED here but deliberately NOT started: it
+# hard-requires RUNTIME_ARN, which doesn't exist until the AgentCore runtime is
+# created in a LATER deploy phase. deploy-all.sh writes /etc/bot-gateway.env and
+# starts bot-gateway.service AFTER the runtime is ready (via SSM). On a REBOOT the
+# unit (WantedBy=multi-user.target) restarts on its own — by then the env file
+# persists on disk, so it comes straight back up.
+#
+# Backend-only deploys (no gateway tarball staged) skip this gracefully.
+GW_APP=/opt/bot-gateway
+if aws s3api head-object --bucket "$BUCKET" --key bot-gateway.tar.gz --region "$REGION" >/dev/null 2>&1; then
+  echo "setting up bot-gateway (build now, start later when runtime env is written)"
+  # Node 24 — same major as the agent container's CLI subprocess. Pin the MAJOR
+  # only (setup_24.x): NodeSource GCs old patch debs, so an exact patch pin would
+  # break the build later. Skip if a compatible node is already present (reboot/rerun).
+  if ! command -v node >/dev/null 2>&1; then
+    retry_net curl -fsSL https://deb.nodesource.com/setup_24.x -o /tmp/nodesetup.sh
+    bash /tmp/nodesetup.sh
+    retry_net apt-get install -y nodejs
+  fi
+  mkdir -p "$GW_APP"
+  retry_net aws s3 cp "s3://$BUCKET/bot-gateway.tar.gz" /tmp/gw.tar.gz --region "$REGION"
+  tar xzf /tmp/gw.tar.gz -C "$GW_APP"
+  rm -f /tmp/gw.tar.gz
+  # Install ALL deps (typescript/@types live in devDependencies and `npm run build`
+  # = `tsc` needs them), compile TS → dist/, THEN prune devDeps so the resident
+  # service runs on prod-only modules. A bare `npm ci --omit=dev` would skip tsc and
+  # make `npm run build` fail with "tsc: not found" (cross-review HIGH).
+  ( cd "$GW_APP" && retry_net npm ci && npm run build && npm prune --omit=dev ) \
+    || { echo "BOOTSTRAP_FAILED: bot-gateway npm ci / build / prune failed"; exit 1; }
+  chmod +x "$GW_APP/run.sh"
+  # Sanity: the compiled entrypoint must exist, else the unit would crash-loop later.
+  [ -f "$GW_APP/dist/index.js" ] || { echo "BOOTSTRAP_FAILED: bot-gateway build produced no dist/index.js"; exit 1; }
+
+  cat > /etc/systemd/system/bot-gateway.service <<UNIT
+[Unit]
+Description=source-truth Feishu bot-gateway (long-connection event subscriber)
+After=network-online.target
+Wants=network-online.target
+# Only starts once /etc/bot-gateway.env exists (deploy writes it after the runtime
+# is ready). ConditionPathExists makes a premature boot a clean no-op, not a crash-
+# loop: systemd marks the unit "condition failed" and moves on; the deploy's
+# later start re-evaluates it.
+ConditionPathExists=/etc/bot-gateway.env
+[Service]
+WorkingDirectory=$GW_APP
+# run.sh sources /etc/bot-gateway.env (non-secret config) and fetches the Feishu
+# app credentials from Secrets Manager into the process env (never written to disk).
+ExecStart=$GW_APP/run.sh
+Restart=always
+RestartSec=5
+# OOM ISOLATION: the gateway shares this host with the resident codegraph index
+# (the system's reason for existing). Cap the gateway's memory via cgroup so a
+# gateway leak/spike triggers ITS OWN OOM-kill (systemd restarts it) instead of
+# letting the kernel pick the codegraph writer and corrupt/empty graph.db
+# (cross-review). Tunable via CODEGRAPH_MAX_FILES-class sizing; 1G is ample for a
+# Node long-connection + bounded concurrent invokes (MAX_CONCURRENT_INVOKES).
+MemoryHigh=768M
+MemoryMax=1G
+[Install]
+WantedBy=multi-user.target
+UNIT
+  systemctl daemon-reload
+  # enable (start on future boots) but do NOT start now — the env file isn't written
+  # yet. The deploy starts it explicitly once the runtime exists.
+  systemctl enable bot-gateway.service || true
+  echo "bot-gateway installed (not started — awaiting /etc/bot-gateway.env)"
+else
+  echo "no bot-gateway.tar.gz staged — skipping gateway setup (backend-only deploy)"
+fi
+
 echo "BOOTSTRAP_DONE"
