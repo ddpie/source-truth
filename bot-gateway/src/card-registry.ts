@@ -104,6 +104,12 @@ export function rememberCard(
   const prev = registry.get(messageId);
   registry.delete(messageId);
   const clippedQuestion = question === undefined ? undefined : question.slice(0, MAX_QUESTION_CHARS);
+  // NOTE: this deliberately does NOT carry over the feedback-UI flags
+  // (voteRowPainted / reasonGridAppended / reasonRowPainted) — today there is exactly
+  // one call site (at card-send time, before any button exists), so a re-record never
+  // races a vote. If a FUTURE edit/re-send path ever re-records an already-answered
+  // messageId, it MUST preserve these flags (spread `...prev`) or it reopens the 300315
+  // duplicate-element conflict class (a vote after re-record would re-paint/re-append).
   registry.set(messageId, { cardId, sessionId, question: clippedQuestion, answer: prev?.answer, parentMessageId, askerOpenId });
   if (registry.size > MAX_ENTRIES) {
     const oldest = registry.keys().next().value;
