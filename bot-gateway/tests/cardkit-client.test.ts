@@ -22,9 +22,6 @@ import {
   buildQuestionElement,
   buildFeedbackButtons,
   buildFeedbackReasonElements,
-  buildFeedbackThanksElement,
-  FEEDBACK_ROW_EID,
-  FEEDBACK_REASON_ROW_EID,
   FEEDBACK_REASON_CODES,
 } from "../src/cardkit-client";
 
@@ -45,30 +42,25 @@ function collectButtonValues(els: unknown[]): Array<Record<string, unknown>> {
 }
 
 describe("feedback buttons (👍/👎 + reason)", () => {
-  it("vote row has fb_up/fb_down with action=feedback and the row carries a stable element_id", () => {
+  it("vote buttons are TOP-LEVEL fb_up/fb_down (disable-in-place by id), action=feedback", () => {
     const els = buildFeedbackButtons() as Array<Record<string, unknown>>;
-    expect(els[0].element_id).toBe(FEEDBACK_ROW_EID);   // row replaceable in place
+    // top-level buttons (NOT wrapped in a column_set) so each is element_id-addressable
+    // for the proven same-tag disable path (cross-review #6).
+    expect(els.every((e) => e.tag === "button")).toBe(true);
+    expect(els.map((e) => e.element_id).sort()).toEqual(["fb_down", "fb_up"]);
     const vals = collectButtonValues(els);
-    const votes = vals.filter((v) => v.action === "feedback").map((v) => v.vote);
-    expect(votes).toEqual(expect.arrayContaining(["up", "down"]));
-    // every feedback button uses action="feedback" — never collides with follow_up/stop
+    expect(vals.map((v) => v.vote).sort()).toEqual(["down", "up"]);
     expect(vals.every((v) => v.action === "feedback")).toBe(true);
   });
 
-  it("reason block has one button per enumerated reasonCode, all action=feedback_reason, no free text", () => {
+  it("reason buttons are top-level, one per enumerated reasonCode, action=feedback_reason, no free text", () => {
     const els = buildFeedbackReasonElements() as Array<Record<string, unknown>>;
-    expect(els[0].element_id).toBe(FEEDBACK_REASON_ROW_EID);
     const vals = collectButtonValues(els);
     expect(vals).toHaveLength(FEEDBACK_REASON_CODES.length);
     expect(vals.map((v) => v.reasonCode).sort()).toEqual([...FEEDBACK_REASON_CODES].sort());
     expect(vals.every((v) => v.action === "feedback_reason")).toBe(true);
-  });
-
-  it("thanks element targets the given row id and is a markdown ✓ line (re-vote prevented)", () => {
-    const el = JSON.parse(buildFeedbackThanksElement(FEEDBACK_ROW_EID));
-    expect(el.element_id).toBe(FEEDBACK_ROW_EID);
-    expect(el.tag).toBe("markdown");
-    expect(el.content).toContain("✓");
+    // each reason button is element_id-addressable (fbr_<code>) for in-place disable
+    expect(els.filter((e) => e.tag === "button").every((e) => String(e.element_id).startsWith("fbr_"))).toBe(true);
   });
 });
 

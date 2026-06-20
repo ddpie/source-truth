@@ -25,7 +25,7 @@ import { fromNodeProviderChain } from "@aws-sdk/credential-providers";
 
 import { invokeRuntimeStreaming, classifyInvokeOutcome, isTurnCapError, type AwsCredentials } from "./sigv4";
 import { decideFinalize, hardFailureMessage, shapeBody } from "./finalize-decision";
-import { createCard, updateContent, closeStreaming, finalizeCard, appendFooter, appendClarify, buildSendCardContent, disableFollowUpButton, appendReasoningPanel, updateReasoningPanel, appendEvidencePanel, updateEvidencePanel, appendOneChart, MAX_CHARTS, appendStopButton, appendStatusLine, updateStatusLine, formatElapsed, appendFeedbackButtons, appendFeedbackReasons, replaceWithThanks, FEEDBACK_ROW_EID, FEEDBACK_REASON_ROW_EID, type ActionButton } from "./cardkit-client";
+import { createCard, updateContent, closeStreaming, finalizeCard, appendFooter, appendClarify, buildSendCardContent, disableFollowUpButton, appendReasoningPanel, updateReasoningPanel, appendEvidencePanel, updateEvidencePanel, appendOneChart, MAX_CHARTS, appendStopButton, appendStatusLine, updateStatusLine, formatElapsed, appendFeedbackButtons, appendFeedbackReasons, type ActionButton } from "./cardkit-client";
 import { extractCharts } from "./extract-charts";
 import { rememberCard, rememberAnswer, lookupCard, collectChain } from "./card-registry";
 import { composeFollowUpPrompt } from "./followup-context";
@@ -1434,36 +1434,55 @@ async function main(): Promise<void> {
         } else if (value?.action === "feedback" && (value.vote === "up" || value.vote === "down")) {
           // 👍/👎 vote. NOT asker-scoped (anyone may rate — more feedback is better; do
           // NOT copy stop's fail-closed asker gate here). User-level metric → hashUserId,
-          // no traceId (metrics.ts §4). The cb: dedup above already prevents a re-delivered
-          // callback from double-counting; the button-row replacement prevents a re-vote.
+          // no traceId (metrics.ts §4).
           const fbEntry = lookupCard(messageId);
           const fbCardId = value.card_id || fbEntry?.cardId;
           const fbSession = fbEntry?.sessionId;
-          emitMetric("feedback_voted", { vote: value.vote }, { hashUserId: hashUserId(operatorOpenId), sessionId: fbSession });
+          const voterHash = hashUserId(operatorOpenId);
+          // PER-CARD-PER-USER VOTE GUARD (cross-review P1 #1/#1b): the cb: key only catches a
+          // re-delivered callback, and the row-replacement UI is best-effort/racy — neither
+          // stops one user voting twice (👍 then 👎 have different eids → both counted, and a
+          // re-tap after the 90s composite TTL re-counts). So gate the metric on a STABLE
+          // per-(card,user) key: a user's FIRST vote on a card counts; any later vote (either
+          // button, any time) is dropped. Card-scoped, so different cards still each get a vote.
+          const voteKey = `vote:${fbCardId || messageId}:${voterHash}`;
+          if (isDuplicate(voteKey)) {
+            log({ event: "feedback_revote_ignored", card: fbCardId ?? null });
+          } else {
+            emitMetric("feedback_voted", { vote: value.vote }, { hashUserId: voterHash, sessionId: fbSession });
+          }
+          // UI (best-effort, independent of the count guard): disable the vote buttons IN PLACE
+          // (same-tag button replacement — proven by disableFollowUpButton; NOT a column_set→
+          // markdown swap, whose cross-tag PUT is unverified and fails silently, cross-review
+          // #6). On 👎 also reveal the reason buttons. A missing card (evicted/restart) is logged
+          // (cross-review #5) rather than silently skipped.
           if (fbCardId) {
             const seq = nextCallbackSeq();
-            // 👍 → replace the vote row with a thanks line (done). 👎 → append the reason
-            // buttons (the row stays so the user sees what they picked), let the user
-            // optionally pick a reason; the reason click finalizes with its own thanks.
-            if (value.vote === "up") {
-              void replaceWithThanks(fbCardId, FEEDBACK_ROW_EID, seq)
-                .catch((e) => log({ event: "feedback_render_error", error: redactSensitive(String(e)).slice(0, 200) }));
-            } else {
-              void replaceWithThanks(fbCardId, FEEDBACK_ROW_EID, seq)
-                .then(() => appendFeedbackReasons(fbCardId, nextCallbackSeq()))
-                .catch((e) => log({ event: "feedback_render_error", error: redactSensitive(String(e)).slice(0, 200) }));
-            }
+            const chosen = value.vote === "up" ? "fb_up" : "fb_down";
+            void disableFollowUpButton(fbCardId, chosen, value.vote === "up" ? t("card.feedback.up") : t("card.feedback.down"), seq)
+              .then(() => { if (value.vote === "down") return appendFeedbackReasons(fbCardId, nextCallbackSeq()); })
+              .catch((e) => log({ event: "feedback_render_error", error: redactSensitive(String(e)).slice(0, 200) }));
+          } else {
+            log({ event: "feedback_card_unresolved", action: "feedback", messageId: hashUserId(messageId) });
           }
         } else if (value?.action === "feedback_reason" && typeof value.reasonCode === "string") {
           // 👎-reason pick (enumerated code, never free text). emitMetric runtime-whitelists
-          // reasonCode, so even a tampered payload can't inject text. Replace the reason row
-          // with thanks to prevent a second pick.
+          // reasonCode, so even a tampered payload can't inject text. Same per-card-per-user
+          // guard so a reason can't be double-submitted; disable the chosen reason button in place.
           const frEntry = lookupCard(messageId);
           const frCardId = value.card_id || frEntry?.cardId;
-          emitMetric("feedback_reason", { reasonCode: value.reasonCode }, { hashUserId: hashUserId(operatorOpenId), sessionId: frEntry?.sessionId });
-          if (frCardId) {
-            void replaceWithThanks(frCardId, FEEDBACK_REASON_ROW_EID, nextCallbackSeq())
+          const reasonHash = hashUserId(operatorOpenId);
+          const reasonKey = `reason:${frCardId || messageId}:${reasonHash}`;
+          if (isDuplicate(reasonKey)) {
+            log({ event: "feedback_reason_dup_ignored", card: frCardId ?? null });
+          } else {
+            emitMetric("feedback_reason", { reasonCode: value.reasonCode }, { hashUserId: reasonHash, sessionId: frEntry?.sessionId });
+          }
+          if (frCardId && value.eid) {
+            void disableFollowUpButton(frCardId, value.eid, t(`card.feedback.reason.${value.reasonCode}`), nextCallbackSeq())
               .catch((e) => log({ event: "feedback_render_error", error: redactSensitive(String(e)).slice(0, 200) }));
+          } else if (!frCardId) {
+            log({ event: "feedback_card_unresolved", action: "feedback_reason", messageId: hashUserId(messageId) });
           }
         } else {
           // A callback we recognized the envelope of but could NOT act on — e.g. a
