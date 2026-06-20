@@ -41,7 +41,7 @@ infra/                  基础设施即代码（MVP 先 agentcore toolkit / boto
 config/                 配置驱动：i18n.json（卡片 / 告警 / 错误文案）、alarm-thresholds.json（告警阈值，运维可调）、projects.example.json（项目路由 schema 模板；真实配置在 .local/projects.json，部署相关、gitignore）
 scripts/                运维生命周期
   check-invariants.sh   快速结构 lint（AGENTS / CLAUDE / structure / 双语配对 / 顶层目录存在性）
-  lib/                  common.sh（格式化 + 依赖检查）、env-utils.sh（.env / deploy-config 共享 helper）、render_metric_filters.py（指标定义→put-metric-filter 计划）、render_dashboard.py（看板模板渲染 + 禁 type:log 校验）、render_alarms.py（阈值→put-metric-alarm 计划）
+  lib/                  common.sh（格式化 + 依赖检查）、env-utils.sh（.env / deploy-config 共享 helper）、render_metric_filters.py（指标定义→put-metric-filter 计划）、render_dashboard.py（看板模板渲染 + 禁 type:log 校验）、render_alarms.py（阈值→put-metric-alarm 计划）、render_manifest.py（多仓 REPO_MANIFEST_JSON 校验+逐仓记录，纯函数可测）
   apply-metric-filters.sh  把 infra/monitoring 的指标定义应用到 CloudWatch（幂等 upsert；--defs 切 A 类/告警；--dry-run）
   apply-dashboards.sh   渲染看板模板并 put-dashboard（幂等；--dry-run；读 metric-filters 同源 namespace）
   apply-alarms.sh       建 SNS topic + 从 config/alarm-thresholds.json 建 CloudWatch 告警（幂等；订阅需手动确认）
