@@ -25,7 +25,7 @@ import { fromNodeProviderChain } from "@aws-sdk/credential-providers";
 
 import { invokeRuntimeStreaming, classifyInvokeOutcome, isTurnCapError, type AwsCredentials } from "./sigv4";
 import { decideFinalize, hardFailureMessage, shapeBody } from "./finalize-decision";
-import { createCard, updateContent, closeStreaming, finalizeCard, appendFooter, appendClarify, buildSendCardContent, disableFollowUpButton, appendReasoningPanel, updateReasoningPanel, appendEvidencePanel, updateEvidencePanel, appendOneChart, MAX_CHARTS, appendStopButton, appendStatusLine, updateStatusLine, formatElapsed, appendFeedbackButtons, appendFeedbackReasons, type ActionButton } from "./cardkit-client";
+import { createCard, updateContent, closeStreaming, finalizeCard, appendFooter, appendClarify, buildSendCardContent, disableFollowUpButton, appendReasoningPanel, updateReasoningPanel, appendEvidencePanel, updateEvidencePanel, appendOneChart, MAX_CHARTS, appendStopButton, appendStatusLine, updateStatusLine, formatElapsed, appendFeedbackButtons, appendFeedbackReasons, disableButtonPlain, FEEDBACK_REASON_CODES, type ActionButton } from "./cardkit-client";
 import { extractCharts } from "./extract-charts";
 import { rememberCard, rememberAnswer, lookupCard, collectChain } from "./card-registry";
 import { composeFollowUpPrompt } from "./followup-context";
@@ -1469,9 +1469,16 @@ async function main(): Promise<void> {
           // #6). On 👎 also reveal the reason buttons. A missing card (evicted/restart) is logged
           // (cross-review #5) rather than silently skipped.
           if (fbCardId) {
-            const seq = nextCallbackSeq();
-            const chosen = value.vote === "up" ? "fb_up" : "fb_down";
-            void disableFollowUpButton(fbCardId, chosen, value.vote === "up" ? t("card.feedback.up") : t("card.feedback.down"), seq)
+            // Disable BOTH vote buttons (they're mutually exclusive): ✓ on the chosen one,
+            // plain-disable on the other — so after 👍 the user can't also click 👎 (the
+            // count guard already drops a 2nd vote, but the buttons LOOKED clickable — the
+            // reported bug). Chosen first, then the sibling, then (on 👎) reveal reasons;
+            // sequential nextCallbackSeq() keeps the writes strictly ordered.
+            const up = value.vote === "up";
+            const chosen = up ? "fb_up" : "fb_down";
+            const other = up ? "fb_down" : "fb_up";
+            void disableFollowUpButton(fbCardId, chosen, up ? t("card.feedback.up") : t("card.feedback.down"), nextCallbackSeq())
+              .then(() => disableButtonPlain(fbCardId, other, up ? t("card.feedback.down") : t("card.feedback.up"), nextCallbackSeq()))
               .then(() => { if (value.vote === "down") return appendFeedbackReasons(fbCardId, nextCallbackSeq()); })
               .catch((e) => log({ event: "feedback_render_error", error: redactSensitive(String(e)).slice(0, 200) }));
           } else {
@@ -1491,7 +1498,16 @@ async function main(): Promise<void> {
             emitMetric("feedback_reason", { reasonCode: value.reasonCode }, { hashUserId: reasonHash, sessionId: frEntry?.sessionId });
           }
           if (frCardId && value.eid) {
-            void disableFollowUpButton(frCardId, value.eid, t(`card.feedback.reason.${value.reasonCode}`), nextCallbackSeq())
+            // Disable ALL reason buttons (mutually exclusive): ✓ on the chosen, plain on the
+            // rest — so the user can't submit a second reason (count guard already drops it).
+            const picked = value.reasonCode;
+            void disableFollowUpButton(frCardId, value.eid, t(`card.feedback.reason.${picked}`), nextCallbackSeq())
+              .then(async () => {
+                for (const code of FEEDBACK_REASON_CODES) {
+                  if (code === picked) continue;
+                  await disableButtonPlain(frCardId, `fbr_${code}`, t(`card.feedback.reason.${code}`), nextCallbackSeq());
+                }
+              })
               .catch((e) => log({ event: "feedback_render_error", error: redactSensitive(String(e)).slice(0, 200) }));
           } else if (!frCardId) {
             log({ event: "feedback_card_unresolved", action: "feedback_reason", messageId: hashUserId(messageId) });

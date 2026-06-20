@@ -53,6 +53,15 @@ describe("feedback buttons (👍/👎 + reason)", () => {
     expect(vals.every((v) => v.action === "feedback")).toBe(true);
   });
 
+  it("buildDisabledButtonElement greys a sibling WITHOUT a ✓ and keeps its label (mutually-exclusive disable)", () => {
+    const el = JSON.parse(require("../src/cardkit-client").buildDisabledButtonElement("fb_down", "👎 没帮助"));
+    expect(el.element_id).toBe("fb_down");
+    expect(el.disabled).toBe(true);
+    expect(el.text.content).toBe("👎 没帮助");      // original label kept, no ✓ prefix
+    expect(el.text.content).not.toContain("✓");
+    expect(el.value.action).toBe("noop");           // a click does nothing even if it fired
+  });
+
   it("reason buttons are top-level, one per enumerated reasonCode, action=feedback_reason, no free text", () => {
     const els = buildFeedbackReasonElements() as Array<Record<string, unknown>>;
     const vals = collectButtonValues(els);
