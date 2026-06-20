@@ -1209,6 +1209,14 @@ async function main(): Promise<void> {
   const lark = await import("@larksuiteoapi/node-sdk");
   const dispatcher = new lark.EventDispatcher({}).register({
     "im.message.receive_v1": (data: unknown) => {
+      // Drop events that arrive DURING graceful shutdown: gracefulShutdown's abort
+      // sweep (abortControllers loop) has already run, so a turn started now would
+      // register a FRESH abortController the drain never sees → process.exit at the 8s
+      // deadline kills it mid-stream, leaving a card stuck on "正在分析…" forever — the
+      // exact frozen-card outcome abort-all exists to prevent. wsRef.stop() is best-effort
+      // (an event can already be buffered in the SDK when SIGTERM lands), so this in-handler
+      // gate is the real guard (cross-review: confirmed-still-present P1).
+      if (shuttingDown) return;
       const event = sdkEventToImEvent(data);
       if (event) {
         void handleMessageEvent(event, { invoke }, {
@@ -1239,6 +1247,11 @@ async function main(): Promise<void> {
       return {};
     },
     "card.action.trigger": (data: unknown) => {
+      // During graceful shutdown, don't start a NEW invoke from a button tap (it would
+      // register an abortController the drain already passed → abandoned mid-stream at
+      // exit). Still return a valid ack so Feishu doesn't surface a tap error to the user;
+      // the tap is simply a no-op this shutdown (cross-review confirmed-still-present P1).
+      if (shuttingDown) return {};
       try {
         const d = data as {
           header?: { event_id?: string };
