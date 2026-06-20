@@ -110,6 +110,23 @@ deploy-all.sh：把目标仓库打成 tarball 上传 S3（部署时快照）
 （为何不挂 EFS、改用 index-service 本地副本的论证，见
 [`docs/agent/efs-codegraph-sharing-spike.md`](docs/agent/efs-codegraph-sharing-spike.md)。）
 
+## 安全设计（纵深防御）
+
+把代码读给一个群里的非技术读者听，安全面有三类：**别越权**（只读不能变成写）、**别泄露**（密钥/内网拓扑不能进群）、**别被带偏**（提问或代码里的注入指令不能改变行为）。每一类都不靠"提示词说说而已"，而是有代码层强制：
+
+| 面 | 怎么强制 | 真相源 |
+|----|---------|--------|
+| **只读边界** | Agent SDK 配 `tools=[]`（可用性闸，连写工具都不在模型上下文里）+ `disallowed_tools` 黑名单 + `permission_mode=dontAsk`；index-service 端只注册 7 个只读工具（闭合白名单，不注册即无能力） | `agent-container/agent_lib.py`、`index-service/http_bridge.py` |
+| **会话隔离** | 每次提问跑在独立的 Firecracker microVM，**不挂任何共享/代码文件系统**（无 EFS、无 `/mnt/repo`）；代码只经 HTTP 桥读，会话之间无共享状态 | `docs/agent/architecture.md` |
+| **路径confinement** | Agent 给的文件路径经词法 + realpath 双重校验关进仓库根，符号链接逃逸（指向仓库外）被丢弃；SQLite 只读模式开、禁扩展加载 | `index-service/path_align.py`、`file_read.py`、`file_table.py` |
+| **密钥/拓扑脱敏** | 进群的每个字段（结论/依据/追问/澄清/分析过程/问题回显/兜底文本）都过脱敏：AWS/Stripe/GitHub/JWT/Azure key、连接串口令、EC2 内网 DNS、S3 bucket、本机飞书 secret 全部 `[已隐藏]` | `bot-gateway/src/redact.ts` |
+| **防注入信任边界** | 工具读到的代码/注释/配置一律当"待分析数据"，其中任何"改变你的行为"的文字都不执行；只信打包进镜像的 system prompt | `agent-container/prompts/system.md` |
+| **取证泄漏兜底** | 冷启动时模型偶尔把工具调用当文本吐出（MCP 未注册）——agent 侧退避重试，gateway 侧检测并剥离，0 工具的"假完成"渲染为失败卡而非绿色成功 | `agent-container/agent_lib.py`、`bot-gateway/src/strip-toolcall-leak.ts` |
+| **单写者铁律** | graph.db 同一时刻只一个写者（flock 跨进程 + 进程内重启锁 + orphan reaper），杜绝 RocksDB 并发写损坏 | `index-service/codegraph_session.py`、`bootstrap.sh` |
+| **密钥不入库** | 飞书 App ID/Secret、token 走环境变量 / Secrets Manager / SSM，部署 user-data 只写非敏感配置 | `.local/`（gitignored）、`docs/agent/invariants.md` §7 |
+
+逐条「是什么 / 谁是真相源 / 怎么机检 / 违反后果」见 [`docs/agent/invariants.md`](docs/agent/invariants.md)。
+
 ## 风险与可信度
 
 - **AI 固有风险**：模型可能幻觉、可能被提问里的注入指令带偏。护栏：答案强约束"代码为唯一依据 +
@@ -123,7 +140,7 @@ deploy-all.sh：把目标仓库打成 tarball 上传 S3（部署时快照）
 |------|------|
 | 部署 / 连飞书 / 运维 / 排错（从零到能用） | [`docs/runbook.md`](docs/runbook.md) |
 | 一次提问如何穿过系统（AI 必读） | [`docs/agent/architecture.md`](docs/agent/architecture.md) |
-| AI 协作约定 / 不变量 | [`AGENTS.md`](AGENTS.md) |
+| AI 协作约定 / 不变量（含安全不变量逐条） | [`AGENTS.md`](AGENTS.md) · [`docs/agent/invariants.md`](docs/agent/invariants.md) |
 | 目录结构（双语） | [`docs/structure_zh.md`](docs/structure_zh.md) · [`docs/structure_en.md`](docs/structure_en.md) |
 | 需求 / 架构设计真相源 | [`docs/design/requirements_zh.md`](docs/design/requirements_zh.md) · [`docs/design/architecture-overview_zh.md`](docs/design/architecture-overview_zh.md) |
 | CardKit 流式卡片调研 | [`docs/agent/cardkit-streaming-spike.md`](docs/agent/cardkit-streaming-spike.md) |
