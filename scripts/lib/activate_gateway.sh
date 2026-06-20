@@ -14,7 +14,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/common.sh"
 
 REGION="$1"; IID="$2"; RUNTIME_ARN="$3"; SECRET_ID="$4"
-LOCALE="${5:-zh}"; LOG_HASH_SALT="${6:-}"; FEISHU_API_BASE="${7:-}"
+LOCALE="${5:-zh}"; LOG_HASH_SALT="${6:-}"; FEISHU_API_BASE="${7:-}"; IDLE_TIMEOUT="${8:-}"
 
 [[ -n "$IID" && "$IID" != "None" ]] || { say err "activate_gateway: missing index instance id"; exit 2; }
 [[ -n "$RUNTIME_ARN" ]] || { say err "activate_gateway: missing RUNTIME_ARN"; exit 2; }
@@ -33,6 +33,10 @@ LOCALE='${LOCALE}'"
 LOG_HASH_SALT='${LOG_HASH_SALT}'"
 [[ -n "$FEISHU_API_BASE" ]] && ENV_BODY="${ENV_BODY}
 FEISHU_API_BASE='${FEISHU_API_BASE}'"
+# The runtime's idle timeout (seconds) — the gateway derives its session-reuse TTL
+# from this so "reusable on the gateway" never outlives "still warm on AgentCore".
+[[ -n "$IDLE_TIMEOUT" ]] && ENV_BODY="${ENV_BODY}
+RUNTIME_IDLE_TIMEOUT_SECS='${IDLE_TIMEOUT}'"
 
 # Base64 the body so arbitrary content survives the JSON/shell trip through
 # send-command intact (no escaping games with quotes/newlines in the parameters).

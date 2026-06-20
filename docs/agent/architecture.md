@@ -19,7 +19,8 @@ structure）描述系统*是什么*；本文描述*一次提问如何在系统�
       · SigV4 签名调 AgentCore InvokeAgentRuntime（src/sigv4.ts），
         path = /runtimes/<encodeURIComponent(runtimeArn)>/invocations，带 runtimeSessionId
   → AgentCore Runtime（Firecracker microVM，每会话独立容器）
-      · 秒级冷启；空闲约 15 分钟回收；Session Storage 约 14 天过期
+      · 秒级冷启；空闲达 idleRuntimeSessionTimeout（默认 900 秒 / 15 分钟，部署时显式配置）后回收；
+        Session Storage 约 14 天过期。网关的 session 复用 TTL 与该 idle 值同源对齐（见下文「Runtime 调参」）
       · microVM 内运行 agent-container（Python，agent-container/agent.py）
           · @app.entrypoint 异步流式 handler（bedrock_agentcore.runtime.BedrockAgentCoreApp）
           · Claude Code Agent SDK（claude_agent_sdk.query / ClaudeAgentOptions），
@@ -81,6 +82,27 @@ structure）描述系统*是什么*；本文描述*一次提问如何在系统�
 **含义**：要改 Runtime 的 env / idle timeout / 请求头，编辑 `scripts/lib/deploy_runtime.py` 并重跑
 `deploy-all.sh`（`deploy.sh` 为已废弃转发垫片）——改 CDK 不生效。密钥（飞书 app secret、bot token）走
 Secrets Manager / SSM，**当前需手工在 CDK 外创建**（编排脚本尚未自动建密钥），重部署不覆盖真实凭证。
+
+## Runtime 调参与成本权衡（idle / session 复用）
+
+Runtime 按无状态使用：每次 invoke 都是一次全新的 SDK 会话，多轮追问由网关把历史问答重新拼进 prompt 续接
+（external history replay，见 `bot-gateway/src/followup-context.ts`），不依赖 microVM 内残留的对话状态。
+复用 `runtimeSessionId` 的唯一作用是把同一问答链路由到同一个暖 microVM、省去冷启动，它不承载语义。
+
+这带来一条必须对齐的约束：**网关判定「会话可复用」的时间窗，不应超过 AgentCore 保留暖 microVM 的时间窗。**
+若网关的窗口更长，落在两者之间的追问会复用一个已被回收的会话 id，触发一次冷启动——功能不受影响（历史靠
+replay 不丢），但响应慢几秒。为此两个值由同一参数驱动：
+
+- `idleRuntimeSessionTimeout`：暖 microVM 空闲多久后回收。在 `deploy_runtime.py` 的 `lifecycleConfiguration`
+  中设置，由 `deploy-all.sh --idle-timeout` 传入，默认 900 秒（15 分钟，与 AWS 默认一致）。
+- 网关的 session 复用 TTL（`session-map.ts`）：部署时将上述值写入网关环境变量 `RUNTIME_IDLE_TIMEOUT_SECS`，
+  TTL 据此派生，默认同为 15 分钟。调整时改动 `--idle-timeout` 一处即可，两侧随之联动。
+
+**成本权衡。** AgentCore 的计费规则是：CPU 仅在活跃处理时计费（空闲时免费），内存则按整个 session 生命周期计费。
+因此调大 idle 会延长暖 microVM 存活、增加这段空闲期的内存开销，仅当该时间窗内确有追问发生时才划算。多数会话
+在一次问答后即结束，调大 idle 主要覆盖「问答十余分钟后才追问」这类低频场景，收益通常不抵成本，故默认保持
+15 分钟。仅在追问密集的场景（如客服式高频问答）才建议用 `--idle-timeout` 调大并接受相应的内存开销；如需进一步
+压缩成本，可调小（最低 60 秒）。`maxLifetime`（默认 8 小时）是暖 microVM 的存活硬上限，到期强制重建，通常无需调整。
 
 ## 四个核心架构选择
 

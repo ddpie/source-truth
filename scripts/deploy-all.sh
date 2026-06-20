@@ -53,10 +53,19 @@ INSTANCE_TYPE=""
 MAX_FILES=""
 MODEL=""
 ROOT_VOLUME_GB=""
+IDLE_TIMEOUT=""          # AgentCore session idle timeout (s); gateway session TTL is aligned to this
+MAX_LIFETIME=""          # AgentCore microVM hard max age (s) before forced recycle
 DEFAULT_INSTANCE_TYPE="t4g.large"
 DEFAULT_MAX_FILES="10000"
 DEFAULT_MODEL="global.anthropic.claude-opus-4-8"
 DEFAULT_ROOT_VOLUME_GB="30"
+# Idle timeout default = AWS's own default (900s/15min). The gateway derives its
+# session-reuse TTL from this exact value (persisted to deploy-config), so "warm
+# enough to reuse" on the gateway and "still alive" on AgentCore mean the same
+# thing. Cost: AgentCore bills idle MEMORY (not idle CPU), so raising this trades
+# follow-up warm-hit rate for idle-memory spend — tune per workload.
+DEFAULT_IDLE_TIMEOUT="900"
+DEFAULT_MAX_LIFETIME="28800"
 REFRESH_INDEX=false       # --refresh-index: replace a running index instance if its artifacts are stale
 declare -A SKIP=()
 
@@ -83,6 +92,10 @@ Options:
   --root-volume-gb <n> index-service root EBS size in GiB (default: 30). Grow for a
                       large repo: it holds the repo copy + graph.db + tarball.
   --model <id>        Bedrock model id for the agent runtime
+  --idle-timeout <s>  AgentCore session idle timeout, seconds (60..28800; default 900/15min).
+                      The gateway's session-reuse TTL is aligned to this. Larger = higher
+                      follow-up warm-hit rate but more idle-memory cost (idle CPU is free).
+  --max-lifetime <s>  AgentCore microVM hard max age before forced recycle (60..28800; default 28800/8h)
   --skip <phase>      Skip a phase: artifacts|iam|network|index-svc|image|runtime|gateway (repeatable)
   --refresh-index     Replace the running index-service instance if this run staged
                       newer index-service code / repo to S3 (reuse can't re-bootstrap).
@@ -114,6 +127,8 @@ while [[ $# -gt 0 ]]; do
     --max-files) MAX_FILES="$2"; shift 2 ;;
     --root-volume-gb) ROOT_VOLUME_GB="$2"; shift 2 ;;
     --model) MODEL="$2"; shift 2 ;;
+    --idle-timeout) IDLE_TIMEOUT="$2"; shift 2 ;;
+    --max-lifetime) MAX_LIFETIME="$2"; shift 2 ;;
     --skip) SKIP["$2"]=1; shift 2 ;;
     --refresh-index) REFRESH_INDEX=true; shift ;;
     --dry-run) DRY_RUN=true; shift ;;
@@ -139,6 +154,8 @@ INSTANCE_TYPE="${INSTANCE_TYPE:-${DEPLOY_INSTANCE_TYPE:-$DEFAULT_INSTANCE_TYPE}}
 export DEPLOY_INSTANCE_TYPE="$INSTANCE_TYPE"
 MAX_FILES="${MAX_FILES:-${DEPLOY_MAX_FILES:-$DEFAULT_MAX_FILES}}"
 ROOT_VOLUME_GB="${ROOT_VOLUME_GB:-${DEPLOY_ROOT_VOLUME_GB:-$DEFAULT_ROOT_VOLUME_GB}}"
+IDLE_TIMEOUT="${IDLE_TIMEOUT:-${DEPLOY_IDLE_TIMEOUT:-$DEFAULT_IDLE_TIMEOUT}}"
+MAX_LIFETIME="${MAX_LIFETIME:-${DEPLOY_MAX_LIFETIME:-$DEFAULT_MAX_LIFETIME}}"
 ACCOUNT="$(aws sts get-caller-identity --query Account --output text)"
 
 # --- resolve the --repo source (local dir | git URL | s3:// tarball/prefix) ---
@@ -588,7 +605,7 @@ else
   # that HTTP bridge, so the microVM mounts no filesystem.
   RUNTIME_SG="${INDEX_SERVICE_SG:?INDEX_SERVICE_SG not set — run the index-svc phase first}"
   if [[ "$DRY_RUN" == true ]]; then
-    say info "[dry-run] deploy_runtime.py → AgentCore runtime (model=$MODEL, sg=$RUNTIME_SG, CODEGRAPH_MCP_URL=${CODEGRAPH_URL})"
+    say info "[dry-run] deploy_runtime.py → AgentCore runtime (model=$MODEL, sg=$RUNTIME_SG, CODEGRAPH_MCP_URL=${CODEGRAPH_URL}, idle=${IDLE_TIMEOUT}s, maxlife=${MAX_LIFETIME}s)"
   else
     # Capture stdout (deploy_runtime.py prints AGENT_RUNTIME_ID/ARN to stdout, all
     # status to stderr) so we can PERSIST the ARN. Without this the runtime deploys
@@ -598,7 +615,8 @@ else
       --region "$REGION" --account "$ACCOUNT" \
       --role-arn "$ROLE_ARN" --image "$ECR_URI" --model "$MODEL" \
       --subnets "$SUBNET" --security-groups "$RUNTIME_SG" \
-      --codegraph-mcp-url "$CODEGRAPH_URL")"
+      --codegraph-mcp-url "$CODEGRAPH_URL" \
+      --idle-timeout "$IDLE_TIMEOUT" --max-lifetime "$MAX_LIFETIME")"
     RT_ARN="$(printf '%s\n' "$RT_OUT" | sed -n 's/^AGENT_RUNTIME_ARN=//p')"
     RT_ID="$(printf '%s\n' "$RT_OUT" | sed -n 's/^AGENT_RUNTIME_ID=//p')"
     if [[ -z "$RT_ARN" ]]; then
@@ -609,7 +627,12 @@ else
     update_env "$CONFIG_FILE" AGENT_RUNTIME_ARN "$RT_ARN"
     update_env "$CONFIG_FILE" RUNTIME_ARN "$RT_ARN"  # the name bot-gateway reads
     [[ -n "$RT_ID" ]] && update_env "$CONFIG_FILE" AGENT_RUNTIME_ID "$RT_ID"
-    say ok "runtime deployed → RUNTIME_ARN persisted to ${CONFIG_FILE} (VPC sg=$RUNTIME_SG, CODEGRAPH_MCP_URL → ${CODEGRAPH_URL})"
+    # Persist the lifecycle knobs: read back on a flagless rerun (so an in-place
+    # update doesn't revert them), AND consumed by the gateway phase so the gateway's
+    # session-reuse TTL is aligned to the runtime's actual idle window.
+    update_env "$CONFIG_FILE" DEPLOY_IDLE_TIMEOUT "$IDLE_TIMEOUT"
+    update_env "$CONFIG_FILE" DEPLOY_MAX_LIFETIME "$MAX_LIFETIME"
+    say ok "runtime deployed → RUNTIME_ARN persisted to ${CONFIG_FILE} (VPC sg=$RUNTIME_SG, idle=${IDLE_TIMEOUT}s, maxlife=${MAX_LIFETIME}s, CODEGRAPH_MCP_URL → ${CODEGRAPH_URL})"
   fi
 fi
 
@@ -661,7 +684,7 @@ else
   say step "Phase 6: activate bot-gateway"
   bash "$SCRIPT_DIR/lib/activate_gateway.sh" \
     "$REGION" "$GW_INSTANCE" "$GW_RUNTIME_ARN" "$FEISHU_SECRET_ID" \
-    "${LOCALE:-zh}" "${LOG_HASH_SALT:-}" "${FEISHU_API_BASE:-}" \
+    "${LOCALE:-zh}" "${LOG_HASH_SALT:-}" "${FEISHU_API_BASE:-}" "$IDLE_TIMEOUT" \
     || { say err "gateway activation failed — backend is up; fix and re-run (or --skip gateway)"; exit 1; }
   say ok "bot-gateway activated on $GW_INSTANCE"
 fi

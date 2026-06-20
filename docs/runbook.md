@@ -132,6 +132,12 @@ aws ssm start-session --region <r> --target <INDEX_SERVICE_INSTANCE>
 **只重部 runtime**（改了 agent 镜像 / system prompt 后）：重跑 `deploy-all.sh`（镜像与 runtime 阶段幂等）。
 注意热 microVM 会持旧镜像约 15 分钟才被回收。
 
+**调整暖 VM 存活时长（追问命中率 vs 成本）**：`deploy-all.sh --idle-timeout <秒>`（默认 900，即 15 分钟，
+范围 60–28800）。该参数同时设置 AgentCore 的 `idleRuntimeSessionTimeout` 与网关的 session 复用 TTL，二者自动对齐。
+成本权衡：AgentCore 空闲时 CPU 免费、内存照常计费，因此调大会延长暖 VM 存活、提高追问命中暖机的概率，
+但需承担这段空闲期的内存开销；多数会话在一次问答后即结束，故默认 15 分钟。追问密集的场景可调大，需要压缩成本则调小。
+详见 [`agent/architecture.md`](agent/architecture.md)「Runtime 调参与成本权衡」。
+
 **看网关日志**（网关是 index 主机上的 `bot-gateway.service`，结构化 JSON 日志进 journald）：
 
 ```bash
