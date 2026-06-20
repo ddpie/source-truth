@@ -269,3 +269,72 @@ def test_to_local_allows_symlink_within_repo(tmp_path):
     os.symlink(str(target), str(link))
     got = path_align.to_local_path(f"{MOUNT}/alias.json", local_root=str(root), mount_root=MOUNT)
     assert got == os.path.realpath(str(target))
+
+
+# --- multi-repo `repo` prefix (design §4.4 path honesty): <repo>/<rel> ----------
+def test_repo_prefix_forward_on_repo_relative():
+    # to_container_path with repo= prefixes the agent-visible path with <repo>/.
+    got = path_align.to_container_path("Assets/Foo.cs", index_root=INDEX_ROOT, repo="client")
+    assert got == "client/Assets/Foo.cs"
+    # absolute index path → stripped then prefixed
+    got2 = path_align.to_container_path(f"{INDEX_ROOT}/a/b.cs", index_root=INDEX_ROOT, repo="backend-svc")
+    assert got2 == "backend-svc/a/b.cs"
+
+
+def test_repo_prefix_default_empty_is_unchanged():
+    # repo="" (single-repo default) must be byte-identical to no repo arg → no regression.
+    assert path_align.to_container_path("a/b.cs", index_root=INDEX_ROOT, repo="") == \
+        path_align.to_container_path("a/b.cs", index_root=INDEX_ROOT)
+
+
+def test_repo_prefix_repo_root_is_bare_repo():
+    # the repo root "." becomes just "<repo>", not "<repo>/."
+    assert path_align.to_container_path(".", index_root=INDEX_ROOT, repo="client") == "client"
+
+
+def test_repo_prefix_not_applied_with_legacy_mount_root():
+    # a legacy mount_root is single-repo only; repo is ignored there.
+    got = path_align.to_container_path("a/b.cs", index_root=INDEX_ROOT, mount_root="/mnt/repo", repo="client")
+    assert got == "/mnt/repo/a/b.cs"
+
+
+def test_format_location_carries_repo_prefix():
+    loc = {"file": "Assets/Foo.cs", "line": 12}
+    assert path_align.format_location(loc, index_root=INDEX_ROOT, repo="client") == "client/Assets/Foo.cs:12"
+
+
+def test_to_local_strips_repo_prefix(tmp_path):
+    # inverse: the agent sends "<repo>/<rel>" (what it saw); to_local_path strips the
+    # leading "<repo>/" before resolving onto the local on-disk copy.
+    root = tmp_path / "repo"
+    (root / "a").mkdir(parents=True)
+    (root / "a" / "b.json").write_text("{}")
+    got = path_align.to_local_path("client/a/b.json", local_root=str(root), repo="client")
+    assert got == os.path.realpath(str(root / "a" / "b.json"))
+
+
+def test_to_local_repo_round_trip():
+    # to_container_path(repo) then to_local_path(repo) is a faithful round-trip (the rel part).
+    agent_path = path_align.to_container_path("Assets/Foo.cs", index_root=INDEX_ROOT, repo="client")
+    assert agent_path == "client/Assets/Foo.cs"
+    # stripping the same repo recovers the repo-relative path (resolved against a local root)
+    # use a non-existent root: realpath still resolves lexically, confinement holds.
+    got = path_align.to_local_path(agent_path, local_root="/data/repo/client", repo="client")
+    assert got == "/data/repo/client/Assets/Foo.cs"
+
+
+def test_to_local_repo_prefix_default_empty_unchanged(tmp_path):
+    root = tmp_path / "repo"
+    (root / "a").mkdir(parents=True)
+    (root / "a" / "b.json").write_text("{}")
+    assert path_align.to_local_path("a/b.json", local_root=str(root), repo="") == \
+        path_align.to_local_path("a/b.json", local_root=str(root))
+
+
+def test_to_local_repo_prefix_does_not_enable_escape(tmp_path):
+    # stripping "<repo>/" must NOT let a ../ escape through — the existing guards still apply
+    # after the strip.
+    root = tmp_path / "repo"
+    root.mkdir()
+    with pytest.raises(ValueError):
+        path_align.to_local_path("client/../../etc/passwd", local_root=str(root), repo="client")

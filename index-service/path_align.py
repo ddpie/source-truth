@@ -61,6 +61,7 @@ def to_container_path(
     *,
     index_root: str,
     mount_root: str = DEFAULT_MOUNT_ROOT,
+    repo: str = "",
 ) -> str:
     """Rewrite a CodeGraph-returned path into the container mount path.
 
@@ -71,6 +72,13 @@ def to_container_path(
     - Absolute paths already under a non-empty ``mount_root`` are idempotent.
     - Relative paths are interpreted relative to the repo root.
     - Redundant ``.`` / ``..`` / double-slash segments are normalized.
+
+    ``repo`` (multi-repo): when set, the repo-relative result is PREFIXED with
+    ``<repo>/`` so the agent sees ``<repo>/<repo-relative-path>`` and can tell which
+    repo a citation came from (design §4.4 "path honesty"). Default ``""`` = single
+    repo = no prefix = byte-identical to the pre-multi-repo behavior. Only applied in
+    the repo-relative (empty mount_root) case; a legacy mount_root is single-repo and
+    ignores ``repo``.
 
     Raises ValueError if ``raw`` is empty or resolves outside the repo root
     (absolute path not under index_root/mount_root, or relative path escaping up).
@@ -89,14 +97,14 @@ def to_container_path(
         for root in roots:
             rel = _relative_to(norm, root)
             if rel is not None:
-                return _join_mount(mount_root, rel)
+                return _with_repo(repo, _join_mount(mount_root, rel), mount_root)
         raise ValueError(f"absolute path escapes repo root: {raw!r}")
 
     # Relative path: must not climb above the repo root.
     rel = posixpath.normpath(raw)
     if rel == ".." or rel.startswith("../"):
         raise ValueError(f"relative path escapes repo root: {raw!r}")
-    return _join_mount(mount_root, rel)
+    return _with_repo(repo, _join_mount(mount_root, rel), mount_root)
 
 
 def to_local_path(
@@ -104,6 +112,7 @@ def to_local_path(
     *,
     local_root: str,
     mount_root: str = DEFAULT_MOUNT_ROOT,
+    repo: str = "",
 ) -> str:
     """Resolve an AGENT-supplied path back onto the LOCAL repo copy on disk.
 
@@ -131,6 +140,19 @@ def to_local_path(
     if not requested or not requested.strip():
         raise ValueError("path must be a non-empty string")
     requested = _normalize_seps(requested)
+
+    # Multi-repo inverse of to_container_path's prefix: the agent saw a path the tool
+    # emitted as "<repo>/<rel>", so strip a leading "<repo>/" (ONLY a relative path —
+    # a legacy absolute mount path never carries it) before resolving onto local_root.
+    # repo="" (single repo) → no-op, byte-identical to pre-multi-repo. The repo name is
+    # already charset-validated upstream (manifest ^[a-z0-9][a-z0-9-]*$), but we only
+    # STRIP it here, never use it to build a path, so this can't widen the attack surface.
+    if repo and not posixpath.isabs(requested):
+        prefix = repo.rstrip("/") + "/"
+        if requested == repo:
+            requested = ""
+        elif requested.startswith(prefix):
+            requested = requested[len(prefix):]
 
     local_root = posixpath.normpath(local_root)
     mount_root = posixpath.normpath(mount_root) if mount_root else ""
@@ -169,6 +191,7 @@ def format_location(
     *,
     index_root: str,
     mount_root: str = DEFAULT_MOUNT_ROOT,
+    repo: str = "",
 ) -> str:
     """Turn a CodeGraph ``symbol.location`` dict into an agent-readable reference.
 
@@ -181,7 +204,7 @@ def format_location(
     raw_file = location.get("file")
     if not raw_file:
         raise ValueError("location is missing required 'file' field")
-    path = to_container_path(raw_file, index_root=index_root, mount_root=mount_root)
+    path = to_container_path(raw_file, index_root=index_root, mount_root=mount_root, repo=repo)
     line = location.get("line")
     return f"{path}:{line}" if line is not None else path
 
@@ -202,3 +225,12 @@ def _join_mount(mount_root: str, rel: str) -> str:
     if not mount_root:
         return rel if rel else "."
     return mount_root if not rel else posixpath.normpath(f"{mount_root}/{rel}")
+
+
+def _with_repo(repo: str, path: str, mount_root: str) -> str:
+    """Prefix a repo-relative path with ``<repo>/`` (multi-repo path honesty, design §4.4).
+    No-op when repo is empty (single-repo) or a legacy mount_root is in use (single-repo
+    only). The repo root "." becomes just "<repo>" (not "<repo>/.")."""
+    if not repo or mount_root:
+        return path
+    return repo if path == "." else f"{repo}/{path}"
