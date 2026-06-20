@@ -129,6 +129,35 @@ def test_row_cap_truncates(repo, monkeypatch):
     assert out["truncated"] is True
 
 
+def test_exactly_max_rows_not_truncated_and_keeps_last_row(repo, monkeypatch):
+    # REGRESSION: the header was counted against MAX_ROWS, so a table with EXACTLY
+    # MAX_ROWS data rows dropped its last row AND falsely reported TRUNCATED.
+    monkeypatch.setattr(file_table, "MAX_ROWS", 3)
+    (repo / "Config" / "exact.csv").write_text("id,v\n0,0\n1,1\n2,2\n", encoding="utf-8")
+    out = file_table.read_table("Config/exact.csv", local_root=str(repo), mount_root=MOUNT)
+    assert out["truncated"] is False
+    assert "2 | 2" in out["content"]            # last data row present
+    assert "(3 row(s))" in out["content"]        # reports DATA rows, no TRUNCATED
+
+
+def test_csv_cell_with_embedded_newline_stays_one_row(repo):
+    # A quoted cell with an embedded newline (game description/dialogue columns) must
+    # NOT split into phantom output rows — it's flattened to a visible \n.
+    (repo / "Config" / "desc.csv").write_text('id,desc\n1,"line1\nline2"\n2,ok\n', encoding="utf-8")
+    out = file_table.read_table("Config/desc.csv", local_root=str(repo), mount_root=MOUNT)
+    pipe_lines = [ln for ln in out["content"].splitlines() if "|" in ln]
+    assert len(pipe_lines) == 3                  # header + 2 data rows, not 4
+    assert "line1\\nline2" in out["content"]     # newline flattened, not split
+
+
+def test_corrupt_sqlite_raises_clean_value_error(repo):
+    # A non-database file with a .db extension must give an actionable ValueError, not
+    # an opaque internal error (the bridge only forwards ValueError detail).
+    (repo / "Config" / "bad.db").write_bytes(b"this is not a database at all")
+    with pytest.raises(ValueError, match="not a valid SQLite database"):
+        file_table.read_table("Config/bad.db", local_root=str(repo), mount_root=MOUNT)
+
+
 def test_unsupported_extension_raises(repo):
     (repo / "Config" / "x.png").write_bytes(b"\x89PNG\r\n")
     with pytest.raises(ValueError, match="does not handle"):

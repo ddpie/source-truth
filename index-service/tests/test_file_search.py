@@ -75,6 +75,23 @@ def test_empty_pattern_raises(repo: Path):
         file_search.run_search("   ", local_root=str(repo), mount_root="/mnt/repo")
 
 
+def test_gbk_encoded_file_in_results_does_not_crash(tmp_path: Path):
+    # REGRESSION: a GBK/GB2312 source file (common in Chinese game repos) in the search
+    # results made the strict-UTF-8 decode of rg/grep stdout raise UnicodeDecodeError,
+    # crashing the WHOLE search (even an ASCII query) into a generic internal error.
+    # errors="replace" must let the search still return its matches.
+    (tmp_path / "skill.cs").write_bytes("// 火球术 id=5 伤害500".encode("gbk"))
+    out = file_search.run_search("id=5", local_root=str(tmp_path), mount_root="")
+    assert out["count"] >= 1  # found the ASCII token despite the GBK bytes
+
+
+def test_bad_regex_raises_value_error_not_runtime(repo: Path):
+    # An unbalanced regex group is a recoverable USER-input error → ValueError (the
+    # bridge forwards its detail as "bad search pattern"), not a generic RuntimeError.
+    with pytest.raises(ValueError, match="bad search pattern"):
+        file_search.run_search("foo(", local_root=str(repo), mount_root="")
+
+
 def test_search_to_json_is_valid_json(repo: Path):
     import json
     s = file_search.search_to_json("MaxEncumbrance", local_root=str(repo), mount_root="/mnt/repo")
