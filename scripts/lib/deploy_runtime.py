@@ -59,6 +59,8 @@ def deploy(
     subnets: list[str] | None = None,
     security_groups: list[str] | None = None,
     codegraph_mcp_url: str | None = None,
+    idle_timeout: int | None = None,
+    max_lifetime: int | None = None,
 ) -> tuple[str, str]:
     client = boto3.client("bedrock-agentcore-control", region_name=region)
     artifact = {"containerConfiguration": {"containerUri": image}}
@@ -97,6 +99,23 @@ def deploy(
         filesystemConfigurations=fs,
         environmentVariables=env,
     )
+
+    # Session lifecycle. We set this EXPLICITLY (rather than relying on AWS defaults)
+    # so the warm-microVM idle window is a documented value the gateway's session-reuse
+    # TTL is aligned to — not a guessed constant. Cost note: AgentCore bills CPU only
+    # during active processing (idle CPU is free) but bills MEMORY for the whole session
+    # lifetime, so a LONGER idle timeout = more idle memory cost with no CPU cost. The
+    # default 900s (15min) matches AWS's own default and the gateway TTL; raise it only
+    # if follow-up "stickiness" matters more than the idle-memory spend.
+    #   idleRuntimeSessionTimeout: terminate a session idle this long (60..28800, default 900)
+    #   maxLifetime: hard cap on a microVM's age before forced recycle (60..28800, default 28800)
+    lifecycle: dict[str, int] = {}
+    if idle_timeout is not None:
+        lifecycle["idleRuntimeSessionTimeout"] = idle_timeout
+    if max_lifetime is not None:
+        lifecycle["maxLifetime"] = max_lifetime
+    if lifecycle:
+        common["lifecycleConfiguration"] = lifecycle
 
     existing = find_existing(client, name)
     if existing:
@@ -152,7 +171,17 @@ def main() -> int:
     p.add_argument("--subnets", help="comma-separated subnet ids (VPC mode)")
     p.add_argument("--security-groups", help="comma-separated security group ids")
     p.add_argument("--codegraph-mcp-url", help="index-service CodeGraph MCP-over-HTTP URL")
+    # Session lifecycle (seconds). Omit → AWS defaults (idle 900, maxLifetime 28800).
+    p.add_argument("--idle-timeout", type=int, help="idleRuntimeSessionTimeout secs (60..28800; default 900)")
+    p.add_argument("--max-lifetime", type=int, help="maxLifetime secs (60..28800; default 28800)")
     args = p.parse_args()
+
+    # Validate lifecycle bounds up front so a bad value fails with a clear message
+    # here, not as an opaque ValidationException minutes into the deploy.
+    for flag, val in (("--idle-timeout", args.idle_timeout), ("--max-lifetime", args.max_lifetime)):
+        if val is not None and not (60 <= val <= 28800):
+            print(f"{flag} must be in 60..28800 seconds, got {val}", file=sys.stderr)
+            return 2
 
     rid, arn = deploy(
         region=args.region,
@@ -163,6 +192,8 @@ def main() -> int:
         subnets=args.subnets.split(",") if args.subnets else None,
         security_groups=args.security_groups.split(",") if args.security_groups else None,
         codegraph_mcp_url=args.codegraph_mcp_url,
+        idle_timeout=args.idle_timeout,
+        max_lifetime=args.max_lifetime,
     )
     print(f"AGENT_RUNTIME_ID={rid}")
     print(f"AGENT_RUNTIME_ARN={arn}")

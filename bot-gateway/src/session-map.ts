@@ -15,7 +15,28 @@
 
 import { randomUUID } from "node:crypto";
 
-const DEFAULT_TTL_MS = 30 * 60 * 1000; // 30 minutes (> AgentCore idle ~15min)
+/**
+ * Session-reuse TTL, ALIGNED to the AgentCore runtime's idle timeout.
+ *
+ * Reusing a runtimeSessionId only pays off while AgentCore still holds the warm
+ * microVM behind it; once the runtime's idle timeout recycles that VM, "reuse"
+ * silently lands on a cold start. So this TTL must NOT exceed the runtime idle
+ * window. The deploy writes the runtime's actual idle timeout into the gateway
+ * env (RUNTIME_IDLE_TIMEOUT_SECS, set by activate_gateway.sh from deploy-all's
+ * --idle-timeout), so the two are driven by one value instead of two guesses.
+ * Default 900s (15min) = AgentCore's own default, used when the env is unset.
+ *
+ * The TTL is sliding (refreshed on every reuse), so it bounds idle-gap-to-expiry,
+ * not total conversation length.
+ */
+function resolveDefaultTtlMs(): number {
+  const raw = process.env.RUNTIME_IDLE_TIMEOUT_SECS;
+  const secs = raw ? Number(raw) : NaN;
+  // Guard against unset/garbage/non-positive; fall back to the AgentCore default.
+  return Number.isFinite(secs) && secs > 0 ? secs * 1000 : 900 * 1000;
+}
+
+const DEFAULT_TTL_MS = resolveDefaultTtlMs();
 
 interface Entry {
   sessionId: string;

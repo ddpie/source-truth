@@ -44,12 +44,32 @@ describe("getSessionId", () => {
     expect(a).toBe(b);
   });
 
-  it("expires entries after TTL", () => {
+  it("expires entries after the default TTL (15min, aligned to AgentCore idle)", () => {
     jest.useFakeTimers();
     const before = getSessionId("chat_ttl");
-    jest.advanceTimersByTime(30 * 60 * 1000 + 1); // default 30min TTL
+    // Default TTL is 900s (15min) = AgentCore's default idle timeout, unless
+    // RUNTIME_IDLE_TIMEOUT_SECS overrides it (unset in this test env).
+    jest.advanceTimersByTime(15 * 60 * 1000 + 1);
     const after = getSessionId("chat_ttl");
     expect(after).not.toBe(before); // new session after expiry
+    jest.useRealTimers();
+  });
+
+  it("does NOT expire just before the default TTL", () => {
+    jest.useFakeTimers();
+    const before = getSessionId("chat_ttl2");
+    jest.advanceTimersByTime(15 * 60 * 1000 - 1000); // 1s short of expiry
+    const after = getSessionId("chat_ttl2");
+    expect(after).toBe(before); // still warm
+    jest.useRealTimers();
+  });
+
+  it("honors an explicit ttlMs override (caller-supplied)", () => {
+    jest.useFakeTimers();
+    const before = getSessionId("chat_ttl3", undefined, 60 * 1000); // 60s TTL
+    jest.advanceTimersByTime(60 * 1000 + 1);
+    const after = getSessionId("chat_ttl3", undefined, 60 * 1000);
+    expect(after).not.toBe(before);
     jest.useRealTimers();
   });
 });

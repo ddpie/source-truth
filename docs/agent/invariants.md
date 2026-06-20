@@ -78,10 +78,24 @@
 
 ## 7. 密钥绝不入库
 
-- **不变量**：飞书 `App ID/Secret`、token 等绝不提交进仓库；走环境变量 / Secrets Manager / SSM。
-- **以谁为准**：`.local/`（gitignored 的启动脚本注入 env）；部署脚本不自动建密钥（手工建）。
-- **机检**：gitleaks pre-commit（规划）；`scripts/deploy-all.sh` 的 user-data 只写非敏感配置。
+- **不变量**：飞书 `App ID/Secret`、token 等绝不提交进仓库；走 Secrets Manager（运行时取出注入进程 env）。
+- **以谁为准**：`scripts/install.sh`（交互式把凭证写进 Secrets Manager 密钥 `source-truth/feishu-app`）；
+  `bot-gateway/run.sh`（启动时从 Secrets Manager 取出注入进程 env，不落盘）；`.local/` gitignored。
+- **机检**：gitleaks pre-commit（规划）；`deploy-all.sh`/`bootstrap.sh` 的 user-data 与 `/etc/bot-gateway.env`
+  只写非敏感配置（后者只存密钥**名**，不存密钥值）。
 - **违反后果**：密钥泄露 → 安全事故。
+
+## 8. 网关 session TTL 与 Runtime idle 对齐
+
+- **不变量**：网关的 session 复用 TTL 不得超过 AgentCore Runtime 的 `idleRuntimeSessionTimeout`。否则网关会
+  复用一个已被回收的暖 microVM，使追问触发冷启动——功能不受影响（历史靠 replay 续接），但响应变慢。
+- **以谁为准**：单一参数 `deploy-all.sh --idle-timeout`（默认 900 秒）同时设置 `deploy_runtime.py` 的
+  `lifecycleConfiguration.idleRuntimeSessionTimeout` 与网关环境变量 `RUNTIME_IDLE_TIMEOUT_SECS`，后者再由
+  `session-map.ts` 派生出 TTL。调整时只改这一个参数，两侧随之联动。
+- **机检**：无静态机检；由「同源派生」从结构上保证，而非维护两个独立常量。
+- **违反后果**：若将 TTL 写成大于 idle 的独立常量（退化前即 TTL 30 分钟、idle 15 分钟），落在中间时间窗的追问
+  会静默冷启。成本提示：调大 idle 会增加空闲期的内存计费（空闲 CPU 免费），详见
+  [`architecture.md`](architecture.md)「Runtime 调参与成本权衡」。
 
 ---
 
