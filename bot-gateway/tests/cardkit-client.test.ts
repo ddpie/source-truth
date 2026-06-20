@@ -92,14 +92,57 @@ describe("feedback buttons (👍/👎 + reason)", () => {
     }
   });
 
-  it("reason buttons are top-level, one per enumerated reasonCode, action=feedback_reason, no free text", () => {
+  it("reason buttons: prompt + a compact grid (column_set), one btn per reasonCode, action=feedback_reason, no free text", () => {
     const els = buildFeedbackReasonElements() as Array<Record<string, unknown>>;
+    // [0] = prompt markdown; [1] = the reason grid column_set (NOT 8 one-per-row buttons).
+    expect(els[0].tag).toBe("markdown");
+    const grid = els[1] as Record<string, unknown>;
+    expect(grid.tag).toBe("column_set");
+    expect(grid.element_id).toBe("fbr_row");
+    // >1 column so it's a grid, not a single stack
+    expect((grid.columns as unknown[]).length).toBeGreaterThan(1);
     const vals = collectButtonValues(els);
     expect(vals).toHaveLength(FEEDBACK_REASON_CODES.length);
     expect(vals.map((v) => v.reasonCode).sort()).toEqual([...FEEDBACK_REASON_CODES].sort());
     expect(vals.every((v) => v.action === "feedback_reason")).toBe(true);
-    // each reason button is element_id-addressable (fbr_<code>) for in-place disable
-    expect(els.filter((e) => e.tag === "button").every((e) => String(e.element_id).startsWith("fbr_"))).toBe(true);
+  });
+
+  it("buildFeedbackButtons(chosen) renders BOTH votes disabled, ✓ on the chosen, noop action (re-click inert)", () => {
+    const els = require("../src/cardkit-client").buildFeedbackButtons("up") as Array<Record<string, unknown>>;
+    const buttons: Array<Record<string, unknown>> = [];
+    const walk = (n: unknown): void => {
+      if (!n || typeof n !== "object") return;
+      const o = n as Record<string, unknown>;
+      if (o.tag === "button") buttons.push(o);
+      for (const v of Object.values(o)) { if (Array.isArray(v)) v.forEach(walk); else if (v && typeof v === "object") walk(v); }
+    };
+    els.forEach(walk);
+    expect(buttons).toHaveLength(2);
+    expect(buttons.every((b) => b.disabled === true)).toBe(true);
+    expect(buttons.every((b) => (b.value as Record<string, unknown>).action === "noop")).toBe(true);
+    const up = buttons.find((b) => b.element_id === "fb_up") as Record<string, unknown>;
+    const down = buttons.find((b) => b.element_id === "fb_down") as Record<string, unknown>;
+    expect(String((up.text as Record<string, unknown>).content)).toContain("✓");
+    expect(String((down.text as Record<string, unknown>).content)).not.toContain("✓");
+  });
+
+  it("buildFeedbackReasonGrid(chosen) renders ALL reason buttons disabled, ✓ on the chosen, noop action", () => {
+    const grid = require("../src/cardkit-client").buildFeedbackReasonGrid("too_slow") as Array<Record<string, unknown>>;
+    const buttons: Array<Record<string, unknown>> = [];
+    const walk = (n: unknown): void => {
+      if (!n || typeof n !== "object") return;
+      const o = n as Record<string, unknown>;
+      if (o.tag === "button") buttons.push(o);
+      for (const v of Object.values(o)) { if (Array.isArray(v)) v.forEach(walk); else if (v && typeof v === "object") walk(v); }
+    };
+    grid.forEach(walk);
+    expect(buttons).toHaveLength(FEEDBACK_REASON_CODES.length);
+    expect(buttons.every((b) => b.disabled === true)).toBe(true);
+    expect(buttons.every((b) => (b.value as Record<string, unknown>).action === "noop")).toBe(true);
+    // ✓ on exactly the chosen one (too_slow → fbr_4)
+    const chosen = buttons.filter((b) => String((b.text as Record<string, unknown>).content).includes("✓"));
+    expect(chosen).toHaveLength(1);
+    expect(chosen[0].element_id).toBe(require("../src/cardkit-client").feedbackReasonEid("too_slow"));
   });
 });
 
