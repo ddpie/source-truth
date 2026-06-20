@@ -374,11 +374,18 @@ def test_message_text_has_toolcall_markup_matches_bare_and_antml():
     # label + a tool name with a "calling" cue, no XML, no "(".
     assert agent_lib._message_text_has_toolcall_markup(_MsgWith([_TextBlock("codegraph_symbol_search を呼びます。")])) is True
     assert agent_lib._message_text_has_toolcall_markup(_MsgWith([_TextBlock("**Tool call: codegraph_symbol_search**")])) is True
-    assert agent_lib._message_text_has_toolcall_markup(_MsgWith([_TextBlock("调用 codegraph_search_files 来查")])) is True
     assert agent_lib._message_text_has_toolcall_markup(_MsgWith([_TextBlock("mcp__codegraph__codegraph_read_file")])) is True
     # A clean answer that merely mentions the word invoke/attempt is NOT markup.
     assert agent_lib._message_text_has_toolcall_markup(_MsgWith([_TextBlock("这个函数会 invoke 回调")])) is False
     assert agent_lib._message_text_has_toolcall_markup(_MsgWith([_TextBlock("第一次 attempt 失败后重试")])) is False
+    # FALSE-POSITIVE GUARD (cross-review P1): the ambiguous call-cues 调用/調用/call were
+    # dropped from the cue set because they are normal review vocabulary. A legitimate
+    # dev-review citation that names a tool next to 调用链 / "call returns" must NOT be
+    # flagged as a leak (the residual zh cold-start narration is caught by the gateway's
+    # zeroToolLeak backstop instead). Only an UNAMBIGUOUS cue — "(" or the Japanese 呼 —
+    # still counts.
+    assert agent_lib._message_text_has_toolcall_markup(_MsgWith([_TextBlock("研发可查 codegraph_search_files 调用链确认")])) is False
+    assert agent_lib._message_text_has_toolcall_markup(_MsgWith([_TextBlock("the codegraph_search_files call returns a list")])) is False
 
 
 def test_run_agent_retries_on_haiku_attempt_leak():
