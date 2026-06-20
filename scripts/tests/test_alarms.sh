@@ -19,12 +19,18 @@ fi
 
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 
-# --- the real thresholds render; disabled alarm skipped; enabled ones emitted ---
+# --- the real thresholds render; all enabled alarms emitted ---
 out="$(python3 "$RENDER" "$THRESH" --namespace SourceTruth/Gateway 2>"$TMP/err")"; rc=$?
 check "real thresholds render (rc 0)" "$rc"
-grep -q "SKIP disabled alarm 'AnswerFailedBurst'" "$TMP/err"; check "disabled alarm skipped (logged)" $?
 n="$(printf '%s\n' "$out" | grep -c . || true)"
-[[ "$n" -eq 3 ]]; check "3 enabled alarms rendered (got $n)" $?
+[[ "$n" -eq 4 ]]; check "4 enabled alarms rendered (got $n)" $?
+# AnswerFailedBurst must watch the DENSE AnswerFailedTotal (not the sparse dimensioned
+# AnswerFailed) so a burst alarm evaluates stably — the documented gap, now closed.
+printf '%s\n' "$out" | python3 -c '
+import json,sys
+m={json.loads(l)["alarmName"]: json.loads(l)["metricName"] for l in sys.stdin if l.strip()}
+assert m.get("source-truth-AnswerFailedBurst")=="AnswerFailedTotal", m.get("source-truth-AnswerFailedBurst")
+'; check "AnswerFailedBurst watches dense AnswerFailedTotal" $?
 
 # each plan line is valid JSON with required put-metric-alarm fields
 bad=0
