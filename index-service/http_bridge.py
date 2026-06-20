@@ -286,10 +286,9 @@ def build_bridge(
     router = RepoRouter([r.name for r in repos])
 
     # Back-compat single-repo handles: existing tests/inspection read app.codegraph_session
-    # and these locals. With one repo they ARE that repo; with many, the "primary" is repos[0].
+    # and `session`. With one repo it IS that repo; with many, the "primary" is repos[0].
     primary = repos[0]
     session = primary.session
-    repo_name = primary.name
 
     app = FastMCP(
         name="codegraph-bridge", host=host, port=port,
@@ -412,20 +411,94 @@ def build_bridge(
                      description=GRAPH_TOOL_DESC.get(name, f"CodeGraph {name} (read-only)."),
                      annotations=READONLY_ANNOT)
 
-    # Fast file-content search over the LOCAL repo copy (replaces the agent's
-    # builtin Grep, which hit EFS/NFS at ~20-47s per whole-repo search; local is
-    # ~0.2s). Registered only when a local workspace was provided AND exists.
-    if local_workspace and os.path.isdir(local_workspace):
+    # Fast file-content search/read over the LOCAL repo copy (replaces the agent's
+    # builtin Grep/Read, which hit EFS/NFS at ~20-47s per whole-repo search; local is
+    # ~0.2s). Registered only when EVERY served repo has a local copy on disk (single-
+    # repo: that's `local_workspace`; multi-repo: each repo's `.local`).
+    file_repos_ok = all(r.local and os.path.isdir(r.local) for r in repos)
+    if file_repos_ok:
+        import file_read
         import file_search
+        import file_table
 
-        async def codegraph_search_files(pattern: str, glob: str | None = None) -> str:
+        def _repo_for_path(path: str, explicit: str | None) -> _Repo:
+            """Route a PATH-based file tool (read_file/read_table) to ONE repo.
+
+            explicit `repo` (if given) wins and is whitelist-validated (out-of-scope →
+            RepoOutOfScope). Otherwise: single repo → the sole repo; multiple repos →
+            INFER from the path's leading ``<repo>/`` segment (graph/search prefix every
+            citation with it). If a multi-repo path has no recognizable prefix, refuse
+            rather than guess (the agent must prefix it or pass repo=)."""
+            resolved = router.resolve(explicit)  # explicit out-of-scope → RepoOutOfScope; unset+multi → None
+            if resolved is not None:
+                return by_name[resolved]
+            seg = (path or "").replace("\\", "/").lstrip("/").split("/", 1)[0]
+            if router.is_in_scope(seg):
+                return by_name[seg]
+            raise ValueError(
+                f"cannot tell which repo {path!r} is in — prefix it with '<repo>/' "
+                f"(one of {[r.name for r in repos]}) or pass repo="
+            )
+
+        def _file_targets(explicit: str | None) -> list[_Repo]:
+            """Route a PATTERN-based file tool (search/glob) to a repo SET.
+
+            explicit in-scope → [that repo]; out-of-scope → RepoOutOfScope; unset+single →
+            [the sole repo]; unset+multiple → ALL repos (fan out across the project)."""
+            resolved = router.resolve(explicit)
+            return [by_name[resolved]] if resolved is not None else list(repos)
+
+        def _merge_file_fanout(list_key: str, per_repo_json: list[str]) -> str:
+            """Concatenate per-repo file-tool results (paths/matches already <repo>/-prefixed,
+            so repos stay distinguishable). Mirrors graph fan-out: a per-repo error contributes
+            nothing; if every repo errored, surface the first error (never a misleading empty)."""
+            merged: dict[str, Any] = {list_key: [], "truncated": False, "count": 0}
+            if list_key == "matches":
+                merged["deduped"] = 0
+            first_error: str | None = None
+            saw_ok = False
+            for raw in per_repo_json:
+                try:
+                    d = json.loads(raw)
+                except (ValueError, TypeError):
+                    continue
+                if not isinstance(d, dict):
+                    continue
+                if "error" in d:
+                    first_error = first_error or raw
+                    continue
+                saw_ok = True
+                merged[list_key].extend(d.get(list_key, []) if isinstance(d.get(list_key), list) else [])
+                merged["truncated"] = merged["truncated"] or bool(d.get("truncated"))
+                if list_key == "matches":
+                    merged["deduped"] += int(d.get("deduped", 0) or 0)
+            if not saw_ok and first_error is not None:
+                return first_error
+            merged["count"] = len(merged[list_key])
+            return json.dumps(merged, ensure_ascii=False)
+
+        async def codegraph_search_files(pattern: str, glob: str | None = None, repo: str | None = None) -> str:
             """Fast text search across the codebase (paths returned repo-relative,
-            e.g. `Assets/Scripts/Foo.cs`). `pattern` is a regex; optional `glob`
-            narrows by filename (e.g. "*.cs", "*.json"). Use this instead of shell grep."""
+            e.g. `Assets/Scripts/Foo.cs`; multi-repo prefixes them `<repo>/...`). `pattern`
+            is a regex; optional `glob` narrows by filename (e.g. "*.cs", "*.json"); optional
+            `repo` scopes to one repo (omit to search ALL repos in the project). Use this
+            instead of shell grep."""
             try:
-                return file_search.search_to_json(
-                    pattern, local_root=local_workspace, mount_root=mount_root, glob=glob, repo=repo_name,
-                )
+                targets = _file_targets(repo)
+            except RepoOutOfScope as exc:
+                logger.warning(json.dumps({"event": "repo_out_of_scope", "tool": "search_files", "detail": str(exc)}))
+                return json.dumps({"error": "repo not in scope", "detail": str(exc)})
+            try:
+                if len(targets) == 1:
+                    t = targets[0]
+                    return file_search.search_to_json(
+                        pattern, local_root=t.local, mount_root=mount_root, glob=glob, repo=t.name,
+                    )
+                per_repo = [
+                    file_search.search_to_json(pattern, local_root=t.local, mount_root=mount_root, glob=glob, repo=t.name)
+                    for t in targets
+                ]
+                return _merge_file_fanout("matches", per_repo)
             except ValueError as exc:
                 # ValueError only echoes the agent-supplied pattern (no host path) → safe to return.
                 return json.dumps({"error": "bad search pattern", "detail": str(exc)})
@@ -436,25 +509,20 @@ def build_bridge(
                 logger.error(json.dumps({"event": "search_error", "error": str(exc)}))
                 return json.dumps({"error": "search failed", "detail": "internal error (see service logs)"})
 
-        app.add_tool(codegraph_search_files, name="codegraph_search_files",
-                     description=(codegraph_search_files.__doc__ or "").strip(),
-                     annotations=READONLY_ANNOT)
-
-        # read_file / glob_files over the SAME local copy — these replace the
-        # agent's builtin Read/Glob so the agent microVM needs NO filesystem mount
-        # (EFS removal): all code access is over this HTTP bridge. Both confine the
-        # agent-supplied path to the local repo via path_align.to_local_path
-        # (lexical + realpath symlink-escape guard) before touching disk.
-        import file_read
-
         async def codegraph_read_file(path: str, offset: int = 0, limit: int | None = None) -> str:
-            """Read a source/config file's contents by its path (the repo-relative
-            path codegraph/search returns, e.g. `Assets/Scripts/Foo.cs` — pass it
-            back verbatim, don't add any prefix). Optional `offset` (0-based line) +
-            `limit` page large files. Use this instead of a shell `cat` or builtin Read."""
+            """Read a source/config file's contents by its path (the path codegraph/search
+            returns, e.g. `Assets/Scripts/Foo.cs` or `<repo>/Assets/Scripts/Foo.cs` —
+            pass it back verbatim). Optional `offset` (0-based line) + `limit` page large
+            files. Use this instead of a shell `cat` or builtin Read."""
+            try:
+                t = _repo_for_path(path, None)
+            except RepoOutOfScope as exc:
+                return json.dumps({"error": "repo not in scope", "detail": str(exc)})
+            except ValueError as exc:
+                return json.dumps({"error": "cannot read file", "detail": str(exc)})
             try:
                 return file_read.read_to_json(
-                    path, local_root=local_workspace, mount_root=mount_root, offset=offset, limit=limit, repo=repo_name,
+                    path, local_root=t.local, mount_root=mount_root, offset=offset, limit=limit, repo=t.name,
                 )
             except ValueError as exc:
                 # ValueError echoes only the agent-supplied path (no host path) → safe.
@@ -465,32 +533,45 @@ def build_bridge(
                 logger.error(json.dumps({"event": "read_error", "error": str(exc)}))
                 return json.dumps({"error": "read failed", "detail": "internal error (see service logs)"})
 
-        async def codegraph_glob_files(pattern: str) -> str:
+        async def codegraph_glob_files(pattern: str, repo: str | None = None) -> str:
             """List files matching a glob `pattern` (e.g. "**/*.cs", "Config/*.json"),
-            interpreted relative to the repo root. Returns repo-relative paths
-            (e.g. `Assets/Scripts/Foo.cs`). Use this instead of a shell `ls`/`find`
-            or builtin Glob."""
+            interpreted relative to the repo root. Returns paths in the agent's namespace
+            (multi-repo prefixes them `<repo>/...`). Optional `repo` scopes to one repo
+            (omit to glob ALL repos). Use this instead of a shell `ls`/`find` or builtin Glob."""
             try:
-                return file_read.glob_to_json(pattern, local_root=local_workspace, mount_root=mount_root, repo=repo_name)
+                targets = _file_targets(repo)
+            except RepoOutOfScope as exc:
+                logger.warning(json.dumps({"event": "repo_out_of_scope", "tool": "glob_files", "detail": str(exc)}))
+                return json.dumps({"error": "repo not in scope", "detail": str(exc)})
+            try:
+                if len(targets) == 1:
+                    t = targets[0]
+                    return file_read.glob_to_json(pattern, local_root=t.local, mount_root=mount_root, repo=t.name)
+                per_repo = [
+                    file_read.glob_to_json(pattern, local_root=t.local, mount_root=mount_root, repo=t.name)
+                    for t in targets
+                ]
+                return _merge_file_fanout("paths", per_repo)
             except ValueError as exc:
                 return json.dumps({"error": "bad glob pattern", "detail": str(exc)})
             except Exception as exc:  # noqa: BLE001 - isolate one query's failure
                 logger.error(json.dumps({"event": "glob_error", "error": str(exc)}))
                 return json.dumps({"error": "glob failed", "detail": "internal error (see service logs)"})
 
-        # read_table: parse STRUCTURED/binary config files (Excel/CSV/TSV/SQLite) to
-        # text. read_file decodes as UTF-8, so an Excel/SQLite config table comes back
-        # as garbage and the agent can't use it — yet that's where game-dev numbers
-        # often live. read_table parses them server-side (read-only) into compact text.
-        import file_table
-
         async def codegraph_read_table(path: str) -> str:
             """Read a STRUCTURED config table that read_file can't (Excel .xlsx/.xls,
             .csv, .tsv, or a SQLite .db) — parsed server-side into plain text rows.
-            Use this when the data lives in a spreadsheet/database config file (common
-            for game numeric tables); for plain-text source/config use read_file."""
+            Pass the path verbatim (a `<repo>/...` prefix is fine). Use this when the data
+            lives in a spreadsheet/database config file (common for game numeric tables);
+            for plain-text source/config use read_file."""
             try:
-                return file_table.read_table_to_json(path, local_root=local_workspace, mount_root=mount_root, repo=repo_name)
+                t = _repo_for_path(path, None)
+            except RepoOutOfScope as exc:
+                return json.dumps({"error": "repo not in scope", "detail": str(exc)})
+            except ValueError as exc:
+                return json.dumps({"error": "cannot read table", "detail": str(exc)})
+            try:
+                return file_table.read_table_to_json(path, local_root=t.local, mount_root=mount_root, repo=t.name)
             except ValueError as exc:
                 return json.dumps({"error": "cannot read table", "detail": str(exc)})
             except Exception as exc:  # noqa: BLE001 - isolate one query's failure
@@ -501,6 +582,9 @@ def build_bridge(
         # __doc__`, so passing a terse description= DROPS the docstring the model needs to
         # disambiguate the tools). Per Anthropic "writing tools for agents": the description
         # is the primary signal the model uses to pick + call a tool correctly.
+        app.add_tool(codegraph_search_files, name="codegraph_search_files",
+                     description=(codegraph_search_files.__doc__ or "").strip(),
+                     annotations=READONLY_ANNOT)
         app.add_tool(codegraph_read_file, name="codegraph_read_file",
                      description=(codegraph_read_file.__doc__ or "").strip(),
                      annotations=READONLY_ANNOT)
@@ -510,11 +594,13 @@ def build_bridge(
         app.add_tool(codegraph_read_table, name="codegraph_read_table",
                      description=(codegraph_read_table.__doc__ or "").strip(),
                      annotations=READONLY_ANNOT)
-        logger.info(json.dumps({"event": "search_tool_enabled", "local_workspace": local_workspace,
-                                "file_tools": ["codegraph_read_file", "codegraph_glob_files", "codegraph_read_table"]}))
+        logger.info(json.dumps({"event": "search_tool_enabled", "repos": [r.name for r in repos],
+                                "file_tools": ["codegraph_search_files", "codegraph_read_file",
+                                               "codegraph_glob_files", "codegraph_read_table"]}))
     else:
         logger.warning(json.dumps({"event": "search_tool_disabled",
-                                   "reason": "no local_workspace", "given": local_workspace}))
+                                   "reason": "a served repo has no local copy on disk",
+                                   "repos": [{"name": r.name, "local": r.local} for r in repos]}))
 
     # Plain HTTP /health so deploy orchestration (and load balancers) can poll
     # readiness: 200 only once the graph warmed up non-empty, 503 otherwise.
