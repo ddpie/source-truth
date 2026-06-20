@@ -172,6 +172,9 @@ aws ssm start-session --region <r> --target <INDEX_SERVICE_INSTANCE>
 #    告警阈值在 config/alarm-thresholds.json（运维可调，改完重跑本步即可）。
 #    订阅是手动一步（邮件需点确认链接）：
 #    aws sns subscribe --region <r> --topic-arn <脚本打印的 ARN> --protocol email --notification-endpoint you@example.com
+# 4. DAU 预聚合 Lambda + 每日调度（产品看板的「日活」widget 读它产出的 SourceTruth/Gateway DAU 指标）
+./scripts/apply-dau-lambda.sh --region <r>
+#    每日跑一次、查前一天的去重活跃用户数。不跑这步则看板 DAU widget 一直空（其余 widget 不受影响）。
 ```
 
 关键告警：`ToolcallLeakDetected`（竞泄复发）、`FinalizeFailed`（冻卡）、`LogPipelineStalled`（日志管道存活
