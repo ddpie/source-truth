@@ -632,28 +632,50 @@ export const FEEDBACK_REASON_CODES = [
   "too_slow", "hard_to_understand", "too_shallow", "other",
 ] as const;
 
-/** The 👍/👎 vote buttons SIDE BY SIDE in one row (a column_set, two equal columns).
- *  Each button keeps its own card-unique element_id (fb_up / fb_down) so it can still be
- *  disabled in place by `PUT/PATCH .../elements/{element_id}` — CardKit addresses a
- *  component by its (card-globally-unique) element_id regardless of nesting depth, so a
- *  button inside a column_set IS individually updatable (confirmed against the Feishu
- *  button + update-element docs). value.action="feedback" keeps them disjoint from
- *  follow_up/stop and the marker emoji. NOT asker-scoped: anyone in the group may rate. */
-export function buildFeedbackButtons(): unknown[] {
-  const voteBtn = (vote: "up" | "down", eid: string, key: string) => ({
-    tag: "column", width: "weighted", weight: 1, elements: [{
-      tag: "button", element_id: eid,
-      text: { tag: "plain_text", content: t(key) },
-      type: "default", size: "small", width: "fill",
-      value: { action: "feedback", vote, eid },
-    }],
-  });
+// The vote row is ONE column_set with its OWN element_id, so a vote replaces the WHOLE row
+// in a single same-tag (column_set→column_set) PUT by that top-level id. Disabling the
+// individual buttons NESTED in the column_set does NOT reliably take effect in the Feishu
+// client (the PUT returns 200 but the nested button stays clickable — observed live: 👎 still
+// re-clickable), so we replace the container, not its children.
+export const FEEDBACK_ROW_EID = "feedback_row";
+
+/** Build the 👍/👎 vote row (a column_set, two equal columns, element_id FEEDBACK_ROW_EID).
+ *  `chosen` (set after a click) renders BOTH buttons disabled — the chosen one with a ✓ — so
+ *  re-clicking does nothing (the buttons are inert). value.action="feedback" keeps them
+ *  disjoint from follow_up/stop and the marker emoji. NOT asker-scoped: anyone may rate. */
+export function buildFeedbackButtons(chosen?: "up" | "down"): unknown[] {
+  const voteBtn = (vote: "up" | "down", eid: string, key: string) => {
+    const picked = chosen === vote;
+    const label = t(key);
+    return {
+      tag: "column", width: "weighted", weight: 1, elements: [{
+        tag: "button", element_id: eid,
+        text: { tag: "plain_text", content: picked ? `✓ ${label}` : label },
+        type: picked ? "primary_text" : "default",
+        size: "small", width: "fill",
+        // When the row is in its chosen/disabled state, ALL vote buttons are disabled so a
+        // re-click is impossible; value.action="noop" is belt-and-suspenders for a racing tap.
+        disabled: chosen !== undefined,
+        value: chosen !== undefined ? { action: "noop", eid } : { action: "feedback", vote, eid },
+      }],
+    };
+  };
   return [{
     tag: "column_set",
+    element_id: FEEDBACK_ROW_EID,
     flex_mode: "bisect",   // two equal columns share the row
     horizontal_spacing: "8px",
     columns: [voteBtn("up", "fb_up", "card.feedback.up"), voteBtn("down", "fb_down", "card.feedback.down")],
   }];
+}
+
+/** Replace the whole vote row with its disabled/chosen state (same-tag column_set PUT by the
+ *  row's own top-level element_id — the reliable path, vs. disabling nested children). */
+export async function disableFeedbackRow(cardId: string, chosen: "up" | "down", sequence: number): Promise<void> {
+  await larkApi("PUT", `/open-apis/cardkit/v1/cards/${cardId}/elements/${FEEDBACK_ROW_EID}`, JSON.stringify({
+    element: JSON.stringify(buildFeedbackButtons(chosen)[0]),
+    sequence,
+  }));
 }
 
 /** Stable element_id for the i-th reason button. INDEX-based (fbr_0..), NOT fbr_<code>:
@@ -667,22 +689,54 @@ export function feedbackReasonEid(code: string): string {
   return `fbr_${i}`;
 }
 
-/** After a 👎, append a prompt + enumerated reason buttons (TOP-LEVEL buttons so each is
- *  disable-in-place addressable by element_id; no free text → no PII). Each carries an
- *  enumerated reasonCode (in value, for the metric); the DOM element_id is the short
- *  index form fbr_<i> to stay within Feishu's 20-char element_id limit. */
-export function buildFeedbackReasonElements(): unknown[] {
-  const elements: unknown[] = [{ tag: "markdown", content: t("card.feedback.reason.prompt") }];
-  FEEDBACK_REASON_CODES.forEach((code) => {
+// The reason buttons live in ONE column_set with its own element_id, laid out as a compact
+// 2-column grid (was 8 full-width rows — too tall for a non-technical reader, user request).
+// A pick replaces the WHOLE grid in a single same-tag column_set PUT (disableFeedbackReasonRow)
+// — same reliable path as the vote row, because disabling the buttons NESTED in the column_set
+// does NOT take effect in the Feishu client (PUT 200 but stays clickable).
+export const FEEDBACK_REASON_EID = "fbr_row";
+const FEEDBACK_REASON_COLS = 2;
+
+/** Build the 👎-reason grid (a column_set, element_id FEEDBACK_REASON_EID). `chosen` (set after
+ *  a pick) renders every button disabled — the chosen one with a ✓ — so re-picking is inert.
+ *  Buttons carry the enumerated reasonCode (in value, for the metric, never free text → no PII);
+ *  the DOM element_id is the short index form fbr_<i> to stay within Feishu's 20-char limit. */
+export function buildFeedbackReasonGrid(chosen?: string): unknown[] {
+  const reasonBtn = (code: string) => {
+    const picked = chosen === code;
+    const label = t(`card.feedback.reason.${code}`);
     const eid = feedbackReasonEid(code);
-    elements.push({
+    return {
       tag: "button", element_id: eid,
-      text: { tag: "plain_text", content: t(`card.feedback.reason.${code}`) },
-      type: "default", size: "small", width: "fill",
-      value: { action: "feedback_reason", reasonCode: code, eid },
-    });
-  });
-  return elements;
+      text: { tag: "plain_text", content: picked ? `✓ ${label}` : label },
+      type: picked ? "primary_text" : "default", size: "small", width: "fill",
+      disabled: chosen !== undefined,
+      value: chosen !== undefined ? { action: "noop", eid } : { action: "feedback_reason", reasonCode: code, eid },
+    };
+  };
+  // Column-major fill into FEEDBACK_REASON_COLS equal columns (each column stacks its buttons
+  // vertically — that's how column_set renders), so the grid stays dense and balanced.
+  const perCol = Math.ceil(FEEDBACK_REASON_CODES.length / FEEDBACK_REASON_COLS);
+  const columns = [];
+  for (let c = 0; c < FEEDBACK_REASON_COLS; c++) {
+    const slice = FEEDBACK_REASON_CODES.slice(c * perCol, (c + 1) * perCol);
+    columns.push({ tag: "column", width: "weighted", weight: 1, vertical_spacing: "4px", elements: slice.map(reasonBtn) });
+  }
+  return [{ tag: "column_set", element_id: FEEDBACK_REASON_EID, flex_mode: "bisect", horizontal_spacing: "8px", columns }];
+}
+
+/** After a 👎, the prompt line + the reason grid (appended together). */
+export function buildFeedbackReasonElements(): unknown[] {
+  return [{ tag: "markdown", content: t("card.feedback.reason.prompt") }, ...buildFeedbackReasonGrid()];
+}
+
+/** Replace the whole reason grid with its disabled/chosen state (same-tag column_set PUT by the
+ *  grid's own top-level element_id — reliable, vs. disabling nested children). */
+export async function disableFeedbackReasonRow(cardId: string, chosen: string, sequence: number): Promise<void> {
+  await larkApi("PUT", `/open-apis/cardkit/v1/cards/${cardId}/elements/${FEEDBACK_REASON_EID}`, JSON.stringify({
+    element: JSON.stringify(buildFeedbackReasonGrid(chosen)[0]),
+    sequence,
+  }));
 }
 
 /** Append the 👍/👎 feedback row to a finalized (successful) card. Its own write so it
