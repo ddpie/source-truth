@@ -37,7 +37,7 @@ infra/                  Infrastructure as code (MVP starts with agentcore toolki
     queries/insights/*.logsinsights              B-class dedup/retention Insights queries (DAU etc., paired with a scheduled pre-aggregation Lambda)
     dashboard.product.json / dashboard.sre.json  Dashboard templates (${REGION}/${NAMESPACE} placeholders; product-usage / SRE-health pages)
   (p2) lib/             runtime / codegraph(index-service) / gateway stacks
-config/                 Config-driven: i18n.json (card / alarm / error copy), alarm-thresholds.json (alarm thresholds, operator-tunable)
+config/                 Config-driven: i18n.json (card / alarm / error copy), alarm-thresholds.json (alarm thresholds, operator-tunable), projects.example.json (project-routing schema template; the real config lives at .local/projects.json — deployment-specific, gitignored)
 scripts/                Operational lifecycle
   check-invariants.sh   Fast structural lint (AGENTS / CLAUDE / structure / bilingual pairing / top-level dir existence)
   lib/                  common.sh (formatting + dep checks), env-utils.sh (.env / deploy-config shared helper), render_metric_filters.py (metric defs → put-metric-filter plan), render_dashboard.py (dashboard template render + no-type:log guard), render_alarms.py (thresholds → put-metric-alarm plan)
@@ -70,7 +70,7 @@ docs/
     invariants.md       source → generated map + change-X-must-change-Y couplings (7 invariants)
     playbooks.md        ordered change recipes (7 recipes)
     *-spike.md          Research notes (cardkit streaming / indexing perf / storage selection / perf comparison / template)
-.local/                 (gitignored) account-specific deploy state: deploy-config, deploy-output.md
+.local/                 (gitignored) account-specific deploy state: deploy-config, projects.json (project routing), deploy-output.md
 ```
 
 Entries tagged `(p1)` / `(p2)` are later-phase outputs; currently placeholders or not yet created. Untagged entries are all in place.
