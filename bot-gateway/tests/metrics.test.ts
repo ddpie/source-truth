@@ -75,6 +75,19 @@ describe("emitMetric — enum whitelist (no free-text / PII leak)", () => {
     emitMetric("card_health", { kind: "toolcall_leak_detected" }, { traceId: "st-1" });
     expect(records[1].kind).toBe("toolcall_leak_detected");
   });
+
+  it("accepts all wired card_health kinds (leak/finalize/dedup); dedup_hit is keyless infra", () => {
+    emitMetric("card_health", { kind: "finalize_failed" }, { traceId: "st-2" });
+    expect(records[0].kind).toBe("finalize_failed");
+    expect(records[0].traceId).toBe("st-2");
+    records = [];
+    // dedup_hit is emitted with NO ctx (pure infra counter — no invoke, no user).
+    emitMetric("card_health", { kind: "dedup_hit" });
+    expect(records[0].kind).toBe("dedup_hit");
+    expect(records[0].hashUserId).toBeUndefined();
+    expect(records[0].traceId).toBeUndefined();
+    expect(records[0].metric).toBe(true);
+  });
 });
 
 describe("emitMetric — best-effort (never breaks the hot path §1)", () => {
