@@ -21,7 +21,7 @@
 
 ## 关键约束
 
-- **长驻在线**：长连接需常在线，不能空闲缩零（建议 ECS Fargate / 常驻容器承载）。
+- **长驻在线**：长连接需常在线，不能空闲缩零；当前由 index-service 主机上的 `bot-gateway.service` 承载。
 - **会话隔离**：不同用户 / 会话绝不共用 runtimeSessionId，否则上下文串扰。
 - **卡片频控**：飞书卡片 update 有频率限制与 10 分钟更新窗口，流式更新需做节流。
 - **事件幂等**：飞书事件会重投，按 event_id 去重。
@@ -37,22 +37,22 @@ export FEISHU_APP_ID=cli_xxx
 export FEISHU_APP_SECRET=xxx          # 从 Secrets Manager/SSM 取出注入，勿写进仓库
 export FEISHU_BOT_OPEN_ID=ou_xxx
 export LOG_HASH_SALT=some-salt        # 可选但建议（脱敏盐）
-# 启动（长驻；ts-node 直接跑 TS，无需预编译）：
+# 启动（长驻；ts-node 直接运行 TS，无需预编译）：
 node_modules/.bin/ts-node --transpile-only src/index.ts
 ```
 
 成功日志：`sdk_wsclient_started` → `sdk_wsclient_connected`。完整的「连飞书 + 验证 + 排错」见
 [`../docs/runbook.md`](../docs/runbook.md)。
 
-> `package.json` 的 `build`/`lint`/`test` 是开发用脚本；启动用上面的 `ts-node` 命令直接跑入口。
-> **同一个飞书应用只能跑一个网关实例**（长连接集群模式，事件只投给一个 client；多实例会争抢事件、表现出旧行为）。
+> `package.json` 的 `build`/`lint`/`test` 是开发用脚本；启动用上面的 `ts-node` 命令运行入口。
+> **同一个飞书应用只能运行一个网关实例**（长连接集群模式，事件只投给一个 client；多实例会争抢事件，导致行为异常）。
 
 ## 运行载体
 
-长驻服务（ECS Fargate / 常驻容器）。语言选 TypeScript：飞书官方 SDK 与 CardKit 流式卡片在 TS 生态最成熟。
+当前作为 index-service 主机上的 systemd 长驻服务运行。语言选 TypeScript：飞书官方 SDK 与 CardKit 流式卡片在 TS 生态最成熟。
 
 ## 运行形态
 
-本地 `ts-node` 跑，飞书长连接单消费者。运行所需 env：`RUNTIME_ARN` / `AWS_REGION` / `FEISHU_APP_ID` /
-`FEISHU_APP_SECRET` / `FEISHU_BOT_OPEN_ID`（群里精确判定被 @）/ `LOG_HASH_SALT`。
-ECS 常驻托管为 post-MVP。
+本地用 `ts-node` 运行，飞书长连接单消费者。运行所需 env：`RUNTIME_ARN` / `AWS_REGION` / `FEISHU_APP_ID` /
+`FEISHU_APP_SECRET` / `FEISHU_BOT_OPEN_ID`（用于判断群消息是否 @ 机器人）/ `LOG_HASH_SALT`。
+独立托管形态为 post-MVP。

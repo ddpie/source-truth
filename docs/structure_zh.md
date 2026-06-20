@@ -8,10 +8,10 @@
 agent-container/        会话 microVM 内运行的 Claude Code Agent（Python）
   README.md             职责 + 对外契约（输入 goal/session、index-service MCP 端点：定位 + 读文件）
   prompts/              系统 prompt + 高频问题清单 + 问答规范（代码为准 / 标差异 / 转研发）
-  Dockerfile            ARM64 基础镜像 sha256 锁定；pin Claude Agent SDK（claude-agent-sdk）；@anthropic-ai/claude-code 按运维决定跟 @latest（不 pin）
+  Dockerfile            ARM64 基础镜像 sha256 锁定；pin Claude Agent SDK（claude-agent-sdk）；@anthropic-ai/claude-code 按运维决定跟随 @latest（不 pin）
   agent.py              @app.entrypoint 异步流式 handler，启动 Agent 循环
   agent_lib.py          SDK-free 只读问答 Agent 主逻辑（agent.py 的可测试内核：选项构建 / 取证循环）
-  requirements.txt + requirements.lock  钉死的 Python 依赖（lock = pip freeze 全传递）
+  requirements.txt + requirements.lock  精确固定的 Python 依赖（lock = pip freeze 全传递）
   tests/                pytest（由 scripts/test.sh 调用）
 bot-gateway/            飞书 Bot 长连接事件网关 + CardKit 流式渲染（TypeScript 长驻服务）
   README.md             长连接 / 事件去重 / 会话→runtimeSessionId 映射 / 卡片更新频控
@@ -21,7 +21,7 @@ index-service/          常驻 CodeGraph 索引服务 + MCP-over-HTTP 接口
   README.md             常驻会话（独占写入 graph.db） / CodeGraph / HTTP 接口（定位 + 读文件） / 本地仓库副本 / bootstrap
   http_bridge.py        FastMCP HTTP 接口（包根，非 src/）：暴露 codegraph 定位 + 读文件工具，路径对齐为仓库相对
   codegraph_session.py  常驻 codegraph-server 会话，独占写入 graph.db（worker 线程 + 私有 loop，健康自愈，带超时）
-  file_search.py        本地副本 ripgrep/grep 检索工具（在本地副本上检索，内置 Grep 禁用、改走本地副本；命中按内容去重；MCP 暴露）
+  file_search.py        本地副本 ripgrep/grep 检索工具（在本地副本上检索，禁用内置 Grep，改走本地副本；命中按内容去重；MCP 暴露）
   file_read.py          本地副本按行 / 按位置读取文件的工具（read_file，路径对齐为仓库相对；MCP 暴露）
   file_table.py         结构化配置表读取（Excel/CSV/TSV/SQLite → 文本，read_table；只读、带 DoS 上限；MCP 暴露）
   path_align.py         索引路径 ↔ 仓库相对路径词法对齐（拒越界；mount_root 默认空）
@@ -47,14 +47,14 @@ scripts/                运维生命周期
   apply-alarms.sh       建 SNS topic + 从 config/alarm-thresholds.json 建 CloudWatch 告警（幂等；订阅需手动确认）
   apply-dau-lambda.sh   部署 B 类 DAU 预聚合 Lambda + 每日 EventBridge 调度（角色/打包/触发，幂等；--dry-run）
   test.sh               单一分层测试入口（离线默认 / --full）
-  check-versions.sh     版本钉死防漂移守卫（base digest / requirements pin / Node / claude-code npm）
+  check-versions.sh     版本固定防漂移守卫（base digest / requirements pin / Node / claude-code npm）
   install.sh            交互式一键安装（查依赖→飞书凭证→配置→确认→调 deploy-all；重跑预填）
   deploy-all.sh         一键部署 canonical（artifacts→IAM→network→index-service→镜像→Runtime→gateway；幂等）
   lib/provision_*.sh + deploy_runtime.py + wait_index_health.sh  deploy-all.sh 的各阶段实现
-  lib/resolve_repo.sh   --repo 多来源解析（本地 / git URL / s3://）→ 统一为本地目录
+  lib/resolve_repo.sh   --repo 多来源解析（本地 / git URL / s3://）→ 统一成本地目录
   lib/activate_gateway.sh  经 SSM 写 /etc/bot-gateway.env + 启动 bot-gateway.service（gateway 与索引同主机）
-  lib/stop_gateway.sh   经 SSM 停旧实例 gateway（蓝绿换实例 break-before-make，防双网关抢飞书长连接）
-  ⚠️ deploy.sh          已废弃兼容垫片（转发到 deploy-all.sh）
+  lib/stop_gateway.sh   经 SSM 停止旧实例 gateway（蓝绿换实例 break-before-make，避免双网关抢占飞书长连接）
+  deploy.sh             已废弃兼容垫片（转发到 deploy-all.sh）
   (p2) ops.sh           运维工具（status / logs / reindex）
   teardown.sh           有序销毁 + 保留资源清单
 docs/
