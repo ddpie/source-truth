@@ -370,6 +370,12 @@ def test_message_text_has_toolcall_markup_matches_bare_and_antml():
     # XML ("Let me call codegraph_symbol_search"). A real answer never names an
     # internal tool, so this is a leak tell.
     assert agent_lib._message_text_has_toolcall_markup(_MsgWith([_TextBlock("Let me call codegraph_symbol_search(query=\"LevelUp\")")])) is True
+    # FOURTH shape (live cold-VM, card st-96f2a7f42c25): JA/EN narration + "Tool call:"
+    # label + a tool name with a "calling" cue, no XML, no "(".
+    assert agent_lib._message_text_has_toolcall_markup(_MsgWith([_TextBlock("codegraph_symbol_search を呼びます。")])) is True
+    assert agent_lib._message_text_has_toolcall_markup(_MsgWith([_TextBlock("**Tool call: codegraph_symbol_search**")])) is True
+    assert agent_lib._message_text_has_toolcall_markup(_MsgWith([_TextBlock("调用 codegraph_search_files 来查")])) is True
+    assert agent_lib._message_text_has_toolcall_markup(_MsgWith([_TextBlock("mcp__codegraph__codegraph_read_file")])) is True
     # A clean answer that merely mentions the word invoke/attempt is NOT markup.
     assert agent_lib._message_text_has_toolcall_markup(_MsgWith([_TextBlock("这个函数会 invoke 回调")])) is False
     assert agent_lib._message_text_has_toolcall_markup(_MsgWith([_TextBlock("第一次 attempt 失败后重试")])) is False
