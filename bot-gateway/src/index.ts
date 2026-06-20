@@ -20,6 +20,7 @@
  *   FEISHU_APP_SECRET   app secret
  */
 
+import { randomUUID } from "node:crypto";
 import { fromNodeProviderChain } from "@aws-sdk/credential-providers";
 
 import { invokeRuntimeStreaming, classifyInvokeOutcome, isTurnCapError, type AwsCredentials } from "./sigv4";
@@ -60,6 +61,18 @@ const BOT_OPEN_ID = process.env.FEISHU_BOT_OPEN_ID ?? "";
 
 function log(obj: Record<string, unknown>): void {
   console.log(JSON.stringify({ ts: new Date().toISOString(), ...obj }));
+}
+
+// A short per-request trace id, shown on the card (top, copyable inline-code) AND
+// stamped on every log line for that request, so when a user reports a problem the
+// operator pastes the id to grep all related logs. 8 hex chars = plenty to
+// disambiguate concurrent requests without being unwieldy on the card.
+function newTraceId(): string {
+  return randomUUID().replace(/-/g, "").slice(0, 8);
+}
+/** Build a logger that auto-stamps `trace` on every line for one request. */
+function traceLogger(traceId: string): (obj: Record<string, unknown>) => void {
+  return (obj) => log({ trace: traceId, ...obj });
 }
 
 // Per-field caps for the finalized card body. A Feishu interactive card has a
@@ -221,9 +234,14 @@ async function streamingCardInvoke(
   //     be dropped at handleMessageEvent's event_id gate and never reach here — the
   //     "first-send failure can retry" guarantee silently didn't hold (cross-review).
   //     `eventId` is threaded in for exactly this rollback. Re-throw so the caller logs.
+  // One traceId per invoke — each follow-up produces its OWN card + answer, so it
+  // gets its OWN id (the user reports the id on the specific card that misbehaved;
+  // the session/parent links already let us walk the conversation). Stamped on the
+  // card + every log line below.
+  const traceId = newTraceId();
   let card: Awaited<ReturnType<typeof sendStreamingCard>>;
   try {
-    card = await sendStreamingCard(sessionId, target, queued, question ?? prompt, parentMessageId, askerOpenId);
+    card = await sendStreamingCard(sessionId, target, queued, question ?? prompt, traceId, parentMessageId, askerOpenId);
   } catch (e) {
     if ("messageId" in target) forget(`msg:${target.messageId}`);
     if (eventId) forget(eventId);
@@ -262,9 +280,10 @@ async function sendStreamingCard(
   target: { messageId: string } | { chatId: string },
   queued: boolean,
   question: string,
+  traceId: string,
   parentMessageId?: string,
   askerOpenId?: string,
-): Promise<{ cardId: string; abort: AbortController; startSeq: number; isFollowUp: boolean; sentMessageId?: string; question: string; statusSeeded: boolean; stopButtonSeeded: boolean }> {
+): Promise<{ cardId: string; abort: AbortController; startSeq: number; isFollowUp: boolean; sentMessageId?: string; question: string; statusSeeded: boolean; stopButtonSeeded: boolean; traceId: string }> {
   const targetKey = "messageId" in target ? target.messageId : target.chatId;
   // REDACT the user's question before it touches any group-visible / persisted /
   // replayed surface. The question is user-typed and a 策划 could paste a secret
@@ -282,7 +301,7 @@ async function sendStreamingCard(
   // Echo the question in the card body (esp. for follow-ups, so the card shows
   // WHAT was asked without scrolling). Pass it to createCard as the "question"
   // element; finalizeCard re-includes it so the full-PUT doesn't wipe it.
-  const cardId = await createCard(summary, isFollowUp, safeQuestion);
+  const cardId = await createCard(summary, isFollowUp, safeQuestion, traceId);
   // Send the card in-process (HTTP), not via `spawn lark-cli` (~800ms): this is
   // on the first-render path, so the spawn cost delayed every answer's first
   // paint. Returns the sent message_id for the follow-up registry.
@@ -366,14 +385,14 @@ async function sendStreamingCard(
   const startSeq = nextSeq - 1;
   // Return the REDACTED question so finalizeCard re-renders the safe echo (a raw
   // value here would re-leak a secret into the finalized full-PUT card).
-  return { cardId, abort, startSeq, isFollowUp, sentMessageId, question: safeQuestion, statusSeeded, stopButtonSeeded };
+  return { cardId, abort, startSeq, isFollowUp, sentMessageId, question: safeQuestion, statusSeeded, stopButtonSeeded, traceId };
 }
 
 /** Streaming invoke body: streams the agent's answer onto the pre-created card
  *  and finalizes it. Runs inside the per-session serializer, so at most one body
  *  per runtimeSessionId is live at a time. */
 async function runStreamingInvoke(
-  card: { cardId: string; abort: AbortController; startSeq: number; isFollowUp: boolean; sentMessageId?: string; question: string; statusSeeded: boolean; stopButtonSeeded: boolean },
+  card: { cardId: string; abort: AbortController; startSeq: number; isFollowUp: boolean; sentMessageId?: string; question: string; statusSeeded: boolean; stopButtonSeeded: boolean; traceId: string },
   sessionId: string,
   prompt: string,
   // A credential PROVIDER, not a snapshot: SignatureV4 re-resolves it on every
@@ -381,7 +400,10 @@ async function runStreamingInvoke(
   // going stale and 403-ing every invoke after a few hours of uptime.
   credentials: () => Promise<AwsCredentials>,
 ): Promise<void> {
-  const { cardId, abort, isFollowUp, sentMessageId, question } = card;
+  const { cardId, abort, isFollowUp, sentMessageId, question, traceId } = card;
+  // Trace-bound logger: every line for THIS invoke carries the same `trace` id shown
+  // on the card, so an operator can grep all logs for a user-reported request.
+  const tlog = traceLogger(traceId);
 
   // 2. Stream the agent's answer; update card content incrementally.
   //    9-minute safety timeout: close streaming gracefully before Feishu's
@@ -739,7 +761,7 @@ async function runStreamingInvoke(
   // Structured perf line (grep '"perf":true' | jq): one row per invoke with the
   // latency breakdown — sign / time-to-first-byte / time-to-first-token / stream
   // duration (the long pole = model + tool turns) / total / SSE event count.
-  log({ perf: true, event: "invoke_timing", card: cardId, ...timing });
+  tlog({ perf: true, event: "invoke_timing", card: cardId, ...timing });
 
   // A backend failure must NEVER masquerade as a completed answer — that is the
   // "silent wrong answer when the index is unavailable" mode the code-as-only-
@@ -927,7 +949,7 @@ async function runStreamingInvoke(
   const elapsedLabel = formatElapsed(performance.now() - monoStart);
   // panelSteps is already cleaned (redactSteps above); finalizeCard re-redacts which
   // is idempotent (no markup/secret left to strip).
-  await writer.write((seq) => finalizeCard(cardId, finalText, redactSteps(panelSteps), seq, isFollowUp, aborted, hardFailed, finalEvidence, question, elapsedLabel, turnCapped, !!clarify, timedOut));
+  await writer.write((seq) => finalizeCard(cardId, finalText, redactSteps(panelSteps), seq, isFollowUp, aborted, hardFailed, finalEvidence, question, elapsedLabel, turnCapped, !!clarify, timedOut, traceId));
   // Store the (redacted) answer in the registry BEFORE rendering the follow-up
   // buttons. rememberAnswer is pure in-memory (no card I/O), and the follow-up
   // suggestion buttons are written just below — if a user clicks one in the window
@@ -986,7 +1008,7 @@ async function runStreamingInvoke(
   }
   // Redact `error` before logging: on a non-200 path it now carries the raw backend
   // response body (sigv4), which could echo a token/header/connection-string.
-  log({ event: "card_closed", card: cardId, chars: answer.length, charts: charts.length, timedOut, failed, turnCapped, error: error ? redactSensitive(error) : undefined });
+  tlog({ event: "card_closed", card: cardId, chars: answer.length, charts: charts.length, timedOut, failed, turnCapped, error: error ? redactSensitive(error) : undefined });
   } catch (finalizeErr) {
     // The finalize composition threw unexpectedly. The card is still mid-stream
     // (header blue "正在分析…", live timer, dead 停止 button). Best-effort force it to
@@ -996,10 +1018,10 @@ async function runStreamingInvoke(
     // the 停止 button + live status line. Each step is independently swallowed —
     // we must not throw out of the emergency path. closeStreaming is attempted too
     // in case finalizeCard's PUT itself fails (so streaming_mode is cleared either way).
-    log({ event: "finalize_error", card: cardId, error: redactSensitive(String(finalizeErr)).slice(0, 300) });
+    tlog({ event: "finalize_error", card: cardId, error: redactSensitive(String(finalizeErr)).slice(0, 300) });
     try { writer.dropLanes("status", "content", "evidence"); } catch { /* best-effort */ }
     await writer.write((seq) =>
-      finalizeCard(cardId, t("msg.serviceError"), [], seq, isFollowUp, false, true, "", question, "", false, false),
+      finalizeCard(cardId, t("msg.serviceError"), [], seq, isFollowUp, false, true, "", question, "", false, false, false, traceId),
     ).catch(() => {});
     await writer.write((seq) => closeStreaming(cardId, seq)).catch(() => {});
   }
