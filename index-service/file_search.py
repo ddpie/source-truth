@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import shutil
 import subprocess
 from time import perf_counter
@@ -109,13 +110,30 @@ def run_search(
     cmd = build_command(pattern, local_root, glob=glob, max_matches=max_matches)
     try:
         proc = subprocess.run(  # noqa: S603 - argv list, no shell
-            cmd, capture_output=True, text=True, timeout=SEARCH_TIMEOUT_S, check=False,
+            # errors="replace": rg/grep stdout can contain bytes from NON-UTF-8 source
+            # files (GBK/GB2312 are very common in Chinese game configs). Without this,
+            # Python's strict UTF-8 decode of stdout raises UnicodeDecodeError the moment
+            # ONE matched file is GBK — crashing the WHOLE search (even an ASCII query)
+            # into a generic "internal error", so the agent can't find code that exists
+            # (breaks "code as the only source of truth" on Chinese repos). Replace lets
+            # the search still return its matches; a few mojibake chars in one line beat
+            # losing every result (cross-review P0).
+            cmd, capture_output=True, text=True, errors="replace",
+            timeout=SEARCH_TIMEOUT_S, check=False,
         )
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError(f"search timed out after {SEARCH_TIMEOUT_S}s") from exc
     # rg/grep exit 1 == "no matches" (not an error); >1 == real failure.
     if proc.returncode > 1:
-        raise RuntimeError(f"search failed (rc={proc.returncode}): {proc.stderr[:200]}")
+        # A bad REGEX (unbalanced group, etc.) is a RECOVERABLE user-input error, not
+        # an internal failure — raise ValueError so the bridge surfaces an actionable
+        # "bad search pattern" the agent can relay/retry, instead of a generic "internal
+        # error". rg/grep both say "regex parse error" / "invalid"; stderr carries no
+        # host path (cross-review). Other rc>1 (real failure) stays RuntimeError.
+        stderr = proc.stderr or ""
+        if re.search(r"regex parse error|invalid regex|unmatched|trailing backslash", stderr, re.IGNORECASE):
+            raise ValueError(f"bad search pattern (regex error): {stderr[:200]}")
+        raise RuntimeError(f"search failed (rc={proc.returncode}): {stderr[:200]}")
 
     matches: list[dict[str, Any]] = []
     truncated = False
