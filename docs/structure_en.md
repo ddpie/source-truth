@@ -54,7 +54,7 @@ scripts/                Operational lifecycle
   lib/resolve_repo.sh   --repo multi-source resolver (local / git URL / s3://) → normalized local dir
   lib/activate_gateway.sh  Write /etc/bot-gateway.env + start bot-gateway.service via SSM (gateway co-located with the index host)
   lib/stop_gateway.sh   Stop the old instance's gateway via SSM (break-before-make on blue-green swap; prevents two gateways racing the Feishu long-connection)
-  ⚠️ deploy.sh          Deprecated compatibility shim (delegates to deploy-all.sh)
+  deploy.sh             Deprecated compatibility shim (delegates to deploy-all.sh)
   (p2) ops.sh           Ops toolkit (status / logs / reindex)
   teardown.sh           Ordered teardown + retained-resource list
 docs/
