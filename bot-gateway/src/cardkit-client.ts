@@ -42,15 +42,18 @@ export function buildQuestionElement(question: string): Record<string, unknown> 
 
 /** "TraceID: <id>" as a single quote line at the very top of the card. The id is the
  *  same one stamped on every log line for this request, so an operator can grep logs
- *  when a user reports a problem. Rendered as a markdown blockquote (`>`) per the
- *  product preference — visually set apart from the answer without the heaviness of a
- *  code block. (Feishu cards have no native copy-button component; the id is still
- *  selectable to copy.) Kept on one short line so it doesn't compete with the answer. */
+ *  when a user reports a problem. Rendered as ONE muted line — a grey label + the id
+ *  in inline code (`<font>` greys the label so it sits quietly above the answer; the
+ *  blockquote `>` was dropped because its left bar competes visually, and a code block
+ *  is heavier still). The inline-code id is long-press-copyable on mobile, which is the
+ *  lightweight stand-in for the copy button Feishu cards have no native component for —
+ *  matching how Stripe/Sentry surface a request-id: a quiet, copyable short code. Placed
+ *  as the FIRST element so it's already on-screen even if the card ends early. */
 export function buildTraceElement(traceId: string): Record<string, unknown> {
   return {
     tag: "markdown",
     element_id: "trace",
-    content: `> ${t("card.trace.prefix")}${traceId}`,
+    content: `<font color='grey'>${t("card.trace.prefix")}</font>\`${traceId}\``,
   };
 }
 
@@ -352,14 +355,16 @@ export async function appendCharts(
 }
 
 /** Collapsible "供研发复核" panel for the evidence section (file paths / symbols
- *  / line numbers). Folded by default so the non-technical reader sees only the
- *  business answer; a dev expands it to verify. null when there's no evidence. */
-export function buildEvidencePanel(evidence: string): unknown {
+ *  / line numbers). Mirrors the 分析过程 panel: EXPANDED while it streams (the dev
+ *  watches the citations forming, same as the reasoning steps) and FOLDED at
+ *  finalize (the non-technical reader is left with just the business answer; a dev
+ *  re-expands to verify). null when there's no evidence. */
+export function buildEvidencePanel(evidence: string, expanded = false): unknown {
   if (!evidence.trim()) return null;
   return {
     tag: "collapsible_panel",
     element_id: "evidence",
-    expanded: false,
+    expanded,
     background_color: "grey",
     padding: "8px 8px 8px 8px",
     border: { color: "grey", corner_radius: "5px" },
@@ -380,10 +385,10 @@ export function buildEvidencePanel(evidence: string): unknown {
 /** Append the live "供研发复核" panel (folded) ONCE, when evidence first appears
  *  mid-stream. Same element_id="evidence" as finalizeCard's panel + same layout
  *  order (below the conclusion), so it does NOT re-layout at finalize — it just
- *  stops being touched. Folded from the start (the non-technical reader isn't
- *  distracted; a dev can expand it live to follow the citations forming). */
+ *  stops being touched. EXPANDED while streaming (mirrors 分析过程 — the dev sees
+ *  citations forming live); finalizeCard re-folds it. */
 export async function appendEvidencePanel(cardId: string, evidence: string, sequence: number): Promise<void> {
-  const panel = buildEvidencePanel(evidence);
+  const panel = buildEvidencePanel(evidence, true);
   if (!panel) return;
   await larkApi("POST", `/open-apis/cardkit/v1/cards/${cardId}/elements`, JSON.stringify({
     type: "append",
@@ -392,9 +397,10 @@ export async function appendEvidencePanel(cardId: string, evidence: string, sequ
   }));
 }
 
-/** Update the live evidence panel in place as more citations stream in. */
+/** Update the live evidence panel in place as more citations stream in (stays
+ *  expanded during streaming, same as updateReasoningPanel). */
 export async function updateEvidencePanel(cardId: string, evidence: string, sequence: number): Promise<void> {
-  const panel = buildEvidencePanel(evidence);
+  const panel = buildEvidencePanel(evidence, true);
   if (!panel) return;
   await larkApi("PUT", `/open-apis/cardkit/v1/cards/${cardId}/elements/evidence`, JSON.stringify({
     element: JSON.stringify(panel),

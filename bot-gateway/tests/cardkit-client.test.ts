@@ -79,12 +79,13 @@ describe("buildCreateCardBody", () => {
     ).toBe(true);
   });
 
-  it("renders the traceId as a quote line at the TOP when provided", () => {
+  it("renders the traceId as a muted line (grey label + inline-code id) at the TOP", () => {
     const card = JSON.parse(JSON.parse(buildCreateCardBody({ question: "Q", traceId: "a1b2c3d4" })).data);
     const first = card.body.elements[0] as { element_id?: string; content?: string };
     expect(first.element_id).toBe("trace");        // top of the card
-    expect(first.content!.startsWith(">")).toBe(true);   // markdown blockquote
-    expect(first.content).toContain("a1b2c3d4");
+    expect(first.content).toContain("<font color='grey'>"); // muted label, not a blockquote
+    expect(first.content).toContain("`a1b2c3d4`");          // id in inline code (long-press copy)
+    expect(first.content!.startsWith(">")).toBe(false);     // blockquote bar dropped
   });
 
   it("omits the trace line when no traceId is given", () => {
@@ -163,9 +164,14 @@ describe("buildEvidencePanel (供研发复核, live + finalize)", () => {
       tag: string; expanded: boolean; element_id: string; elements: Array<{ content: string }>;
     };
     expect(panel.tag).toBe("collapsible_panel");
-    expect(panel.expanded).toBe(false); // dev-review folded by default
+    expect(panel.expanded).toBe(false); // dev-review folded by default (finalize)
     expect(panel.element_id).toBe("evidence");
     expect(panel.elements[0].content).toContain("FormulaHelper.cs:75");
+  });
+
+  it("builds an EXPANDED panel while streaming (mirrors 分析过程 live)", () => {
+    const panel = buildEvidencePanel("FormulaHelper.cs:75", true) as { expanded: boolean };
+    expect(panel.expanded).toBe(true); // dev watches citations forming live
   });
 
   it("returns null when there is no evidence (so live append/update no-ops)", () => {
