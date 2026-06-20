@@ -138,6 +138,27 @@ describe("isToolCallLeakDominant", () => {
   it("is FALSE for a clean answer (no markers)", () => {
     expect(isToolCallLeakDominant("暴击倍率 1.5 倍。")).toBe(false);
   });
+
+  it("is TRUE for the markup-LESS JA/EN narration leak (Tool call: + 呼びます + json)", () => {
+    // The cold-VM shape that leaked raw on card st-96f2a7f42c25: no XML, just narration
+    // + a "Tool call:" label + a ```json args block.
+    const leak = [
+      "我先去定位游泳速度相关的逻辑。",
+      "codegraph_symbol_search を呼びます。",
+      "**Tool call: codegraph_symbol_search**",
+      "```json",
+      '{ "query": "swim speed" }',
+      "```",
+    ].join("\n");
+    expect(isToolCallLeakDominant(leak)).toBe(true);
+    expect(stripToolCallLeak(leak)).not.toMatch(/Tool call|を呼|codegraph_symbol_search|```json/);
+  });
+
+  it("is FALSE for a real answer that cites a tool name in prose (no calling cue)", () => {
+    // A 供研发复核 citation mentions a tool/symbol name but isn't a CALL — must not misfire.
+    const body = "游泳速度由耐力决定，负重不拖慢，这是一段完整真实的答案，逐项核对无误足够长不应判为泄漏。\n> 🔍 **供研发复核**\n> 见 SwimController.cs:42 的 calc";
+    expect(isToolCallLeakDominant(body)).toBe(false);
+  });
 });
 
 describe("no ReDoS on many unclosed invoke opens", () => {
