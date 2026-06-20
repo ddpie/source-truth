@@ -42,12 +42,22 @@ function collectButtonValues(els: unknown[]): Array<Record<string, unknown>> {
 }
 
 describe("feedback buttons (👍/👎 + reason)", () => {
-  it("vote buttons are TOP-LEVEL fb_up/fb_down (disable-in-place by id), action=feedback", () => {
+  it("vote buttons sit in ONE row (column_set) yet keep per-button element_ids fb_up/fb_down", () => {
     const els = buildFeedbackButtons() as Array<Record<string, unknown>>;
-    // top-level buttons (NOT wrapped in a column_set) so each is element_id-addressable
-    // for the proven same-tag disable path (cross-review #6).
-    expect(els.every((e) => e.tag === "button")).toBe(true);
-    expect(els.map((e) => e.element_id).sort()).toEqual(["fb_down", "fb_up"]);
+    // single column_set row (user wants 👍/👎 side by side); each button still carries its
+    // own card-unique element_id so it's individually disable-able by id (nested PUT works).
+    expect(els).toHaveLength(1);
+    expect(els[0].tag).toBe("column_set");
+    // collect the button element_ids regardless of nesting depth
+    const ids: string[] = [];
+    const walk = (n: unknown): void => {
+      if (!n || typeof n !== "object") return;
+      const o = n as Record<string, unknown>;
+      if (o.tag === "button" && typeof o.element_id === "string") ids.push(o.element_id);
+      for (const v of Object.values(o)) { if (Array.isArray(v)) v.forEach(walk); else if (v && typeof v === "object") walk(v); }
+    };
+    walk(els[0]);
+    expect(ids.sort()).toEqual(["fb_down", "fb_up"]);
     const vals = collectButtonValues(els);
     expect(vals.map((v) => v.vote).sort()).toEqual(["down", "up"]);
     expect(vals.every((v) => v.action === "feedback")).toBe(true);
