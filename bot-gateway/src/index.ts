@@ -550,18 +550,23 @@ async function runStreamingInvoke(
     // tick (RTT > cadence) advanced the counter without rendering → the visible dots
     // skipped a phase (·→···). Time-derived: a dropped frame just means the next
     // rendered dot reflects true elapsed time, no desync (dim#1「不晃」).
-    const elapsedMs = performance.now() - monoStart;
-    const dots = ELLIPSIS[Math.floor(elapsedMs / STATUS_WRITE_MS) % ELLIPSIS.length];
-    const elapsed = formatElapsed(elapsedMs);  // s / Mm Ss / Hh Mm
-    const phaseWord = stage === "thinking" ? "正在思考" : "正在分析";
-    const text = `${phaseWord} ${elapsed}${dots}`;
     lastStatusWrite = now;
     // Latest-wins lane: if a status frame is still queued, this one REPLACES it
     // (stale frames dropped) instead of piling up behind a slow lark-cli spawn —
     // so the timer always shows the CURRENT elapsed time, never a frame queued
     // seconds ago (the "卡在 11s" complaint). Decide append-vs-update at execution
     // time on the live flag so a failed append retries as an append.
+    // ELAPSED IS COMPUTED INSIDE THE CALLBACK (at EXECUTION time, not schedule time):
+    // a status frame can sit queued behind a slow/retried sibling write (e.g. a content
+    // updateContent in 429 backoff ~1.75s); capturing `text` at schedule time would then
+    // paint a 1-2s-stale value and the seconds would visibly stall-then-jump-forward when
+    // it finally runs. Recomputing here from the monotonic base means even a delayed frame
+    // paints the TRUE current elapsed — no jump (cross-review P2, dim#1「不晃」).
     writer.coalesce("status", async (seq) => {
+      const elapsedMs = performance.now() - monoStart;
+      const dots = ELLIPSIS[Math.floor(elapsedMs / STATUS_WRITE_MS) % ELLIPSIS.length];
+      const phaseWord = stage === "thinking" ? "正在思考" : "正在分析";
+      const text = `${phaseWord} ${formatElapsed(elapsedMs)}${dots}`;
       if (!statusAppended) {
         await appendStatusLine(cardId, text, seq);
         statusAppended = true; // only on success → a throw leaves it false
