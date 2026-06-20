@@ -31,6 +31,18 @@ if (SALT === SALT_FALLBACK) {
 }
 
 /**
+ * True when the hash salt is the PUBLIC fallback (LOG_HASH_SALT unset). Telemetry
+ * (metrics.ts) stamps this onto user-level aggregation events as `saltWeak` so a
+ * CloudWatch query can tell "this hashUserId is weakly de-identified, don't trust it
+ * for long-term retention analysis" rather than silently treating it as anonymized.
+ * (Telemetry-and-feedback plan §2 / 阶段0(c): the always-on gateway must not crash on a
+ * missing salt, so we surface the weakness instead of throwing.)
+ */
+export function saltIsWeak(): boolean {
+  return SALT === SALT_FALLBACK;
+}
+
+/**
  * Stable, non-reversible short token for a user/chat/message identifier.
  * Empty/undefined → "anon" (so a missing id doesn't crash logging).
  */
