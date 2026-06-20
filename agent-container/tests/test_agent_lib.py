@@ -283,9 +283,10 @@ class _ToolUseBlock:
 
 
 class _ToolResultBlock:
-    def __init__(self, tid, is_error=False):
+    def __init__(self, tid, is_error=False, content=None):
         self.tool_use_id = tid
         self.is_error = is_error
+        self.content = content
 
 
 class _MsgWith:
@@ -325,6 +326,68 @@ def test_track_tool_latency_ignores_non_content_messages():
     for junk in (None, 42, "str", _MsgWith("not-a-list")):
         agent_lib._track_tool_latency(junk, pending)  # must not raise
     assert pending == {}
+
+
+# ── _is_empty_retrieval: 检索空命中 detection (zeroResultRetrieval) ──────────────
+def test_is_empty_retrieval_detects_no_match_shapes():
+    # symbol_search / get_callers / analyze_impact no-match → "symbol not found"
+    assert agent_lib._is_empty_retrieval(
+        "mcp__codegraph__codegraph_symbol_search",
+        _ToolResultBlock("t", content='{"error": "codegraph_symbol_search: symbol not found", "detail": "x"}'))
+    # search_files no-match → {"matches": []}
+    assert agent_lib._is_empty_retrieval(
+        "mcp__codegraph__codegraph_search_files",
+        _ToolResultBlock("t", content='{"matches": [], "truncated": false}'))
+    # graph tool empty → {"results": []}
+    assert agent_lib._is_empty_retrieval(
+        "mcp__codegraph__codegraph_get_callers",
+        _ToolResultBlock("t", content='{"results": []}'))
+    # content as a list of text blocks (the other SDK serialization)
+    assert agent_lib._is_empty_retrieval(
+        "mcp__codegraph__codegraph_search_files",
+        _ToolResultBlock("t", content=[{"type": "text", "text": '{"matches": []}'}]))
+
+
+def test_is_empty_retrieval_false_on_hits_and_nonretrieval():
+    # a retrieval tool that DID match → not empty
+    assert not agent_lib._is_empty_retrieval(
+        "mcp__codegraph__codegraph_search_files",
+        _ToolResultBlock("t", content='{"matches": [{"path": "a.cs", "line": 1, "text": "x"}]}'))
+    # read_file is NOT a retrieval tool — its content (even empty file) must never count
+    assert not agent_lib._is_empty_retrieval(
+        "mcp__codegraph__codegraph_read_file",
+        _ToolResultBlock("t", content='{"content": "", "lines": 0}'))
+    assert not agent_lib._is_empty_retrieval(
+        "mcp__codegraph__codegraph_glob_files",
+        _ToolResultBlock("t", content='{"matches": []}'))  # glob empty ≠ retrieval miss
+    # an is_error result is a FAILURE (counted as toolErrors), not an empty hit
+    assert not agent_lib._is_empty_retrieval(
+        "mcp__codegraph__codegraph_search_files",
+        _ToolResultBlock("t", is_error=True, content='{"error": "search failed"}'))
+    # garbage / missing content never crashes, returns False
+    assert not agent_lib._is_empty_retrieval("mcp__codegraph__codegraph_search_files", _ToolResultBlock("t"))
+
+
+def test_track_tool_latency_counts_empty_retrievals():
+    import logging
+    pending: dict = {}
+    with caplog_level(logging.INFO):
+        agent_lib._track_tool_latency(_MsgWith([_ToolUseBlock("t1", "mcp__codegraph__codegraph_search_files")]), pending)
+        n = agent_lib._track_tool_latency(
+            _MsgWith([_ToolResultBlock("t1", content='{"matches": []}')]), pending)
+    assert n == 1, "an empty search_files result must count as one zeroResultRetrieval"
+    # a hit returns 0
+    pending2: dict = {}
+    agent_lib._track_tool_latency(_MsgWith([_ToolUseBlock("t2", "mcp__codegraph__codegraph_search_files")]), pending2)
+    n2 = agent_lib._track_tool_latency(
+        _MsgWith([_ToolResultBlock("t2", content='{"matches": [{"path": "a"}]}')]), pending2)
+    assert n2 == 0
+
+
+def caplog_level(level):
+    # tiny shim so the test reads cleanly without a caplog fixture where we don't assert logs
+    import contextlib
+    return contextlib.nullcontext()
 
 
 # ── MCP-init-race detection + retry (the "raw <invoke> XML in card" root cause) ──
