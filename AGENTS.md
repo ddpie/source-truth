@@ -51,7 +51,7 @@ Agent）、`bot-gateway/`（TS 网关 + CardKit）、`index-service/`（CodeGrap
 `docs/`（人面向）+ `docs/agent/`（AI 面向）+ `docs/design/`（导入的设计真相源）。
 
 **生成物 / 不可手改：** `infra/cdk.out/`、`node_modules/`、`.venv/`、构建产物。源 → 生成物映射表见
-`docs/agent/invariants.md`（随 p1 补全）。
+`docs/agent/invariants.md`。
 
 ## Code style
 
@@ -67,7 +67,7 @@ Agent）、`bot-gateway/`（TS 网关 + CardKit）、`index-service/`（CodeGrap
 需要 Docker / AWS 的 smoke / e2e（smoke/e2e 目前为占位）。pre-push 跑离线套件。结构自检
 `./scripts/check-invariants.sh` 由 lint 层调用。
 
-## Critical constraints（细节随 p1 落到 docs/agent/invariants.md）
+## Critical constraints（详见 docs/agent/invariants.md）
 
 - **代码为唯一依据**：答案必须基于 index-service 服务的最新主分支真实代码 + CodeGraph 取证；代码与文档 / 记忆
   冲突时以代码为准，并标注差异与文档时间；低置信度转研发。
@@ -108,7 +108,8 @@ Agent）、`bot-gateway/`（TS 网关 + CardKit）、`index-service/`（CodeGrap
 
 - 架构心智模型：`docs/agent/architecture.md`
 - CardKit「会生长的答案卡」调研（`bot-gateway` 核心能力）：`docs/agent/cardkit-streaming-spike.md`
-- 不变量与真相源映射：`docs/agent/invariants.md`（p1）
-- 变更配方：`docs/agent/playbooks.md`（p1）
+- 不变量与真相源映射：`docs/agent/invariants.md`
+- 变更配方：`docs/agent/playbooks.md`
+- 部署 / 连飞书 / 运维 / 排错：`docs/runbook.md`
 - 目录结构：`docs/structure_zh.md` · `docs/structure_en.md`
 - 需求 / 架构设计真相源：`docs/design/requirements_zh.md` · `docs/design/architecture-overview_zh.md`
