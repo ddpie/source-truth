@@ -444,6 +444,7 @@ async function runStreamingInvoke(
     log({ event: "card_write_dropped", card: cardId, op: label, error: redactSensitive(String(err)).slice(0, 200) }));
   let lastUpdate = 0;
   let lastPanelUpdate = 0;
+  let firstTokenEmitted = false; // one-shot guard for the answer_first_token telemetry
   let timedOut = false;
   let stage: "thinking" | "analyzing" = "thinking";
   let stepsShown = 0; // how many reasoning steps are currently rendered in the panel
@@ -675,6 +676,14 @@ async function runStreamingInvoke(
       // lands on it. Placeholder until any real text exists so it never flashes
       // empty.
       const now = Date.now();
+      // TELEMETRY: answer_first_token — fired ONCE the moment real conclusion text first
+      // exists (体感关键 ttfb = time-to-first-conclusion-token). Placed BEFORE the throttle
+      // early-return so a throttled tick can't delay/skip it; one-shot via firstTokenEmitted.
+      // Diagnostic event → traceId-keyed, no hashUserId (metrics.ts §4). best-effort.
+      if (!firstTokenEmitted && textSoFar.length > 0) {
+        firstTokenEmitted = true;
+        emitMetric("answer_first_token", { ttfbMs: Math.round(performance.now() - monoStart) }, { traceId, sessionId });
+      }
       if (now - lastUpdate < THROTTLE_MS) return;
       lastUpdate = now;
       // Strip the evidence (供研发复核) section and the 你可能还想问 follow-up trailer
