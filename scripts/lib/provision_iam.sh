@@ -38,6 +38,21 @@ aws iam put-role-policy --role-name "$INDEX_ROLE" --policy-name feishu-secret --
   \"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",
   \"Action\":[\"secretsmanager:GetSecretValue\"],
   \"Resource\":[\"arn:aws:secretsmanager:${REGION}:${ACCOUNT}:secret:source-truth/*\"]}]}" >/dev/null
+# Inline policy: ship the co-located bot-gateway's journald logs to CloudWatch. Until now
+# only the AgentCore runtime role had logs perms; the gateway (a systemd unit ON the index
+# host since co-location) had none, so its structured metric:true lines stayed in local
+# journald and never reached CloudWatch — blocking the telemetry log pipeline + the whole
+# monitoring dashboard/alarms (telemetry plan 阶段0 / monitoring plan §0 front gate). The
+# CloudWatch agent on the host assumes THIS instance role; grant it create/put. CreateLogGroup
+# can't be name-scoped (it acts on the group being created), so it's "*"; the stream/put are
+# scoped to this project's log group prefix for least privilege. Idempotent (put-role-policy
+# upserts), so a re-run just reasserts it — no new instance needed to apply.
+aws iam put-role-policy --role-name "$INDEX_ROLE" --policy-name cloudwatch-logs --policy-document "{
+  \"Version\":\"2012-10-17\",\"Statement\":[
+    {\"Effect\":\"Allow\",\"Action\":[\"logs:CreateLogGroup\"],\"Resource\":\"*\"},
+    {\"Effect\":\"Allow\",\"Action\":[\"logs:CreateLogStream\",\"logs:PutLogEvents\",\"logs:DescribeLogStreams\"],
+     \"Resource\":[\"arn:aws:logs:${REGION}:${ACCOUNT}:log-group:/source-truth/*\",
+                   \"arn:aws:logs:${REGION}:${ACCOUNT}:log-group:/source-truth/*:*\"]}]}" >/dev/null
 if ! aws iam get-instance-profile --instance-profile-name "$INDEX_PROFILE" >/dev/null 2>&1; then
   aws iam create-instance-profile --instance-profile-name "$INDEX_PROFILE" >/dev/null
   aws iam add-role-to-instance-profile --instance-profile-name "$INDEX_PROFILE" --role-name "$INDEX_ROLE" >/dev/null
