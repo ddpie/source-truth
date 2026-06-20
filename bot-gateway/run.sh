@@ -63,4 +63,22 @@ for env_key, json_key, required in (
 fi
 eval "$EXPORTS"
 
+# LOG_HASH_SALT (telemetry de-identification) — fetch HOST-SIDE from Secrets Manager, same
+# as the Feishu creds above, so the salt NEVER travels through the deploy's SSM RunShellScript
+# command body (base64 there is recorded in CloudTrail / SSM history — not secret). If the env
+# file already set it (explicit override), keep that; otherwise read source-truth/log-hash-salt
+# (the instance role has GetSecretValue on source-truth/*). A missing secret is non-fatal: the
+# gateway still runs and log.ts uses its (weak) fallback while emitMetric stamps saltWeak:true,
+# so de-identification weakness is observable rather than a crash. Never written to disk.
+if [[ -z "${LOG_HASH_SALT:-}" ]]; then
+  SALT_VAL="$(aws secretsmanager get-secret-value \
+    --secret-id source-truth/log-hash-salt --region "$AWS_REGION" \
+    --query SecretString --output text 2>/dev/null || echo "")"
+  if [[ -n "$SALT_VAL" ]]; then
+    export LOG_HASH_SALT="$SALT_VAL"
+  else
+    echo "run.sh WARN: source-truth/log-hash-salt not readable — telemetry hashUserId uses the weak public fallback (saltWeak:true will be stamped)" >&2
+  fi
+fi
+
 exec node dist/index.js
