@@ -18,6 +18,8 @@
 #   4 index-svc  : security groups + ARM EC2 (Ubuntu 24.04) running bootstrap.sh
 #   5 image      : build the agent container (ARM64) and push to ECR
 #   6 runtime    : AgentCore runtime in VPC mode, CODEGRAPH_MCP_URL set
+#   7 gateway    : write /etc/bot-gateway.env + start bot-gateway.service (co-located
+#                  on the index host) via SSM — once the runtime ARN exists
 #
 # NO EFS: the agent microVM mounts no filesystem; it reads all source code over
 # the index-service HTTP bridge (read_file/glob_files/search_files/codegraph_*).
@@ -81,7 +83,7 @@ Options:
   --root-volume-gb <n> index-service root EBS size in GiB (default: 30). Grow for a
                       large repo: it holds the repo copy + graph.db + tarball.
   --model <id>        Bedrock model id for the agent runtime
-  --skip <phase>      Skip a phase: artifacts|iam|network|index-svc|image|runtime (repeatable)
+  --skip <phase>      Skip a phase: artifacts|iam|network|index-svc|image|runtime|gateway (repeatable)
   --refresh-index     Replace the running index-service instance if this run staged
                       newer index-service code / repo to S3 (reuse can't re-bootstrap).
                       Without it, a stale reuse only WARNs (never silently serves old code).
@@ -331,7 +333,12 @@ else
   # times out). Globbing every .py makes new modules ship automatically; tests/
   # live in a subdir and are excluded by the top-level-only glob.
   TMP_IDX="$(mktemp /tmp/index-service.XXXX.tar.gz)"
-  ( cd "$ROOT/index-service" && tar czf "$TMP_IDX" ./*.py requirements.txt )
+  # DETERMINISTIC archive: pin sort order, mtime, and owner, and `gzip -n` (no name/
+  # timestamp in the gzip header). Otherwise the tarball's bytes — hence its S3 ETag —
+  # change on every run even when content is identical, which makes the index-host
+  # ArtifactSig staleness check (provision_index_service.sh) ALWAYS report stale and
+  # makes --refresh-index rebuild the instance every run for no reason (cross-review HIGH).
+  ( cd "$ROOT/index-service" && tar --sort=name --mtime='UTC 2020-01-01' --owner=0 --group=0 --numeric-owner -cf - ./*.py requirements.txt | gzip -n > "$TMP_IDX" )
   run aws s3 cp "$TMP_IDX" "s3://$BUCKET/index-service.tar.gz" --region "$REGION"
 
   # repo to index. EXCLUDE .git / vendored deps / build caches: codegraph already
@@ -356,10 +363,15 @@ else
       say err "--repo local path does not exist or is not a directory: $REPO_PATH"; exit 1
     fi
     TMP_REPO="$(mktemp /tmp/repo.XXXX.tar.gz)"
-    tar czf "$TMP_REPO" \
+    # Deterministic (see index-service tar above): a git clone / s3 fetch writes files
+    # with fresh mtimes every run, so without pinning mtime/sort/owner + `gzip -n` the
+    # ETag would change every deploy and --refresh-index would rebuild the index host
+    # on every run even when the repo content is unchanged (cross-review HIGH).
+    tar --sort=name --mtime='UTC 2020-01-01' --owner=0 --group=0 --numeric-owner \
       --exclude='.git' --exclude='node_modules' --exclude='.venv' \
       --exclude='*.tmp' --exclude='__pycache__' \
-      -C "$(dirname "$STAGE_REPO_PATH")" "$(basename "$STAGE_REPO_PATH")"
+      -cf - -C "$(dirname "$STAGE_REPO_PATH")" "$(basename "$STAGE_REPO_PATH")" \
+      | gzip -n > "$TMP_REPO"
     run aws s3 cp "$TMP_REPO" "s3://$BUCKET/${REPO_SUBDIR}.tar.gz" --region "$REGION"
     rm -f "$TMP_REPO"
   fi
@@ -374,7 +386,9 @@ else
     [[ "$DRY_RUN" == true ]] || exit 1
   fi
   TMP_GW="$(mktemp /tmp/bot-gateway.XXXX.tar.gz)"
-  ( cd "$ROOT/bot-gateway" && tar czf "$TMP_GW" src tsconfig.json package.json package-lock.json run.sh )
+  # Deterministic (see above): keeps the gateway tarball's ETag stable across reruns
+  # when its source is unchanged, so the ArtifactSig staleness check is meaningful.
+  ( cd "$ROOT/bot-gateway" && tar --sort=name --mtime='UTC 2020-01-01' --owner=0 --group=0 --numeric-owner -cf - src tsconfig.json package.json package-lock.json run.sh | gzip -n > "$TMP_GW" )
   run aws s3 cp "$TMP_GW" "s3://$BUCKET/bot-gateway.tar.gz" --region "$REGION"
   say ok "artifacts staged"
 fi
@@ -474,6 +488,14 @@ else
       # + a 5s margin, so the two can't silently drift apart. Fallback 35 if unset
       # (older config) — still > the historical 30s TTL.
       DRAIN_S=$(( ${INDEX_DNS_TTL:-30} + 5 ))
+      # BREAK-BEFORE-MAKE for the gateway: the old instance also runs bot-gateway,
+      # whose Feishu long-connection is a GLOBAL singleton per app (cluster mode —
+      # two live clients steal each other's events). Synchronously stop the OLD
+      # gateway NOW (systemctl stop returns after the process exits → connection
+      # dropped), BEFORE Phase 6 starts the NEW instance's gateway, so the two can
+      # never overlap. (Index/codegraph CAN run two instances — separate graph.db —
+      # which is why index is make-before-break but gateway must be break-before-make.)
+      bash "$SCRIPT_DIR/lib/stop_gateway.sh" "$REGION" "$INDEX_OLD_INSTANCE" || true
       say info "blue-green: new index healthy + DNS cut over; draining ${DRAIN_S}s (TTL ${INDEX_DNS_TTL:-30}+5) then terminating old instance $INDEX_OLD_INSTANCE"
       sleep "$DRAIN_S"
       # Clear INDEX_OLD_INSTANCE only on a SUCCESSFUL terminate: if terminate fails
@@ -591,18 +613,64 @@ else
   fi
 fi
 
+# ============================================================
+# Phase 6: activate bot-gateway (co-located on the index host)
+# ============================================================
+# The gateway was BUILT + INSTALLED by bootstrap.sh but left stopped (it needs the
+# now-existing RUNTIME_ARN). Here we write /etc/bot-gateway.env + start the service
+# via SSM. Requires a Feishu secret id (FEISHU_SECRET_ID): install.sh creates the
+# secret and persists the id; a backend-only run without it SKIPS activation and
+# prints how to finish. The credentials themselves stay in Secrets Manager — only
+# the secret id is written to the host (run.sh fetches the creds at start).
+GW_RUNTIME_ARN="${RUNTIME_ARN:-${AGENT_RUNTIME_ARN:-}}"
+GW_INSTANCE="${INDEX_SERVICE_INSTANCE:-}"
+# Backfill FEISHU_SECRET_ID when it isn't in the env/config: a direct `deploy-all.sh`
+# rerun (not via install.sh, which is the only thing that persists it) would otherwise
+# skip gateway activation. If the conventional secret (created by install.sh) exists,
+# adopt it so a plain rerun still (re)activates the gateway — critical after a
+# --refresh-index swapped the index host, since the OLD gateway was just terminated
+# and the NEW one only comes up here (cross-review HIGH).
+if [[ -z "${FEISHU_SECRET_ID:-}" && "$DRY_RUN" != true ]]; then
+  if aws secretsmanager describe-secret --secret-id "source-truth/feishu-app" --region "$REGION" >/dev/null 2>&1; then
+    FEISHU_SECRET_ID="source-truth/feishu-app"
+    update_env "$CONFIG_FILE" FEISHU_SECRET_ID "$FEISHU_SECRET_ID"
+    say info "adopted existing Feishu secret source-truth/feishu-app (FEISHU_SECRET_ID backfilled)"
+  fi
+fi
+# Did this run swap the index host? If so the old gateway was terminated in Phase 3,
+# so NOT activating the new one now leaves the bot offline — escalate that case.
+GW_SWAPPED=false
+[[ -n "${INDEX_OLD_INSTANCE:-}" ]] && GW_SWAPPED=true
+if skip gateway; then
+  say warn "skip gateway"
+  [[ "$GW_SWAPPED" == true ]] && say err "WARNING: index host was just replaced AND gateway activation was skipped — the bot is now OFFLINE. Re-run without --skip gateway."
+elif [[ "$DRY_RUN" == true ]]; then
+  say step "Phase 6: activate bot-gateway"
+  say info "[dry-run] write /etc/bot-gateway.env (RUNTIME_ARN, FEISHU_SECRET_ID, LOCALE) + start bot-gateway.service via SSM"
+elif [[ -z "${FEISHU_SECRET_ID:-}" ]]; then
+  say step "Phase 6: activate bot-gateway"
+  if [[ "$GW_SWAPPED" == true ]]; then
+    say err "index host was REPLACED this run but no FEISHU_SECRET_ID is configured — the new host's gateway is NOT started, so the bot is now OFFLINE."
+    say err "  → Run ./scripts/install.sh, or set FEISHU_SECRET_ID and re-run, to bring the gateway back."
+  else
+    say warn "no FEISHU_SECRET_ID configured — skipping gateway activation (backend-only deploy)."
+    say warn "  → Run ./scripts/install.sh (interactive) to create the Feishu secret + activate the gateway,"
+    say warn "    or set FEISHU_SECRET_ID (a Secrets Manager secret holding {app_id,app_secret,bot_open_id}) and re-run."
+  fi
+else
+  say step "Phase 6: activate bot-gateway"
+  bash "$SCRIPT_DIR/lib/activate_gateway.sh" \
+    "$REGION" "$GW_INSTANCE" "$GW_RUNTIME_ARN" "$FEISHU_SECRET_ID" \
+    "${LOCALE:-zh}" "${LOG_HASH_SALT:-}" "${FEISHU_API_BASE:-}" \
+    || { say err "gateway activation failed — backend is up; fix and re-run (or --skip gateway)"; exit 1; }
+  say ok "bot-gateway activated on $GW_INSTANCE"
+fi
+
 say ok "deploy-all complete"
 
-# Final next-steps: the backend (index-service + AgentCore runtime) is now up, but
-# the Feishu bot-gateway is NOT deployed by this script and needs the ONE manual
-# prerequisite AGENTS.md flags. Surface it loudly (non-blocking) so a fresh-account
-# run doesn't report success while the end-to-end 策划→answer path is silently dead.
-if [[ "$DRY_RUN" != true ]]; then
-  say warn "NEXT STEPS — the backend is READY but the bot-gateway is NOT yet running:"
-  say warn "  • bot-gateway is a long-lived process you run separately (not provisioned here)."
-  say warn "  • It requires env: FEISHU_APP_ID + FEISHU_APP_SECRET (create the secret by hand —"
-  say warn "    Secrets Manager/SSM, per AGENTS.md; this script does NOT create it), FEISHU_BOT_OPEN_ID,"
-  say warn "    AWS_REGION, and RUNTIME_ARN (already persisted to ${CONFIG_FILE})."
-  say warn "  • Until the gateway runs with those, 策划 @机器人 → answer will NOT work even though"
-  say warn "    every AWS resource above is healthy."
+if [[ "$DRY_RUN" != true && -z "${FEISHU_SECRET_ID:-}" ]]; then
+  say warn "NEXT STEPS — backend READY, but the bot-gateway is NOT yet active:"
+  say warn "  • Run ./scripts/install.sh to create the Feishu secret in Secrets Manager and activate the gateway,"
+  say warn "  • or create the secret yourself and re-run with FEISHU_SECRET_ID set."
+  say warn "  • Until then, 策划 @机器人 → answer will NOT work even though every AWS resource is healthy."
 fi
