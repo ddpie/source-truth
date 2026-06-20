@@ -515,16 +515,20 @@ async def run_agent(
 #         ```json … ```
 #     No XML, no "(" after the name — so the bare-name "(" arm missed it and it leaked
 #     raw onto the card (cross-review: card st-96f2a7f42c25). Add arms for: a literal
-#     "Tool call:" / "tool_use" label, and a codegraph_* tool name immediately followed
-#     by call-narration verbs (を呼/呼びます/call/调用/调用). The robust tell stands: an
-#     internal tool NAME paired with a "calling" cue in OUTPUT text is always a leak.
+#     "Tool call:" / "tool_use" label, the Japanese call verb (を呼/呼び), and the raw
+#     mcp__ name. CUE SET KEPT NARROW (cross-review P1): the ambiguous `call|调用|調用`
+#     verbs were DROPPED — they are normal review vocabulary (调用链 / "the call returns")
+#     and a reproducibly tool-citing legit answer would otherwise retry twice then fail.
+#     This MIRRORS the gateway's strip-toolcall-leak BARE_TOOLCALL_RE so the two detectors
+#     agree on what counts as a leak. The residual zh cold-start narration (`调用
+#     codegraph_x` with no paren) is caught downstream by the gateway zeroToolLeak
+#     backstop (0 tool calls + a bare tool name), not by an agent retry.
 _TOOLCALL_MARKUP_RE = re.compile(
     r"<(?:antml:)?invoke\b"
     r"|(?:antml:)?function_calls\b"
     r"|<attempt_[a-zA-Z0-9_]+\b"
     r"|\bcodegraph_[a-z_]+\s*\("                       # bare CALL with args
-    r"|\bcodegraph_[a-z_]+\s*(?:を|呼|call|调用|調用)"   # name THEN "calling" cue (…を呼びます)
-    r"|(?:call|调用|調用|呼[びぶ])\s*(?:mcp__)?codegraph_[a-z_]+"  # cue THEN name (调用 codegraph_x)
+    r"|\bcodegraph_[a-z_]+\s*(?:を\s*呼|呼び)"           # name THEN Japanese call verb (…を呼びます)
     r"|^\s*\**Tool[ _]call\b"                          # "Tool call:" / "**Tool call**" label line
     r"|\bmcp__codegraph__[a-z_]+\b",                   # the raw internal mcp__ name never appears in a real answer
     re.IGNORECASE | re.MULTILINE,

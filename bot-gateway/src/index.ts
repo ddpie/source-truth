@@ -65,13 +65,13 @@ function log(obj: Record<string, unknown>): void {
 
 // A per-request trace id, shown on the card top AND stamped on every log line for that
 // request, so when a user reports a problem the operator pastes the id to grep all
-// related logs. Format follows the common community pattern (Stripe-style): a short
-// TYPE PREFIX (`st-` = source-truth) + 12 hex chars. 12 hex = 48 bits (~2.8e14): no
-// realistic collision for a single-bot support id, while staying short enough to read
-// aloud / relay in a support chat (a bare 32-char UUID is collision-proof but unwieldy;
-// 8 chars felt too short). The prefix makes it recognizable as a trace id at a glance.
+// related logs. A TYPE PREFIX (`st-` = source-truth) + the full 32-hex UUID (dashes
+// stripped), aligning the length with the industry standard (OpenTelemetry trace-id /
+// Sentry event-id are both 32 hex) so it reads as a proper, collision-proof trace id.
+// The prefix makes it recognizable at a glance; the card renders it as quiet inline
+// code (long-press-copyable) so the length doesn't crowd the answer.
 function newTraceId(): string {
-  return "st-" + randomUUID().replace(/-/g, "").slice(0, 12);
+  return "st-" + randomUUID().replace(/-/g, "");
 }
 /** Build a logger that auto-stamps `trace` on every line for one request. The traceId
  *  is spread LAST so it always wins — a logged object that happens to carry its own
@@ -875,6 +875,14 @@ async function runStreamingInvoke(
   // turn produced no real answer → show the clean failure message; otherwise just strip
   // the stray block(s). Skip on hard failure (already a fixed message). The operator
   // log carries the signal for real root-causing.
+  // Clarification is detected from the RAW answer (no dependency on the leak/strip
+  // pass), so compute it FIRST — a clarification is a legitimately 0-tool turn (the
+  // agent is asking the user back, it hasn't retrieved anything), and the zeroToolLeak
+  // backstop below must not mistake a clarify prompt that happens to name a tool for a
+  // cold-start failure (cross-review P2: the backstop ran before this and could turn a
+  // valid clarification into a 查询失败 card). The full clarify handling (redaction,
+  // buttons) still happens at its original site below; this is only the early signal.
+  const clarifyDetected = (!hardFailed && !aborted && !turnCapped) && extractClarification(answer) !== null;
   let leakFailed = false;
   if (!hardFailed) {
     // Assess dominance over BOTH body AND evidence: a leak can land after the
@@ -885,9 +893,11 @@ async function runStreamingInvoke(
     // card says 回答完成"): a turn that ran ZERO tools yet whose output still exposes
     // an internal tool name after stripping is a cold-start no-real-work turn that
     // evaded the markup regex — treat it as a failure too, not a green success. A
-    // legit 0-tool answer (clarify / honest 查不到 / refuse) never contains a
-    // codegraph_* / mcp__ tool name, so this won't misfire on those.
+    // legit 0-tool answer (honest 查不到 / refuse) rarely contains a codegraph_* / mcp__
+    // tool name. A CLARIFICATION is the one expected-benign 0-tool turn, so it's excluded
+    // explicitly (cross-review P2) rather than relying on it never naming a tool.
     const zeroToolLeak = (timing.toolCalls ?? 0) === 0
+      && !clarifyDetected
       && /\b(?:mcp__)?codegraph_[a-z_]+\b|^\s*\**tool[ _]call\b/im.test(bodyNoEvidence + "\n" + evidence);
     if (isToolCallLeakDominant(bodyNoEvidence + "\n" + evidence) || zeroToolLeak) {
       log({ event: "toolcall_leak_dominant", card: cardId, chars: bodyNoEvidence.length, zeroToolLeak });
