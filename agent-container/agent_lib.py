@@ -387,6 +387,7 @@ async def run_agent(
     t0 = time.perf_counter()
     first_emitted = False
     n = 0
+    zero_result_retrievals = 0  # run total of empty retrieval-tool results (检索空命中)
     # Per-tool latency: a tool_use block (in an AssistantMessage) opens a timer
     # keyed by its id; the matching tool_result (in a UserMessage) closes it and
     # emits a `tool_latency` perf line per call. This is what localizes "10 Grep
@@ -416,13 +417,14 @@ async def run_agent(
     # tiny; the leak attempt is at most ~1 turn so its buffer is small.
     async def _drive(p: str, *, suppress_on_leak: bool) -> AsyncIterator[Any]:
         nonlocal first_emitted, saw_tool_use, saw_markup_text, last_num_turns, saw_error_result
+        nonlocal zero_result_retrievals
         buf: list[Any] = []
         committed = not suppress_on_leak  # retry attempt streams immediately
         async for message in qfn(prompt=p, options=options):
             if not first_emitted:
                 first_emitted = True
                 _perf("agent_first_message", (time.perf_counter() - t0) * 1000, traceId=trace_id)
-            _track_tool_latency(message, pending)
+            zero_result_retrievals += _track_tool_latency(message, pending)
             _maybe_log_result(message)
             if _message_has_tool_use(message):
                 saw_tool_use = True
@@ -544,7 +546,8 @@ async def run_agent(
             pending.clear()  # drop the cold attempt's unclosed tool timers so they can't mis-pair
             attempt += 1
     finally:
-        _perf("agent_run_total", (time.perf_counter() - t0) * 1000, messages=n, traceId=trace_id)
+        _perf("agent_run_total", (time.perf_counter() - t0) * 1000, messages=n,
+              zeroResultRetrieval=zero_result_retrievals, traceId=trace_id)
 
 
 # Matches the tool-call markup/leak the model emits as TEXT when MCP tools aren't
@@ -644,16 +647,85 @@ def _message_text_has_toolcall_markup(message: Any) -> bool:
     return False
 
 
-def _track_tool_latency(message: Any, pending: dict[str, tuple[str, float]]) -> None:
+# Retrieval tools whose EMPTY result is the "检索空命中" signal (correlates with index
+# staleness / blind spots). Read/glob/table tools are NOT retrieval — they return file content,
+# so their "empty" (an empty file) is not a retrieval miss and must not be counted. Matched by
+# suffix so it's independent of the mcp__codegraph__ prefix.
+_RETRIEVAL_TOOL_SUFFIXES: tuple[str, ...] = (
+    "symbol_search", "get_callers", "analyze_impact", "search_files",
+)
+
+
+def _result_block_text(block: Any) -> str:
+    """Best-effort extract the textual payload of a tool_result block. The SDK may put the
+    tool's return as a bare string in `.content`, or as a list of {type:text, text:...} blocks.
+    Returns "" on any shape we don't recognize (so callers never crash on it)."""
+    content = getattr(block, "content", None)
+    if isinstance(content, str):
+        return content
+    if isinstance(content, (list, tuple)):
+        parts = []
+        for c in content:
+            t = getattr(c, "text", None)
+            if t is None and isinstance(c, dict):
+                t = c.get("text")
+            if isinstance(t, str):
+                parts.append(t)
+        return "".join(parts)
+    return ""
+
+
+def _is_empty_retrieval(name: str, block: Any) -> bool:
+    """True iff `name` is a RETRIEVAL tool AND its result indicates no match. The bridge's
+    no-match shapes (see index-service/http_bridge.py + file_search.py):
+      - symbol/callers/impact no-match → {"error": "...symbol not found", ...}
+      - search_files no-match         → {"matches": [], ...}
+      - graph tools empty             → {"results": []} / empty results
+    An is_error result is a per-tool FAILURE (counted separately as toolErrors), not an empty
+    hit, so it's excluded here. Substring/JSON checks are deliberately loose but anchored to
+    the bridge's actual strings — read_file/glob/table never emit these shapes."""
+    if not any(name.endswith(s) for s in _RETRIEVAL_TOOL_SUFFIXES):
+        return False
+    if getattr(block, "is_error", None):
+        return False  # a failure, not an empty hit
+    text = _result_block_text(block)
+    if not text:
+        return False
+    # The bridge's "symbol not found" no-match (graph tools).
+    if "symbol not found" in text:
+        return True
+    # JSON payloads: empty matches / empty results. Parse when it looks like JSON; fall back to
+    # a tight substring check so a non-JSON shape still catches the obvious empties.
+    stripped = text.strip()
+    if stripped.startswith("{"):
+        try:
+            obj = json.loads(stripped)
+            if isinstance(obj, dict):
+                if isinstance(obj.get("matches"), list) and not obj["matches"]:
+                    return True
+                if isinstance(obj.get("results"), list) and not obj["results"]:
+                    return True
+        except (ValueError, TypeError):
+            pass
+    return False
+
+
+def _track_tool_latency(message: Any, pending: dict[str, tuple[str, float]]) -> int:
     """Time each tool round-trip: open a timer on a tool_use block, close + emit a
     `tool_latency` perf line on the matching tool_result. Best-effort + duck-typed
     (no SDK import); a shape we don't recognize is simply ignored. The per-tool
     breakdown (esp. Grep/Read on EFS vs codegraph MCP) is the issue-#2 lever for
-    deciding whether to cut tool calls or speed up file I/O."""
+    deciding whether to cut tool calls or speed up file I/O.
+
+    Returns the number of EMPTY-RETRIEVAL results closed by this message (a retrieval tool that
+    came back with no match -- the 检索空命中 signal, correlates with index staleness/blind spots).
+    The caller accumulates it across the run and surfaces a run total. Telemetry only.
+    """
+    empty_retrievals = 0
     try:
         content = getattr(message, "content", None)
         if not isinstance(content, (list, tuple)):
-            return
+            return 0
         now = time.perf_counter()
         for block in content:
             tool_id = getattr(block, "id", None)
@@ -666,10 +738,14 @@ def _track_tool_latency(message: Any, pending: dict[str, tuple[str, float]]) -> 
             result_id = getattr(block, "tool_use_id", None)
             if result_id is not None and result_id in pending:
                 name, start = pending.pop(result_id)
+                empty = _is_empty_retrieval(name, block)
+                if empty:
+                    empty_retrievals += 1
                 _perf("tool_latency", (now - start) * 1000, tool=name,
-                      is_error=getattr(block, "is_error", None))
+                      is_error=getattr(block, "is_error", None), empty_retrieval=empty)
     except Exception as exc:  # noqa: BLE001 - perf logging must never break the stream
         logger.warning(json.dumps({"event": "tool_latency_log_failed", "error": str(exc)}))
+    return empty_retrievals
 
 
 def _maybe_log_result(message: Any) -> None:
