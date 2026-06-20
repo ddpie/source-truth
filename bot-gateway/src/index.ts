@@ -881,8 +881,16 @@ async function runStreamingInvoke(
     // 供研发复核 heading (→ evidence partition), so checking the body alone would
     // miss an evidence-only leak. If dominant, the whole turn produced no real
     // answer → clean failure message + suppress charts/evidence.
-    if (isToolCallLeakDominant(bodyNoEvidence + "\n" + evidence)) {
-      log({ event: "toolcall_leak_dominant", card: cardId, chars: bodyNoEvidence.length });
+    // EXTRA backstop (the user's real worry: "task didn't actually complete but the
+    // card says 回答完成"): a turn that ran ZERO tools yet whose output still exposes
+    // an internal tool name after stripping is a cold-start no-real-work turn that
+    // evaded the markup regex — treat it as a failure too, not a green success. A
+    // legit 0-tool answer (clarify / honest 查不到 / refuse) never contains a
+    // codegraph_* / mcp__ tool name, so this won't misfire on those.
+    const zeroToolLeak = (timing.toolCalls ?? 0) === 0
+      && /\b(?:mcp__)?codegraph_[a-z_]+\b|^\s*\**tool[ _]call\b/im.test(bodyNoEvidence + "\n" + evidence);
+    if (isToolCallLeakDominant(bodyNoEvidence + "\n" + evidence) || zeroToolLeak) {
+      log({ event: "toolcall_leak_dominant", card: cardId, chars: bodyNoEvidence.length, zeroToolLeak });
       bodyNoEvidence = t("msg.fail.toolcallLeak");
       charts = []; evidence = ""; leakFailed = true;
     } else {

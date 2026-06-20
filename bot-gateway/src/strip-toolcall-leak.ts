@@ -46,11 +46,19 @@ const ORPHAN_INVOKE_OPEN = new RegExp(`${BOLD}<(?:antml:)?invoke\\b[^>\\n]{0,400
 const ATTEMPT_BLOCK = new RegExp(`${BOLD}<(attempt_[a-zA-Z0-9_]+)\\b[\\s\\S]{0,8000}?<\\/\\1>${BOLD}`, "gi");
 const ORPHAN_ATTEMPT_OPEN = new RegExp(`${BOLD}<\\/?attempt_[a-zA-Z0-9_]+\\b[^>\\n]{0,400}>${BOLD}`, "gi");
 
+// A leaked internal tool name paired with a "calling" cue, or a "Tool call:" label, or
+// the raw mcp__ name — the markup-LESS leak shape (model narrates the call in mixed
+// JA/EN + a ```json args block instead of emitting XML). A real answer never exposes an
+// internal tool name, so these are always a leak (live: card st-96f2a7f42c25, which the
+// XML-only matcher missed → rendered raw). Used by both hasToolCallMarkup + the count.
+const BARE_TOOLCALL_RE = /\bcodegraph_[a-z_]+\s*(?:\(|を|呼|call|调用|調用)|(?:call|调用|調用|呼[びぶ])\s*(?:mcp__)?codegraph_[a-z_]+|mcp__codegraph__[a-z_]+\b|^\s*\**tool[ _]call\b/im;
+
 /** True if `text` contains any (prefixed or bare) tool-call markup. */
 function hasToolCallMarkup(text: string): boolean {
   return /<(?:antml:)?invoke\b/i.test(text)
     || /(?:antml:)?function_calls/i.test(text)
-    || /<attempt_[a-zA-Z0-9_]+\b/i.test(text);
+    || /<attempt_[a-zA-Z0-9_]+\b/i.test(text)
+    || BARE_TOOLCALL_RE.test(text);
 }
 
 /** Remove leaked tool-call markup from `text`. Returns the cleaned text (trimmed). */
@@ -62,7 +70,14 @@ export function stripToolCallLeak(text: string): string {
     .replace(PARAM_BLOCK, "")         // stray <parameter> tags
     .replace(TOOLCALL_BLOCK, "")      // <function_calls> wrappers
     .replace(ATTEMPT_BLOCK, "")       // haiku <attempt_tool>…</attempt_tool> (bounded gap)
-    .replace(ORPHAN_ATTEMPT_OPEN, ""); // …then any unclosed/closing <attempt_tool …>
+    .replace(ORPHAN_ATTEMPT_OPEN, "") // …then any unclosed/closing <attempt_tool …>
+    // markup-LESS narration leak: a "**Tool call: codegraph_x**" label line (+ an
+    // optional following ```json args block), and a bare "codegraph_x を呼びます /
+    // 调用 codegraph_x" narration line. Line-anchored so prose merely mentioning a
+    // tool name isn't nuked.
+    .replace(/^[ \t]*\**tool[ _]call\b.*$/gim, "")
+    .replace(/^[ \t]*\**(?:mcp__)?codegraph_[a-z_]+\**\s*(?:を|呼|呼びます|call|调用|調用)[^\n]*$/gim, "")
+    .replace(/```json\s[\s\S]{0,800}?```/gi, ""); // a stray args json block left by the narration
   // Collapse the blank lines / dangling whitespace the removals leave behind.
   out = out.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
   return out;
@@ -80,7 +95,9 @@ export function isToolCallLeakDominant(text: string): boolean {
   if (!text) return false;
   const markers = (text.match(/<(?:antml:)?invoke\b/gi) || []).length
     + (text.match(/(?:antml:)?function_calls/gi) || []).length
-    + (text.match(/<attempt_[a-zA-Z0-9_]+\b/gi) || []).length;
+    + (text.match(/<attempt_[a-zA-Z0-9_]+\b/gi) || []).length
+    + (text.match(/\bcodegraph_[a-z_]+\s*(?:\(|を|呼|call|调用|調用)|(?:call|调用|調用|呼[びぶ])\s*(?:mcp__)?codegraph_[a-z_]+|mcp__codegraph__[a-z_]+\b/gi) || []).length
+    + (text.match(/^\s*\**tool[ _]call\b/gim) || []).length;
   if (markers < 2) return false;
   const stripped = stripToolCallLeak(text);
   return stripped.length < 80 || stripped.length < 0.35 * text.length;

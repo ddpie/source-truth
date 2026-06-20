@@ -508,9 +508,26 @@ async def run_agent(
 #     extra retry on a ≤1-turn tool-free answer; (c) the gateway strips such leaks
 #     downstream regardless. Missing a real bare-name leak (no retry, raw call text in
 #     the card) is the worse failure, so the broad match wins.
+#   - FOURTH observed shape (live, cold VM): the model narrates the call in mixed
+#     JA/EN + a "Tool call:" label + a ```json args block, e.g.
+#         codegraph_symbol_search を呼びます。
+#         **Tool call: codegraph_symbol_search**
+#         ```json … ```
+#     No XML, no "(" after the name — so the bare-name "(" arm missed it and it leaked
+#     raw onto the card (cross-review: card st-96f2a7f42c25). Add arms for: a literal
+#     "Tool call:" / "tool_use" label, and a codegraph_* tool name immediately followed
+#     by call-narration verbs (を呼/呼びます/call/调用/调用). The robust tell stands: an
+#     internal tool NAME paired with a "calling" cue in OUTPUT text is always a leak.
 _TOOLCALL_MARKUP_RE = re.compile(
-    r"<(?:antml:)?invoke\b|(?:antml:)?function_calls\b|<attempt_[a-zA-Z0-9_]+\b|\bcodegraph_[a-z_]+\s*\(",
-    re.IGNORECASE,
+    r"<(?:antml:)?invoke\b"
+    r"|(?:antml:)?function_calls\b"
+    r"|<attempt_[a-zA-Z0-9_]+\b"
+    r"|\bcodegraph_[a-z_]+\s*\("                       # bare CALL with args
+    r"|\bcodegraph_[a-z_]+\s*(?:を|呼|call|调用|調用)"   # name THEN "calling" cue (…を呼びます)
+    r"|(?:call|调用|調用|呼[びぶ])\s*(?:mcp__)?codegraph_[a-z_]+"  # cue THEN name (调用 codegraph_x)
+    r"|^\s*\**Tool[ _]call\b"                          # "Tool call:" / "**Tool call**" label line
+    r"|\bmcp__codegraph__[a-z_]+\b",                   # the raw internal mcp__ name never appears in a real answer
+    re.IGNORECASE | re.MULTILINE,
 )
 
 
