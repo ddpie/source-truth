@@ -79,11 +79,12 @@ describe("buildCreateCardBody", () => {
     ).toBe(true);
   });
 
-  it("renders the traceId in a copyable code block at the TOP when provided", () => {
+  it("renders the traceId as a quote line at the TOP when provided", () => {
     const card = JSON.parse(JSON.parse(buildCreateCardBody({ question: "Q", traceId: "a1b2c3d4" })).data);
     const first = card.body.elements[0] as { element_id?: string; content?: string };
-    expect(first.element_id).toBe("trace");                 // top of the card
-    expect(first.content).toContain("```\na1b2c3d4\n```");  // fenced code block → Feishu Copy control
+    expect(first.element_id).toBe("trace");        // top of the card
+    expect(first.content!.startsWith(">")).toBe(true);   // markdown blockquote
+    expect(first.content).toContain("a1b2c3d4");
   });
 
   it("omits the trace line when no traceId is given", () => {

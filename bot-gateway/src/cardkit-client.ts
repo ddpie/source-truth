@@ -40,18 +40,17 @@ export function buildQuestionElement(question: string): Record<string, unknown> 
   };
 }
 
-/** "TraceID:" label + the id in a FENCED CODE BLOCK, at the very top of the card. The
- *  id is the same one stamped on every log line for this request, so an operator can
- *  grep logs when a user reports a problem. Cards have NO native copy-button component
- *  (verified against the schema 2.0 docs), but the Feishu client renders a Copy control
- *  on a fenced code block (and it's selectable/long-press-copyable everywhere as a
- *  fallback) — so a code block is the closest thing to "one-tap copy" the platform
- *  offers. Kept on its own short element so it doesn't compete with the answer. */
+/** "TraceID: <id>" as a single quote line at the very top of the card. The id is the
+ *  same one stamped on every log line for this request, so an operator can grep logs
+ *  when a user reports a problem. Rendered as a markdown blockquote (`>`) per the
+ *  product preference — visually set apart from the answer without the heaviness of a
+ *  code block. (Feishu cards have no native copy-button component; the id is still
+ *  selectable to copy.) Kept on one short line so it doesn't compete with the answer. */
 export function buildTraceElement(traceId: string): Record<string, unknown> {
   return {
     tag: "markdown",
     element_id: "trace",
-    content: `${t("card.trace.prefix")}\n\`\`\`\n${traceId}\n\`\`\``,
+    content: `> ${t("card.trace.prefix")}${traceId}`,
   };
 }
 
