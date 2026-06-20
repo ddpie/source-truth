@@ -64,4 +64,18 @@ describe("isDuplicate", () => {
     expect(isDuplicate("evt_ttl")).toBe(false); // expired, treated as new
     jest.useRealTimers();
   });
+
+  it("honors a custom SHORT ttlMs (callback composite-key path): redelivery swallowed, later re-tap allowed", () => {
+    // The card-action callback uses a 90s TTL for the COMPOSITE fallback key (no real
+    // event_id), so a seconds-apart Feishu redelivery is still deduped, but a deliberate
+    // re-tap minutes later is NOT silently swallowed (cross-review P1).
+    jest.useFakeTimers();
+    const SHORT = 90_000;
+    expect(isDuplicate("cb:composite", SHORT)).toBe(false);  // first tap
+    jest.advanceTimersByTime(3_000);
+    expect(isDuplicate("cb:composite", SHORT)).toBe(true);   // redelivery seconds later → swallowed
+    jest.advanceTimersByTime(90_000);                        // 90s+ later (deliberate re-tap)
+    expect(isDuplicate("cb:composite", SHORT)).toBe(false);  // re-tap is allowed, not dropped
+    jest.useRealTimers();
+  });
 });

@@ -1256,10 +1256,21 @@ async function main(): Promise<void> {
         // shape); fall back to a composite (clicked button + source card + chat)
         // that a genuine re-delivery repeats identically while distinct clicks
         // differ. "cb:" prefix keeps this keyspace disjoint from the "msg:" one.
-        const cbId = d?.header?.event_id ?? d?.event_id ?? d?.token
+        const realIdemKey = d?.header?.event_id ?? d?.event_id ?? d?.token;
+        const cbId = realIdemKey
           ?? `${value?.action ?? ""}:${value?.eid ?? ""}:${value?.card_id ?? ""}:${messageId}:${chatId}`;
-        if (isDuplicate(`cb:${cbId}`)) {
-          log({ event: "callback_duplicate", action: value?.action ?? "" });
+        // TTL trade-off (cross-review P1): with a REAL idempotency key, a Feishu redelivery
+        // repeats it but two GENUINE taps differ — so the full 15-min window is safe (and
+        // needed to outlast a ~9-min invoke). With only the COMPOSITE fallback (no event_id
+        // in the payload), a redelivery AND a deliberate re-tap are wire-identical, so the
+        // key can't tell them apart. Feishu redelivers within SECONDS; a human re-tap of the
+        // same suggestion comes later. So scope the fallback to a SHORT window: still
+        // swallows the seconds-apart redelivery (the double-answer this guards), but a
+        // deliberate re-tap minutes later is no longer silently dropped (it used to do
+        // nothing with only an operator log). Real-key path keeps the full TTL.
+        const cbTtlMs = realIdemKey ? undefined : 90_000;
+        if (isDuplicate(`cb:${cbId}`, cbTtlMs)) {
+          log({ event: "callback_duplicate", action: value?.action ?? "", keyed: realIdemKey ? "idem" : "composite" });
           return {};
         }
         if (value?.action === "stop") {
