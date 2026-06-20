@@ -31,11 +31,15 @@ index-service/          常驻 CodeGraph 索引服务 + MCP-over-HTTP 接口
   tests/                pytest（由 scripts/test.sh 调用）
 infra/                  基础设施即代码（MVP 先 agentcore toolkit / boto3，渐进 CDK 化）
   README.md             IaC 分工：CDK 管稳定层 / deploy-all.sh 用 boto3 配 AgentCore Runtime
+  monitoring/           监控（CloudWatch 侧；scripts/boto3，非 CDK stack）
+    queries/metric-filters/a-class-metrics.json  A 类指标口径单一事实源（计数/分位/分布 → metric-filter）
+    queries/insights/*.logsinsights              B 类去重/留存的 Insights 查询（DAU 等，配定时预聚合 Lambda）
   (p2) lib/             runtime / codegraph(index-service) / gateway 各 stack
 config/                 配置驱动：i18n.json（卡片 / 告警 / 错误文案）、(p1) alarm-thresholds.json（阈值待落地）
 scripts/                运维生命周期
   check-invariants.sh   快速结构 lint（AGENTS / CLAUDE / structure / 双语配对 / 顶层目录存在性）
-  lib/                  common.sh（格式化 + 依赖检查）、env-utils.sh（.env / deploy-config 共享 helper）
+  lib/                  common.sh（格式化 + 依赖检查）、env-utils.sh（.env / deploy-config 共享 helper）、render_metric_filters.py（指标定义→put-metric-filter 计划，纯函数可测）
+  apply-metric-filters.sh  把 infra/monitoring 的 A 类指标定义应用到 CloudWatch（幂等 upsert；--dry-run 离线打印）
   test.sh               单一分层测试入口（离线默认 / --full）
   check-versions.sh     版本钉死防漂移守卫（base digest / requirements pin / Node / claude-code npm）
   install.sh            交互式一键安装（查依赖→飞书凭证→配置→确认→调 deploy-all；重跑预填）
