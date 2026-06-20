@@ -70,9 +70,11 @@ function log(obj: Record<string, unknown>): void {
 function newTraceId(): string {
   return randomUUID().replace(/-/g, "").slice(0, 8);
 }
-/** Build a logger that auto-stamps `trace` on every line for one request. */
+/** Build a logger that auto-stamps `trace` on every line for one request. The traceId
+ *  is spread LAST so it always wins — a logged object that happens to carry its own
+ *  `trace` key (e.g. a future timing field) can't silently shadow the request id. */
 function traceLogger(traceId: string): (obj: Record<string, unknown>) => void {
-  return (obj) => log({ trace: traceId, ...obj });
+  return (obj) => log({ ...obj, trace: traceId });
 }
 
 // Per-field caps for the finalized card body. A Feishu interactive card has a
@@ -924,9 +926,9 @@ async function runStreamingInvoke(
   // card always ends up finalized (header green, streaming off, stop button gone)
   // even if one mid-step write failed.
   await writer.write((seq) => updateContent(cardId, finalText, seq)
-    .catch((e) => { log({ event: "finalize_content_error", card: cardId, error: String(e) }); throw e; }));
+    .catch((e) => { log({ event: "finalize_content_error", card: cardId, error: redactSensitive(String(e)).slice(0, 300) }); throw e; }));
   await writer.write((seq) => closeStreaming(cardId, seq)
-    .catch((e) => { log({ event: "close_streaming_error", card: cardId, error: String(e) }); throw e; }));
+    .catch((e) => { log({ event: "close_streaming_error", card: cardId, error: redactSensitive(String(e)).slice(0, 300) }); throw e; }));
 
   // 4. Finalize: header → green "回答完成" (or 已停止 / 查询失败) + reasoning panel
   //    collapsed. The full-card PUT rebuilds the body (conclusion + panel), which
@@ -981,7 +983,7 @@ async function runStreamingInvoke(
     // failing append is logged and skipped; the others still render.
     safeCharts.forEach((c, i) => {
       void writer.write((seq) => appendOneChart(cardId, c, i, seq)
-        .catch((e) => log({ event: "chart_error", index: i, error: String(e) })));
+        .catch((e) => log({ event: "chart_error", index: i, error: redactSensitive(String(e)).slice(0, 300) })));
     });
   }
   // Outcome ACTION buttons (recovery affordances, shown above follow-up suggestions):
@@ -1119,7 +1121,7 @@ async function main(): Promise<void> {
       // (non-200 / stream error), so reaching here means something unexpected
       // broke (e.g. the initial card create/send). Fall back to plain text and
       // keep the message neutral — it is NOT necessarily a card-render issue.
-      log({ event: "card_fallback", error: String(cardErr) });
+      log({ event: "card_fallback", error: redactSensitive(String(cardErr)).slice(0, 300) });
       // If streamingCardInvoke threw BEFORE it removed the "processing" reaction
       // (e.g. the initial createCard / card-send failed at index.ts:97-109), that
       // emoji is still stuck on the user's message. Clear it here so a failed
@@ -1135,7 +1137,7 @@ async function main(): Promise<void> {
       // idempotent, so re-redacting the already-safe chain part of a follow-up
       // blob is harmless while it covers the raw new-question segment.
       await sendReply({ messageId: res.messageId, answer: `${t("msg.serviceError")}\n\n${redactSensitive(prompt)}` })
-        .catch((e) => log({ event: "fallback_error", error: String(e) }));
+        .catch((e) => log({ event: "fallback_error", error: redactSensitive(String(e)).slice(0, 300) }));
     }
     log({ event: "replied", message: hashUserId(res.messageId), session: sessionId });
   };
@@ -1173,7 +1175,7 @@ async function main(): Promise<void> {
             }
             return replyWithCard(res);
           })
-          .catch((err) => log({ event: "handle_error", error: String(err) }));
+          .catch((err) => log({ event: "handle_error", error: redactSensitive(String(err)).slice(0, 300) }));
       }
       return {};
     },
@@ -1282,7 +1284,7 @@ async function main(): Promise<void> {
           // The new follow-up card's PARENT is the card being followed up, so a
           // follow-up-of-this-follow-up keeps walking the chain.
           void streamingCardInvoke(sessionId, prompt, { chatId }, credentials, value.text, messageId, operatorOpenId, composeBtn)
-            .catch((e) => log({ event: "follow_up_error", error: String(e) }));
+            .catch((e) => log({ event: "follow_up_error", error: redactSensitive(String(e)).slice(0, 300) }));
           // Mark the clicked button: disable it + ✓ on the original card, so the
           // user sees which one they picked (best-effort, async).
           const cardId = entry?.cardId;
@@ -1291,7 +1293,7 @@ async function main(): Promise<void> {
             // same-second rapid clicks (see nextCallbackSeq).
             const seq = nextCallbackSeq();
             void disableFollowUpButton(cardId, value.eid, value.text, seq)
-              .catch((e) => log({ event: "disable_button_error", error: String(e) }));
+              .catch((e) => log({ event: "disable_button_error", error: redactSensitive(String(e)).slice(0, 300) }));
           }
           // No toast — the in-place button disable (✓ + greyed) is feedback enough.
         } else {
@@ -1309,7 +1311,7 @@ async function main(): Promise<void> {
         // a throw in the synchronous setup before ctrl.abort()/streamingCardInvoke
         // (malformed payload, helper throw) would otherwise leave a 停止 click with
         // no abort + no trace, or a follow-up with no card + no error. Log it.
-        log({ event: "callback_handler_error", error: String(e) });
+        log({ event: "callback_handler_error", error: redactSensitive(String(e)).slice(0, 300) });
       }
       return {};
     },
@@ -1330,7 +1332,9 @@ async function main(): Promise<void> {
     onReconnecting: () => log({ event: "sdk_wsclient_reconnecting" }),
     onReconnected: () => log({ event: "sdk_wsclient_reconnected" }),
     onError: (err: unknown) => {
-      const msg = String(err);
+      // Redact: a Feishu SDK auth error could carry an app_access_token / URL in its
+      // message; match the redaction the answer-path error logs already do.
+      const msg = redactSensitive(String(err)).slice(0, 300);
       // The transient/terminal/shutdown decision is a PURE, unit-tested helper
       // (classifyWsError) so this critical "does the gateway survive a blip / restart
       // on bad creds / stand down cleanly on redeploy" logic isn't untested inline.
@@ -1348,7 +1352,7 @@ async function main(): Promise<void> {
           // crash-loop, dark throughout. Back off + re-start in-process instead.
           const backoffMs = 3000 + Math.floor(Math.random() * 4000);
           log({ event: "ws_conn_limit_retry", error: msg, backoffMs });
-          setTimeout(() => { try { ws.start({ eventDispatcher: dispatcher }); } catch (e) { log({ event: "ws_retry_failed", error: String(e) }); } }, backoffMs);
+          setTimeout(() => { try { ws.start({ eventDispatcher: dispatcher }); } catch (e) { log({ event: "ws_retry_failed", error: redactSensitive(String(e)).slice(0, 300) }); } }, backoffMs);
           return;
         }
         case "exit":
@@ -1379,13 +1383,13 @@ if (require.main === module) {
   // bot going dark. (Individual invokes still finalize their own cards via their
   // own try/catch; this only catches what those miss.)
   process.on("unhandledRejection", (reason) => {
-    log({ event: "unhandled_rejection", error: String(reason) });
+    log({ event: "unhandled_rejection", error: redactSensitive(String(reason)).slice(0, 300) });
   });
   process.on("uncaughtException", (err) => {
-    log({ event: "uncaught_exception", error: String(err && err.stack ? err.stack : err) });
+    log({ event: "uncaught_exception", error: redactSensitive(String(err && err.stack ? err.stack : err)).slice(0, 500) });
   });
   main().catch((err) => {
-    log({ event: "fatal", error: String(err) });
+    log({ event: "fatal", error: redactSensitive(String(err)).slice(0, 500) });
     process.exit(1);
   });
 }
