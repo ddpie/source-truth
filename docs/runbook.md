@@ -158,6 +158,25 @@ aws ssm start-session --region <r> --target <INDEX_SERVICE_INSTANCE>
 **重启网关**（实例内）：`sudo systemctl restart bot-gateway`。改了飞书凭证后，重跑
 `install.sh`（或 deploy 的 gateway 阶段）会重写 `/etc/bot-gateway.env` 并重启服务。
 
+**监控：指标 / 看板 / 告警**（CloudWatch 侧，部署期身份需 `logs:PutMetricFilter` /
+`cloudwatch:PutDashboard,PutMetricAlarm` / `sns:CreateTopic`；不是运行时角色）。三步幂等、可重跑、
+换区域只改 `--region`。**顺序固定：先指标 filter，再看板/告警**（告警引用 metric，metric 由 filter 产出）：
+
+```bash
+# 1. A 类指标 filter（看板读的计数/分位/分布）
+./scripts/apply-metric-filters.sh --region <r>            # --dry-run 先看计划
+# 2. 看板（产品用量 + SRE 健康两页）
+./scripts/apply-dashboards.sh --region <r>
+# 3. 告警 + SNS（apply-alarms 会先自动应用告警专用 dense filter，再建 alarm——顺序内建，不会建在空指标上）
+./scripts/apply-alarms.sh --region <r>
+#    告警阈值在 config/alarm-thresholds.json（运维可调，改完重跑本步即可）。
+#    订阅是手动一步（邮件需点确认链接）：
+#    aws sns subscribe --region <r> --topic-arn <脚本打印的 ARN> --protocol email --notification-endpoint you@example.com
+```
+
+关键告警：`ToolcallLeakDetected`（竞泄复发）、`FinalizeFailed`（冻卡）、`LogPipelineStalled`（日志管道存活
+兜底——盯网关每 60s 的 `gateway_heartbeat` 心跳，心跳停=管道断/网关挂才报，空闲夜晚心跳照发不误报）。
+
 **拆除整套（停止计费）**：试用完、或某次部署中途失败留下计费资源（NAT ~$32/月、EIP、EC2）时，一条命令按反依赖顺序清干净：
 
 ```bash
