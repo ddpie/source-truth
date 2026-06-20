@@ -589,7 +589,12 @@ async function runStreamingInvoke(
       // The timeoutTimer (armed above) is what enforces the deadline — it sets
       // timedOut + aborts the socket. Here we just stop processing further chunks
       // once that's happened (the abort may have a few in-flight chunks behind it).
-      if (timedOut) return;
+      // ALSO bail on a USER 停止 (abort.signal.aborted): the SSE read loop checks the
+      // signal at the TOP of its loop, but a chunk already in flight when 停止 lands is
+      // still delivered and fires this callback — without this guard it would schedule a
+      // card write AFTER the user asked to stop (cross-review SSE F2). Both the deadline
+      // and the user-stop must short-circuit here; the abort path finalizes the card.
+      if (timedOut || abort.signal.aborted) return;
       // Stage 2 (思考→分析): on the first tool call, flip the stage word. The 停止
       // button is normally already seeded at card-send time (so it exists while
       // queued + during the whole thinking phase). Only append it HERE as a

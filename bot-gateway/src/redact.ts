@@ -90,7 +90,11 @@ const PATTERNS: Array<[RegExp, string | ((...args: string[]) => string)]> = [
   // (actual keys/tokens), preserving numeric config. (A secret that is coincidentally
   // all-digits is implausible; the conn-string / vendor-prefix patterns still
   // cover other shapes.)
-  [/([A-Za-z0-9_]{0,32}(?:secret|token|password|passwd|pwd|pass(?![a-z])|api[_-]?key|private[_-]?key|access[_-]?key)[A-Za-z0-9_]{0,32})(["']?\s*[:=]\s*["']?)(?![\d.,]+(?:["'\s,;)}\]]|$))([^\s"'`,;)}\]]{8,})/gi,
+  // `account[_-]?key` is included so an Azure Storage connection string's
+  // `AccountKey=…` is anchored (bare `key` alone is NOT a member — it would
+  // over-redact `foreign_key`, `sort_key`, `primary_key` game fields — but the
+  // distinctive `accountkey`/`account_key` shape is a real credential, near-zero FP).
+  [/([A-Za-z0-9_]{0,32}(?:secret|token|password|passwd|pwd|pass(?![a-z])|api[_-]?key|private[_-]?key|access[_-]?key|account[_-]?key)[A-Za-z0-9_]{0,32})(["']?\s*[:=]\s*["']?)(?![\d.,]+(?:["'\s,;)}\]]|$))([^\s"'`,;)}\]]{8,})/gi,
     (_m, k: string, sep: string) => `${k}${sep}${REDACTED}`],
   // Connection-string inline password: scheme://user:PASSWORD@host (jdbc:mysql://,
   // mongodb://, redis://, https:// with userinfo …). The password sits between
@@ -114,6 +118,24 @@ const PATTERNS: Array<[RegExp, string | ((...args: string[]) => string)]> = [
   // excludes '/' so a plain "http://host/path" with no '@' can't false-match.
   [/([a-zA-Z][a-zA-Z0-9+.-]{0,39}:\/\/[^\s:@/]*):([^\s@]+)@/g,
     (_m, pre: string) => `${pre}:${REDACTED}@`],
+  // INTERNAL INFRASTRUCTURE TOPOLOGY (cross-review): the agent legitimately reads infra
+  // config / IaC, so an internal AWS hostname or bucket URI can land in a citation. These
+  // are recon-useful internal-topology disclosure (same class as the /mnt/repo path scrub
+  // below) and have DISTINCTIVE shapes that don't collide with game data — so redact them.
+  // Deliberately NARROW (no bare RFC1918 IP rule: "10.0.13.42"-shaped strings also appear
+  // as version numbers / coordinates / ID tuples in game data → too high a false-positive
+  // rate; the in-VPC index URL is a tool target that never reaches answer content anyway).
+  // EC2 auto-assigned internal DNS: ip-10-0-13-42.<region>.compute.internal /
+  // ip-…​.ec2.internal. This embeds the actual PRIVATE IP (10-0-13-42), so it's genuine
+  // internal-topology disclosure — redact it. (We deliberately do NOT redact a plain
+  // short internal hostname like `db.internal:3306`: that's low-recon-value and useful
+  // in a citation — see the benign-host test. Only the IP-bearing EC2 DNS form is
+  // scrubbed.) ReDoS-safe: fixed `ip-`, bounded numeric groups, single required tail.
+  [/\bip-(?:\d{1,3}-){3}\d{1,3}(?:\.[a-z0-9-]{1,40}){0,3}\.(?:compute(?:-\d)?|ec2)\.internal\b/gi, REDACTED],
+  // S3 bucket URIs — internal bucket naming is reconnaissance-useful. Single bounded
+  // char-class for the bucket + an optional key path (negated class, required prefix) →
+  // no nested quantifier, no ReDoS.
+  [/\bs3:\/\/[a-z0-9][a-z0-9.-]{2,62}(?:\/[^\s"'`]*)?/gi, REDACTED],
 ];
 
 export function redactSensitive(text: string): string {
