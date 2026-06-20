@@ -114,6 +114,37 @@
           ["${NAMESPACE}", "ClarifyShown", {"label": "澄清触发数", "stat": "Sum", "color": "#bcbd22", "yAxis": "right"}]
         ]
       }
+    },
+    {
+      "type": "metric",
+      "x": 0, "y": 20, "width": 12, "height": 6,
+      "properties": {
+        "title": "冷启动：频率（次数）与占比",
+        "region": "${REGION}",
+        "view": "timeSeries",
+        "period": 3600,
+        "metrics": [
+          ["${NAMESPACE}", "RuntimeColdStarts", {"id": "cold", "label": "冷启动次数", "stat": "Sum", "color": "#17becf"}],
+          ["${NAMESPACE}", "QuestionsReceived", {"id": "q", "visible": false, "stat": "Sum"}],
+          [{"expression": "cold / q", "label": "冷启动占比", "id": "coldRate", "color": "#d62728", "yAxis": "right"}]
+        ],
+        "yAxis": {"right": {"min": 0, "max": 1, "label": "占比", "showUnits": false}}
+      }
+    },
+    {
+      "type": "metric",
+      "x": 12, "y": 20, "width": 12, "height": 6,
+      "properties": {
+        "title": "冷启动耗时分位（microVM spin-up 折进首字，p50/p95）— 与暖启动延迟分开",
+        "region": "${REGION}",
+        "view": "timeSeries",
+        "period": 3600,
+        "yAxis": {"left": {"label": "ms", "showUnits": false, "min": 0}},
+        "metrics": [
+          ["${NAMESPACE}", "RuntimeColdStartMs", {"label": "p50", "stat": "p50", "color": "#2ca02c"}],
+          ["...", {"label": "p95", "stat": "p95", "color": "#ff7f0e"}]
+        ]
+      }
     }
   ]
 }

@@ -73,6 +73,23 @@
       "purpose": "首字延迟 (体感关键) — p95"
     },
     {
+      "name": "RuntimeColdStarts",
+      "event": "runtime_cold_start",
+      "filterPattern": "{ $.metric IS TRUE && $.event = \"runtime_cold_start\" }",
+      "metricValue": "1",
+      "defaultValue": 0,
+      "unit": "Count",
+      "purpose": "冷启动频率：落在全新 session(无暖 microVM)的 invoke 数。冷启动占比 = RuntimeColdStarts / QuestionsReceived"
+    },
+    {
+      "name": "RuntimeColdStartMs",
+      "event": "runtime_cold_start",
+      "filterPattern": "{ $.metric IS TRUE && $.event = \"runtime_cold_start\" }",
+      "metricValue": "$.spinupMs",
+      "unit": "Milliseconds",
+      "purpose": "冷启动耗时 (microVM spin-up + 路由折进首字时间) — 看 p50/p95，与暖启动延迟分开"
+    },
+    {
       "name": "EvidenceCitations",
       "event": "answer_completed",
       "filterPattern": "{ $.metric IS TRUE && $.event = \"answer_completed\" }",
