@@ -47,6 +47,11 @@ aws iam put-role-policy --role-name "$INDEX_ROLE" --policy-name feishu-secret --
 # can't be name-scoped (it acts on the group being created), so it's "*"; the stream/put are
 # scoped to this project's log group prefix for least privilege. Idempotent (put-role-policy
 # upserts), so a re-run just reasserts it — no new instance needed to apply.
+# ⚠️ COUPLING: the bootstrap.sh CloudWatch-agent config (gate 2/3) MUST use a log_group_name
+# under the LEADING-SLASH prefix /source-truth/ (e.g. /source-truth/bot-gateway). A config
+# that drops the slash or uses another prefix silently AccessDenies every PutLogEvents. Both
+# ARN forms below are required: the bare :log-group:/source-truth/* for DescribeLogStreams,
+# and the :log-group:/source-truth/*:* (log-stream) variant for CreateLogStream/PutLogEvents.
 aws iam put-role-policy --role-name "$INDEX_ROLE" --policy-name cloudwatch-logs --policy-document "{
   \"Version\":\"2012-10-17\",\"Statement\":[
     {\"Effect\":\"Allow\",\"Action\":[\"logs:CreateLogGroup\"],\"Resource\":\"*\"},
