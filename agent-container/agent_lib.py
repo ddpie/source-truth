@@ -675,15 +675,25 @@ def _result_block_text(block: Any) -> str:
     return ""
 
 
+# The result-container keys each retrieval tool puts its hits under (verified live against
+# codegraph-server 0.18.5, see index-service/codegraph_session.py): an EMPTY one of these = a
+# confirmed no-match. symbol_search→results, get_callers→callers, analyze_impact→impacted,
+# search_files→matches. ALL FOUR must be checked, or empties from callers/impacted are missed.
+_RETRIEVAL_RESULT_KEYS: tuple[str, ...] = ("results", "callers", "impacted", "matches")
+
+
 def _is_empty_retrieval(name: str, block: Any) -> bool:
-    """True iff `name` is a RETRIEVAL tool AND its result indicates no match. The bridge's
-    no-match shapes (see index-service/http_bridge.py + file_search.py):
-      - symbol/callers/impact no-match → {"error": "...symbol not found", ...}
-      - search_files no-match         → {"matches": [], ...}
-      - graph tools empty             → {"results": []} / empty results
-    An is_error result is a per-tool FAILURE (counted separately as toolErrors), not an empty
-    hit, so it's excluded here. Substring/JSON checks are deliberately loose but anchored to
-    the bridge's actual strings — read_file/glob/table never emit these shapes."""
+    """True iff `name` is a RETRIEVAL tool AND its result is a confirmed no-match. No-match shapes:
+      - found-but-empty → {"results"|"callers"|"impacted"|"matches": []}
+      - symbol itself not resolvable → {"error": "...symbol not found", ...}
+    An is_error result is a per-tool FAILURE (counted as toolErrors), not an empty hit → excluded.
+
+    CRITICAL ordering: parse JSON and check the result CONTAINER first; a non-empty container is a
+    HIT, return False immediately. Only then consult the `error` field for the "symbol not found"
+    no-match. The "symbol not found" phrase must be matched ONLY inside the error field, never in
+    the raw payload — a search_files HIT embeds matched source-line text, which can legitimately
+    contain that phrase (e.g. a comment), and a raw-substring check would miscount the hit as empty
+    (cross-review HIGH). read_file/glob/table are excluded by the suffix gate above."""
     if not any(name.endswith(s) for s in _RETRIEVAL_TOOL_SUFFIXES):
         return False
     if getattr(block, "is_error", None):
@@ -691,22 +701,30 @@ def _is_empty_retrieval(name: str, block: Any) -> bool:
     text = _result_block_text(block)
     if not text:
         return False
-    # The bridge's "symbol not found" no-match (graph tools).
-    if "symbol not found" in text:
-        return True
-    # JSON payloads: empty matches / empty results. Parse when it looks like JSON; fall back to
-    # a tight substring check so a non-JSON shape still catches the obvious empties.
     stripped = text.strip()
     if stripped.startswith("{"):
         try:
             obj = json.loads(stripped)
-            if isinstance(obj, dict):
-                if isinstance(obj.get("matches"), list) and not obj["matches"]:
-                    return True
-                if isinstance(obj.get("results"), list) and not obj["results"]:
-                    return True
         except (ValueError, TypeError):
-            pass
+            obj = None
+        if isinstance(obj, dict):
+            # HIT wins: any non-empty result container → definitely not empty.
+            for k in _RETRIEVAL_RESULT_KEYS:
+                v = obj.get(k)
+                if isinstance(v, list) and v:
+                    return False
+            # Empty container → no-match.
+            for k in _RETRIEVAL_RESULT_KEYS:
+                if isinstance(obj.get(k), list):  # present but empty (the `and v` above ruled out non-empty)
+                    return True
+            # No result container: a no-match only if the ERROR field says "symbol not found"
+            # (scoped to error so a hit's matched-line text can't trigger it).
+            err = obj.get("error")
+            if isinstance(err, str) and "symbol not found" in err:
+                return True
+            return False
+    # Non-JSON payload: be conservative — only the explicit graph "symbol not found" envelope is
+    # JSON, so a non-JSON shape we don't recognize is NOT counted (avoids guessing).
     return False
 
 

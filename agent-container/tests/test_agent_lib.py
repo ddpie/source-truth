@@ -338,10 +338,18 @@ def test_is_empty_retrieval_detects_no_match_shapes():
     assert agent_lib._is_empty_retrieval(
         "mcp__codegraph__codegraph_search_files",
         _ToolResultBlock("t", content='{"matches": [], "truncated": false}'))
-    # graph tool empty → {"results": []}
+    # symbol_search empty → {"results": []}
+    assert agent_lib._is_empty_retrieval(
+        "mcp__codegraph__codegraph_symbol_search",
+        _ToolResultBlock("t", content='{"results": []}'))
+    # get_callers empty → {"callers": []}  (was missed before the fix)
     assert agent_lib._is_empty_retrieval(
         "mcp__codegraph__codegraph_get_callers",
-        _ToolResultBlock("t", content='{"results": []}'))
+        _ToolResultBlock("t", content='{"callers": []}'))
+    # analyze_impact empty → {"impacted": []}  (was missed before the fix)
+    assert agent_lib._is_empty_retrieval(
+        "mcp__codegraph__codegraph_analyze_impact",
+        _ToolResultBlock("t", content='{"impacted": []}'))
     # content as a list of text blocks (the other SDK serialization)
     assert agent_lib._is_empty_retrieval(
         "mcp__codegraph__codegraph_search_files",
@@ -353,6 +361,15 @@ def test_is_empty_retrieval_false_on_hits_and_nonretrieval():
     assert not agent_lib._is_empty_retrieval(
         "mcp__codegraph__codegraph_search_files",
         _ToolResultBlock("t", content='{"matches": [{"path": "a.cs", "line": 1, "text": "x"}]}'))
+    # HIT whose matched-line text CONTAINS "symbol not found" must NOT be miscounted as empty
+    # (cross-review HIGH: the substring check must be scoped to the error field, not the payload)
+    assert not agent_lib._is_empty_retrieval(
+        "mcp__codegraph__codegraph_search_files",
+        _ToolResultBlock("t", content='{"matches": [{"path": "E.cs", "line": 9, "text": "// handle symbol not found case"}], "truncated": false}'))
+    # non-empty callers / impacted → hit
+    assert not agent_lib._is_empty_retrieval(
+        "mcp__codegraph__codegraph_get_callers",
+        _ToolResultBlock("t", content='{"callers": [{"uri": "a", "line": 1}]}'))
     # read_file is NOT a retrieval tool — its content (even empty file) must never count
     assert not agent_lib._is_empty_retrieval(
         "mcp__codegraph__codegraph_read_file",
