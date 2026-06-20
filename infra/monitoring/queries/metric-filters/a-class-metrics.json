@@ -6,15 +6,25 @@
     "B-class (DAU/retention de-dup) is NOT here — see ../insights/ (it needs a scheduled pre-aggregation",
     "Lambda, never a real-time dashboard log-dedup widget).",
     "",
-    "Each entry is consumed by a future put-metric-filter script (monitoring阶段2/3): it creates one",
-    "metric-filter on the gateway log group (/source-truth/bot-gateway) emitting `metric` into",
-    "namespace `metricNamespace` with the listed dimensions. DENSITY: counters set defaultValue:0 so",
-    "the metric is dense (emits 0 when no match) and alarms judge stably (plan 阶段3); latency metrics",
-    "have no defaultValue (a percentile over absent data is meaningless).",
+    "Each entry is consumed by scripts/apply-metric-filters.sh: it creates one metric-filter on the",
+    "gateway log group (logGroup below) emitting `metric` into namespace `metricNamespace`.",
+    "DENSITY rules (and a hard CloudWatch constraint):",
+    "  - Plain counters (no dimensions) set defaultValue:0 so the metric is DENSE (emits 0 when no",
+    "    match) and alarms judge stably (plan 阶段3).",
+    "  - Latency/distribution metrics (metricValue is a $.field, not 1) have NO defaultValue (a",
+    "    percentile over absent data is meaningless).",
+    "  - DIMENSIONED metrics MUST NOT set defaultValue — CloudWatch rejects defaultValue together",
+    "    with dimensions, and a dimensioned metric is inherently SPARSE (a dimension value's stream",
+    "    only gets points when that value appears). These are for dashboard breakdown; for stable",
+    "    rate-alarming on a specific dimension value, 阶段3 adds a dedicated dense per-value filter.",
+    "apply-metric-filters.sh ENFORCES the constraint (fails loud if an entry has both).",
     "",
-    "filterPattern uses the CloudWatch metric-filter JSON syntax ($.field = \"x\") — NOT Logs-Insights",
-    "syntax (the two are not interchangeable; plan 原则3). The single source of metric INTENT is this",
-    "file; the Insights equivalents (for ad-hoc drill-down) live alongside in ../insights/."
+    "filterPattern uses the CloudWatch metric-filter JSON syntax — NOT Logs-Insights syntax (the two",
+    "are not interchangeable; plan 原则3). CRITICAL: string fields match with $.field = \"x\", but JSON",
+    "BOOLEANS match with $.field IS TRUE / IS FALSE — `$.metric = true` matches the STRING \"true\", not",
+    "the boolean, so it would silently match ZERO of the gateway's `\"metric\":true` lines (validated via",
+    "aws logs test-metric-filter). The single source of metric INTENT is this file; the Insights",
+    "equivalents (for ad-hoc drill-down) live alongside in ../insights/."
   ],
   "metricNamespace": "SourceTruth/Gateway",
   "logGroup": "/source-truth/bot-gateway",
@@ -22,7 +32,7 @@
     {
       "name": "QuestionsReceived",
       "event": "question_received",
-      "filterPattern": "{ $.metric = true && $.event = \"question_received\" }",
+      "filterPattern": "{ $.metric IS TRUE && $.event = \"question_received\" }",
       "metricValue": "1",
       "defaultValue": 0,
       "unit": "Count",
@@ -31,7 +41,7 @@
     {
       "name": "FollowupQuestions",
       "event": "question_received",
-      "filterPattern": "{ $.metric = true && $.event = \"question_received\" && $.isFollowup = true }",
+      "filterPattern": "{ $.metric IS TRUE && $.event = \"question_received\" && $.isFollowup IS TRUE }",
       "metricValue": "1",
       "defaultValue": 0,
       "unit": "Count",
@@ -40,7 +50,7 @@
     {
       "name": "AnswerCompleted",
       "event": "answer_completed",
-      "filterPattern": "{ $.metric = true && $.event = \"answer_completed\" }",
+      "filterPattern": "{ $.metric IS TRUE && $.event = \"answer_completed\" }",
       "metricValue": "1",
       "defaultValue": 0,
       "unit": "Count",
@@ -49,7 +59,7 @@
     {
       "name": "AnswerLatencyMs",
       "event": "answer_completed",
-      "filterPattern": "{ $.metric = true && $.event = \"answer_completed\" }",
+      "filterPattern": "{ $.metric IS TRUE && $.event = \"answer_completed\" }",
       "metricValue": "$.latencyMs",
       "unit": "Milliseconds",
       "purpose": "总延迟 — 看 p50/p95/p99 extended statistic, 不看平均 (plan 原则5)"
@@ -57,7 +67,7 @@
     {
       "name": "FirstTokenMs",
       "event": "answer_first_token",
-      "filterPattern": "{ $.metric = true && $.event = \"answer_first_token\" }",
+      "filterPattern": "{ $.metric IS TRUE && $.event = \"answer_first_token\" }",
       "metricValue": "$.ttfbMs",
       "unit": "Milliseconds",
       "purpose": "首字延迟 (体感关键) — p95"
@@ -65,7 +75,7 @@
     {
       "name": "EvidenceCitations",
       "event": "answer_completed",
-      "filterPattern": "{ $.metric = true && $.event = \"answer_completed\" }",
+      "filterPattern": "{ $.metric IS TRUE && $.event = \"answer_completed\" }",
       "metricValue": "$.evidenceCitationCount",
       "unit": "Count",
       "purpose": "证据覆盖率 — avg + (>0 占比 via a 2nd filter if needed)"
@@ -73,7 +83,7 @@
     {
       "name": "ToolCalls",
       "event": "answer_completed",
-      "filterPattern": "{ $.metric = true && $.event = \"answer_completed\" }",
+      "filterPattern": "{ $.metric IS TRUE && $.event = \"answer_completed\" }",
       "metricValue": "$.numToolCalls",
       "unit": "Count",
       "purpose": "每答工具调用数 (取证强度)"
@@ -81,17 +91,17 @@
     {
       "name": "AnswerFailed",
       "event": "answer_failed",
-      "filterPattern": "{ $.metric = true && $.event = \"answer_failed\" }",
+      "filterPattern": "{ $.metric IS TRUE && $.event = \"answer_failed\" }",
       "metricValue": "1",
-      "defaultValue": 0,
       "unit": "Count",
       "dimensions": { "reason": "$.reason" },
+      "_sparse": "NO defaultValue: CloudWatch forbids defaultValue together with dimensions (a dimensioned metric only emits on a match → inherently sparse). For STABLE rate-alarming on a specific failure mode, add a dedicated per-reason filter WITH defaultValue:0 in 阶段3 (same approach as card_health kinds). This dimensioned metric is for dashboard breakdown, not alarms.",
       "purpose": "失败分布 by reason — 仅真故障, NOT 含 aborted (中止单独画, 否则虚高失败率)"
     },
     {
       "name": "AnswerAborted",
       "event": "answer_aborted",
-      "filterPattern": "{ $.metric = true && $.event = \"answer_aborted\" }",
+      "filterPattern": "{ $.metric IS TRUE && $.event = \"answer_aborted\" }",
       "metricValue": "1",
       "defaultValue": 0,
       "unit": "Count",
@@ -100,7 +110,7 @@
     {
       "name": "ClarifyShown",
       "event": "clarify_shown",
-      "filterPattern": "{ $.metric = true && $.event = \"clarify_shown\" }",
+      "filterPattern": "{ $.metric IS TRUE && $.event = \"clarify_shown\" }",
       "metricValue": "1",
       "defaultValue": 0,
       "unit": "Count",
@@ -109,32 +119,32 @@
     {
       "name": "FeedbackVoted",
       "event": "feedback_voted",
-      "filterPattern": "{ $.metric = true && $.event = \"feedback_voted\" }",
+      "filterPattern": "{ $.metric IS TRUE && $.event = \"feedback_voted\" }",
       "metricValue": "1",
-      "defaultValue": 0,
       "unit": "Count",
       "dimensions": { "vote": "$.vote" },
+      "_sparse": "NO defaultValue with dimensions (CloudWatch constraint). Sparse breakdown for the dashboard; up/down ratios are computed from the two dimension streams.",
       "purpose": "点赞率 = vote=up / (up+down); 反馈覆盖率 = FeedbackVoted / AnswerCompleted"
     },
     {
       "name": "FeedbackReason",
       "event": "feedback_reason",
-      "filterPattern": "{ $.metric = true && $.event = \"feedback_reason\" }",
+      "filterPattern": "{ $.metric IS TRUE && $.event = \"feedback_reason\" }",
       "metricValue": "1",
-      "defaultValue": 0,
       "unit": "Count",
       "dimensions": { "reasonCode": "$.reasonCode" },
+      "_sparse": "NO defaultValue with dimensions (CloudWatch constraint). Sparse by design.",
       "purpose": "负反馈下钻 by reasonCode (inaccurate/no_evidence/hard_to_understand/…)"
     },
     {
       "name": "CardHealth",
       "event": "card_health",
-      "filterPattern": "{ $.metric = true && $.event = \"card_health\" }",
+      "filterPattern": "{ $.metric IS TRUE && $.event = \"card_health\" }",
       "metricValue": "1",
-      "defaultValue": 0,
       "unit": "Count",
       "dimensions": { "kind": "$.kind" },
-      "_alarm": "toolcall_leak_detected / finalize_failed 超阈值 → 告警 (plan 阶段3). kind 仅5个=低基数, 做 dimension 安全",
+      "_sparse": "NO defaultValue with dimensions (CloudWatch constraint) — this dimensioned metric is SPARSE (a kind's stream only gets points when that kind fires). kind is low-cardinality (5) so the dimension is safe, but for STABLE alarming on toolcall_leak_detected / finalize_failed, 阶段3 adds a dedicated per-kind filter WITH defaultValue:0 (dense) per the plan. This metric is for the dashboard breakdown.",
+      "_alarm": "toolcall_leak_detected / finalize_failed 超阈值 → 告警 (plan 阶段3, 专用稠密 filter).",
       "purpose": "卡片健康 by kind (泄漏剥离/冻卡/双答/幂等重发/心跳停滞)"
     }
   ]
