@@ -852,6 +852,11 @@ async function runStreamingInvoke(
   } else {
     const ex = extractCharts(answer);
     charts = ex.charts;
+    // Log any chart spec DROPPED as unrenderable (field refs not matching data keys,
+    // non-numeric yField, bad type/JSON) — these used to render as a SILENT blank chart
+    // (cross-review P1). The prose table the prompt mandates alongside is the fallback,
+    // so the user still gets the numbers; this just makes the drop observable.
+    if (ex.dropped.length > 0) tlog({ event: "chart_dropped", count: ex.dropped.length, reasons: ex.dropped });
     // Split evidence FIRST, then strip follow-ups from the body only — see the live
     // path above: the reverse order loses the evidence block when 你可能还想问 precedes
     // 供研发复核 (stripFollowUps' greedy tail-eat). Confine each extractor to its partition.

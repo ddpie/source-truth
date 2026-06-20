@@ -43,18 +43,71 @@ export const ALLOWED_CHART_TYPES = new Set(["bar", "line", "pie"]);
 // finalize hot path. Bound the raw block so an oversized spec is dropped cleanly.
 const MAX_CHART_SPEC_BYTES = 20_000;
 
-export function extractCharts(answer: string): { text: string; charts: ChartSpec[] } {
+/**
+ * Validate that a parsed chart spec will actually RENDER (not just parse). VChart
+ * silently draws empty axes — no error — when the field references don't bind to the
+ * data, so a structurally-valid-but-unbindable spec is the worst case: the user sees a
+ * blank chart with nothing logged (cross-review P1). Catch the two field-binding failures
+ * the prompt warns about but can't enforce:
+ *   - bar/line: `xField` AND `yField` must each name a key present in EVERY data record,
+ *     and the `yField` value must be NUMERIC in every record (a unit-suffixed string like
+ *     "100点" makes the linear axis plot nothing).
+ *   - pie: `valueField` (numeric) + `categoryField` (present) likewise.
+ * Returns a reason string when the spec is NOT renderable (for logging), else null.
+ * Lenient on shape it doesn't recognize (returns null = keep) so a future valid VChart
+ * variant isn't dropped — only the two known blank-chart shapes are rejected.
+ */
+export function chartRejectReason(spec: ChartSpec): string | null {
+  const values = (spec as { data?: { values?: unknown } }).data?.values;
+  if (!Array.isArray(values) || values.length === 0) return "empty data.values";
+  const records = values.filter((v): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v));
+  if (records.length === 0) return "no object records in data.values";
+  const type = String(spec.type).toLowerCase();
+  const hasKey = (k: unknown): k is string => typeof k === "string" && k.length > 0;
+  const everyHas = (key: string) => records.every((r) => key in r);
+  const everyNumeric = (key: string) => records.every((r) => typeof r[key] === "number" && Number.isFinite(r[key] as number));
+
+  if (type === "pie") {
+    const vf = (spec as { valueField?: unknown }).valueField;
+    const cf = (spec as { categoryField?: unknown }).categoryField;
+    if (!hasKey(vf) || !hasKey(cf)) return "pie missing valueField/categoryField";
+    if (!everyHas(vf)) return `valueField '${vf}' not in every record`;
+    if (!everyHas(cf)) return `categoryField '${cf}' not in every record`;
+    if (!everyNumeric(vf)) return `valueField '${vf}' is not numeric in every record`;
+    return null;
+  }
+  // bar / line (rectangular)
+  const xf = (spec as { xField?: unknown }).xField;
+  const yf = (spec as { yField?: unknown }).yField;
+  if (!hasKey(xf) || !hasKey(yf)) return "bar/line missing xField/yField";
+  if (!everyHas(xf)) return `xField '${xf}' not in every record`;
+  if (!everyHas(yf)) return `yField '${yf}' not in every record`;
+  if (!everyNumeric(yf)) return `yField '${yf}' is not numeric in every record`;
+  return null;
+}
+
+export interface DroppedChart { reason: string; type?: string }
+
+export function extractCharts(answer: string): { text: string; charts: ChartSpec[]; dropped: DroppedChart[] } {
   const charts: ChartSpec[] = [];
+  const dropped: DroppedChart[] = [];
   let text = answer.replace(CHART_BLOCK, (_full, body: string) => {
     const trimmed = body.trim();
-    if (trimmed.length > MAX_CHART_SPEC_BYTES) return ""; // oversized → drop, still strip from prose
+    if (trimmed.length > MAX_CHART_SPEC_BYTES) { dropped.push({ reason: "oversized" }); return ""; }
     try {
       const spec = JSON.parse(trimmed) as ChartSpec;
-      if (spec && typeof spec.type === "string"
-          && ALLOWED_CHART_TYPES.has(spec.type.toLowerCase())) {
-        charts.push(spec);
+      if (spec && typeof spec.type === "string" && ALLOWED_CHART_TYPES.has(spec.type.toLowerCase())) {
+        // Structural validation: VChart renders a parseable-but-unbindable spec as a
+        // BLANK chart with no error, so reject the known blank-chart shapes here (field
+        // refs not matching data keys, non-numeric yField) and let the prose-table
+        // fallback stand, rather than show the user an empty plot (cross-review P1).
+        const reason = chartRejectReason(spec);
+        if (reason) dropped.push({ reason, type: spec.type });
+        else charts.push(spec);
+      } else {
+        dropped.push({ reason: "bad type", type: typeof spec?.type === "string" ? spec.type : undefined });
       }
-    } catch { /* invalid JSON → drop the block, don't render a broken chart */ }
+    } catch { dropped.push({ reason: "invalid JSON" }); }
     return ""; // strip the block from the prose regardless
   });
   // Defense-in-depth: if a residual ```chart fence STILL slipped through (a shape
@@ -77,5 +130,5 @@ export function extractCharts(answer: string): { text: string; charts: ChartSpec
     text = text.replace(/^[ \t]*```chart(?![A-Za-z0-9])[\s\S]{0,8000}?^[ \t]*```[ \t]*$/gm, "");
   }
   // Collapse the blank lines left where blocks were removed.
-  return { text: text.replace(/\n{3,}/g, "\n\n").trim(), charts };
+  return { text: text.replace(/\n{3,}/g, "\n\n").trim(), charts, dropped };
 }
