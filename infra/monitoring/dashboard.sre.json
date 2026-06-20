@@ -147,6 +147,13 @@
           ["...", {"label": "p95", "stat": "p95", "color": "#ff7f0e"}]
         ]
       }
+    },
+    {
+      "type": "text",
+      "x": 0, "y": 26, "width": 24, "height": 5,
+      "properties": {
+        "markdown": "## 🔍 按 TraceID 查全链路日志\nTraceID 在飞书卡片顶部，网关与 agent 两侧日志统一用 `traceId`。\n\n[打开 Logs Insights](https://${REGION}.console.aws.amazon.com/cloudwatch/home?region=${REGION}#logsV2:logs-insights) → 勾选日志组 `/source-truth/bot-gateway` 与 `/aws/bedrock-agentcore/runtimes/...`，运行：\n\n```\nfields @timestamp, @logStream, event, @message | filter traceId = \"st-xxxx\" | sort @timestamp asc\n```"
+      }
     }
   ]
 }
