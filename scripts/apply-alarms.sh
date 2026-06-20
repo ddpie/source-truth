@@ -82,6 +82,20 @@ if [[ -z "$NAMESPACE" ]]; then
 fi
 [[ -n "$NAMESPACE" ]] || { say err "no namespace: pass --namespace or set metricNamespace in $DEFS"; exit 2; }
 
+# Ensure the alarm BACKING metric-filters exist FIRST (deploy-ordering safety, cross-review).
+# The LogPipelineStalled alarm uses treatMissingData=breaching on GatewayHeartbeat; if that
+# filter doesn't exist yet, the alarm would sit in ALARM from creation (a never-published
+# metric reads as missing → breaching) and false-page until the metric first appears. Applying
+# the dense alarm filters here (idempotent) guarantees the metrics are defined before the
+# alarms reference them — the operator can't get the order wrong. Skipped in --dry-run.
+if [[ "$DRY_RUN" -eq 0 ]]; then
+  say step "ensuring alarm backing metric-filters exist (deploy-order safety)"
+  if ! bash "$ROOT/scripts/apply-metric-filters.sh" --region "$REGION" --defs "$DEFS"; then
+    say err "could not apply alarm metric-filters ($DEFS) — alarms would watch non-existent metrics; aborting"
+    exit 1
+  fi
+fi
+
 # Ensure the SNS topic (create-topic is idempotent; returns the ARN either way). Skipped
 # in dry-run (no AWS), where we render WITHOUT a topic arn so the plan is still printable.
 TOPIC_ARN=""
