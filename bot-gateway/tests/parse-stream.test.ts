@@ -371,3 +371,38 @@ describe("sawResult — bare-key result:null must not satisfy the terminal guard
     expect(st.sawResult).toBe(true);
   });
 });
+
+describe("turn-count accounting (numTurns — telemetry, gateway-side from the SSE stream)", () => {
+  it("captures num_turns off the terminal ResultMessage", () => {
+    const st = newStreamState();
+    applyEvent(st, { content: [{ name: "codegraph_symbol_search", input: {} }] });
+    applyEvent(st, { content: [{ text: "答案" }] });
+    expect(st.numTurns).toBe(0); // not set until the terminal message
+    applyEvent(st, { subtype: "success", is_error: false, num_turns: 7, stop_reason: "end_turn", result: "答案" });
+    expect(st.numTurns).toBe(7);
+    expect(st.sawResult).toBe(true);
+  });
+
+  it("captures num_turns:0 (a leak/no-work turn) as 0, distinct from 'never seen'", () => {
+    const st = newStreamState();
+    applyEvent(st, { num_turns: 0, stop_reason: "end_turn" });
+    expect(st.numTurns).toBe(0);
+    expect(st.sawResult).toBe(true);
+  });
+
+  it("ignores num_turns on a NON-terminal event (has a content array → not a ResultMessage)", () => {
+    const st = newStreamState();
+    // A per-tool result item carries content[]; the run-summary predicate excludes it, so a
+    // stray num_turns-looking field on it must NOT be captured.
+    applyEvent(st, { content: [{ tool_use_id: "t1", content: "x", num_turns: 99 }] });
+    expect(st.numTurns).toBe(0);
+  });
+
+  it("does not let an intermediate stop_reason event overwrite a later terminal num_turns", () => {
+    const st = newStreamState();
+    applyEvent(st, { stop_reason: "tool_use" });  // terminal-predicate matches (stop_reason string) but no num_turns
+    expect(st.numTurns).toBe(0);
+    applyEvent(st, { num_turns: 5, result: "done" });
+    expect(st.numTurns).toBe(5);
+  });
+});
