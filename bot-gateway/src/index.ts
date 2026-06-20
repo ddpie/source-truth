@@ -122,10 +122,15 @@ const abortControllers = new Map<string, AbortController>();
 // finalize writes a brief bounded window to land, then exit. wsRef is set once the
 // WSClient exists; the stop is best-effort (not in the SDK's public types).
 let wsRef: { stop?: () => void } | undefined;
+// Liveness heartbeat timer (module scope so shutdown can clear it). Emits gateway_heartbeat
+// on a fixed interval regardless of traffic, so the log-pipeline-liveness alarm has a metric
+// that is NONZERO during idle — distinguishing "alive but idle" from "pipeline dead".
+let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
 let shuttingDown = false;
 function gracefulShutdown(sig: string): void {
   if (shuttingDown) return;
   shuttingDown = true;
+  if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = undefined; }
   log({ event: "shutdown_begin", signal: sig, inflight: abortControllers.size });
   try { wsRef?.stop?.(); } catch { /* no-op if absent — abort-all below is load-bearing */ }
   for (const ctrl of abortControllers.values()) {
@@ -1620,6 +1625,20 @@ async function main(): Promise<void> {
   // "start() invoked". The real "connected + receiving events" signal is the
   // sdk_wsclient_connected log from onReady above.
   log({ event: "sdk_wsclient_started" });
+
+  // LIVENESS HEARTBEAT: emit gateway_heartbeat every HEARTBEAT_SECS regardless of traffic.
+  // The log-pipeline-liveness alarm watches the metric this produces (GatewayHeartbeat, via a
+  // metric-filter) with treatMissingData=breaching — so "alive but idle" (heartbeat still
+  // arriving) is distinguishable from "pipeline dead / agent down" (heartbeat stops). A
+  // traffic-driven metric like question_received can't make that distinction: an idle night
+  // and a dead gateway both look like no data. unref() so the timer never keeps the process
+  // alive on its own (shutdown clears it explicitly anyway).
+  const HEARTBEAT_SECS = Number(process.env.HEARTBEAT_SECS || 60);
+  emitMetric("gateway_heartbeat", {});   // one immediately so the metric exists from t0
+  heartbeatTimer = setInterval(() => {
+    try { emitMetric("gateway_heartbeat", {}); } catch { /* best-effort, never crash the gateway */ }
+  }, Math.max(10, HEARTBEAT_SECS) * 1000);
+  heartbeatTimer.unref?.();
 
   // (SIGTERM/SIGINT handlers were registered at the top of main(); gracefulShutdown
   // is module-scoped and uses wsRef set below.)
