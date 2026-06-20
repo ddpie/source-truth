@@ -724,34 +724,71 @@ def build_bridge(
     return app
 
 
+def pair_workspaces(workspace: list[str], local_workspace: list[str]) -> list[tuple[str, str | None]]:
+    """Pair repeatable --workspace with --local-workspace BY POSITION → build_bridge input.
+
+    Pure (no I/O) so it's unit-testable. Each --workspace[i] pairs with --local-workspace[i];
+    a missing local (fewer --local-workspace than --workspace) → None for that repo. Rules:
+      - at least one --workspace (fail-loud — a bridge with no repo is a deploy error);
+      - --local-workspace count must not EXCEED --workspace count (a stray local with no
+        matching workspace is a config mistake, not silently dropped);
+      - duplicate workspace paths are rejected (two sessions on one graph.db → corruption).
+    """
+    if not workspace:
+        raise ValueError("at least one --workspace is required")
+    if len(local_workspace) > len(workspace):
+        raise ValueError(
+            f"--local-workspace given {len(local_workspace)}x but only {len(workspace)} "
+            f"--workspace; each local pairs with a workspace by position")
+    seen: set[str] = set()
+    pairs: list[tuple[str, str | None]] = []
+    for i, ws in enumerate(workspace):
+        key = ws.rstrip("/")
+        if key in seen:
+            raise ValueError(f"duplicate --workspace {ws!r} (two sessions on one graph.db → corruption)")
+        seen.add(key)
+        local = local_workspace[i] if i < len(local_workspace) else None
+        pairs.append((ws, local))
+    return pairs
+
+
 def main() -> int:
     p = argparse.ArgumentParser()
-    p.add_argument("--workspace", required=True, help="repo path codegraph-server indexes")
+    # Repeatable for multi-repo: one --workspace per repo this bridge serves, each paired
+    # BY POSITION with a --local-workspace. Single-repo passes one of each (unchanged).
+    p.add_argument("--workspace", action="append", default=[],
+                   help="repo path codegraph-server indexes (repeat for multi-repo)")
     p.add_argument("--host", default="0.0.0.0")
     p.add_argument("--port", type=int, default=8080)
     p.add_argument("--mount-root", default=path_align.DEFAULT_MOUNT_ROOT)
-    p.add_argument("--local-workspace", default=None,
-                   help="local-disk copy of the repo for fast file search (grep over EFS is ~225x slower)")
+    p.add_argument("--local-workspace", action="append", default=[],
+                   help="local-disk copy for fast file search; pairs with --workspace by position "
+                        "(grep over EFS is ~225x slower). Repeat for multi-repo.")
     args = p.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 
-    # SINGLE-WRITER HARD GUARD — take the workspace flock early so a conflict exits
-    # cleanly (return 1) before any worker work. build_bridge() re-calls this (it's
-    # idempotent — no-op when this process already holds it) so an app-factory launch
-    # that bypasses main() is still guarded. See acquire_singleton_writer_lock().
     try:
-        acquire_singleton_writer_lock(args.workspace)
+        pairs = pair_workspaces(args.workspace, args.local_workspace)
+    except ValueError as exc:
+        logger.error(json.dumps({"event": "bridge_bad_args", "detail": str(exc)}))
+        return 2
+
+    # SINGLE-WRITER HARD GUARD — take EACH workspace flock early so a conflict exits
+    # cleanly (return 1) before any worker work. build_bridge() re-calls these (idempotent
+    # per workspace) so an app-factory launch that bypasses main() is still guarded.
+    try:
+        for ws, _local in pairs:
+            acquire_singleton_writer_lock(ws)
     except SingleWriterConflict:
         return 1  # the helper already logged bridge_singleton_conflict
 
-    logger.info(json.dumps({"event": "bridge_start", "workspace": args.workspace,
-                            "host": args.host, "port": args.port,
-                            "local_workspace": args.local_workspace}))
-    # build_bridge already started the resident worker (warming in background).
+    logger.info(json.dumps({"event": "bridge_start",
+                            "workspaces": [ws for ws, _ in pairs],
+                            "host": args.host, "port": args.port}))
+    # build_bridge starts each repo's resident worker (warming in background).
     app = build_bridge(
-        workspace=args.workspace, host=args.host, port=args.port, mount_root=args.mount_root,
-        local_workspace=args.local_workspace,
+        workspaces=pairs, host=args.host, port=args.port, mount_root=args.mount_root,
     )
     app.run(transport="streamable-http")
     return 0
