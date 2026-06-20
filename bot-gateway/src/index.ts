@@ -762,6 +762,14 @@ async function runStreamingInvoke(
   // latency breakdown — sign / time-to-first-byte / time-to-first-token / stream
   // duration (the long pole = model + tool turns) / total / SSE event count.
   tlog({ perf: true, event: "invoke_timing", card: cardId, ...timing });
+  // Observability for the "follow-up answered without re-investigating" bug: a
+  // FOLLOW-UP that finalized cleanly (not aborted/timed-out) with ZERO tool calls is
+  // the suspicious shape — the model likely restated the replayed prior answer
+  // instead of re-querying (root cause fixed in the prompt + composeFollowUpPrompt;
+  // this log lets us confirm the fix held / catch regressions by grepping the trace).
+  if (isFollowUp && !rawAborted && !timedOut && (timing.toolCalls ?? 0) === 0) {
+    tlog({ event: "followup_no_evidence", card: cardId, chars: answer.length });
+  }
 
   // A backend failure must NEVER masquerade as a completed answer — that is the
   // "silent wrong answer when the index is unavailable" mode the code-as-only-
