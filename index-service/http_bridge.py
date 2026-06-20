@@ -18,6 +18,7 @@ Run as a resident service:
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import logging
 import os
@@ -29,6 +30,7 @@ from mcp.server.fastmcp import FastMCP
 
 import path_align
 from codegraph_session import CodegraphSession, IndexUnhealthy
+from repo_fanout import merge_fanout
 from repo_router import RepoRouter, RepoOutOfScope
 
 # NOTE: the bridge uses the RESIDENT CodegraphSession exclusively. The older
@@ -200,81 +202,152 @@ def _parse_symbol_location(raw: str, query: str) -> tuple[str, int]:
     return f"file://{index_file}", line
 
 
+class _Repo:
+    """One served repo: its codegraph session + the paths the tools resolve against.
+
+    name      — repo identity (workspace basename); the <repo>/ path prefix + scope key.
+    workspace — index-space path codegraph indexes (for path_align index_root).
+    local     — local-disk copy the file tools read (read_file/glob/search/table).
+    session   — the resident CodegraphSession for this repo's graph.
+    """
+
+    __slots__ = ("name", "workspace", "local", "session")
+
+    def __init__(self, name: str, workspace: str, local: str | None, session: Any):
+        self.name = name
+        self.workspace = workspace
+        self.local = local
+        self.session = session
+
+
 def build_bridge(
     *,
-    workspace: str,
+    workspace: str | None = None,
+    workspaces: list[tuple[str, str | None]] | None = None,
     host: str = "127.0.0.1",
     port: int = 8080,
     mount_root: str = path_align.DEFAULT_MOUNT_ROOT,
     local_workspace: str | None = None,
 ) -> FastMCP:
-    """Build (but don't run) the FastMCP HTTP bridge for a CodeGraph workspace.
+    """Build (but don't run) the FastMCP HTTP bridge for one or more CodeGraph repos.
 
-    ``workspace`` is the index-service-side repo path codegraph-server indexes
-    (a LOCAL-disk copy); its returned paths are rewritten from there into the
-    agent's namespace — REPO-RELATIVE by default (``mount_root=""``), or under a
-    legacy ``/mnt/repo`` if a non-empty ``mount_root`` is given. ``local_workspace``
-    is the LOCAL-disk repo copy the file tools (read_file/glob_files/search_files)
-    read; post-EFS-removal it's the SAME path as ``workspace``.
+    Single-repo (today): pass ``workspace=`` (+ optional ``local_workspace=``). Multi-repo
+    (阶段2): pass ``workspaces=[(workspace, local_workspace), ...]`` — one resident session per
+    repo, all served by this one bridge process. The two forms are mutually exclusive.
+
+    Each repo's ``workspace`` is the index-service-side path codegraph-server indexes (a
+    LOCAL-disk copy); returned paths are rewritten into the agent's namespace — REPO-RELATIVE
+    by default (``mount_root=""``), or under a legacy ``/mnt/repo`` if a non-empty
+    ``mount_root`` is given — and PREFIXED with ``<repo>/`` so the agent can tell repos apart.
+    ``local_workspace`` is the copy the file tools read; post-EFS-removal it's the SAME path
+    as ``workspace``.
+
+    A graph/file tool takes an optional ``repo`` arg routed SERVER-SIDE through a whitelist
+    (不变量1): out-of-scope → rejected (never routed); in-scope → that repo's session; unset
+    with multiple repos → FAN OUT across all (results merged); unset with one repo → that repo.
     """
-    # ONE resident codegraph-server process holds the graph in memory for its
-    # whole lifetime. Spawning per-query instead re-scans the repo every call
-    # (~20s cold on EFS for ~8.7k files) — unusable on a request path. The
-    # worker task serializes calls internally (codegraph isn't concurrent-safe
-    # on its graph); warm queries are single-digit ms so serialized is fine.
-    # max_files must match the build phase, or the resident session re-scans
-    # with a different limit and rebuilds instead of loading the warm graph.
+    if workspaces is None:
+        if workspace is None:
+            raise ValueError("build_bridge requires either workspace= or workspaces=")
+        workspaces = [(workspace, local_workspace)]
+    elif workspace is not None:
+        raise ValueError("pass either workspace= or workspaces=, not both")
+    if not workspaces:
+        raise ValueError("workspaces must be non-empty")
+
+    # ONE resident codegraph-server process per repo holds that repo's graph in memory for
+    # its whole lifetime. Spawning per-query instead re-scans the repo every call (~20s cold
+    # for ~8.7k files) — unusable on a request path. Each worker serializes calls on its own
+    # graph (codegraph isn't concurrent-safe); warm queries are single-digit ms.
+    # max_files must match the build phase, or a resident session re-scans with a different
+    # limit and rebuilds instead of loading the warm graph.
     max_files = int(os.environ.get("CODEGRAPH_MAX_FILES", "10000"))
-    # SINGLE-WRITER GUARD — acquired HERE (before the worker spawns codegraph-server),
-    # not just in main(), so an app-factory launch (gunicorn http_bridge:app --workers N)
-    # can't bypass it and spawn N writers. Idempotent if main() already took it.
-    acquire_singleton_writer_lock(workspace)
-    session = CodegraphSession(workspace, max_files=max_files)
 
-    # SERVER-SIDE SCOPE ENFORCEMENT (multi-repo 不变量1 / 阶段3 gate): the repo NAME this
-    # bridge serves is the workspace basename (e.g. /data/repo/code-5x → "code-5x"). Every
-    # tool takes an optional `repo` arg routed through this router BEFORE touching the
-    # session: an out-of-scope repo is rejected here, never routed (the cross-project leak
-    # this stops). Today N=1 (one workspace) so it resolves to the sole repo or rejects a
-    # wrong name; it generalizes unchanged to N workspaces once bootstrap builds them.
-    repo_name = posixpath.basename(workspace.rstrip("/"))
-    router = RepoRouter([repo_name])
+    repos: list[_Repo] = []
+    for ws, local in workspaces:
+        # SINGLE-WRITER GUARD per workspace — acquired HERE (before the worker spawns
+        # codegraph-server), not just in main(), so an app-factory launch (gunicorn
+        # http_bridge:app --workers N) can't bypass it and spawn duplicate writers. Each
+        # workspace takes its OWN flock (see acquire_singleton_writer_lock / _WRITER_LOCK_FDS).
+        acquire_singleton_writer_lock(ws)
+        repos.append(_Repo(
+            name=posixpath.basename(ws.rstrip("/")),
+            workspace=ws,
+            local=local,
+            session=CodegraphSession(ws, max_files=max_files),
+        ))
 
-    def _route(repo: str | None) -> str:
-        """Resolve the agent's `repo` arg to an in-scope repo (or raise RepoOutOfScope,
-        a ValueError the per-query handler turns into a clean 'no such repo')."""
-        resolved = router.resolve(repo)
-        # N=1: resolve() returns the sole repo for None; for N>1 a None means fan-out, not
-        # yet wired (single workspace today), so treat None as the sole/first repo.
-        return resolved if resolved is not None else router.repos[0]
+    by_name: dict[str, _Repo] = {r.name: r for r in repos}
+
+    # SERVER-SIDE SCOPE ENFORCEMENT (不变量1 / 阶段3 gate): the in-scope set is exactly the
+    # repos this bridge was built for. resolve() rejects any out-of-scope repo (never routes
+    # it — the cross-project leak this stops); returns the sole repo when unset+single; returns
+    # None when unset+multi (the caller fans out across all).
+    router = RepoRouter([r.name for r in repos])
+
+    # Back-compat single-repo handles: existing tests/inspection read app.codegraph_session
+    # and these locals. With one repo they ARE that repo; with many, the "primary" is repos[0].
+    primary = repos[0]
+    session = primary.session
+    repo_name = primary.name
 
     app = FastMCP(
         name="codegraph-bridge", host=host, port=port,
         stateless_http=True,
     )
 
-    async def _resolve_uri_line(query: str) -> tuple[str, int]:
-        """Resolve a symbol query to an index-space (uri, 0-based line).
+    async def _resolve_uri_line(repo: _Repo, query: str) -> tuple[str, int]:
+        """Resolve a symbol query to an index-space (uri, 0-based line) IN ONE REPO.
 
         get_callers/analyze_impact need a uri+line, but the agent only ever sees
         repo-relative paths and can't supply an index-space uri. So the bridge
-        resolves the query itself via symbol_search (the same resident session,
-        index space), taking the top-ranked hit. Raises IndexUnhealthy on an
-        unusable index; ValueError if the symbol can't be located.
+        resolves the query itself via THIS repo's symbol_search session, taking the
+        top-ranked hit. Raises IndexUnhealthy on an unusable index; ValueError if the
+        symbol can't be located.
         """
-        raw = await session.call_tool("codegraph_symbol_search", {"query": query})
+        raw = await repo.session.call_tool("codegraph_symbol_search", {"query": query})
         # Pure, null-safe parse (unit-tested in test_http_bridge_resolve.py): any
         # unusable shape (null/non-dict symbol, missing location) raises ValueError
         # → clean "symbol not found", never a generic "{tool} failed".
         return _parse_symbol_location(raw, query)
 
-    async def _build_args(tool_name: str, query: str) -> dict[str, Any]:
-        """Map the uniform `query` UX onto each tool's real argument shape."""
+    async def _build_args(repo: _Repo, tool_name: str, query: str) -> dict[str, Any]:
+        """Map the uniform `query` UX onto each tool's real argument shape (per repo)."""
         if tool_name == "codegraph_symbol_search":
             return {"query": query}
         # get_callers / analyze_impact require uri+line — resolve from the query.
-        uri, line = await _resolve_uri_line(query)
+        uri, line = await _resolve_uri_line(repo, query)
         return {"uri": uri, "line": line}
+
+    async def _run_on_repo(repo: _Repo, tool_name: str, query: str) -> str:
+        """Run one graph tool against ONE repo's session and return aligned JSON.
+
+        This is the PER-(repo,query) isolation boundary: every failure mode is caught
+        and turned into an error envelope JSON (never propagates), so in a fan-out one
+        repo's unhealthy/error can't blank the others — merge_fanout drops error
+        envelopes and only surfaces an error if EVERY repo errored.
+        """
+        try:
+            arguments = await _build_args(repo, tool_name, query)
+            raw = await repo.session.call_tool(tool_name, arguments)
+            # Align against THIS repo's workspace; prefix paths with <repo>/ (path honesty).
+            return _align_paths(raw, tool_name, index_root=repo.workspace, mount_root=mount_root, repo=repo.name)
+        except IndexUnhealthy as exc:
+            logger.error(json.dumps({"event": "refuse_unhealthy", "tool": tool_name,
+                                     "repo": repo.name, "detail": str(exc)}))
+            return json.dumps({"error": "index unavailable", "detail": str(exc)})
+        except ValueError as exc:
+            # Symbol not locatable for a caller/impact query — not an index fault, so
+            # report it as a normal "no match" without flipping health.
+            logger.info(json.dumps({"event": "tool_no_match", "tool": tool_name,
+                                     "repo": repo.name, "detail": str(exc)}))
+            return json.dumps({"error": f"{tool_name}: symbol not found", "detail": str(exc)})
+        except Exception as exc:  # noqa: BLE001 - isolate one (repo,query) failure
+            # Generic detail only — str(exc) on an internal/transport error can carry
+            # host paths/frames that must not reach the group-visible card.
+            logger.error(json.dumps({"event": "tool_error", "tool": tool_name,
+                                     "repo": repo.name, "error": str(exc)}))
+            return json.dumps({"error": f"{tool_name} failed", "detail": "internal error (see service logs)"})
 
     def _make_tool(tool_name: str):
         # Uniform `query` arg → FastMCP generates a clean JSON schema and the
@@ -283,39 +356,26 @@ def build_bridge(
         # symbol_search internally (see _build_args) — the agent can't supply an
         # index-space uri because it only ever sees repo-relative paths.
         async def _tool(query: str, repo: str | None = None) -> str:
-            # Wait for warmup (don't refuse mid-startup), then refuse only on a
-            # genuinely unhealthy (empty/corrupt) index. Returning an explicit
-            # error — not empty results — keeps the agent from answering "not
-            # found" off a broken graph (POC rule: code is the only truth).
+            # SERVER-SIDE SCOPE GATE FIRST (不变量1): resolve the agent's `repo` arg
+            # through the whitelist before ANY session work. out-of-scope → reject
+            # (never route); a specific in-scope repo → run there; unset + multiple
+            # repos → fan out across all and merge; unset + single → that sole repo.
             try:
-                # SERVER-SIDE SCOPE GATE FIRST: reject an out-of-scope `repo` before any
-                # session work (不变量1). Raises RepoOutOfScope (a ValueError) → the handler
-                # below turns it into a clean "no such repo" result, never a fallback.
-                resolved_repo = _route(repo)
-                arguments = await _build_args(tool_name, query)
-                raw = await session.call_tool(tool_name, arguments)
-                # Path alignment is INSIDE the try so an unexpected envelope shape
-                # can't escape this per-query isolation boundary into FastMCP — it
-                # falls to the generic handler below and returns an error JSON. The
-                # resolved repo prefixes returned paths as <repo>/… (path honesty §4.4).
-                return _align_paths(raw, tool_name, index_root=workspace, mount_root=mount_root, repo=resolved_repo)
+                resolved = router.resolve(repo)
             except RepoOutOfScope as exc:
                 logger.warning(json.dumps({"event": "repo_out_of_scope", "tool": tool_name, "detail": str(exc)}))
                 return json.dumps({"error": "repo not in scope", "detail": str(exc)})
-            except IndexUnhealthy as exc:
-                logger.error(json.dumps({"event": "refuse_unhealthy", "tool": tool_name,
-                                         "detail": str(exc)}))
-                return json.dumps({"error": "index unavailable", "detail": str(exc)})
-            except ValueError as exc:
-                # Symbol not locatable for a caller/impact query — not an index
-                # fault, so report it as a normal "no match" without flipping health.
-                logger.info(json.dumps({"event": "tool_no_match", "tool": tool_name, "detail": str(exc)}))
-                return json.dumps({"error": f"{tool_name}: symbol not found", "detail": str(exc)})
-            except Exception as exc:  # noqa: BLE001 - isolate one query's failure
-                # Generic detail only — str(exc) on an internal/transport error can
-                # carry host paths/frames that must not reach the group-visible card.
-                logger.error(json.dumps({"event": "tool_error", "tool": tool_name, "error": str(exc)}))
-                return json.dumps({"error": f"{tool_name} failed", "detail": "internal error (see service logs)"})
+
+            if resolved is not None:
+                # Single target repo (explicit in-scope, or the sole repo when unset).
+                return await _run_on_repo(by_name[resolved], tool_name, query)
+
+            # FAN OUT: unset repo + multiple in scope → query each concurrently, merge.
+            # Each _run_on_repo isolates its own failure into an error envelope, so a
+            # gather here can't raise; merge_fanout drops errored repos and only surfaces
+            # an error if every repo errored.
+            per_repo = await asyncio.gather(*[_run_on_repo(r, tool_name, query) for r in repos])
+            return merge_fanout(tool_name, list(per_repo))
 
         _tool.__name__ = tool_name
         return _tool
@@ -470,9 +530,20 @@ def build_bridge(
         # IDLE instance (no user traffic) recovers without waiting for a query —
         # otherwise a health-gated load balancer would see 503 forever. Single-
         # flight + best-effort (never raises); a no-op when the worker is healthy.
-        await session.maybe_self_heal()
-        ok = session.healthy
-        detail = session.health_detail
+        # MULTI-REPO: heal EVERY repo's session and treat the bridge as healthy only
+        # when ALL repos are healthy (one repo's empty/corrupt graph = degraded bridge;
+        # the agent could otherwise answer "not found" off a broken repo). The detail
+        # names the first unhealthy repo so ops can pinpoint which graph is down.
+        for r in repos:
+            await r.session.maybe_self_heal()
+        unhealthy = [r for r in repos if not r.session.healthy]
+        ok = not unhealthy
+        if unhealthy:
+            first = unhealthy[0]
+            detail = (f"{len(unhealthy)}/{len(repos)} repo(s) unhealthy; "
+                      f"first: {first.name}: {first.session.health_detail}")
+        else:
+            detail = session.health_detail
         # LOCAL repo read probe — A HEALTH GATE, not just telemetry. The agent reads
         # source over THIS bridge (read_file/glob_files/search_files) off the local
         # repo copy. codegraph answers from its IN-MEMORY graph (session.healthy
@@ -480,22 +551,26 @@ def build_bridge(
         # extract dir got wiped) — but then every agent file read fails and the user
         # gets a broken answer while /health lied 200. So a probe FAILURE flips
         # /health to unhealthy. A consecutive-fail counter avoids flapping on a
-        # single transient error. Probes local_workspace if given, else the indexed
-        # workspace (same local path post-EFS-removal).
-        probe_root = local_workspace or workspace
+        # single transient error. Probes EACH repo's local copy (file tools read off it);
+        # any one unreadable flips the bridge unhealthy. Falls back to the indexed
+        # workspace when a repo has no separate local copy (same path post-EFS-removal).
         disk_ms = -1.0
         probe_ok = True
         try:
             import os
             import time as _t
             t0 = _t.perf_counter()
-            entries = os.listdir(probe_root)  # 1 metadata read
-            if entries:
-                p = os.path.join(probe_root, entries[0])
-                os.stat(p)                    # stat read
+            total_entries = 0
+            for r in repos:
+                pr = r.local or r.workspace
+                entries = os.listdir(pr)  # 1 metadata read per repo
+                total_entries += len(entries)
+                if entries:
+                    os.stat(os.path.join(pr, entries[0]))  # stat read
             disk_ms = round((_t.perf_counter() - t0) * 1000, 1)
             logger.info(json.dumps({"event": "repo_probe", "perf": True,
-                                    "latency_ms": disk_ms, "entries": len(entries)}))
+                                    "latency_ms": disk_ms, "entries": total_entries,
+                                    "repos": len(repos)}))
         except Exception as exc:  # noqa: BLE001
             probe_ok = False
             logger.warning(json.dumps({"event": "repo_probe_failed", "error": str(exc)}))
@@ -521,16 +596,21 @@ def build_bridge(
             status_code=200 if ok else 503,
         )
 
-    # Start the resident codegraph worker now, so it's running on EVERY serving
+    # Start EACH repo's resident codegraph worker now, so it's running on EVERY serving
     # path (main() and tests alike) — not only when main() remembers to start it.
     # FastMCP's `lifespan=` is the MCP-session lifespan, NOT the ASGI startup
-    # hook, so starting there never fired under the real server. The worker owns
-    # its own thread + event loop, so start() is safe to call here (returns
-    # immediately, warms the graph in the background) and is idempotent.
-    session.start()
+    # hook, so starting there never fired under the real server. Each worker owns
+    # its own thread + event loop, so start() is safe here (returns immediately, warms
+    # the graph in the background) and is idempotent.
+    for r in repos:
+        r.session.start()
 
-    # Expose the session so callers can inspect health / stop it.
-    app.codegraph_session = session  # type: ignore[attr-defined]
+    # Expose the sessions so callers can inspect health / stop them. `codegraph_session`
+    # is the PRIMARY (back-compat: existing tests/inspection use it); `codegraph_sessions`
+    # is the full list for multi-repo callers.
+    app.codegraph_session = primary.session  # type: ignore[attr-defined]
+    app.codegraph_sessions = [r.session for r in repos]  # type: ignore[attr-defined]
+    app.codegraph_repos = repos  # type: ignore[attr-defined]
     return app
 
 
