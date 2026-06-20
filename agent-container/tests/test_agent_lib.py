@@ -446,6 +446,37 @@ def test_run_agent_retries_once_on_mcp_init_race():
         "failed-attempt narration must be discarded, not yielded"
 
 
+def test_run_agent_emits_error_when_BOTH_attempts_leak():
+    # Both attempts are cold-start leaks (MCP never registered: index-service down, or
+    # two cold VMs). The 2nd attempt must NOT be streamed raw (which would hand the
+    # gateway dirty <invoke> markup + a clean ResultMessage → rendered as a finish);
+    # instead the agent emits an error event so the gateway shows an honest failure
+    # card (cross-review). The dirty narration must NOT appear in the stream.
+    calls = {"n": 0}
+
+    async def fake_query(prompt, options):
+        calls["n"] += 1
+        # Same leak shape on BOTH attempts.
+        yield _MsgWith([_TextBlock("先搜一下\n<invoke name=\"codegraph_search_files\">")])
+        yield _ResultMsg(num_turns=1)
+
+    msgs = _collect(agent_lib.run_agent({"prompt": "x"}, query_fn=fake_query))
+    assert calls["n"] == 2, "must retry exactly once"
+    # An error event (top-level error string, no content array) must be emitted.
+    errs = [m for m in msgs if isinstance(m, dict) and m.get("error")]
+    assert len(errs) == 1, "a single error event must be emitted when both attempts leak"
+    assert errs[0].get("is_error") is True
+    # The leaked narration from neither attempt may be yielded.
+    texts = []
+    for m in msgs:
+        for b in getattr(m, "content", []) or []:
+            tx = getattr(b, "text", None)
+            if isinstance(tx, str):
+                texts.append(tx)
+    assert not any("先搜一下" in s or "<invoke" in s for s in texts), \
+        "neither leaked attempt may reach the stream"
+
+
 def test_run_agent_retries_once_on_thrown_cold_start_exception():
     # Attempt 1 RAISES before any output (the contradictory CLI error
     # "Claude Code returned an error result: success" on a cold microVM). This
