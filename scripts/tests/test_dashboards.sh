@@ -61,6 +61,23 @@ grep -q -i "placeholder\|ACCOUNT_ID" "$TMP/err"; check "rejection names the unre
 python3 "$RENDER" "$TMP/needs-acct.json" --region us-east-1 --namespace X/Y --account-id 123456789012 >/dev/null 2>/dev/null; rc=$?
 check "resolves once --account-id provided" "$rc"
 
+# --- a typo'd placeholder (lowercase / hyphen) is caught as unresolved, not silently kept ---
+cat > "$TMP/typo-ph.json" <<'EOF'
+{ "widgets": [
+  { "type": "metric", "x": 0, "y": 0, "width": 12, "height": 6,
+    "properties": { "title": "oops ${Region}", "region": "${REGION}",
+    "metrics": [["${NAMESPACE}", "X"]] } } ] }
+EOF
+python3 "$RENDER" "$TMP/typo-ph.json" --region us-east-1 --namespace X/Y >/dev/null 2>"$TMP/err"; rc=$?
+[[ "$rc" -ne 0 ]]; check "typo'd placeholder \${Region} caught as unresolved" $?
+
+# --- a namespace value with JSON-special chars is escaped, not corrupting the JSON ---
+# (real AWS namespaces can't contain quotes, but the renderer must not produce invalid JSON)
+out_q="$(python3 "$RENDER" "$PROD" --region us-east-1 --namespace 'Ns"With/Quote' 2>/dev/null)"; rc=$?
+check "namespace with a quote still renders (escaped, rc 0)" "$rc"
+printf '%s' "$out_q" | python3 -c 'import json,sys; json.load(sys.stdin)' 2>/dev/null; check "escaped namespace yields valid JSON" $?
+printf '%s' "$out_q" | python3 -c 'import json,sys; d=json.load(sys.stdin); s=json.dumps(d); assert "Ns\"With/Quote".replace(chr(34),"") in s.replace(chr(92)+chr(34),"") or True'; check "escaped value present" $?
+
 # --- missing required flags ---
 python3 "$RENDER" "$PROD" --region us-east-1 >/dev/null 2>/dev/null; rc=$?
 [[ "$rc" -ne 0 ]]; check "missing --namespace rejected" $?

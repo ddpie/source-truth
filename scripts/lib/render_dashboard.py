@@ -21,7 +21,12 @@ import json
 import re
 import sys
 
-PLACEHOLDER_RE = re.compile(r"\$\{[A-Z_]+\}")
+# Substitution targets these exact placeholder names; the LEFTOVER detector is
+# deliberately BROADER (`${...anything...}`) so a typo'd placeholder like ${Region}
+# or ${ACCOUNT-ID} is caught as unresolved rather than silently surviving into the
+# rendered body (CloudWatch would then show a literal "${Region}").
+SUBSTITUTABLE = ("REGION", "NAMESPACE", "ACCOUNT_ID")
+PLACEHOLDER_RE = re.compile(r"\$\{[^}]+\}")
 # Widget types we allow. "log" (Logs-Insights query widget) is deliberately BANNED.
 ALLOWED_WIDGET_TYPES = {"metric", "text", "alarm"}
 
@@ -50,12 +55,19 @@ def render(template: dict, subs: dict):
 
     # Substitute placeholders by serializing → string-replace → reparse. Substituting
     # on the JSON TEXT (not walking the tree) covers placeholders nested anywhere
-    # (titles, expressions, SEARCH() strings) uniformly.
+    # (titles, expressions, SEARCH() strings) uniformly. CRITICAL: JSON-escape each
+    # value before injecting it into the serialized text — a value containing a quote
+    # or backslash would otherwise corrupt the JSON (we substitute INTO a string
+    # context, so the value must be escaped exactly as JSON would escape it). We strip
+    # the surrounding quotes json.dumps adds, since the placeholder already sits inside
+    # the surrounding "...".
     text = json.dumps(body, ensure_ascii=False)
-    for key, val in subs.items():
+    for key in SUBSTITUTABLE:
+        val = subs.get(key)
         if val is None:
             continue
-        text = text.replace("${" + key + "}", str(val))
+        escaped = json.dumps(str(val), ensure_ascii=False)[1:-1]
+        text = text.replace("${" + key + "}", escaped)
 
     # No unresolved placeholder may survive (e.g. ${ACCOUNT_ID} used but not provided).
     leftover = PLACEHOLDER_RE.findall(text)
