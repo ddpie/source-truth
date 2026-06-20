@@ -5,7 +5,7 @@
  * AND to resume the same warm session.
  */
 
-import { rememberCard, rememberAnswer, lookupCard, forgetCard, collectChain, claimCardUiFlag } from "../src/card-registry";
+import { rememberCard, rememberAnswer, lookupCard, forgetCard, collectChain, claimCardUiFlag, isAskerAction } from "../src/card-registry";
 
 describe("card registry", () => {
   it("remembers and looks up a card_id by message_id", () => {
@@ -164,5 +164,32 @@ describe("collectChain (multi-turn follow-up history)", () => {
     const turns = collectChain("q1");
     expect(turns).toHaveLength(1);
     expect(turns[0].question!.length).toBeLessThanOrEqual(1500);
+  });
+});
+
+describe("isAskerAction — fail-closed asker gate (stop / feedback / feedback_reason)", () => {
+  it("allows ONLY when the known asker equals the operator", () => {
+    expect(isAskerAction("ou_asker", "ou_asker")).toBe(true);
+  });
+
+  it("denies a different operator (a non-asker group member)", () => {
+    // The whole point: a Feishu card has ONE shared UI, so an unscoped action lets any
+    // member spend the card's single vote / abort someone's stream. A non-asker is refused.
+    expect(isAskerAction("ou_asker", "ou_someone_else")).toBe(false);
+  });
+
+  it("FAILS CLOSED when the asker is unknown (empty/undefined) — never trust an unverifiable card", () => {
+    expect(isAskerAction(undefined, "ou_op")).toBe(false);
+    expect(isAskerAction("", "ou_op")).toBe(false);
+  });
+
+  it("FAILS CLOSED when the operator id is missing", () => {
+    expect(isAskerAction("ou_asker", undefined)).toBe(false);
+    expect(isAskerAction("ou_asker", "")).toBe(false);
+  });
+
+  it("does NOT treat two empty ids as a match (both-empty must not authorize)", () => {
+    expect(isAskerAction("", "")).toBe(false);
+    expect(isAskerAction(undefined, undefined)).toBe(false);
   });
 });
