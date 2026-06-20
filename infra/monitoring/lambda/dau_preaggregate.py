@@ -65,8 +65,12 @@ def _zone_offset_seconds(tz_name: str, when_utc: datetime) -> int:
             return int(off.total_seconds())
     except Exception:  # noqa: BLE001 - fall back to the static table
         pass
-    static = {"Asia/Tokyo": 9 * 3600, "UTC": 0, "Asia/Shanghai": 8 * 3600,
-              "America/Los_Angeles": -8 * 3600, "America/New_York": -5 * 3600}
+    # Fallback only for NON-DST zones (exact year-round). DST zones are deliberately NOT
+    # here: a fixed offset would be wrong half the year, and silently wrong is worse than
+    # the explicit 0 (UTC) you get for an unknown zone. The Lambda's default + ops zone is
+    # Asia/Tokyo (no DST), so this fallback is exact for the real deployment; zoneinfo
+    # handles everything else when tzdata is present (it is, on the python3.x Lambda runtime).
+    static = {"Asia/Tokyo": 9 * 3600, "Asia/Shanghai": 8 * 3600, "UTC": 0}
     return static.get(tz_name, 0)
 
 
@@ -88,7 +92,9 @@ def parse_dau(results: list[list[dict[str, str]]]) -> tuple[int, int]:
     results → (0, 0) (the explicit-zero contract). Pure."""
     if not results:
         return 0, 0
-    row = {cell["field"]: cell["value"] for cell in results[0]}
+    # Defensive: GetQueryResults reliably includes "field", but a malformed cell must not
+    # KeyError post-StartQuery (which would skip the put). .get() + drop fieldless cells.
+    row = {cell.get("field"): cell.get("value") for cell in results[0] if cell.get("field")}
     def _int(v: str | None) -> int:
         try:
             return int(float(v)) if v not in (None, "") else 0
