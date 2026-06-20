@@ -622,31 +622,38 @@ export async function disableButtonPlain(cardId: string, elementId: string, labe
   }));
 }
 
-// The 5 negative-feedback reason codes (mirror metrics.ts FeedbackReasonCode). A 👎
-// reveals these; clicking one emits feedback_reason{reasonCode} then disables them.
-export const FEEDBACK_REASON_CODES = ["inaccurate", "no_evidence", "off_topic", "outdated", "other"] as const;
+// The negative-feedback reason codes (mirror metrics.ts FeedbackReasonCode). A 👎 reveals
+// these; clicking one emits feedback_reason{reasonCode} then disables them. too_slow /
+// hard_to_understand / too_shallow added (user request): for the non-technical 策划/QA
+// audience "看不懂"(说人话没做到) / "太浅显"(漏档位/分支) / "时间太长"(延迟) are real,
+// high-value负反馈信号 distinct from the accuracy/evidence ones.
+export const FEEDBACK_REASON_CODES = [
+  "inaccurate", "no_evidence", "off_topic", "outdated",
+  "too_slow", "hard_to_understand", "too_shallow", "other",
+] as const;
 
-/** The 👍/👎 vote buttons as TWO TOP-LEVEL buttons (element_ids fb_up / fb_down), NOT
- *  inside a column_set — so each can be disabled in place by element_id via the PROVEN
- *  same-tag button-replacement path (disableFollowUpButton), instead of a cross-tag
- *  column_set→markdown PUT whose behavior is unverified and fails silently (cross-review
- *  #6). value.action="feedback" keeps them disjoint from follow_up/stop and from the marker
- *  emoji the body parser keys on. NOT asker-scoped: anyone in the group may rate. */
+/** The 👍/👎 vote buttons SIDE BY SIDE in one row (a column_set, two equal columns).
+ *  Each button keeps its own card-unique element_id (fb_up / fb_down) so it can still be
+ *  disabled in place by `PUT/PATCH .../elements/{element_id}` — CardKit addresses a
+ *  component by its (card-globally-unique) element_id regardless of nesting depth, so a
+ *  button inside a column_set IS individually updatable (confirmed against the Feishu
+ *  button + update-element docs). value.action="feedback" keeps them disjoint from
+ *  follow_up/stop and the marker emoji. NOT asker-scoped: anyone in the group may rate. */
 export function buildFeedbackButtons(): unknown[] {
-  return [
-    {
-      tag: "button", element_id: "fb_up",
-      text: { tag: "plain_text", content: t("card.feedback.up") },
+  const voteBtn = (vote: "up" | "down", eid: string, key: string) => ({
+    tag: "column", width: "weighted", weight: 1, elements: [{
+      tag: "button", element_id: eid,
+      text: { tag: "plain_text", content: t(key) },
       type: "default", size: "small", width: "fill",
-      value: { action: "feedback", vote: "up", eid: "fb_up" },
-    },
-    {
-      tag: "button", element_id: "fb_down",
-      text: { tag: "plain_text", content: t("card.feedback.down") },
-      type: "default", size: "small", width: "fill",
-      value: { action: "feedback", vote: "down", eid: "fb_down" },
-    },
-  ];
+      value: { action: "feedback", vote, eid },
+    }],
+  });
+  return [{
+    tag: "column_set",
+    flex_mode: "bisect",   // two equal columns share the row
+    horizontal_spacing: "8px",
+    columns: [voteBtn("up", "fb_up", "card.feedback.up"), voteBtn("down", "fb_down", "card.feedback.down")],
+  }];
 }
 
 /** After a 👎, append a prompt + enumerated reason buttons (TOP-LEVEL buttons so each is
