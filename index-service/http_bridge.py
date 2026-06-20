@@ -37,8 +37,16 @@ from repo_router import RepoRouter, RepoOutOfScope
 # codegraph process per query is the corruption-risk pattern the resident
 # session replaced, so it must never re-enter the production path.
 
-# Process-lifetime singleton lock fd; module-global so the GC can't collect it and
-# release the flock mid-run. See acquire_singleton_writer_lock().
+# Per-WORKSPACE writer-lock fds, module-global so the GC can't collect them and
+# release the flocks mid-run. Keyed by the normalized workspace path → held fd, so a
+# multi-repo bridge that serves N workspaces in one process takes N DISTINCT flocks
+# (one per graph.db), NOT one process-wide lock. See acquire_singleton_writer_lock().
+_WRITER_LOCK_FDS: dict[str, Any] = {}
+
+# Back-compat shim for older tests/inspection that referenced a single fd. It mirrors
+# the MOST-RECENTLY acquired lock fd (None when none held). The authoritative state is
+# _WRITER_LOCK_FDS; this is only a convenience view. (Setting it to None and calling
+# acquire still works — the per-workspace dict is what gates idempotency.)
 _SINGLETON_FD: Any = None
 
 
@@ -46,30 +54,41 @@ class SingleWriterConflict(RuntimeError):
     """Raised when another process already holds this workspace's writer flock."""
 
 
+def _lock_key(workspace: str) -> str:
+    """Normalize a workspace path to a stable lock-registry key (so '/d/r' and '/d/r/'
+    are the same lock). Mirrors the lock_path derivation."""
+    return workspace.rstrip("/")
+
+
 def acquire_singleton_writer_lock(workspace: str) -> None:
     """SINGLE-WRITER HARD GUARD (do NOT rely on a comment). The whole no-corruption
-    invariant rests on exactly ONE process owning the codegraph-server that writes
-    graph.db. Take a process-lifetime exclusive flock keyed to the workspace BEFORE
-    the worker starts; if another bridge already holds it, raise instead of becoming
-    a second writer.
+    invariant rests on exactly ONE process owning the codegraph-server that writes a
+    given graph.db. Take a process-lifetime exclusive flock keyed PER WORKSPACE BEFORE
+    that workspace's worker starts; if another process already holds it, raise instead
+    of becoming a second writer.
 
-    Called from build_bridge() (NOT just main()) so it also guards an app-factory
-    launch — `gunicorn http_bridge:app --workers N` imports `app` and bypasses main()
-    entirely, so a flock only in main() would let N forked workers each spawn a writer
-    → concurrent graph.db writers → silent 0-node corruption (cross-review H1, deepened).
-    Idempotent: if THIS process already holds the lock (main() took it, or a re-entrant
-    build), it's a no-op — re-flock'ing an fd we already own succeeds and we keep the
-    same fd. A DIFFERENT process gets BlockingIOError on the non-blocking acquire.
+    PER-WORKSPACE (multi-repo): a bridge process that serves N workspaces calls this
+    once per workspace and holds N independent flocks — locking workspace A must NOT
+    suppress locking workspace B (the bug a single process-wide fd would cause: repos
+    2..N silently unguarded → concurrent writers on their graph.db → 0-node corruption).
+
+    Called from build_bridge() (NOT just main()) so it also guards an app-factory launch
+    — `gunicorn http_bridge:app --workers N` imports `app` and bypasses main(), so a flock
+    only in main() would let N forked workers each spawn a writer (cross-review H1).
+    Idempotent PER WORKSPACE: if THIS process already holds this workspace's lock, it's a
+    no-op (same fd kept). A DIFFERENT process gets BlockingIOError on the non-blocking
+    acquire → SingleWriterConflict.
     """
     global _SINGLETON_FD
-    if _SINGLETON_FD is not None:
-        return  # this process already owns it (main() or a prior build_bridge call)
+    key = _lock_key(workspace)
+    if key in _WRITER_LOCK_FDS:
+        return  # this process already owns THIS workspace's lock
     import fcntl
     # Workspace-keyed lock file (stable across restarts; one per indexed repo). Lives
     # next to the repo copy so it shares the graph.db's local disk (a real fs, not a
-    # tmpfs a container restart wipes). The held fd is module-global so it is not GC'd
-    # (which would release the lock) for the process lifetime.
-    lock_path = workspace.rstrip("/") + ".bridge.lock"
+    # tmpfs a container restart wipes). The held fd is kept in the module-global dict so
+    # it is not GC'd (which would release the lock) for the process lifetime.
+    lock_path = key + ".bridge.lock"
     fd = open(lock_path, "w")  # noqa: SIM115 - held for process life
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -81,7 +100,8 @@ def acquire_singleton_writer_lock(workspace: str) -> None:
         raise SingleWriterConflict(lock_path) from exc
     fd.write(str(os.getpid()))
     fd.flush()
-    _SINGLETON_FD = fd
+    _WRITER_LOCK_FDS[key] = fd
+    _SINGLETON_FD = fd  # back-compat view: most-recent lock
 
 logger = logging.getLogger("codegraph-bridge")
 
