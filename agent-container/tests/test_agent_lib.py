@@ -421,10 +421,13 @@ def _collect(agen):
     return asyncio.run(_run())
 
 
-def test_run_agent_retries_once_on_mcp_init_race():
+def test_run_agent_retries_once_on_mcp_init_race(monkeypatch):
     # Attempt 1: leak shape — text with <invoke> markup, NO tool_use, num_turns=1.
     # Attempt 2 (retry): real tool_use + a healthy result. The retry must fire and
     # its messages must be yielded after the failed attempt's.
+    async def _no_sleep(_s):
+        return None
+    monkeypatch.setattr(agent_lib.asyncio, "sleep", _no_sleep)  # skip the cold-start backoff
     calls = {"n": 0}
 
     async def fake_query(prompt, options):
@@ -459,25 +462,32 @@ def test_run_agent_retries_once_on_mcp_init_race():
         "failed-attempt narration must be discarded, not yielded"
 
 
-def test_run_agent_emits_error_when_BOTH_attempts_leak():
-    # Both attempts are cold-start leaks (MCP never registered: index-service down, or
-    # two cold VMs). The 2nd attempt must NOT be streamed raw (which would hand the
-    # gateway dirty <invoke> markup + a clean ResultMessage → rendered as a finish);
-    # instead the agent emits an error event so the gateway shows an honest failure
-    # card (cross-review). The dirty narration must NOT appear in the stream.
+def test_run_agent_emits_error_when_ALL_attempts_leak(monkeypatch):
+    # EVERY attempt is a cold-start leak (MCP never registered: index-service down, or a
+    # string of cold VMs). No attempt may be streamed raw (that would hand the gateway
+    # dirty <invoke> markup + a clean ResultMessage → rendered as a finish); instead the
+    # agent exhausts its bounded retry budget and emits ONE error event so the gateway
+    # shows an honest failure card. With COLD_START_MAX_RETRIES re-runs the total attempt
+    # count is 1 + retries; the backoff sleep is monkeypatched to 0 to keep the test fast.
+    monkeypatch.setattr(agent_lib, "_env_cold_start_retries", lambda: 2)
+
+    async def _no_sleep(_s):
+        return None
+    monkeypatch.setattr(agent_lib.asyncio, "sleep", _no_sleep)
+
     calls = {"n": 0}
 
     async def fake_query(prompt, options):
         calls["n"] += 1
-        # Same leak shape on BOTH attempts.
+        # Same leak shape on EVERY attempt.
         yield _MsgWith([_TextBlock("先搜一下\n<invoke name=\"codegraph_search_files\">")])
         yield _ResultMsg(num_turns=1)
 
     msgs = _collect(agent_lib.run_agent({"prompt": "x"}, query_fn=fake_query))
-    assert calls["n"] == 2, "must retry exactly once"
-    # An error event (top-level error string, no content array) must be emitted.
+    assert calls["n"] == 3, "must run the initial attempt + 2 cold-start retries"
+    # An error event (top-level error string, no content array) must be emitted ONCE.
     errs = [m for m in msgs if isinstance(m, dict) and m.get("error")]
-    assert len(errs) == 1, "a single error event must be emitted when both attempts leak"
+    assert len(errs) == 1, "a single error event must be emitted when all attempts leak"
     assert errs[0].get("is_error") is True
     # The leaked narration from neither attempt may be yielded.
     texts = []
@@ -490,11 +500,14 @@ def test_run_agent_emits_error_when_BOTH_attempts_leak():
         "neither leaked attempt may reach the stream"
 
 
-def test_run_agent_retries_once_on_thrown_cold_start_exception():
+def test_run_agent_retries_once_on_thrown_cold_start_exception(monkeypatch):
     # Attempt 1 RAISES before any output (the contradictory CLI error
     # "Claude Code returned an error result: success" on a cold microVM). This
     # escapes _is_leak_shape (it's a raised exception, not a message), so the retry
     # must be driven by the n==0 thrown-exception path. Attempt 2 succeeds.
+    async def _no_sleep(_s):
+        return None
+    monkeypatch.setattr(agent_lib.asyncio, "sleep", _no_sleep)
     calls = {"n": 0}
 
     async def fake_query(prompt, options):
@@ -548,9 +561,12 @@ def test_run_agent_does_not_retry_on_healthy_run():
     assert calls["n"] == 1, "healthy run must not retry"
 
 
-def test_run_agent_retries_on_errored_empty_result():
+def test_run_agent_retries_on_errored_empty_result(monkeypatch):
     # The OTHER cold-start failure: is_error=True, out=0, num_turns=1, no tool_use,
     # no markup (the SDK/MCP errored before any answer). Must retry once.
+    async def _no_sleep(_s):
+        return None
+    monkeypatch.setattr(agent_lib.asyncio, "sleep", _no_sleep)
     calls = {"n": 0}
 
     async def fake_query(prompt, options):
@@ -579,3 +595,73 @@ def test_run_agent_does_not_retry_when_no_markup():
 
     _collect(agent_lib.run_agent({"prompt": "x"}, query_fn=fake_query))
     assert calls["n"] == 1, "a clean short answer must not retry"
+
+
+def test_run_agent_recovers_on_second_retry_after_two_cold_attempts(monkeypatch):
+    # ROOT-FIX regression: the live failure (card st-e70f824f…) was TWO back-to-back
+    # cold attempts both losing the MCP-init race. With a bounded backoff retry budget,
+    # a VM that's still cold on attempt 2 but warm by attempt 3 must now SUCCEED instead
+    # of surfacing 查询失败. Also asserts the backoff sleep is actually awaited between
+    # cold attempts (the wall-clock that lets the handshake finish).
+    monkeypatch.setattr(agent_lib, "_env_cold_start_retries", lambda: 2)
+    sleeps = []
+
+    async def _rec_sleep(s):
+        sleeps.append(s)
+    monkeypatch.setattr(agent_lib.asyncio, "sleep", _rec_sleep)
+
+    calls = {"n": 0}
+
+    async def fake_query(prompt, options):
+        calls["n"] += 1
+        if calls["n"] <= 2:  # first two attempts: cold-start leak
+            yield _MsgWith([_TextBlock("先搜一下\n<invoke name=\"codegraph_search_files\">")])
+            yield _ResultMsg(num_turns=1)
+        else:  # third attempt: warm, real answer
+            yield _MsgWith([_ToolUseBlock("t1", "codegraph_search_files")])
+            yield _MsgWith([_TextBlock("背包上限是力量 × 1.5。")])
+            yield _ResultMsg(num_turns=4)
+
+    msgs = _collect(agent_lib.run_agent({"prompt": "背包上限"}, query_fn=fake_query))
+    assert calls["n"] == 3, "must keep retrying through two cold attempts to the warm one"
+    # Backoff grew between attempts and was awaited twice (before retry 1 and retry 2).
+    assert sleeps == [agent_lib.COLD_START_BACKOFF_BASE_S,
+                      agent_lib.COLD_START_BACKOFF_BASE_S * 2], "backoff must grow per retry"
+    texts = [getattr(b, "text", "") for m in msgs for b in getattr(m, "content", []) or [] if hasattr(b, "text")]
+    assert any(s.startswith("背包上限是力量") for s in texts), "the warm attempt's answer must be yielded"
+    # No error event — it recovered.
+    assert not any(isinstance(m, dict) and m.get("error") for m in msgs)
+    # The discarded cold attempts' leaked narration must NOT leak into the stream.
+    assert not any("先搜一下" in s or "<invoke" in s for s in texts)
+
+
+def test_run_agent_stamps_traceid_on_logs(monkeypatch, caplog):
+    # traceId from the payload must appear on the agent's structured logs so they join
+    # the gateway's lines on one id. A cold-start run exercises the warn path too.
+    monkeypatch.setattr(agent_lib, "_env_cold_start_retries", lambda: 1)
+
+    async def _no_sleep(_s):
+        return None
+    monkeypatch.setattr(agent_lib.asyncio, "sleep", _no_sleep)
+
+    calls = {"n": 0}
+
+    async def fake_query(prompt, options):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            yield _MsgWith([_TextBlock("先搜\n<invoke name=\"codegraph_search_files\">")])
+            yield _ResultMsg(num_turns=1)
+        else:
+            yield _MsgWith([_ToolUseBlock("t1", "codegraph_search_files")])
+            yield _MsgWith([_TextBlock("答案。")])
+            yield _ResultMsg(num_turns=3)
+
+    import logging as _logging
+    with caplog.at_level(_logging.WARNING, logger="agent"):
+        _collect(agent_lib.run_agent(
+            {"prompt": "x", "traceId": "st-abc123"}, query_fn=fake_query))
+    # The retry warn line must carry the trace id.
+    retry_lines = [r.getMessage() for r in caplog.records if "mcp_init_race_retry" in r.getMessage()]
+    assert retry_lines, "a cold-start retry must have been logged"
+    assert any('"trace": "st-abc123"' in line for line in retry_lines), \
+        "the traceId must be stamped on the agent's retry log"

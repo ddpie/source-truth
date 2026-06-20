@@ -15,6 +15,7 @@ Design notes:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -163,6 +164,33 @@ def load_system_prompt(path: Path | str | None = None) -> str:
 # headroom while still hard-capping a runaway read→grep→read loop. Tune via
 # AGENT_MAX_TURNS.
 DEFAULT_MAX_TURNS = 60
+
+# COLD-START retry budget. The MCP-init race (model narrates tool calls as text
+# because the CodeGraph MCP HTTP handshake hasn't registered the tools yet) is a
+# WARMUP problem: the first failed attempt establishes the connection, so a retry
+# usually lands warm. But back-to-back retries with NO gap can BOTH lose the race on
+# a very cold VM (e.g. right after a redeploy spins fresh microVMs) — observed live
+# (card st-e70f824f…): two cold attempts → honest 查询失败, but the user shouldn't
+# have hit it at all. So we (a) allow up to COLD_START_MAX_RETRIES re-runs (was a
+# single retry), and (b) SLEEP a short, growing backoff BEFORE each retry so the MCP
+# handshake has wall-clock time to finish on the warming VM. Total added latency is
+# bounded (0.8s + 1.6s = 2.4s worst case) and only paid on a genuine cold start — a
+# warm run never retries. Operator-tunable via env.
+COLD_START_MAX_RETRIES = 2
+COLD_START_BACKOFF_BASE_S = 0.8
+
+
+def _env_cold_start_retries() -> int:
+    """Cold-start retry ceiling from ``COLD_START_MAX_RETRIES`` (operator-tunable).
+    Falls back to the default on unset/invalid; 0 disables retries (single attempt)."""
+    raw = os.environ.get("COLD_START_MAX_RETRIES")
+    if raw is None:
+        return COLD_START_MAX_RETRIES
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        return COLD_START_MAX_RETRIES
+    return n if n >= 0 else COLD_START_MAX_RETRIES
 
 
 def build_options_dict(
@@ -318,6 +346,20 @@ async def run_agent(
     prompt = payload.get("prompt")
     if not isinstance(prompt, str) or not prompt.strip():
         raise ValueError("payload.prompt is required and must be a non-empty string")
+    # traceId forwarded by the gateway (sigv4.buildInvokeRequest) — stamp it on EVERY
+    # log line this run emits so the agent's cold-start/retry/per-tool logs join the
+    # gateway's invoke_timing/card_closed on a single id. Best-effort: a missing/odd
+    # value degrades to "" (logs still emit, just unjoined) rather than failing the run.
+    trace_id = payload.get("traceId")
+    trace_id = trace_id if isinstance(trace_id, str) and trace_id else ""
+
+    def _plog(event: str, **ctx: Any) -> None:
+        """Structured warning line, trace-stamped. Mirrors _perf's swallow-all
+        contract — diagnostics must never break the streaming hot path."""
+        try:
+            logger.warning(json.dumps({"event": event, "trace": trace_id, **ctx}))
+        except Exception:  # noqa: BLE001 - diagnostics are best-effort
+            pass
 
     options = build_options(
         system_prompt=load_system_prompt(),
@@ -367,7 +409,7 @@ async def run_agent(
         async for message in qfn(prompt=p, options=options):
             if not first_emitted:
                 first_emitted = True
-                _perf("agent_first_message", (time.perf_counter() - t0) * 1000)
+                _perf("agent_first_message", (time.perf_counter() - t0) * 1000, trace=trace_id)
             _track_tool_latency(message, pending)
             _maybe_log_result(message)
             if _message_has_tool_use(message):
@@ -420,69 +462,77 @@ async def run_agent(
     saw_error_result = False
     last_num_turns: int | None = None
 
-    retry_due_to_raise = False
+    max_retries = _env_cold_start_retries()
     try:
-        try:
-            async for message in _drive(prompt, suppress_on_leak=True):
+        # Bounded cold-start retry loop. Attempt 0 is the real run; each subsequent
+        # attempt re-runs ONLY when the prior one is the cold-start failure shape (leak
+        # markup / errored-empty / thrown-before-output), and ONLY while nothing real has
+        # streamed yet (n stays 0 across cold attempts — a leak attempt's buffer is
+        # DISCARDED, never yielded). Before each retry we sleep a growing backoff so the
+        # MCP handshake finishes on the warming VM (the root fix for "two cold attempts
+        # back-to-back both lose the race"). The moment an attempt streams real content
+        # the loop is done; a warm first attempt never enters a retry.
+        attempt = 0
+        while True:
+            retry_due_to_raise = False
+            try:
+                async for message in _drive(prompt, suppress_on_leak=True):
+                    n += 1
+                    yield message
+            except Exception as exc:  # noqa: BLE001
+                # A THROWN SDK/CLI exception before any output — e.g. the contradictory
+                # "Claude Code returned an error result: success" a cold microVM raises
+                # when its first turn fails before producing an answer (live, esp. right
+                # after a redeploy spins fresh VMs). Same cold-start class as the leak/
+                # errored shapes, but it ESCAPES _is_leak_shape (raised, not a message).
+                # Retry ONLY if nothing streamed yet (n == 0) so we never duplicate
+                # already-streamed content; otherwise surface the error.
+                if n > 0:
+                    raise
+                retry_due_to_raise = True
+                _perf("agent_attempt_raised", (time.perf_counter() - t0) * 1000, attempt=attempt, trace=trace_id)
+                _plog("agent_attempt_raised", attempt=attempt,
+                      detail="cold-start exception before any output", error=str(exc)[:200])
+
+            # Decide whether THIS attempt was a cold-start failure that warrants a retry.
+            is_cold_failure = retry_due_to_raise or _is_leak_shape()
+            if not is_cold_failure:
+                break  # real content streamed (or a clean short answer) → done
+            if attempt >= max_retries:
+                # Out of retries and still cold → emit the explicit error event the
+                # gateway classifies as a failure (honest 查询失败 card + retry button),
+                # rather than leaving the card with no answer and no error signal.
+                _perf("mcp_init_race_exhausted", (time.perf_counter() - t0) * 1000,
+                      attempts=attempt + 1, num_turns=last_num_turns, trace=trace_id)
+                _plog("mcp_init_race_exhausted", attempts=attempt + 1, num_turns=last_num_turns,
+                      detail="cold-start MCP tools never registered after all retries; emitting error")
                 n += 1
-                yield message
-        except Exception as exc:  # noqa: BLE001
-            # A THROWN SDK/CLI exception on the cold first attempt — e.g. the
-            # contradictory "Claude Code returned an error result: success" the CLI
-            # raises when a cold microVM's first turn fails before producing an answer
-            # (observed live, esp. right after a redeploy spins fresh VMs). This is the
-            # SAME cold-start class as the leak/errored-result shapes, but it ESCAPES
-            # _is_leak_shape because it arrives as a raised exception, not a message.
-            # Retry once on the now-warm connection — but ONLY if we yielded nothing
-            # yet (n == 0), so we can never duplicate already-streamed answer content.
-            if n > 0:
-                raise  # already streamed real content → don't re-run, surface the error
-            retry_due_to_raise = True
-            _perf("agent_first_attempt_raised", (time.perf_counter() - t0) * 1000)
-            logger.warning(json.dumps({"event": "agent_first_attempt_raised",
-                                       "detail": "cold-start exception before any output; retrying once",
-                                       "error": str(exc)[:200]}))
-        if retry_due_to_raise or _is_leak_shape():
-            if not retry_due_to_raise:
-                _perf("mcp_init_race_retry", (time.perf_counter() - t0) * 1000, num_turns=last_num_turns)
-                logger.warning(json.dumps({"event": "mcp_init_race_retry",
-                                           "detail": "tools not registered on cold start; retrying once"}))
+                yield {"error": "retrieval unavailable after retries (MCP tools not registered)",
+                       "error_type": "mcp_init_race", "is_error": True}
+                break
+
+            # Back off BEFORE the next attempt so the MCP handshake has time to finish.
+            backoff_s = COLD_START_BACKOFF_BASE_S * (2 ** attempt)
+            _perf("mcp_init_race_retry", (time.perf_counter() - t0) * 1000,
+                  attempt=attempt, num_turns=last_num_turns, backoff_s=backoff_s, trace=trace_id)
+            _plog("mcp_init_race_retry", attempt=attempt, num_turns=last_num_turns,
+                  backoff_s=backoff_s, reason=("thrown" if retry_due_to_raise else "leak_shape"),
+                  detail="cold-start tools not registered; backing off then retrying")
+            await asyncio.sleep(backoff_s)
+            # Reset the per-attempt signals for the next run.
             saw_tool_use = False
             saw_markup_text = False
             saw_error_result = False
             last_num_turns = None
             # Re-arm first_emitted so agent_first_message measures the RETRY's (real)
-            # first token, not the discarded cold-start attempt's leaked first message.
-            # Otherwise the dim#5 time-to-first metric is corrupted on exactly the
-            # cold-start runs it exists to measure (anchored to thrown-away output).
+            # first token, not a discarded cold-start attempt's leaked first message —
+            # otherwise the time-to-first metric is corrupted on exactly the cold-start
+            # runs it exists to measure.
             first_emitted = False
-            pending.clear()  # drop attempt-1's unclosed tool timers so they can't mis-pair
-            # Retry with suppress_on_leak=True (NOT False): if the SECOND attempt is
-            # ALSO a cold-start leak (MCP still unregistered — e.g. index-service truly
-            # down, or two cold VMs back-to-back), streaming it raw would hand the
-            # gateway a dirty <invoke>-markup stream WITH a normal ResultMessage, so the
-            # gateway treats it as a clean finish and only its downstream strip saves it.
-            # Buffering lets us DROP a still-leak attempt-2 and emit an explicit error
-            # instead, so the gateway shows an honest 查询失败 card (cross-review). A
-            # normal warm retry still flushes live the moment a real tool_use / turn>1
-            # appears (same as attempt-1), so the typewriter is preserved.
-            n_before_retry = n
-            async for message in _drive(prompt, suppress_on_leak=True):
-                n += 1
-                yield message
-            if n == n_before_retry:
-                # Attempt-2 produced nothing usable (still leak / errored). Emit an
-                # error-shaped terminal event the gateway classifies as a failure
-                # (detectEventError: top-level error string, no content array) rather
-                # than leaving the card with no answer + no error signal.
-                _perf("mcp_init_race_retry_failed", (time.perf_counter() - t0) * 1000, num_turns=last_num_turns)
-                logger.warning(json.dumps({"event": "mcp_init_race_retry_failed",
-                                           "detail": "second attempt still a cold-start leak; emitting error"}))
-                n += 1
-                yield {"error": "retrieval unavailable after retry (MCP tools not registered)",
-                       "error_type": "mcp_init_race", "is_error": True}
+            pending.clear()  # drop the cold attempt's unclosed tool timers so they can't mis-pair
+            attempt += 1
     finally:
-        _perf("agent_run_total", (time.perf_counter() - t0) * 1000, messages=n)
+        _perf("agent_run_total", (time.perf_counter() - t0) * 1000, messages=n, trace=trace_id)
 
 
 # Matches the tool-call markup/leak the model emits as TEXT when MCP tools aren't

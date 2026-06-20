@@ -51,6 +51,27 @@ describe("buildInvokeRequest", () => {
     expect(JSON.parse(req.body)).toEqual({ prompt: "消除判定逻辑在哪" });
   });
 
+  it("forwards traceId in the body when provided (so the agent stamps its logs)", () => {
+    const req = buildInvokeRequest({
+      runtimeArn: RUNTIME_ARN,
+      region: "ap-northeast-1",
+      sessionId: SESSION_ID,
+      prompt: "x",
+      traceId: "st-deadbeef",
+    });
+    expect(JSON.parse(req.body)).toEqual({ prompt: "x", traceId: "st-deadbeef" });
+  });
+
+  it("omits traceId from the body when not provided (wire shape unchanged)", () => {
+    const req = buildInvokeRequest({
+      runtimeArn: RUNTIME_ARN,
+      region: "ap-northeast-1",
+      sessionId: SESSION_ID,
+      prompt: "x",
+    });
+    expect(Object.keys(JSON.parse(req.body))).toEqual(["prompt"]);
+  });
+
   it("rejects a runtimeSessionId shorter than the AgentCore minimum", () => {
     expect(MIN_SESSION_ID_LEN).toBeGreaterThanOrEqual(33);
     expect(() =>
