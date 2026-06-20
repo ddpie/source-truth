@@ -69,15 +69,25 @@ is_set() { [[ -n "${1:-}" && "${1:-}" != "None" ]]; }
 
 # --- discover (config first, then tag) ---
 RT_ID="${AGENT_RUNTIME_ID:-}"
-EC2_ID="${INDEX_SERVICE_INSTANCE:-}"; is_set "$EC2_ID" || EC2_ID="$(Q describe-instances --filters "Name=tag:Name,Values=source-truth-index-service" "Name=instance-state-name,Values=pending,running,stopping,stopped" --query 'Reservations[].Instances[0].InstanceId' --output text 2>/dev/null || echo "")"
-OLD_EC2_ID="${INDEX_OLD_INSTANCE:-}"
+# Discover ALL index-service instances by tag, then UNION with the two config-recorded
+# ids — there can be MORE than one alive (a blue-green overlap window, or a failed-refresh
+# leftover), and the old tag query used `Reservations[].Instances[0]` (first per
+# reservation) + only the 2 config vars, so it could miss a second tagged instance and
+# leave it billing after reporting "teardown complete" (cross-review P1). Collect every
+# `Instances[].InstanceId` across all reservations + the config ids, dedup, terminate all.
+TAGGED_INSTANCES="$(Q describe-instances --filters "Name=tag:Name,Values=source-truth-index-service" "Name=instance-state-name,Values=pending,running,stopping,stopped" --query 'Reservations[].Instances[].InstanceId' --output text 2>/dev/null || echo "")"
+# space-separated, deduped union of config ids + every tagged id
+ALL_INSTANCES="$(printf '%s\n' ${INDEX_SERVICE_INSTANCE:-} ${INDEX_OLD_INSTANCE:-} $TAGGED_INSTANCES | grep -vE '^(None)?$' | sort -u | tr '\n' ' ')"
+# EC2_ID kept as the "primary" id for the SG/ENI-drain lookups further down (which key
+# off a single instance's SG); the full set is terminated via ALL_INSTANCES above.
+EC2_ID="${INDEX_SERVICE_INSTANCE:-}"; is_set "$EC2_ID" || EC2_ID="$(printf '%s' "$ALL_INSTANCES" | awk '{print $1}')"
 VPC="${VPC_ID:-}"; is_set "$VPC" || VPC="$(by_tag vpcs source-truth-vpc Vpcs VpcId)"
 NAT="${NAT_GATEWAY:-}"; is_set "$NAT" || NAT="$(Q describe-nat-gateways --filter "Name=tag:Name,Values=source-truth-nat" "Name=state,Values=available,pending" --query 'NatGateways[0].NatGatewayId' --output text 2>/dev/null || echo "")"
 ZONE_ID="${INDEX_DNS_ZONE_ID:-}"
 
 say step "teardown plan — region $REGION, account ${ACCOUNT:-?}"
 say info "  AgentCore runtime : ${RT_ID:-<none>}"
-say info "  index-service EC2 : ${EC2_ID:-<none>}${OLD_EC2_ID:+ (+ old $OLD_EC2_ID)}"
+say info "  index-service EC2 : ${ALL_INSTANCES:-<none>}"
 say info "  NAT gateway       : ${NAT:-<none>} (+ its Elastic IP)"
 say info "  VPC + subnets/RT/IGW/SG : ${VPC:-<none>}"
 say info "  Route53 private zone    : ${ZONE_ID:-<discover by VPC>}"
@@ -130,8 +140,10 @@ PY
   # DependencyViolation → those strand). The wait is keyed on the index SG further down.
 fi
 
-# ---- 2. EC2 index-service instance(s) ----
-for inst in "$EC2_ID" "$OLD_EC2_ID"; do
+# ---- 2. EC2 index-service instance(s) — terminate EVERY discovered one ----
+# Iterate the full deduped union (tag-discovered + both config ids), not just the two
+# config vars, so a leaked blue-green/failed-refresh peer can't survive teardown.
+for inst in $ALL_INSTANCES; do
   if is_set "$inst"; then
     del "instance $inst" Q terminate-instances --instance-ids "$inst"
     Q wait instance-terminated --instance-ids "$inst" 2>/dev/null || true
@@ -139,7 +151,15 @@ for inst in "$EC2_ID" "$OLD_EC2_ID"; do
 done
 
 # ---- 3. Route53 private hosted zone (records first, then the zone) ----
+# Discover by config id → by VPC → by NAME. The name fallback matters because a 2-pass
+# teardown (common when pass 1 times out on ENI drain) may have ALREADY deleted the VPC,
+# after which list-hosted-zones-by-vpc returns nothing and the (paid $0.50/mo) zone would
+# leak with no way to find it (cross-review P2). list-hosted-zones is global, so match the
+# private zone by its DNS name as a last resort. (A name collision with an unrelated
+# `source-truth.internal` PRIVATE zone in the same account is implausible and still only
+# deletes a zone matching THIS project's name.)
 is_set "$ZONE_ID" || { is_set "$VPC" && ZONE_ID="$(aws route53 list-hosted-zones-by-vpc --vpc-id "$VPC" --vpc-region "$REGION" --query "HostedZoneSummaries[?Name=='source-truth.internal.'].HostedZoneId | [0]" --output text 2>/dev/null || echo "")"; }
+is_set "$ZONE_ID" || ZONE_ID="$(aws route53 list-hosted-zones --query "HostedZones[?Name=='source-truth.internal.' && Config.PrivateZone].Id | [0]" --output text 2>/dev/null | sed 's#/hostedzone/##' || echo "")"
 if is_set "$ZONE_ID"; then
   # Delete every non-SOA/NS record set, then the zone (Route53 refuses a non-empty zone).
   recs="$(aws route53 list-resource-record-sets --hosted-zone-id "$ZONE_ID" --query "ResourceRecordSets[?Type!='SOA' && Type!='NS']" --output json 2>/dev/null || echo "[]")"
