@@ -73,6 +73,7 @@ def read_file(
     mount_root: str,
     offset: int = 0,
     limit: int | None = None,
+    repo: str = "",
 ) -> dict[str, Any]:
     """Read a single file from the LOCAL repo copy.
 
@@ -80,11 +81,16 @@ def read_file(
     prefix); it is confined to ``local_root`` before opening. Returns
     {"path", "content", "lines", "truncated"} with ``path`` in the agent's namespace
     (repo-relative by default).
+    ``repo`` (multi-repo): the graph/search tools emit paths as ``<repo>/<rel>`` so the
+    agent can tell repos apart, and passes that path back here verbatim. With ``repo`` set,
+    ``to_local_path`` STRIPS the leading ``<repo>/`` before confining to ``local_root`` (the
+    repo's own copy), and the returned path is re-prefixed so it round-trips. ``repo=""``
+    (single repo / no prefix) is unchanged.
     ``offset`` (0-based line) + ``limit`` page large files. Raises ValueError on
     a bad/escaping path or a path that isn't a regular file (so the bridge can
     report a clean error rather than leak a stack trace)."""
     t0 = perf_counter()
-    local_path = path_align.to_local_path(requested, local_root=local_root, mount_root=mount_root)
+    local_path = path_align.to_local_path(requested, local_root=local_root, mount_root=mount_root, repo=repo)
     if not os.path.isfile(local_path):
         raise ValueError(f"not a readable file: {requested!r}")
 
@@ -140,7 +146,7 @@ def read_file(
     # prefix match and raise "escapes repo root" on every read. Mirror glob_files,
     # which roots on os.path.realpath(local_root).
     mount_path = path_align.to_container_path(
-        local_path, index_root=os.path.realpath(local_root), mount_root=mount_root)
+        local_path, index_root=os.path.realpath(local_root), mount_root=mount_root, repo=repo)
     elapsed_ms = (perf_counter() - t0) * 1000
     logger.info(perf_entry("file_read", elapsed_ms, path=mount_path[:120],
                            lines=len(sliced), truncated=byte_truncated or line_truncated,
@@ -165,6 +171,7 @@ def glob_files(
     *,
     local_root: str,
     mount_root: str,
+    repo: str = "",
 ) -> dict[str, Any]:
     """List files in the LOCAL repo copy matching a glob ``pattern``.
 
@@ -173,7 +180,10 @@ def glob_files(
     rebased. Returns {"paths": [...], "truncated": bool} with paths in the agent's
     namespace (repo-relative by default), sorted, deduped. Hidden/.git/node_modules
     entries are excluded to match file_search's view. Raises ValueError on an empty pattern
-    or one that escapes the repo root."""
+    or one that escapes the repo root.
+    ``repo`` (multi-repo): with ``repo`` set, a leading ``<repo>/`` on the pattern is stripped
+    before globbing this repo's copy, and returned paths are re-prefixed with ``<repo>/`` so
+    they round-trip with what the agent saw. ``repo=""`` is unchanged (single repo)."""
     if not pattern or not pattern.strip():
         raise ValueError("glob pattern must be non-empty")
     t0 = perf_counter()
@@ -185,6 +195,18 @@ def glob_files(
     # — an inconsistency the agent can't diagnose (cross-review). Backslashes → '/',
     # leading '//' collapsed.
     pattern = path_align._normalize_seps(pattern)
+
+    # MULTI-REPO: strip a leading "<repo>/" the agent carried over from a cited path (the
+    # graph/search tools prefix every path with the repo it came from). Only a relative
+    # pattern carries it; a legacy absolute mount pattern never does. repo="" → no-op.
+    if repo and not os.path.isabs(pattern):
+        _prefix = repo.rstrip("/") + "/"
+        if pattern == repo:
+            pattern = ""
+        elif pattern.startswith(_prefix):
+            pattern = pattern[len(_prefix):]
+        if not pattern or not pattern.strip():
+            raise ValueError("glob pattern is empty after stripping the repo prefix")
 
     # Rebase a (legacy) mount-prefixed pattern to repo-relative, then confine the
     # NON-glob prefix to the repo (a pattern like ../../etc/* must be rejected).
@@ -225,7 +247,7 @@ def glob_files(
         if not os.path.isfile(real_hit):
             continue
         try:
-            mount_path = path_align.to_container_path(real_hit, index_root=real_root, mount_root=mount_root)
+            mount_path = path_align.to_container_path(real_hit, index_root=real_root, mount_root=mount_root, repo=repo)
         except ValueError:
             continue
         paths.append(mount_path)
@@ -240,14 +262,14 @@ def glob_files(
 
 
 def read_to_json(requested: str, *, local_root: str, mount_root: str,
-                 offset: int = 0, limit: int | None = None) -> str:
+                 offset: int = 0, limit: int | None = None, repo: str = "") -> str:
     """read_file → JSON string (the MCP tool return shape)."""
     return json.dumps(
-        read_file(requested, local_root=local_root, mount_root=mount_root, offset=offset, limit=limit),
+        read_file(requested, local_root=local_root, mount_root=mount_root, offset=offset, limit=limit, repo=repo),
         ensure_ascii=False,
     )
 
 
-def glob_to_json(pattern: str, *, local_root: str, mount_root: str) -> str:
+def glob_to_json(pattern: str, *, local_root: str, mount_root: str, repo: str = "") -> str:
     """glob_files → JSON string (the MCP tool return shape)."""
-    return json.dumps(glob_files(pattern, local_root=local_root, mount_root=mount_root), ensure_ascii=False)
+    return json.dumps(glob_files(pattern, local_root=local_root, mount_root=mount_root, repo=repo), ensure_ascii=False)

@@ -253,3 +253,18 @@ def test_build_command_scopes_to_root_and_glob():
     assert "foo" in cmd
     # glob is threaded through (rg --glob or grep --include)
     assert any("*.cs" in part for part in cmd)
+
+
+# --- multi-repo repo= prefixing (graph/search paths are <repo>/-prefixed) ---
+def test_search_prefixes_match_paths_with_repo(repo: Path):
+    out = file_search.run_search("MaxEncumbrance", local_root=str(repo), mount_root="", repo="code-5x")
+    assert out["matches"], "expected a hit"
+    for m in out["matches"]:
+        assert m["path"].startswith("code-5x/"), m["path"]
+    # exact path round-trips with what read_file would resolve back
+    assert any(m["path"] == "code-5x/config/items.json" for m in out["matches"]), [m["path"] for m in out["matches"]]
+
+
+def test_search_repo_unset_unchanged(repo: Path):
+    out = file_search.run_search("MaxEncumbrance", local_root=str(repo), mount_root="", repo="")
+    assert any(m["path"] == "config/items.json" for m in out["matches"])
