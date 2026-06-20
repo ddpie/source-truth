@@ -39,6 +39,20 @@ for bad in '../etc' 'Code5x' 'a b' 'repo;rm' 'a_b' 'a/b' 'a.bak'; do
 done
 _run=$((_run+1)); printf '  ok   illegal subdir names rejected (../etc, Code5x, a b, repo;rm, a_b, a/b, a.bak)\n'
 
+# TRAILING-NEWLINE bypass (Python ^...$ matches before a trailing \n — cross-review CRITICAL):
+# "code-5x\n" must be REJECTED, not carry a newline into useradd/path/pgrep. Use a JSON file
+# with a real embedded \n (json string escape) so the parser sees the newline.
+printf '%s' '{"repos":[{"subdir":"code-5x\n","source":"s3://b/x"}]}' > "$TMP/m.json"
+python3 "$R" "$TMP/m.json" >/dev/null 2>/dev/null; [[ $? -ne 0 ]]; check "subdir with trailing newline rejected (\\A\\Z anchor, not ^\$)" $?
+printf '%s' '{"repos":[{"subdir":"code-5x\r","source":"s3://b/x"}]}' > "$TMP/m.json"
+python3 "$R" "$TMP/m.json" >/dev/null 2>/dev/null; [[ $? -ne 0 ]]; check "subdir with trailing CR rejected" $?
+# LEADING-DASH option-injection (a name like -rf becomes a CLI flag — cross-review MEDIUM):
+mk '{"repos":[{"subdir":"-rf","source":"s3://b/x"}]}'
+python3 "$R" "$TMP/m.json" >/dev/null 2>/dev/null; [[ $? -ne 0 ]]; check "leading-dash subdir rejected (option injection)" $?
+# a legitimate name with an INTERIOR dash is still fine
+mk '{"repos":[{"subdir":"backend-svc-2","source":"s3://b/x"}]}'
+python3 "$R" "$TMP/m.json" >/dev/null 2>/dev/null; check "interior-dash subdir still accepted" $?
+
 # --- CONTRACT: empty subdir / empty source (rm -rf root-wipe guard) ---
 mk '{"repos":[{"subdir":"","source":"s3://b/x"}]}'
 python3 "$R" "$TMP/m.json" >/dev/null 2>/dev/null; [[ $? -ne 0 ]]; check "empty subdir rejected" $?
