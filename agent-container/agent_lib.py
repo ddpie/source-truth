@@ -457,9 +457,30 @@ async def run_agent(
             # cold-start runs it exists to measure (anchored to thrown-away output).
             first_emitted = False
             pending.clear()  # drop attempt-1's unclosed tool timers so they can't mis-pair
-            async for message in _drive(prompt, suppress_on_leak=False):
+            # Retry with suppress_on_leak=True (NOT False): if the SECOND attempt is
+            # ALSO a cold-start leak (MCP still unregistered — e.g. index-service truly
+            # down, or two cold VMs back-to-back), streaming it raw would hand the
+            # gateway a dirty <invoke>-markup stream WITH a normal ResultMessage, so the
+            # gateway treats it as a clean finish and only its downstream strip saves it.
+            # Buffering lets us DROP a still-leak attempt-2 and emit an explicit error
+            # instead, so the gateway shows an honest 查询失败 card (cross-review). A
+            # normal warm retry still flushes live the moment a real tool_use / turn>1
+            # appears (same as attempt-1), so the typewriter is preserved.
+            n_before_retry = n
+            async for message in _drive(prompt, suppress_on_leak=True):
                 n += 1
                 yield message
+            if n == n_before_retry:
+                # Attempt-2 produced nothing usable (still leak / errored). Emit an
+                # error-shaped terminal event the gateway classifies as a failure
+                # (detectEventError: top-level error string, no content array) rather
+                # than leaving the card with no answer + no error signal.
+                _perf("mcp_init_race_retry_failed", (time.perf_counter() - t0) * 1000, num_turns=last_num_turns)
+                logger.warning(json.dumps({"event": "mcp_init_race_retry_failed",
+                                           "detail": "second attempt still a cold-start leak; emitting error"}))
+                n += 1
+                yield {"error": "retrieval unavailable after retry (MCP tools not registered)",
+                       "error_type": "mcp_init_race", "is_error": True}
     finally:
         _perf("agent_run_total", (time.perf_counter() - t0) * 1000, messages=n)
 
@@ -480,6 +501,13 @@ async def run_agent(
 #     as a CALL "codegraph_x(...)", whereas a legit dev-review citation writes it as
 #     `codegraph_x` / "用 codegraph_x 去读" (no paren). Anchoring on "(" avoids
 #     wrongly retrying a tool-free answer that merely NAMES a tool in prose.
+#     NOTE (cross-review weighed): a mid-prose `codegraph_x(...)` could in theory be a
+#     non-compliant answer that CITES a tool with parens (false positive). We KEEP
+#     matching it anyway: (a) the system prompt forbids exposing tool names in answers,
+#     so a compliant answer never contains it; (b) the false-positive only costs ONE
+#     extra retry on a ≤1-turn tool-free answer; (c) the gateway strips such leaks
+#     downstream regardless. Missing a real bare-name leak (no retry, raw call text in
+#     the card) is the worse failure, so the broad match wins.
 _TOOLCALL_MARKUP_RE = re.compile(
     r"<(?:antml:)?invoke\b|(?:antml:)?function_calls\b|<attempt_[a-zA-Z0-9_]+\b|\bcodegraph_[a-z_]+\s*\(",
     re.IGNORECASE,
