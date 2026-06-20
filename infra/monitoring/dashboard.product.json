@@ -1,0 +1,119 @@
+{
+  "_doc": [
+    "PRODUCT / USAGE dashboard (monitoring plan §2.A, 受众: 产品 / 非技术).",
+    "TEMPLATE — placeholders ${REGION} and ${NAMESPACE} are rendered by",
+    "scripts/render_dashboard.py before put-dashboard. Do NOT hand-edit the rendered output;",
+    "edit THIS template and re-render (源在 git, 看板是生成物 — plan 原则1).",
+    "",
+    "HARD CONSTRAINT (plan 阶段2): every widget is type:metric (reads CloudWatch metrics extracted",
+    "by the metric-filters). NO type:log Logs-Insights widgets — those re-scan raw logs on every",
+    "open, billed by bytes + consume the regional concurrency cap (plan 原则2 / 风险表).",
+    "",
+    "Dimensioned metrics (FeedbackVoted by vote, FeedbackReason by reasonCode) use SEARCH() so the",
+    "widget auto-discovers dimension values without hardcoding them. DAU is B-class: it reads a",
+    "PRE-AGGREGATED custom metric (${NAMESPACE} DAU) produced by the scheduled Lambda — until that",
+    "Lambda lands (monitoring 阶段1 remaining) the DAU widget shows no data, by design (never a",
+    "real-time log-dedup widget)."
+  ],
+  "widgets": [
+    {
+      "type": "text",
+      "x": 0, "y": 0, "width": 24, "height": 2,
+      "properties": {
+        "markdown": "# source-truth · 用量看板\n机器人用了多少、答得好不好。数据来自网关结构化日志经 CloudWatch 指标化（非实时扫日志）。延迟/健康看 **SRE 看板**。"
+      }
+    },
+    {
+      "type": "metric",
+      "x": 0, "y": 2, "width": 12, "height": 6,
+      "properties": {
+        "title": "提问量 / 追问量（每日）",
+        "region": "${REGION}",
+        "view": "timeSeries",
+        "stacked": false,
+        "period": 86400,
+        "stat": "Sum",
+        "metrics": [
+          ["${NAMESPACE}", "QuestionsReceived", {"label": "提问数", "color": "#1f77b4"}],
+          ["${NAMESPACE}", "FollowupQuestions", {"label": "其中追问数", "color": "#aec7e8"}]
+        ]
+      }
+    },
+    {
+      "type": "metric",
+      "x": 12, "y": 2, "width": 12, "height": 6,
+      "properties": {
+        "title": "追问占比（追问 / 总提问）",
+        "region": "${REGION}",
+        "view": "timeSeries",
+        "period": 86400,
+        "yAxis": {"left": {"min": 0, "max": 1, "label": "占比", "showUnits": false}},
+        "metrics": [
+          ["${NAMESPACE}", "FollowupQuestions", {"id": "fu", "visible": false, "stat": "Sum", "period": 86400}],
+          ["${NAMESPACE}", "QuestionsReceived", {"id": "q", "visible": false, "stat": "Sum", "period": 86400}],
+          [{"expression": "fu / q", "label": "追问占比", "id": "ratio"}]
+        ]
+      }
+    },
+    {
+      "type": "metric",
+      "x": 0, "y": 8, "width": 12, "height": 6,
+      "properties": {
+        "title": "点赞率（赞 / (赞+踩)）与反馈覆盖率（投票数 / 完成数）",
+        "region": "${REGION}",
+        "view": "timeSeries",
+        "period": 86400,
+        "yAxis": {"left": {"min": 0, "max": 1, "label": "占比", "showUnits": false}},
+        "metrics": [
+          [{"expression": "up / (up + down)", "label": "点赞率", "id": "likeRate", "color": "#2ca02c"}],
+          [{"expression": "(up + down) / completed", "label": "反馈覆盖率", "id": "coverage", "color": "#ff7f0e"}],
+          ["${NAMESPACE}", "FeedbackVoted", "vote", "up", {"id": "up", "visible": false, "stat": "Sum"}],
+          ["${NAMESPACE}", "FeedbackVoted", "vote", "down", {"id": "down", "visible": false, "stat": "Sum"}],
+          ["${NAMESPACE}", "AnswerCompleted", {"id": "completed", "visible": false, "stat": "Sum"}]
+        ]
+      }
+    },
+    {
+      "type": "metric",
+      "x": 12, "y": 8, "width": 12, "height": 6,
+      "properties": {
+        "title": "负反馈原因分布",
+        "region": "${REGION}",
+        "view": "pie",
+        "period": 2592000,
+        "stat": "Sum",
+        "metrics": [
+          [{"expression": "SEARCH('{${NAMESPACE},reasonCode} MetricName=\"FeedbackReason\"', 'Sum', 2592000)", "label": "", "id": "reasons"}]
+        ]
+      }
+    },
+    {
+      "type": "metric",
+      "x": 0, "y": 14, "width": 12, "height": 6,
+      "properties": {
+        "title": "证据覆盖（每答平均引用代码处数）",
+        "region": "${REGION}",
+        "view": "timeSeries",
+        "period": 86400,
+        "stat": "Average",
+        "metrics": [
+          ["${NAMESPACE}", "EvidenceCitations", {"label": "平均证据数/答", "color": "#9467bd"}]
+        ]
+      }
+    },
+    {
+      "type": "metric",
+      "x": 12, "y": 14, "width": 12, "height": 6,
+      "properties": {
+        "title": "日活用户（DAU · 预聚合指标，待定时 Lambda 上线后有数）",
+        "region": "${REGION}",
+        "view": "timeSeries",
+        "period": 86400,
+        "stat": "Maximum",
+        "metrics": [
+          ["${NAMESPACE}", "DAU", {"label": "日活用户数", "color": "#17becf"}]
+        ]
+      }
+    }
+  ]
+}
