@@ -55,6 +55,35 @@ export interface CardEntry {
    *  doesn't let every group member trigger an invoke (cost), and a bot replying
    *  to our card never matches an asker. Other members must still @-mention. */
   askerOpenId?: string;
+  /** Whether the 👍/👎 vote row has already been replaced with its disabled state.
+   *  CARD-lifetime flag (the vote row is a card-global element): the first vote
+   *  paints the row and disables it for everyone; later votes still count (per-user
+   *  metric) but must NOT repaint. Tracked here, not in the dedup store, because the
+   *  vote row's "already painted" is a card-existence fact — it must outlive the
+   *  dedup TTL (15min), or a vote on a still-live but stale card would repaint and
+   *  the reason-grid re-append would 300315-conflict on the existing fbr_* ids. */
+  voteRowPainted?: boolean;
+  /** Whether the 👎 reason grid has been appended to this card (independent of
+   *  voteRowPainted, so a 👍-then-👎 still gets its reason grid exactly once — a
+   *  bare 👍 paints the row but does NOT append reasons). Append-once guard: a 2nd
+   *  append would 300315-conflict on the existing fbr_* element ids. */
+  reasonGridAppended?: boolean;
+  /** Whether the reason grid has been replaced with its disabled/chosen state.
+   *  CARD-lifetime, card-global element — first reason pick paints it for everyone. */
+  reasonRowPainted?: boolean;
+}
+
+/** Set a card-lifetime UI flag on the entry for `messageId`, returning true iff the
+ *  flag FLIPPED from unset→set on THIS call (i.e. the caller is the first to claim it).
+ *  Card-scoped, mark-and-check, tied to entry lifetime (NOT the dedup TTL) so a vote /
+ *  reason pick on a still-live card can never re-trigger a one-shot UI write. Returns
+ *  false if the card is unknown (evicted/restart) — caller treats that as "don't write". */
+export function claimCardUiFlag(messageId: string, flag: "voteRowPainted" | "reasonGridAppended" | "reasonRowPainted"): boolean {
+  const e = registry.get(messageId);
+  if (!e) return false;
+  if (e[flag]) return false;
+  e[flag] = true;
+  return true;
 }
 
 /** One prior turn in a replayed conversation chain (oldest→newest order). */

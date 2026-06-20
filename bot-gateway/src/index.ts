@@ -27,7 +27,7 @@ import { invokeRuntimeStreaming, classifyInvokeOutcome, isTurnCapError, type Aws
 import { decideFinalize, hardFailureMessage, shapeBody } from "./finalize-decision";
 import { createCard, updateContent, closeStreaming, finalizeCard, appendFooter, appendClarify, buildSendCardContent, disableFollowUpButton, appendReasoningPanel, updateReasoningPanel, appendEvidencePanel, updateEvidencePanel, appendOneChart, MAX_CHARTS, appendStopButton, appendStatusLine, updateStatusLine, formatElapsed, appendFeedbackButtons, appendFeedbackReasons, disableFeedbackRow, disableFeedbackReasonRow, type ActionButton } from "./cardkit-client";
 import { extractCharts } from "./extract-charts";
-import { rememberCard, rememberAnswer, lookupCard, collectChain } from "./card-registry";
+import { rememberCard, rememberAnswer, lookupCard, collectChain, claimCardUiFlag } from "./card-registry";
 import { composeFollowUpPrompt } from "./followup-context";
 import { removeReaction } from "./reaction";
 import { redactSensitive, redactSteps, redactDeep } from "./redact";
@@ -1474,38 +1474,49 @@ async function main(): Promise<void> {
           // path fixes), and their two row-disables would race for an arbitrary ✓. The first
           // interaction paints the row with that voter's choice and disables it for EVERYONE
           // (the row is card-global, so no one can click after), which is the correct behavior.
-          const uiKey = `voteui:${fbCardId}`;
-          const firstCardUi = !!fbCardId && !isDuplicate(uiKey);
+          //
+          // The two flags (row-painted, reason-grid-appended) are tracked on the CARD REGISTRY
+          // ENTRY, not the dedup store — they're card-existence facts that must outlive the
+          // 15min dedup TTL (a vote on a still-live but stale card must not re-paint / re-append
+          // and 300315-conflict). They're INDEPENDENT: a bare 👍 paints the row but appends no
+          // reasons, so a later (raced) 👎 still gets its reason grid exactly once.
           //
           // Disabling the buttons NESTED in the column_set returns 200 but does NOT take effect
           // in the Feishu client (👎 stayed clickable — observed live), so we replace the WHOLE
           // row (disableFeedbackRow, same-tag column_set PUT by its own top-level element_id) to
           // render both buttons inert with a ✓ on the chosen one.
           //
-          // CRITICAL — these two writes MUST be SERIALIZED, not fired concurrently. CardKit
+          // CRITICAL — disable then append MUST be SERIALIZED, not fired concurrently. CardKit
           // enforces a per-card monotonic `sequence` watermark: the disable takes seq N, the
           // reason append takes N+1. If they race and the APPEND (N+1) reaches CardKit first,
           // the watermark jumps to N+1 and the disable (N) is SILENTLY rejected — it returns
           // 200 with NO visual effect, so the vote buttons stay clickable forever (observed
           // live: 👍/👎 infinitely re-clickable). Awaiting disable→append applies them in seq
           // order so both stick.
-          if (fbCardId && firstCardUi) {
-            void (async () => {
-              try {
-                await disableFeedbackRow(fbCardId, fbVote, nextCallbackSeq());
-              } catch (e) {
-                log({ event: "feedback_render_error", op: "disable_row", error: redactSensitive(String(e)).slice(0, 200) });
-              }
-              // On 👎, reveal the reason buttons AFTER the disable (strictly higher seq).
-              if (fbVote === "down") {
-                try {
-                  await appendFeedbackReasons(fbCardId, nextCallbackSeq());
-                } catch (e) {
-                  log({ event: "feedback_render_error", op: "append_reasons", error: redactSensitive(String(e)).slice(0, 200) });
+          if (fbCardId) {
+            const paintRow = claimCardUiFlag(messageId, "voteRowPainted");
+            // Append the reason grid only on a 👎, and only the first time for THIS card.
+            const appendReasons = fbVote === "down" && claimCardUiFlag(messageId, "reasonGridAppended");
+            if (paintRow || appendReasons) {
+              void (async () => {
+                if (paintRow) {
+                  try {
+                    await disableFeedbackRow(fbCardId, fbVote, nextCallbackSeq());
+                  } catch (e) {
+                    log({ event: "feedback_render_error", op: "disable_row", error: redactSensitive(String(e)).slice(0, 200) });
+                  }
                 }
-              }
-            })();
-          } else if (!fbCardId) {
+                // Reveal the reason buttons AFTER the disable (strictly higher seq).
+                if (appendReasons) {
+                  try {
+                    await appendFeedbackReasons(fbCardId, nextCallbackSeq());
+                  } catch (e) {
+                    log({ event: "feedback_render_error", op: "append_reasons", error: redactSensitive(String(e)).slice(0, 200) });
+                  }
+                }
+              })();
+            }
+          } else {
             log({ event: "feedback_card_unresolved", action: "feedback", messageId: hashUserId(messageId) });
           }
         } else if (value?.action === "feedback_reason" && typeof value.reasonCode === "string") {
@@ -1526,10 +1537,11 @@ async function main(): Promise<void> {
           // per-user — same reasoning as the vote row): the grid is a card-global element, so
           // the first picker's choice paints the ✓ and disables it for everyone. Gating per-user
           // would let a second user's pick race/re-disable the grid (higher seq wins, arbitrary
-          // ✓). The metric stays per-user above. element_ids are the SHORT index form fbr_<i>
-          // (feedbackReasonEid) — fbr_<code> overflowed Feishu's 20-char limit.
-          const reasonUiKey = `reasonui:${frCardId}`;
-          if (frCardId && !isDuplicate(reasonUiKey)) {
+          // ✓). The flag lives on the card registry entry (card lifetime, not the 15min dedup
+          // TTL — a pick on a still-live card must never re-disable). The metric stays per-user
+          // above. element_ids are the SHORT index form fbr_<i> (feedbackReasonEid) — fbr_<code>
+          // overflowed Feishu's 20-char limit.
+          if (frCardId && claimCardUiFlag(messageId, "reasonRowPainted")) {
             void disableFeedbackReasonRow(frCardId, value.reasonCode, nextCallbackSeq())
               .catch((e) => log({ event: "feedback_render_error", op: "disable_reason_row", error: redactSensitive(String(e)).slice(0, 200) }));
           } else if (!frCardId) {

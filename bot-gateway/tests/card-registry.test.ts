@@ -5,7 +5,7 @@
  * AND to resume the same warm session.
  */
 
-import { rememberCard, rememberAnswer, lookupCard, forgetCard, collectChain } from "../src/card-registry";
+import { rememberCard, rememberAnswer, lookupCard, forgetCard, collectChain, claimCardUiFlag } from "../src/card-registry";
 
 describe("card registry", () => {
   it("remembers and looks up a card_id by message_id", () => {
@@ -58,6 +58,36 @@ describe("card registry", () => {
     rememberCard("om_msg3", "card_x");
     forgetCard("om_msg3");
     expect(lookupCard("om_msg3")).toBeUndefined();
+  });
+});
+
+describe("claimCardUiFlag (card-lifetime one-shot feedback-UI guards)", () => {
+  it("flips unset→set exactly once per (card, flag), returning true only on the first claim", () => {
+    rememberCard("om_flag1", "card_f1");
+    expect(claimCardUiFlag("om_flag1", "voteRowPainted")).toBe(true);   // first claim paints
+    expect(claimCardUiFlag("om_flag1", "voteRowPainted")).toBe(false);  // re-vote: no repaint
+    expect(claimCardUiFlag("om_flag1", "voteRowPainted")).toBe(false);
+    expect(lookupCard("om_flag1")?.voteRowPainted).toBe(true);
+  });
+
+  it("tracks the three flags INDEPENDENTLY so a 👍 (paints row) still lets a later 👎 append its reason grid", () => {
+    rememberCard("om_flag2", "card_f2");
+    expect(claimCardUiFlag("om_flag2", "voteRowPainted")).toBe(true);      // 👍 paints the row
+    expect(claimCardUiFlag("om_flag2", "reasonGridAppended")).toBe(true);  // later 👎 still appends reasons once
+    expect(claimCardUiFlag("om_flag2", "reasonGridAppended")).toBe(false); // a 2nd 👎 must not re-append (300315)
+    expect(claimCardUiFlag("om_flag2", "reasonRowPainted")).toBe(true);    // first reason pick disables the grid
+    expect(claimCardUiFlag("om_flag2", "reasonRowPainted")).toBe(false);
+  });
+
+  it("returns false for an unknown/evicted card (caller treats as do-not-write)", () => {
+    expect(claimCardUiFlag("om_never_seen", "voteRowPainted")).toBe(false);
+  });
+
+  it("scopes flags per card — claiming on one card does not affect another", () => {
+    rememberCard("om_flagA", "card_fA");
+    rememberCard("om_flagB", "card_fB");
+    expect(claimCardUiFlag("om_flagA", "voteRowPainted")).toBe(true);
+    expect(claimCardUiFlag("om_flagB", "voteRowPainted")).toBe(true);  // independent card
   });
 });
 
