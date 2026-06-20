@@ -157,13 +157,16 @@ export async function feishuApi(
     if (throttled) {
       if (rateRetries < MAX_RATE_RETRIES) {
         rateRetries++;
-        // EXPONENTIAL backoff with FULL jitter, honoring Retry-After when present.
+        // EXPONENTIAL backoff with jitter, honoring Retry-After when present.
         // The old (150*n + 0-100ms) was sub-second and near-synchronous, so several
         // writers tripping 429 together retried in lock-step → a mini retry storm.
-        // Full jitter (random in [0, base]) decorrelates concurrent retriers; the
-        // exponential base (250·2^(n-1)) gives a limiter real room to recover.
+        // Jitter decorrelates concurrent retriers; the exponential base (250·2^(n-1))
+        // gives a limiter room to recover. Use a base FLOOR + jitter (not pure full
+        // jitter whose lower bound is 0): a 0ms backoff would retry near-instantly and
+        // re-press a limiter that just asked us to slow down — defeating the purpose
+        // (cross-review). So at least half the base, plus 0..half random.
         const expBase = 250 * 2 ** (rateRetries - 1); // 250, 500, 1000ms
-        const backoff = retryAfterMs || Math.floor(Math.random() * expBase);
+        const backoff = retryAfterMs || Math.floor(expBase / 2 + Math.random() * (expBase / 2));
         await new Promise((r) => setTimeout(r, backoff));
         continue;
       }
