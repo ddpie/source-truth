@@ -21,7 +21,8 @@ MVP 用 `agentcore` starter toolkit / boto3 直接起 Runtime + index-service（
 CodeGraph + HTTP 文件工具，无 EFS），先跑通主流程与 POC 性能基准。CodeGraph 召回率、本地检索/读文件
 延迟、常驻索引可靠性是待验证点——验证前不固化 IaC，避免返工。架构定型后再渐进 CDK 化。
 
-## 状态
+## CDK 化目标（p2，未实现）
 
-p0：占位。p2 落地 `bin/app.ts` + `lib/`（runtime-stack / network-stack / codegraph(index-service)-stack /
-gateway-stack）+ 快照测试 + cdk-nag 合规门禁。（无 storage/EFS stack——索引服务用本地磁盘副本。）
+目录当前为占位。CDK 化后落地 `bin/app.ts` + `lib/`（runtime-stack / network-stack /
+codegraph(index-service)-stack / gateway-stack）+ 快照测试 + cdk-nag 合规门禁。
+无 storage/EFS stack——索引服务用本地磁盘副本。

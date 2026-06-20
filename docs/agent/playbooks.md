@@ -4,7 +4,7 @@
 [`invariants.md`](invariants.md) 的不变量。生效方式分三类，先记住：
 
 - **gateway 改动** → 重启网关即时生效（`bash .local/run-gateway.sh`，单实例）。
-- **agent 改动（含 system.md / 工具 / 镜像）** → 重建镜像 + 更新 runtime；**暖 microVM 仍跑旧镜像约 15 分钟**才老化。
+- **agent 改动（含 system.md / 工具 / 镜像）** → 重建镜像 + 更新 runtime；**热 microVM 仍跑旧镜像约 15 分钟**才老化。
 - **index-service 改动 / 刷新代码索引** → 蓝绿替换 index 实例（`--refresh-index`）。
 
 每次改完都跑 `./scripts/test.sh`（离线套件，pre-push 必过）。
@@ -25,15 +25,15 @@
   # 只重建 image + 更新 runtime
   ```
 
-  等暖 VM 老化（~15min）后再复测，否则读到的可能仍是旧 prompt 的输出。
-- **坑**：preamble/marker 类「读卡发现没生效」八成是暖 VM 旧 prompt——先看 deploy 时间，别急着改 gateway 正则兜底。
+  等热 VM 老化（~15min）后再复测，否则读到的可能仍是旧 prompt 的输出。
+- **坑**：preamble/marker 类「读卡发现没生效」八成是热 VM 旧 prompt——先看 deploy 时间，别急着改 gateway 正则兜底。
 
 ## 配方 2：加 / 改一个 MCP 工具（index-service 暴露给 agent）
 
 - **改哪**：`index-service/http_bridge.py`（注册 + 处理器，闭合白名单）+ 工具实现（`file_read.py` /
   `file_search.py` / `file_table.py` / `codegraph_session.py`）；**同步** `agent-container/agent_lib.py`
   的 `CODEGRAPH_TOOLS` 允许清单（两端工具名必须一致，否则 agent 调不到或 server 不暴露）。
-- **只读铁律**：新工具必须只读（`readOnlyHint=True`）；绝不加写/exec 能力（MVP 边界）。
+- **只读约束**：新工具必须只读（`readOnlyHint=True`）；绝不加写/exec 能力（MVP 边界）。
 - **路径安全**：任何接受 agent 路径的工具必须经 `path_align.to_local_path`（词法 + realpath 双层 confine）。
 - **验**：`cd index-service && python -m pytest -q`；加路径逃逸/注入用例。
 - **上线**：蓝绿刷 index（`--refresh-index`）+ 重建镜像（agent 侧允许清单变了）。
@@ -63,7 +63,7 @@
 - **改哪**：`bot-gateway/src/` —— 卡片构建 `cardkit-client.ts`、写入队列 `card-writer.ts`、
   抽取器 `extract-*.ts`、规范化 `normalize-blocks.ts`、脱敏 `redact.ts` / `strip-*.ts`、SSE 解析
   `parse-stream.ts`、会话路由 `session-map.ts` / `card-registry.ts`。
-- **几条硬规矩**（都被多轮 review 坐实过）：
+- **几条硬规矩**：
   - 正则**行首/行尾的无界量词**（`X*` / `[\s\S]*?`）必查 ReDoS，用有界 `{0,N}`；改完跑超长输入探针。
   - `strip` / `normalize` 与 `redact` 同处一条 pipeline 时，**redact 必须在最后**（strip 重接被切断的 secret）。
   - 卡片正文/证据进 finalize PUT 前要 **clamp 长度**（超 Feishu 卡片体积上限会 400 → CardWriter 吞掉 → 卡死）。
@@ -81,7 +81,7 @@
 
 - 改顶层目录 ⇒ 同步 `docs/structure_zh.md` 和 `_en.md`。
 - 新增 `docs/*_zh.md` ⇒ 补 `_en.md`（反之亦然）；非双语的运维文档用中性名（如 `runbook.md`）避开配对校验。
-- 跑 `./scripts/check-invariants.sh` 确认结构/双语/真相源校验过。
+- 跑 `./scripts/check-invariants.sh` 确认结构/双语/权威依据校验过。
 
 ---
 
