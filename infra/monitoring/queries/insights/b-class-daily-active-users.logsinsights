@@ -1,0 +1,19 @@
+-- B-CLASS metric: Daily Active Users (DAU). monitoring plan §2.A / 原则2.
+--
+-- WHY this is B-class, NOT a dashboard widget: DAU = count_distinct(hashUserId) over a day.
+-- A real-time Logs-Insights widget doing this would (a) re-scan raw logs on every dashboard
+-- open, (b) be billed by bytes scanned, (c) hit the 30-min single-query timeout + regional
+-- concurrency cap, and (d) count_distinct still can't express true cohort RETENTION. So this
+-- query is run ONCE/day by a scheduled EventBridge→Lambda that StartQuery's it for "yesterday",
+-- polls GetQueryResults to Complete, then PutMetricData's the scalar into a custom metric
+-- (SourceTruth/Gateway DAU). The dashboard reads that pre-aggregated metric (cheap, 15-mo
+-- retention, alarmable). See ../../README (pre-aggregation spec) for the Lambda contract.
+--
+-- Log group: /source-truth/bot-gateway. Run window: a full local day [00:00, 24:00) for the
+-- target date (the Lambda sets start/end + timezone explicitly — Tokyo, so day boundaries match
+-- ops reality, not UTC). question_received is the activity signal; hashUserId is the user key
+-- (traceId is NOT a user key — key-split, metrics.ts §4). saltWeak rows are still counted but
+-- the Lambda tags the metric so a weak-salt window is flagged downstream.
+fields hashUserId
+| filter metric = 1 and event = "question_received"
+| stats count_distinct(hashUserId) as dau
