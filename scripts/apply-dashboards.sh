@@ -86,6 +86,11 @@ fi
 
 [[ "$DRY_RUN" -eq 0 ]] && { require_cmd aws "install/configure the AWS CLI" || exit 1; }
 
+# Per-run stderr capture (NOT a fixed /tmp path — two concurrent runs would clobber
+# each other and cross-report errors). Cleaned up on exit.
+ERRF="$(mktemp)"
+trap 'rm -f "$ERRF"' EXIT
+
 rc=0
 for entry in "${TEMPLATES[@]}"; do
   tpl="${entry%:*}"; suffix="${entry##*:}"
@@ -107,16 +112,17 @@ for entry in "${TEMPLATES[@]}"; do
   if aws cloudwatch put-dashboard --region "$REGION" \
       --dashboard-name "$name" \
       --dashboard-body "$body" \
-      --query 'DashboardValidationMessages' --output text 2>/tmp/apply_dash_err; then
+      --query 'DashboardValidationMessages' --output text 2>"$ERRF"; then
     # put-dashboard returns validation MESSAGES (non-fatal warnings) even on success.
-    msgs="$(cat /tmp/apply_dash_err 2>/dev/null || true)"
     say ok "put-dashboard $name (${bytes} bytes)"
-    [[ -s /tmp/apply_dash_err ]] && say warn "  $name validation: $msgs"
+    if [[ -s "$ERRF" ]]; then
+      say warn "  $name validation: $(cat "$ERRF")"
+    fi
   else
-    say err "put-dashboard $name FAILED: $(cat /tmp/apply_dash_err 2>/dev/null | head -c 300)"
+    say err "put-dashboard $name FAILED: $(head -c 300 "$ERRF" 2>/dev/null)"
     rc=1
   fi
-  rm -f /tmp/apply_dash_err
+  : > "$ERRF"   # truncate for the next iteration (keep the mktemp'd file)
 done
 
 if [[ "$DRY_RUN" -eq 0 && "$rc" -eq 0 ]]; then
