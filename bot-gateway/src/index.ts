@@ -25,7 +25,7 @@ import { fromNodeProviderChain } from "@aws-sdk/credential-providers";
 
 import { invokeRuntimeStreaming, classifyInvokeOutcome, isTurnCapError, type AwsCredentials } from "./sigv4";
 import { decideFinalize, hardFailureMessage, shapeBody } from "./finalize-decision";
-import { createCard, updateContent, closeStreaming, finalizeCard, appendFooter, appendClarify, buildSendCardContent, disableFollowUpButton, appendReasoningPanel, updateReasoningPanel, appendEvidencePanel, updateEvidencePanel, appendOneChart, MAX_CHARTS, appendStopButton, appendStatusLine, updateStatusLine, formatElapsed, type ActionButton } from "./cardkit-client";
+import { createCard, updateContent, closeStreaming, finalizeCard, appendFooter, appendClarify, buildSendCardContent, disableFollowUpButton, appendReasoningPanel, updateReasoningPanel, appendEvidencePanel, updateEvidencePanel, appendOneChart, MAX_CHARTS, appendStopButton, appendStatusLine, updateStatusLine, formatElapsed, appendFeedbackButtons, appendFeedbackReasons, replaceWithThanks, FEEDBACK_ROW_EID, FEEDBACK_REASON_ROW_EID, type ActionButton } from "./cardkit-client";
 import { extractCharts } from "./extract-charts";
 import { rememberCard, rememberAnswer, lookupCard, collectChain } from "./card-registry";
 import { composeFollowUpPrompt } from "./followup-context";
@@ -1072,6 +1072,11 @@ async function runStreamingInvoke(
     // trailer that stripFollowUps removed from the rendered body).
     const followUps = extractFollowUps(redactSensitive(answer));
     await writer.write((seq) => appendFooter(cardId, seq, followUps, actions));
+    // 👍/👎 feedback row — only on a REAL answer (keepFooter, i.e. not a hard failure /
+    // clarify / dominant-leak). Its own write after the footer so the buttons sit below
+    // the follow-ups. best-effort: a feedback-button append failure must not fail finalize.
+    if (!clarify) void writer.write((seq) => appendFeedbackButtons(cardId, seq)
+      .catch((e) => log({ event: "feedback_buttons_failed", card: cardId, error: redactSensitive(String(e)).slice(0, 200) })));
   } else if (actions.length > 0) {
     // hardFailed/leakFailed → keepFooter is false, but the retry button is exactly
     // what the user needs here. Append a footer carrying ONLY the action button(s).
@@ -1304,7 +1309,7 @@ async function main(): Promise<void> {
           header?: { event_id?: string };
           event_id?: string;
           token?: string;
-          action?: { value?: { action?: string; text?: string; eid?: string; card_id?: string; fresh?: boolean } };
+          action?: { value?: { action?: string; text?: string; eid?: string; card_id?: string; fresh?: boolean; vote?: string; reasonCode?: string } };
           context?: { open_chat_id?: string; open_message_id?: string };
           operator?: { open_id?: string; tenant_key?: string };
         };
@@ -1426,6 +1431,40 @@ async function main(): Promise<void> {
               .catch((e) => log({ event: "disable_button_error", error: redactSensitive(String(e)).slice(0, 300) }));
           }
           // No toast — the in-place button disable (✓ + greyed) is feedback enough.
+        } else if (value?.action === "feedback" && (value.vote === "up" || value.vote === "down")) {
+          // 👍/👎 vote. NOT asker-scoped (anyone may rate — more feedback is better; do
+          // NOT copy stop's fail-closed asker gate here). User-level metric → hashUserId,
+          // no traceId (metrics.ts §4). The cb: dedup above already prevents a re-delivered
+          // callback from double-counting; the button-row replacement prevents a re-vote.
+          const fbEntry = lookupCard(messageId);
+          const fbCardId = value.card_id || fbEntry?.cardId;
+          const fbSession = fbEntry?.sessionId;
+          emitMetric("feedback_voted", { vote: value.vote }, { hashUserId: hashUserId(operatorOpenId), sessionId: fbSession });
+          if (fbCardId) {
+            const seq = nextCallbackSeq();
+            // 👍 → replace the vote row with a thanks line (done). 👎 → append the reason
+            // buttons (the row stays so the user sees what they picked), let the user
+            // optionally pick a reason; the reason click finalizes with its own thanks.
+            if (value.vote === "up") {
+              void replaceWithThanks(fbCardId, FEEDBACK_ROW_EID, seq)
+                .catch((e) => log({ event: "feedback_render_error", error: redactSensitive(String(e)).slice(0, 200) }));
+            } else {
+              void replaceWithThanks(fbCardId, FEEDBACK_ROW_EID, seq)
+                .then(() => appendFeedbackReasons(fbCardId, nextCallbackSeq()))
+                .catch((e) => log({ event: "feedback_render_error", error: redactSensitive(String(e)).slice(0, 200) }));
+            }
+          }
+        } else if (value?.action === "feedback_reason" && typeof value.reasonCode === "string") {
+          // 👎-reason pick (enumerated code, never free text). emitMetric runtime-whitelists
+          // reasonCode, so even a tampered payload can't inject text. Replace the reason row
+          // with thanks to prevent a second pick.
+          const frEntry = lookupCard(messageId);
+          const frCardId = value.card_id || frEntry?.cardId;
+          emitMetric("feedback_reason", { reasonCode: value.reasonCode }, { hashUserId: hashUserId(operatorOpenId), sessionId: frEntry?.sessionId });
+          if (frCardId) {
+            void replaceWithThanks(frCardId, FEEDBACK_REASON_ROW_EID, nextCallbackSeq())
+              .catch((e) => log({ event: "feedback_render_error", error: redactSensitive(String(e)).slice(0, 200) }));
+          }
         } else {
           // A callback we recognized the envelope of but could NOT act on — e.g. a
           // follow_up whose context.open_chat_id was absent (chatId empty), or an
