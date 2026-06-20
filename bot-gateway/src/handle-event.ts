@@ -56,7 +56,7 @@ export interface HandleResult {
    *  retry — the `msg:` key alone can't, since the re-delivery hits this event_id
    *  gate first. */
   eventId?: string;
-  reason?: "duplicate" | "unsupported_type" | "empty" | "not_mentioned" | "not_a_user" | "reply_to_unknown_card";
+  reason?: "duplicate" | "unsupported_type" | "empty" | "not_mentioned" | "not_a_user" | "self_message" | "reply_to_unknown_card";
 }
 
 /** Options that gate WHEN to answer. botOpenId is the bot's own open_id; when
@@ -112,6 +112,16 @@ export async function handleMessageEvent(
   if (event.sender_type !== "user") {
     return { handled: false, reason: "not_a_user" };
   }
+  // 2b. Defense-in-depth self-loop guard: never act on a message whose sender IS the
+  //     bot. The sender_type filter above already blocks this IF Feishu always labels
+  //     the bot's own outgoing messages non-"user" — but a single mislabeled event
+  //     (a tenant/app-as-user identity surprise) would re-open the echo loop, and the
+  //     bot's plain-text FALLBACK reply is a `text` message that could re-enter. An
+  //     explicit open_id match makes the guard robust to any sender_type labeling
+  //     surprise (cross-review P2). No-op when botOpenId is unconfigured.
+  if (options.botOpenId && event.sender_id === options.botOpenId) {
+    return { handled: false, reason: "self_message" };
+  }
 
   // 3. Only text messages are answered in MVP.
   if (event.message_type !== "text") {
@@ -120,10 +130,16 @@ export async function handleMessageEvent(
 
   // 4. In a GROUP, answer only when the bot is @-mentioned (matches the design:
   //    "策划在群里 @机器人 提问"). Without this the bot replies to every line from
-  //    anyone — unsolicited answers + runaway cost. p2p/private chat needs no @.
+  //    anyone — unsolicited answers + runaway cost. Only a true 1:1 private chat
+  //    (`p2p`) skips the @-gate.
+  //    FAIL CLOSED on chat_type: gate on `!== "p2p"` (NOT `=== "group"`). Feishu today
+  //    emits only p2p/group, but an unknown/future type (e.g. a topic-group) cast
+  //    through here must REQUIRE the @-mention, not fall through as un-gated p2p and let
+  //    the bot answer every message from anyone (cross-review P1: `=== "group"` failed
+  //    OPEN on any unrecognized chat_type).
   //    Gate requires the bot's own open_id; if it isn't configured we can't tell
   //    which mention is the bot, so fall back to "any mention present".
-  if (event.chat_type === "group") {
+  if (event.chat_type !== "p2p") {
     const mentioned = options.botOpenId
       ? event.mentions.some((m) => m.open_id === options.botOpenId)
       : event.mentions.length > 0;
