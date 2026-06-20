@@ -352,6 +352,12 @@ async def run_agent(
     # value degrades to "" (logs still emit, just unjoined) rather than failing the run.
     trace_id = payload.get("traceId")
     trace_id = trace_id if isinstance(trace_id, str) and trace_id else ""
+    # repos: the project's repo subdir set, forwarded by the gateway (multi-repo plan 阶段1).
+    # At 阶段1 the agent does NOT yet scope retrieval by it (that's 阶段2 multi-graph) — it is
+    # accepted defensively (validated to a list[str], else dropped) and logged so the
+    # gateway→agent contract is observable end-to-end. An unknown/odd value never breaks the run.
+    repos = payload.get("repos")
+    repos = [r for r in repos if isinstance(r, str)] if isinstance(repos, list) else []
 
     def _plog(event: str, **ctx: Any) -> None:
         """Structured warning line, trace-stamped. Mirrors _perf's swallow-all
@@ -360,6 +366,12 @@ async def run_agent(
             logger.warning(json.dumps({"event": event, "trace": trace_id, **ctx}))
         except Exception:  # noqa: BLE001 - diagnostics are best-effort
             pass
+
+    # Observe the gateway→agent project-routing contract (multi-repo 阶段1): log the repo set
+    # the gateway resolved for this project, so the contract is verifiable end-to-end even
+    # before 阶段2 uses it for scoping. Only when non-empty (single-repo deploy omits it).
+    if repos:
+        _plog("project_repos_received", repos=repos)
 
     options = build_options(
         system_prompt=load_system_prompt(),

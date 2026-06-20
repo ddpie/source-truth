@@ -85,18 +85,31 @@ export function validateProjectsConfig(raw: unknown): ProjectsConfig {
 }
 
 /**
- * Load + validate the project-routing config. The REAL config is DEPLOYMENT-SPECIFIC (which
- * repo subdirs, which internal endpoint) so it lives at .local/projects.json (gitignored,
- * alongside .local/deploy-config which already holds REPO_SUBDIR / INDEX_DNS_NAME) — NOT in
- * the committed tree. config/projects.example.json is the committed schema template.
- * .local/ is at the repo root; bot-gateway/ is a sibling, so ../../.local from dist/.
+ * Resolve the project-routing config path. The REAL config is DEPLOYMENT-SPECIFIC (which repo
+ * subdirs, which internal endpoint) so it is NOT in the committed tree; config/projects.example.json
+ * is the committed schema template.
  *
- * Throws (fail-loud) on a missing file or invalid config so the gateway refuses to start
- * rather than mis-route at request time. The optional `_doc` key is ignored by
- * validateProjectsConfig. Exposed for tests (pathOverride).
+ * Path resolution, in order:
+ *  1. PROJECTS_CONFIG_PATH env (an ABSOLUTE path the deploy writes) — the production path. The
+ *     deployed gateway lives at /opt/bot-gateway, so a `../../.local`-from-dist walk would land
+ *     at /opt/.local (wrong); deploy writes the real absolute location into the env instead.
+ *  2. Fallback: <repo-root>/.local/projects.json — for LOCAL dev where the gateway runs from the
+ *     repo (ts-node), .local/ is a sibling of bot-gateway/ (../../.local from src/ or dist/).
+ */
+function resolveConfigPath(): string {
+  const fromEnv = process.env.PROJECTS_CONFIG_PATH;
+  if (fromEnv && fromEnv.trim()) return fromEnv.trim();
+  return resolve(__dirname, "..", "..", ".local", "projects.json");
+}
+
+/**
+ * Load + validate the project-routing config (path from resolveConfigPath unless overridden).
+ * Throws ProjectsConfigMissing on an ABSENT file (soft — caller serves without projectId) and
+ * a plain Error on a PRESENT-but-invalid one (fail-loud — blocks startup). The optional `_doc`
+ * key is ignored by validateProjectsConfig. Exposed for tests (pathOverride).
  */
 export function loadProjectsConfig(pathOverride?: string): ProjectsConfig {
-  const path = pathOverride ?? resolve(__dirname, "..", "..", ".local", "projects.json");
+  const path = pathOverride ?? resolveConfigPath();
   let raw: string;
   try {
     raw = readFileSync(path, "utf8");
@@ -107,6 +120,7 @@ export function loadProjectsConfig(pathOverride?: string): ProjectsConfig {
     // this sentinel and logs a warning. A PRESENT-but-invalid config is fail-loud below.
     const err = e as NodeJS.ErrnoException;
     if (err && err.code === "ENOENT") throw new ProjectsConfigMissing(path);
+    // Non-ENOENT (EACCES permission, EISDIR is-a-directory, …) is a real misconfig → fail loud.
     throw new Error(`project-routing: cannot read ${path}: ${String(e)}`);
   }
   let parsed: unknown;
