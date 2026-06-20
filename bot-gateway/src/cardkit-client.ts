@@ -302,14 +302,38 @@ export async function updateReasoningPanel(cardId: string, steps: string[], sequ
   }));
 }
 
+/** Force every axis title that has `text` to be VISIBLE. VChart hides axis titles by
+ *  DEFAULT (`title.visible` defaults to false), so an agent spec that writes
+ *  `axes:[{orient,title:{text:"等级"}}]` (no `visible`) renders a chart with NO
+ *  horizontal/vertical axis description — the user can't tell what the axes mean
+ *  (user-reported). The prompt now asks for `visible:true`, but enforce it gateway-side
+ *  too so a spec that omits it still shows labels (defense-in-depth, mirrors the chart
+ *  field-binding backstop). Pure: returns a shallow-cloned spec, only touching axis titles.*/
+export function ensureAxisTitlesVisible<T extends { [k: string]: unknown }>(spec: T): T {
+  const axes = (spec as { axes?: unknown }).axes;
+  if (!Array.isArray(axes)) return spec;
+  const fixedAxes = axes.map((ax) => {
+    if (!ax || typeof ax !== "object") return ax;
+    const title = (ax as { title?: unknown }).title;
+    // Only force-visible when a non-empty text label is present; an axis with no title
+    // text is left untouched (don't draw an empty title box).
+    if (title && typeof title === "object" && typeof (title as { text?: unknown }).text === "string"
+        && (title as { text: string }).text.trim() !== "") {
+      return { ...(ax as object), title: { visible: true, ...(title as object) } };
+    }
+    return ax;
+  });
+  return { ...spec, axes: fixedAxes };
+}
+
 /** Wrap VChart specs (extracted from the agent's ```chart blocks) as CardKit
  *  chart components. The agent builds specs from real config-table numbers it
- *  read; the gateway only transports them. */
+ *  read; the gateway only transports them (plus the axis-title-visibility backstop). */
 export function buildChartElements(specs: Array<{ type: string; [k: string]: unknown }>): unknown[] {
   return specs.map((spec, i) => ({
     tag: "chart",
     element_id: `chart_${i}`,
-    chart_spec: spec,
+    chart_spec: ensureAxisTitlesVisible(spec),
   }));
 }
 
@@ -333,7 +357,7 @@ export async function appendOneChart(
   await larkApi("POST", `/open-apis/cardkit/v1/cards/${cardId}/elements`, JSON.stringify({
     type: "append",
     sequence,
-    elements: JSON.stringify([{ tag: "chart", element_id: `chart_${index}`, chart_spec: spec }]),
+    elements: JSON.stringify([{ tag: "chart", element_id: `chart_${index}`, chart_spec: ensureAxisTitlesVisible(spec) }]),
   }));
 }
 
