@@ -20,6 +20,8 @@
 #   6 runtime    : AgentCore runtime in VPC mode, CODEGRAPH_MCP_URL set
 #   7 gateway    : write /etc/bot-gateway.env + start bot-gateway.service (co-located
 #                  on the index host) via SSM — once the runtime ARN exists
+#   8 monitoring : CloudWatch metric-filters + dashboards + alarms + DAU lambda
+#                  (best-effort, after the gateway logs to /source-truth/bot-gateway)
 #
 # NO EFS: the agent microVM mounts no filesystem; it reads all source code over
 # the index-service HTTP bridge (read_file/glob_files/search_files/codegraph_*).
@@ -96,7 +98,7 @@ Options:
                       The gateway's session-reuse TTL is aligned to this. Larger = higher
                       follow-up warm-hit rate but more idle-memory cost (idle CPU is free).
   --max-lifetime <s>  AgentCore microVM hard max age before forced recycle (60..28800; default 28800/8h)
-  --skip <phase>      Skip a phase: artifacts|iam|network|index-svc|image|runtime|gateway (repeatable)
+  --skip <phase>      Skip a phase: artifacts|iam|network|index-svc|image|runtime|gateway|monitoring (repeatable)
   --refresh-index     Replace the running index-service instance if this run staged
                       newer index-service code / repo to S3 (reuse can't re-bootstrap).
                       Without it, a stale reuse only WARNs (never silently serves old code).
@@ -735,6 +737,41 @@ else
     "${LOCALE:-zh}" "" "${FEISHU_API_BASE:-}" "$IDLE_TIMEOUT" \
     || { say err "gateway activation failed — backend is up; fix and re-run (or --skip gateway)"; exit 1; }
   say ok "bot-gateway activated on $GW_INSTANCE (salt fetched host-side by run.sh from Secrets Manager)"
+fi
+
+# ============================================================
+# Phase 7: monitoring (CloudWatch metric-filters + dashboards + alarms + DAU lambda)
+# ============================================================
+# Runs AFTER the gateway phase so the gateway has (begun to) log to /source-truth/bot-gateway
+# — the metric-filters + DAU lambda target that group. BEST-EFFORT: the backend + gateway are
+# already up by here, so a monitoring hiccup (e.g. the log group not created yet because the
+# gateway hasn't logged its first line) must WARN, never fail the deploy. The four apply
+# scripts are each idempotent + self-guarding; re-running the deploy reconciles them. Skipped
+# on --dry-run and --skip monitoring (or when the gateway itself was skipped — no log group
+# to attach to). Dashboards put fine even before data; metric-filters/DAU may no-op until the
+# gateway's first log line creates the group (re-run picks them up).
+if skip monitoring; then
+  say warn "skip monitoring"
+elif [[ "$DRY_RUN" == true ]]; then
+  say step "Phase 7: monitoring"
+  say info "[dry-run] apply metric-filters + dashboards + alarms + DAU lambda (CloudWatch, best-effort)"
+elif [[ -z "${FEISHU_SECRET_ID:-}" ]]; then
+  # Gateway wasn't activated this run → /source-truth/bot-gateway likely doesn't exist yet.
+  # Dashboards/alarms would build on an empty/absent group; defer to a post-gateway re-run.
+  say warn "skip monitoring (gateway not active yet — run monitoring after the gateway logs once; see runbook)"
+else
+  say step "Phase 7: monitoring (best-effort)"
+  # Dashboards first (they put regardless of data); then metric-filters; then alarms (which
+  # auto-applies its own dense filters); then the DAU lambda. Each warns on failure, never aborts.
+  bash "$SCRIPT_DIR/apply-dashboards.sh" --region "$REGION" \
+    || say warn "  apply-dashboards failed (non-fatal) — re-run ./scripts/apply-dashboards.sh --region $REGION"
+  bash "$SCRIPT_DIR/apply-metric-filters.sh" --region "$REGION" \
+    || say warn "  apply-metric-filters failed (non-fatal; log group may not exist until the gateway logs once) — re-run later"
+  bash "$SCRIPT_DIR/apply-alarms.sh" --region "$REGION" \
+    || say warn "  apply-alarms failed (non-fatal) — re-run ./scripts/apply-alarms.sh --region $REGION"
+  bash "$SCRIPT_DIR/apply-dau-lambda.sh" --region "$REGION" \
+    || say warn "  apply-dau-lambda failed (non-fatal) — re-run ./scripts/apply-dau-lambda.sh --region $REGION"
+  say ok "monitoring applied (best-effort; widgets fill once the gateway logs accrue)"
 fi
 
 say ok "deploy-all complete"
