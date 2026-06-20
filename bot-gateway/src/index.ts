@@ -38,6 +38,7 @@ import { normalizeBlocks } from "./normalize-blocks";
 import { t, initI18n, currentLocale } from "./i18n";
 import { extractClarification } from "./extract-clarify";
 import { handleMessageEvent, type InvokeFn } from "./handle-event";
+import { classifyWsError } from "./index-core";
 import { sdkEventToImEvent } from "./sdk-event";
 import { sendReply } from "./reply";
 import { imReply, imSendToChat } from "./feishu-http";
@@ -111,9 +112,14 @@ function gracefulShutdown(sig: string): void {
   for (const ctrl of abortControllers.values()) {
     try { ctrl.abort(); } catch { /* each invoke finalizes its own card on abort */ }
   }
-  // Bounded drain: give the abort-path finalize writes ~3s to reach CardKit, then
-  // exit regardless (never hang a deploy on a wedged finalize).
-  const deadline = Date.now() + 3000;
+  // Bounded drain: give the abort-path finalize writes time to reach CardKit, then
+  // exit regardless (never hang a deploy on a wedged finalize). 8s (was 3s): a single
+  // finalize PUT that hits a Feishu 429 backs off up to ~250+500+1000ms + RTT, and
+  // several concurrent in-flight cards contend for CardKit's 10/s cap, so 3s could
+  // expire mid-finalize and exit(0) would truncate it → a frozen card, the exact
+  // thing abort-all exists to avoid. 8s covers a finalize-with-retry while still
+  // bounding the redeploy (cross-review).
+  const deadline = Date.now() + 8000;
   const waitDrain = (): void => {
     if (abortControllers.size === 0 || Date.now() > deadline) {
       log({ event: "shutdown_done", drained: abortControllers.size === 0 });
@@ -1287,23 +1293,32 @@ async function main(): Promise<void> {
     onReconnected: () => log({ event: "sdk_wsclient_reconnected" }),
     onError: (err: unknown) => {
       const msg = String(err);
-      // exceed_conn_limit (code 1000040350) is the cluster-mode "too many
-      // connections for this app" case — NOT permanent. It happens when a previous
-      // gateway's WS connection hasn't been torn down server-side yet (or a stray
-      // consumer lingers). Exiting immediately would race a supervised restart into
-      // the SAME limit → tight crash-loop, gateway dark throughout. So for THIS code
-      // only, wait a randomized backoff (let the stale peer drop) and retry start()
-      // in-process instead of exiting. Truly-terminal codes (forbidden/auth_failed —
-      // bad/revoked creds) still exit(1) so the supervisor restarts with fresh state.
-      if (msg.includes("1000040350") || msg.includes("exceed_conn_limit")) {
-        const backoffMs = 3000 + Math.floor(Math.random() * 4000);
-        log({ event: "ws_conn_limit_retry", error: msg, backoffMs });
-        setTimeout(() => { try { ws.start({ eventDispatcher: dispatcher }); } catch (e) { log({ event: "ws_retry_failed", error: String(e) }); } }, backoffMs);
-        return;
+      // The transient/terminal/shutdown decision is a PURE, unit-tested helper
+      // (classifyWsError) so this critical "does the gateway survive a blip / restart
+      // on bad creds / stand down cleanly on redeploy" logic isn't untested inline.
+      switch (classifyWsError(err, shuttingDown)) {
+        case "ignore":
+          // We closed the socket on purpose (SIGTERM → wsRef.stop()); the drain owns
+          // the exit. Without this, the teardown error would race exit(1) ahead of
+          // gracefulShutdown → in-flight cards never finalize + a redeploy looks like
+          // a crash (failure exit code).
+          log({ event: "ws_error_during_shutdown", error: msg });
+          return;
+        case "retry": {
+          // exceed_conn_limit (1000040350): a stale peer still holds the app's WS
+          // slot. Exiting would race a supervised restart into the SAME limit → tight
+          // crash-loop, dark throughout. Back off + re-start in-process instead.
+          const backoffMs = 3000 + Math.floor(Math.random() * 4000);
+          log({ event: "ws_conn_limit_retry", error: msg, backoffMs });
+          setTimeout(() => { try { ws.start({ eventDispatcher: dispatcher }); } catch (e) { log({ event: "ws_retry_failed", error: String(e) }); } }, backoffMs);
+          return;
+        }
+        case "exit":
+          log({ event: "ws_terminal_error", error: msg });
+          // Terminal (bad/revoked creds etc.) — don't run dark. Exit so the
+          // supervisor restarts with fresh state.
+          process.exit(1);
       }
-      log({ event: "ws_terminal_error", error: msg });
-      // Terminal (non-retryable) — don't run dark. Exit so the supervisor restarts.
-      process.exit(1);
     },
   });
   wsRef = ws as unknown as { stop?: () => void }; // let gracefulShutdown best-effort stop intake
