@@ -167,16 +167,19 @@ describe("buildChartElements", () => {
     expect(buildChartElements([])).toEqual([]);
   });
 
-  it("forces axis titles VISIBLE so the chart shows axis descriptions (user-reported)", () => {
+  it("forces axis titles VISIBLE + defaults axis type so the chart shows axis descriptions (user-reported)", () => {
     // VChart hides axis titles by default; an agent spec with title.text but no `visible`
-    // rendered a chart with no axis labels. buildChartElements must inject visible:true.
+    // (and no type) rendered a chart with no axis labels. buildChartElements must inject
+    // visible:true and a sensible type-by-orient (Feishu official example carries both).
     const spec = { type: "bar", data: { values: [{ x: "L1", y: 1 }] }, xField: "x", yField: "y",
       axes: [{ orient: "bottom", title: { text: "等级" } }, { orient: "left", title: { text: "攻击力" } }] };
-    const els = buildChartElements([spec]) as Array<{ chart_spec: { axes: Array<{ title: { visible?: boolean; text: string } }> } }>;
+    const els = buildChartElements([spec]) as Array<{ chart_spec: { axes: Array<{ title: { visible?: boolean; text: string }; type?: string }> } }>;
     const ax = els[0].chart_spec.axes;
     expect(ax[0].title.visible).toBe(true);
     expect(ax[0].title.text).toBe("等级");        // text preserved
+    expect(ax[0].type).toBe("band");              // bottom → band (category)
     expect(ax[1].title.visible).toBe(true);
+    expect(ax[1].type).toBe("linear");            // left → linear (value)
   });
 });
 
@@ -185,6 +188,18 @@ describe("ensureAxisTitlesVisible", () => {
     const out = ensureAxisTitlesVisible({ type: "bar", axes: [{ orient: "bottom", title: { visible: false, text: "x" } }] }) as
       { axes: Array<{ title: { visible: boolean } }> };
     expect(out.axes[0].title.visible).toBe(false);
+  });
+
+  it("respects an explicit axis type (only defaults when omitted)", () => {
+    const out = ensureAxisTitlesVisible({ type: "bar", axes: [{ orient: "bottom", type: "time", title: { text: "t" } }] }) as
+      { axes: Array<{ type: string }> };
+    expect(out.axes[0].type).toBe("time");        // explicit type kept, not overwritten with band
+  });
+
+  it("does NOT default type for top/right axes (only bottom→band, left→linear)", () => {
+    const out = ensureAxisTitlesVisible({ type: "bar", axes: [{ orient: "right", title: { text: "y2" } }] }) as
+      { axes: Array<{ type?: string }> };
+    expect(out.axes[0].type).toBeUndefined();
   });
 
   it("leaves an axis with no title text untouched (no empty title box)", () => {
