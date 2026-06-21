@@ -83,9 +83,9 @@ codegraph 索引吃内存、随仓库增大而增长，按仓库规模选机型�
    「凭证与基础信息」页记下 `App ID`（`cli_...`）和 `App Secret`。
 2. **权限（scope）**：在「权限管理」开通以下（少一个都会让对应功能静默失败）：
    - `im:message`、`im:message.group_at_msg`（读群里 @ 机器人的消息）；
-   - `im:message:send_as_bot`（以机器人身份发消息 / 回复，调 `im/v1/messages`）；
-   - `im:resource`（消息表情回应——网关用「处理中」表情标记正在应答，调 reaction 接口）；
-   - **CardKit 卡片**：开通卡片相关权限（搜索「卡片」开通互动卡片/卡片实例相关 scope，对应 `cardkit/v1/cards` 接口；
+   - `im:message:send_as_bot`（以机器人身份发消息 / 回复 / 加「处理中」表情，调 `im/v1/messages`
+     及其 `reactions` 子接口——表情回应由消息收发权限覆盖，无需单独的资源 scope）；
+   - **CardKit 卡片**：开通卡片相关权限（在「权限管理」搜「卡片」，按 `cardkit/v1/cards` 接口的实际依赖项勾选；
      缺它则卡片建不出来）。
 3. **事件订阅**：启用**长连接**模式（不是 webhook——本系统是长驻订阅，不暴露公网回调）。订阅这两个事件：
    - `im.message.receive_v1`（收到群消息）
