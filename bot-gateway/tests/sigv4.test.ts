@@ -9,7 +9,7 @@
 import { buildInvokeRequest, signInvoke, MIN_SESSION_ID_LEN, classifyInvokeOutcome, isTurnCapError } from "../src/sigv4";
 
 const RUNTIME_ARN =
-  "arn:aws:bedrock-agentcore:ap-northeast-1:557690613480:runtime/source_truth_agent-3nxWGkGA86";
+  "arn:aws:bedrock-agentcore:ap-northeast-1:000000000000:runtime/source_truth_agent-test";
 
 // AgentCore requires runtimeSessionId >= 33 chars; a real randomUUID (36) is the
 // production value, so tests use a valid-length id (UUID-shaped literal).

@@ -20,46 +20,240 @@
   "widgets": [
     {
       "type": "text",
-      "x": 0, "y": 0, "width": 24, "height": 2,
+      "x": 0,
+      "y": 0,
+      "width": 24,
+      "height": 2,
       "properties": {
-        "markdown": "# source-truth · SRE / 健康看板\n延迟分位、失败分布、中止率、卡片健康。延迟看 **p95/p99 不看平均**。失败与中止分开（中止=用户主动停，非故障）。"
+        "markdown": "# source-truth · SRE / 健康看板\n**顶部为告警状态**（红=触发）。下方：延迟分位（看 **p95/p99 不看平均**）、成败/中止、卡片健康、取证深度、冷启动。失败与中止分开（中止=用户主动停，非故障）。全链路排障见底部 TraceID 区。"
+      }
+    },
+    {
+      "type": "alarm",
+      "x": 0,
+      "y": 2,
+      "width": 24,
+      "height": 3,
+      "properties": {
+        "title": "🚨 告警状态（4 条：竞泄复发 / 冻卡 / 失败突增 / 日志管道存活）",
+        "alarms": [
+          "arn:aws:cloudwatch:${REGION}:${ACCOUNT_ID}:alarm:source-truth-ToolcallLeakDetected",
+          "arn:aws:cloudwatch:${REGION}:${ACCOUNT_ID}:alarm:source-truth-FinalizeFailed",
+          "arn:aws:cloudwatch:${REGION}:${ACCOUNT_ID}:alarm:source-truth-AnswerFailedBurst",
+          "arn:aws:cloudwatch:${REGION}:${ACCOUNT_ID}:alarm:source-truth-LogPipelineStalled"
+        ],
+        "sortBy": "stateUpdatedTimestamp",
+        "states": [
+          "ALARM"
+        ]
+      }
+    },
+    {
+      "type": "text",
+      "x": 0,
+      "y": 5,
+      "width": 24,
+      "height": 3,
+      "properties": {
+        "markdown": "## 关键体感指标（实时）\n下面三块单值卡：成功率（成功/提问）、P95 总延迟、P95 首字延迟——一眼看健康。"
       }
     },
     {
       "type": "metric",
-      "x": 0, "y": 2, "width": 12, "height": 6,
+      "x": 0,
+      "y": 8,
+      "width": 8,
+      "height": 4,
+      "properties": {
+        "title": "成功率（成功 / 提问）",
+        "region": "${REGION}",
+        "view": "singleValue",
+        "period": 3600,
+        "sparkline": true,
+        "yAxis": {
+          "left": {
+            "min": 0,
+            "max": 1,
+            "showUnits": false
+          }
+        },
+        "metrics": [
+          [
+            "${NAMESPACE}",
+            "AnswerCompleted",
+            {
+              "id": "scok",
+              "visible": false,
+              "stat": "Sum"
+            }
+          ],
+          [
+            "${NAMESPACE}",
+            "QuestionsReceived",
+            {
+              "id": "scq",
+              "visible": false,
+              "stat": "Sum"
+            }
+          ],
+          [
+            {
+              "expression": "scok / scq",
+              "label": "成功率",
+              "id": "scr"
+            }
+          ]
+        ]
+      }
+    },
+    {
+      "type": "metric",
+      "x": 8,
+      "y": 8,
+      "width": 8,
+      "height": 4,
+      "properties": {
+        "title": "P95 总延迟",
+        "region": "${REGION}",
+        "view": "singleValue",
+        "period": 3600,
+        "sparkline": true,
+        "metrics": [
+          [
+            "${NAMESPACE}",
+            "AnswerLatencyMs",
+            {
+              "label": "p95 ms",
+              "stat": "p95"
+            }
+          ]
+        ]
+      }
+    },
+    {
+      "type": "metric",
+      "x": 16,
+      "y": 8,
+      "width": 8,
+      "height": 4,
+      "properties": {
+        "title": "P95 首字延迟（体感）",
+        "region": "${REGION}",
+        "view": "singleValue",
+        "period": 3600,
+        "sparkline": true,
+        "metrics": [
+          [
+            "${NAMESPACE}",
+            "FirstTokenMs",
+            {
+              "label": "p95 ms",
+              "stat": "p95"
+            }
+          ]
+        ]
+      }
+    },
+    {
+      "type": "metric",
+      "x": 0,
+      "y": 12,
+      "width": 12,
+      "height": 6,
       "properties": {
         "title": "总延迟分位（p50 / p95 / p99）",
         "region": "${REGION}",
         "view": "timeSeries",
         "period": 300,
-        "yAxis": {"left": {"label": "ms", "showUnits": false, "min": 0}},
+        "yAxis": {
+          "left": {
+            "label": "ms",
+            "showUnits": false,
+            "min": 0
+          }
+        },
         "metrics": [
-          ["${NAMESPACE}", "AnswerLatencyMs", {"label": "p50", "stat": "p50", "color": "#2ca02c"}],
-          ["...", {"label": "p95", "stat": "p95", "color": "#ff7f0e"}],
-          ["...", {"label": "p99", "stat": "p99", "color": "#d62728"}]
+          [
+            "${NAMESPACE}",
+            "AnswerLatencyMs",
+            {
+              "label": "p50",
+              "stat": "p50",
+              "color": "#2ca02c"
+            }
+          ],
+          [
+            "...",
+            {
+              "label": "p95",
+              "stat": "p95",
+              "color": "#ff7f0e"
+            }
+          ],
+          [
+            "...",
+            {
+              "label": "p99",
+              "stat": "p99",
+              "color": "#d62728"
+            }
+          ]
         ]
       }
     },
     {
       "type": "metric",
-      "x": 12, "y": 2, "width": 12, "height": 6,
+      "x": 12,
+      "y": 12,
+      "width": 12,
+      "height": 6,
       "properties": {
         "title": "首字延迟分位（p50 / p95 / p99）— 体感关键",
         "region": "${REGION}",
         "view": "timeSeries",
         "period": 300,
-        "yAxis": {"left": {"label": "ms", "showUnits": false, "min": 0}},
+        "yAxis": {
+          "left": {
+            "label": "ms",
+            "showUnits": false,
+            "min": 0
+          }
+        },
         "metrics": [
-          ["${NAMESPACE}", "FirstTokenMs", {"label": "p50", "stat": "p50", "color": "#2ca02c"}],
-          ["...", {"label": "p95", "stat": "p95", "color": "#ff7f0e"}],
-          ["...", {"label": "p99", "stat": "p99", "color": "#d62728"}]
+          [
+            "${NAMESPACE}",
+            "FirstTokenMs",
+            {
+              "label": "p50",
+              "stat": "p50",
+              "color": "#2ca02c"
+            }
+          ],
+          [
+            "...",
+            {
+              "label": "p95",
+              "stat": "p95",
+              "color": "#ff7f0e"
+            }
+          ],
+          [
+            "...",
+            {
+              "label": "p99",
+              "stat": "p99",
+              "color": "#d62728"
+            }
+          ]
         ]
       }
     },
     {
       "type": "metric",
-      "x": 0, "y": 8, "width": 12, "height": 6,
+      "x": 0,
+      "y": 18,
+      "width": 12,
+      "height": 6,
       "properties": {
         "title": "失败分布 by reason（仅真故障，不含中止）",
         "region": "${REGION}",
@@ -68,13 +262,22 @@
         "period": 300,
         "stat": "Sum",
         "metrics": [
-          [{"expression": "SEARCH('{${NAMESPACE},reason} MetricName=\"AnswerFailed\"', 'Sum', 300)", "label": "", "id": "fails"}]
+          [
+            {
+              "expression": "SEARCH('{${NAMESPACE},reason} MetricName=\"AnswerFailed\"', 'Sum', 300)",
+              "label": "",
+              "id": "fails"
+            }
+          ]
         ]
       }
     },
     {
       "type": "metric",
-      "x": 12, "y": 8, "width": 12, "height": 6,
+      "x": 12,
+      "y": 18,
+      "width": 12,
+      "height": 6,
       "properties": {
         "title": "成功 / 失败 / 中止（计数）",
         "region": "${REGION}",
@@ -82,15 +285,39 @@
         "period": 300,
         "stat": "Sum",
         "metrics": [
-          ["${NAMESPACE}", "AnswerCompleted", {"label": "成功", "color": "#2ca02c"}],
-          ["${NAMESPACE}", "AnswerFailedTotal", {"label": "失败（合计）", "color": "#d62728"}],
-          ["${NAMESPACE}", "AnswerAborted", {"label": "中止（用户停止）", "color": "#7f7f7f"}]
+          [
+            "${NAMESPACE}",
+            "AnswerCompleted",
+            {
+              "label": "成功",
+              "color": "#2ca02c"
+            }
+          ],
+          [
+            "${NAMESPACE}",
+            "AnswerFailedTotal",
+            {
+              "label": "失败（合计）",
+              "color": "#d62728"
+            }
+          ],
+          [
+            "${NAMESPACE}",
+            "AnswerAborted",
+            {
+              "label": "中止（用户停止）",
+              "color": "#7f7f7f"
+            }
+          ]
         ]
       }
     },
     {
       "type": "metric",
-      "x": 0, "y": 14, "width": 12, "height": 6,
+      "x": 0,
+      "y": 24,
+      "width": 12,
+      "height": 6,
       "properties": {
         "title": "卡片健康 by kind（泄漏剥离 / 冻卡 / 双答 / 幂等重发 / 心跳停滞）",
         "region": "${REGION}",
@@ -99,111 +326,339 @@
         "period": 300,
         "stat": "Sum",
         "metrics": [
-          [{"expression": "SEARCH('{${NAMESPACE},kind} MetricName=\"CardHealth\"', 'Sum', 300)", "label": "", "id": "health"}]
+          [
+            {
+              "expression": "SEARCH('{${NAMESPACE},kind} MetricName=\"CardHealth\"', 'Sum', 300)",
+              "label": "",
+              "id": "health"
+            }
+          ]
         ]
       }
     },
     {
       "type": "metric",
-      "x": 12, "y": 14, "width": 12, "height": 6,
+      "x": 12,
+      "y": 24,
+      "width": 12,
+      "height": 6,
       "properties": {
         "title": "工具调用/答（取证强度）、工具错误、澄清触发",
         "region": "${REGION}",
         "view": "timeSeries",
         "period": 300,
         "metrics": [
-          ["${NAMESPACE}", "ToolCalls", {"label": "平均工具调用/答", "stat": "Average", "color": "#1f77b4"}],
-          ["${NAMESPACE}", "TurnCount", {"label": "平均循环轮次/答", "stat": "Average", "color": "#9467bd"}],
-          ["${NAMESPACE}", "ToolErrors", {"label": "工具错误数(已恢复)", "stat": "Sum", "color": "#d62728"}],
-          ["${NAMESPACE}", "ClarifyShown", {"label": "澄清触发数", "stat": "Sum", "color": "#bcbd22", "yAxis": "right"}]
+          [
+            "${NAMESPACE}",
+            "ToolCalls",
+            {
+              "label": "平均工具调用/答",
+              "stat": "Average",
+              "color": "#1f77b4"
+            }
+          ],
+          [
+            "${NAMESPACE}",
+            "TurnCount",
+            {
+              "label": "平均循环轮次/答",
+              "stat": "Average",
+              "color": "#9467bd"
+            }
+          ],
+          [
+            "${NAMESPACE}",
+            "ToolErrors",
+            {
+              "label": "工具错误数(已恢复)",
+              "stat": "Sum",
+              "color": "#d62728"
+            }
+          ],
+          [
+            "${NAMESPACE}",
+            "ClarifyShown",
+            {
+              "label": "澄清触发数",
+              "stat": "Sum",
+              "color": "#bcbd22",
+              "yAxis": "right"
+            }
+          ]
         ]
       }
     },
     {
       "type": "metric",
-      "x": 0, "y": 20, "width": 12, "height": 6,
+      "x": 0,
+      "y": 30,
+      "width": 12,
+      "height": 6,
       "properties": {
         "title": "冷启动：频率（次数）与占比",
         "region": "${REGION}",
         "view": "timeSeries",
         "period": 3600,
         "metrics": [
-          ["${NAMESPACE}", "RuntimeColdStarts", {"id": "cold", "label": "冷启动次数", "stat": "Sum", "color": "#17becf"}],
-          ["${NAMESPACE}", "QuestionsReceived", {"id": "q", "visible": false, "stat": "Sum"}],
-          [{"expression": "cold / q", "label": "冷启动占比", "id": "coldRate", "color": "#d62728", "yAxis": "right"}]
+          [
+            "${NAMESPACE}",
+            "RuntimeColdStarts",
+            {
+              "id": "cold",
+              "label": "冷启动次数",
+              "stat": "Sum",
+              "color": "#17becf"
+            }
+          ],
+          [
+            "${NAMESPACE}",
+            "QuestionsReceived",
+            {
+              "id": "q",
+              "visible": false,
+              "stat": "Sum"
+            }
+          ],
+          [
+            {
+              "expression": "cold / q",
+              "label": "冷启动占比",
+              "id": "coldRate",
+              "color": "#d62728",
+              "yAxis": "right"
+            }
+          ]
         ],
-        "yAxis": {"right": {"min": 0, "max": 1, "label": "占比", "showUnits": false}}
+        "yAxis": {
+          "right": {
+            "min": 0,
+            "max": 1,
+            "label": "占比",
+            "showUnits": false
+          }
+        }
       }
     },
     {
       "type": "metric",
-      "x": 12, "y": 20, "width": 12, "height": 6,
+      "x": 12,
+      "y": 30,
+      "width": 12,
+      "height": 6,
       "properties": {
         "title": "冷启动耗时分位（microVM spin-up 折进首字，p50/p95）— 与暖启动延迟分开",
         "region": "${REGION}",
         "view": "timeSeries",
         "period": 3600,
-        "yAxis": {"left": {"label": "ms", "showUnits": false, "min": 0}},
+        "yAxis": {
+          "left": {
+            "label": "ms",
+            "showUnits": false,
+            "min": 0
+          }
+        },
         "metrics": [
-          ["${NAMESPACE}", "RuntimeColdStartMs", {"label": "p50", "stat": "p50", "color": "#2ca02c"}],
-          ["...", {"label": "p95", "stat": "p95", "color": "#ff7f0e"}]
+          [
+            "${NAMESPACE}",
+            "RuntimeColdStartMs",
+            {
+              "label": "p50",
+              "stat": "p50",
+              "color": "#2ca02c"
+            }
+          ],
+          [
+            "...",
+            {
+              "label": "p95",
+              "stat": "p95",
+              "color": "#ff7f0e"
+            }
+          ]
         ]
       }
     },
     {
       "type": "metric",
-      "x": 0, "y": 26, "width": 12, "height": 6,
+      "x": 0,
+      "y": 36,
+      "width": 12,
+      "height": 6,
       "properties": {
         "title": "成功率 / 失败率（占提问；体感质量底线）",
         "region": "${REGION}",
         "view": "timeSeries",
         "period": 3600,
-        "yAxis": {"left": {"min": 0, "max": 1, "label": "占比", "showUnits": false}},
+        "yAxis": {
+          "left": {
+            "min": 0,
+            "max": 1,
+            "label": "占比",
+            "showUnits": false
+          }
+        },
         "metrics": [
-          ["${NAMESPACE}", "AnswerCompleted", {"id": "ok", "visible": false, "stat": "Sum"}],
-          ["${NAMESPACE}", "AnswerFailedTotal", {"id": "fl", "visible": false, "stat": "Sum"}],
-          ["${NAMESPACE}", "QuestionsReceived", {"id": "qq", "visible": false, "stat": "Sum"}],
-          [{"expression": "ok / qq", "label": "成功率", "id": "okr", "color": "#2ca02c"}],
-          [{"expression": "fl / qq", "label": "失败率", "id": "flr", "color": "#d62728"}]
+          [
+            "${NAMESPACE}",
+            "AnswerCompleted",
+            {
+              "id": "ok",
+              "visible": false,
+              "stat": "Sum"
+            }
+          ],
+          [
+            "${NAMESPACE}",
+            "AnswerFailedTotal",
+            {
+              "id": "fl",
+              "visible": false,
+              "stat": "Sum"
+            }
+          ],
+          [
+            "${NAMESPACE}",
+            "QuestionsReceived",
+            {
+              "id": "qq",
+              "visible": false,
+              "stat": "Sum"
+            }
+          ],
+          [
+            {
+              "expression": "ok / qq",
+              "label": "成功率",
+              "id": "okr",
+              "color": "#2ca02c"
+            }
+          ],
+          [
+            {
+              "expression": "fl / qq",
+              "label": "失败率",
+              "id": "flr",
+              "color": "#d62728"
+            }
+          ]
         ]
       }
     },
     {
       "type": "metric",
-      "x": 12, "y": 26, "width": 12, "height": 6,
+      "x": 12,
+      "y": 36,
+      "width": 12,
+      "height": 6,
       "properties": {
         "title": "取证深度：平均证据数/答 与 平均工具调用/答",
         "region": "${REGION}",
         "view": "timeSeries",
         "period": 3600,
         "metrics": [
-          ["${NAMESPACE}", "EvidenceCitations", {"label": "平均证据数/答", "stat": "Average", "color": "#9467bd"}],
-          ["${NAMESPACE}", "ToolCalls", {"label": "平均工具调用/答", "stat": "Average", "color": "#1f77b4"}],
-          ["${NAMESPACE}", "TurnCount", {"label": "平均轮次/答", "stat": "Average", "color": "#17becf", "yAxis": "right"}]
+          [
+            "${NAMESPACE}",
+            "EvidenceCitations",
+            {
+              "label": "平均证据数/答",
+              "stat": "Average",
+              "color": "#9467bd"
+            }
+          ],
+          [
+            "${NAMESPACE}",
+            "ToolCalls",
+            {
+              "label": "平均工具调用/答",
+              "stat": "Average",
+              "color": "#1f77b4"
+            }
+          ],
+          [
+            "${NAMESPACE}",
+            "TurnCount",
+            {
+              "label": "平均轮次/答",
+              "stat": "Average",
+              "color": "#17becf",
+              "yAxis": "right"
+            }
+          ]
         ],
-        "yAxis": {"left": {"min": 0, "showUnits": false}, "right": {"min": 0, "label": "轮次", "showUnits": false}}
+        "yAxis": {
+          "left": {
+            "min": 0,
+            "showUnits": false
+          },
+          "right": {
+            "min": 0,
+            "label": "轮次",
+            "showUnits": false
+          }
+        }
       }
     },
     {
       "type": "metric",
-      "x": 0, "y": 32, "width": 24, "height": 6,
+      "x": 0,
+      "y": 42,
+      "width": 24,
+      "height": 6,
       "properties": {
         "title": "延迟均值 vs 分位（均值被异常值拉偏的程度；社区共识盯分位）",
         "region": "${REGION}",
         "view": "timeSeries",
         "period": 3600,
-        "yAxis": {"left": {"label": "ms", "showUnits": false, "min": 0}},
+        "yAxis": {
+          "left": {
+            "label": "ms",
+            "showUnits": false,
+            "min": 0
+          }
+        },
         "metrics": [
-          ["${NAMESPACE}", "AnswerLatencyMs", {"label": "均值", "stat": "Average", "color": "#aec7e8"}],
-          ["...", {"label": "p50", "stat": "p50", "color": "#2ca02c"}],
-          ["...", {"label": "p95", "stat": "p95", "color": "#ff7f0e"}],
-          ["...", {"label": "p99", "stat": "p99", "color": "#d62728"}]
+          [
+            "${NAMESPACE}",
+            "AnswerLatencyMs",
+            {
+              "label": "均值",
+              "stat": "Average",
+              "color": "#aec7e8"
+            }
+          ],
+          [
+            "...",
+            {
+              "label": "p50",
+              "stat": "p50",
+              "color": "#2ca02c"
+            }
+          ],
+          [
+            "...",
+            {
+              "label": "p95",
+              "stat": "p95",
+              "color": "#ff7f0e"
+            }
+          ],
+          [
+            "...",
+            {
+              "label": "p99",
+              "stat": "p99",
+              "color": "#d62728"
+            }
+          ]
         ]
       }
     },
     {
       "type": "text",
-      "x": 0, "y": 38, "width": 24, "height": 5,
+      "x": 0,
+      "y": 48,
+      "width": 24,
+      "height": 5,
       "properties": {
         "markdown": "## 🔍 按 TraceID 查全链路日志（网关 + agent 两侧合并）\nTraceID 在飞书卡片底部；网关与 agent microVM 两侧日志统一用 `traceId` 串联。\n\n**最省事（推荐，输入 traceId 一个参数即可，其余全自动）：**\n```\n./scripts/trace.sh st-xxxx\n```\n区域、两个 log group（agent 组按 runtime 自动发现）、时间窗、查询、按时间合并——全部自动包装；输出标 `GW`/`AGT` 来源并抽取 latency/工具数/出处数/错误等关键字段。\n\n**控制台手查**：[打开 Logs Insights](https://${REGION}.console.aws.amazon.com/cloudwatch/home?region=${REGION}#logsV2:logs-insights) → 勾选 `/source-truth/bot-gateway` + `/aws/bedrock-agentcore/runtimes/<runtime>-DEFAULT`，把 `st-xxxx` 换成你的 traceId 运行：\n```\nfields @timestamp, @logStream, event, @message | filter @message like /st-xxxx/ | sort @timestamp asc\n```"
       }

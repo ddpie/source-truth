@@ -14,8 +14,8 @@
  * Thin shell: logic lives in handle-event / sdk-event / sigv4 (unit-tested).
  *
  * Env:
- *   RUNTIME_ARN         AgentCore runtime ARN (Tokyo)
- *   AWS_REGION          default ap-northeast-1
+ *   RUNTIME_ARN         AgentCore runtime ARN (any region)
+ *   AWS_REGION          region; falls back to AWS_DEFAULT_REGION, then the RUNTIME_ARN's region
  *   FEISHU_APP_ID       app id (for the SDK long-connection)
  *   FEISHU_APP_SECRET   app secret
  */
@@ -52,8 +52,17 @@ import { emitMetric, type FailReason } from "./metrics";
 import { isDuplicate, forget } from "./dedup";
 import { loadProjectsConfig, resolveRoute, ProjectsConfigMissing, type ProjectsConfig, type ResolvedRoute } from "./project-routing";
 
-const REGION = process.env.AWS_REGION ?? "ap-northeast-1";
 const RUNTIME_ARN = process.env.RUNTIME_ARN ?? "";
+// Region: AWS_REGION (deploy sets it) → AWS_DEFAULT_REGION → derived from the RUNTIME_ARN
+// (arn:aws:bedrock-agentcore:<region>:...). NEVER hardcode a region default — this ships to
+// customer accounts in any region, and a wrong silent default (e.g. Tokyo) would point the
+// gateway at the wrong regional endpoint. The ARN-derived fallback is correct by construction
+// (the runtime we invoke IS in that region); empty only if the ARN is also missing, which
+// the RUNTIME_ARN validation below already fails on.
+const REGION = process.env.AWS_REGION
+  ?? process.env.AWS_DEFAULT_REGION
+  ?? RUNTIME_ARN.split(":")[3]
+  ?? "";
 const APP_ID = process.env.FEISHU_APP_ID ?? "";
 // Which project THIS gateway serves (multi-repo plan 阶段1). Optional: unset + a sole
 // declared project = that project (today's single-project deploy needs no env). Bound by
