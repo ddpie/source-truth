@@ -346,6 +346,24 @@ describe("follow-up buttons (clickable, with element_id)", () => {
     expect(buttons[1].element_id).toBe("followup_1");
   });
 
+  it("carries card_id in the value when given (so the click callback can disable the button)", () => {
+    const els = buildFollowUpElements(["Q1"], [{ kind: "retry", text: "Q", label: "重试" }], "card_FU");
+    const buttons = els.filter((e) => (e as { tag: string }).tag === "button") as Array<{
+      value: { action: string; card_id?: string };
+    }>;
+    expect(buttons.length).toBeGreaterThanOrEqual(2);
+    expect(buttons.every((b) => b.value.action === "follow_up" && b.value.card_id === "card_FU")).toBe(true);
+  });
+
+  it("clarify option buttons carry card_id too", () => {
+    const els = buildClarifyElements("Q?", ["opt A", "opt B"], "card_CL");
+    const buttons = els.filter((e) => (e as { tag: string }).tag === "button") as Array<{
+      value: { action: string; card_id?: string };
+    }>;
+    expect(buttons).toHaveLength(2);
+    expect(buttons.every((b) => b.value.card_id === "card_CL")).toBe(true);
+  });
+
   it("renders a retry ACTION button (fresh=true) before follow-ups", () => {
     const els = buildFollowUpElements([], [{ kind: "retry", text: "负重上限怎么算？", label: "重新试一次" }]);
     const buttons = els.filter((e) => (e as { tag: string }).tag === "button") as Array<{
