@@ -18,8 +18,14 @@ if [[ ! -f "$ENV_FILE" ]]; then
   echo "run.sh FATAL: $ENV_FILE missing — the deploy's gateway phase writes it after the runtime exists" >&2
   exit 1
 fi
+# `set -a` so EVERY var the env file defines is EXPORTED into the environment, not just set
+# as a shell var — otherwise `exec node` below runs with them absent and the gateway dies with
+# "RUNTIME_ARN env is required" even though the file has it (the :? checks pass on the shell var,
+# masking it). set +a right after to scope the auto-export to just the file.
+set -a
 # shellcheck disable=SC1090
 source "$ENV_FILE"
+set +a
 
 : "${RUNTIME_ARN:?run.sh FATAL: RUNTIME_ARN unset in $ENV_FILE}"
 : "${AWS_REGION:?run.sh FATAL: AWS_REGION unset in $ENV_FILE}"
