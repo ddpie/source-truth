@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# provision_index_service.sh <region> <config> <bucket> <repo_subdir> <max_files> <instance_type> [refresh]
-# Idempotent ARM EC2 (Ubuntu 24.04 — glibc 2.39 for codegraph-server) in the
-# private subnet, running index-service/bootstrap.sh as user-data. Prints the
-# instance's private IP on stdout (the only stdout line; logs go to stderr).
+# provision_index_service.sh <region> <config> <bucket> <max_files> <instance_type> [refresh] [root_volume_gb]
+# Provisions the BASE index host only — an idempotent ARM EC2 (Ubuntu 24.04, glibc 2.39 for
+# codegraph-server) in the private subnet running index-service/bootstrap.sh as user-data. Binds
+# NO project (projects are attached later by activate_project.sh over SSM). Prints the instance's
+# private IP on stdout (the only stdout line; logs go to stderr).
 #
-# Security: index-svc SG accepts 8080 from the VPC; the runtime reaches it over
-# the private network. No EFS (the repo copy is local to this instance).
+# Security: index-svc SG accepts the bridge port RANGE (8080-8099) from the VPC — one port per
+# project (multiple projects share this host, each bridge on its own port). The runtime reaches
+# its project's bridge over the private network. No EFS (each repo copy is local to this instance).
 #
 # refresh (7th arg, "true"/"false", default false): when true, a reused instance
 # whose bootstrapped artifacts are STALE (S3 tarballs re-staged since it booted)
@@ -15,36 +17,33 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 source "$SCRIPT_DIR/common.sh"; source "$SCRIPT_DIR/env-utils.sh"
-REGION="$1"; CONFIG="$2"; BUCKET="$3"; REPO_SUBDIR="$4"; MAX_FILES="$5"; ITYPE="$6"; REFRESH="${7:-false}"; ROOT_VOLUME_GB="${8:-30}"
+REGION="$1"; CONFIG="$2"; BUCKET="$3"; MAX_FILES="$4"; ITYPE="$5"; REFRESH="${6:-false}"; ROOT_VOLUME_GB="${7:-30}"
 safe_source_env "$CONFIG"
 Q() { aws ec2 "$@" --region "$REGION"; }
 QS() { aws s3api "$@" --region "$REGION"; }
 log() { say "$@" >&2; }
 
-# A signature of the artifacts an instance would bootstrap from: the ETags of the
-# index-service code tarball + the repo tarball in S3. If either changed since an
-# instance booted, that instance is serving STALE code/index. ETag is S3's
-# content hash, so this changes iff the staged content changed.
+# A signature of the BASE-HOST artifacts an instance bootstraps from: the ETags of the
+# index-service code tarball + the bot-gateway tarball in S3. Repos are NO LONGER part of
+# this — they arrive via git (activate_project.sh git-clones + a refresh timer git-pulls),
+# so a repo change is picked up live and never requires replacing the host. The host is
+# replaced (--refresh-index) only when the BASE CODE (bridge / gateway / its deps) changes.
+# ETag is S3's content hash, so this changes iff the staged base code changed.
 artifact_signature() {
-  local idx repo gw
+  local idx gw
   idx="$(QS head-object --bucket "$BUCKET" --key index-service.tar.gz --query ETag --output text 2>/dev/null || echo none)"
-  repo="$(QS head-object --bucket "$BUCKET" --key "${REPO_SUBDIR}.tar.gz" --query ETag --output text 2>/dev/null || echo none)"
-  # bot-gateway runs ON this instance now, so its tarball is part of what a fresh
-  # bootstrap installs — include it so a gateway-only code change is detected as
-  # STALE and (with --refresh-index) replaces the instance. Absent (backend-only
-  # deploy) → "none", stable, so it doesn't perturb the signature.
+  # bot-gateway runs ON this instance, so its tarball is part of what a fresh bootstrap
+  # installs — include it so a gateway-only code change is detected as STALE and (with
+  # --refresh-index) replaces the instance. Absent (backend-only) → "none", stable.
   gw="$(QS head-object --bucket "$BUCKET" --key bot-gateway.tar.gz --query ETag --output text 2>/dev/null || echo none)"
-  # S3 returns ETags WITH literal surrounding double-quotes (e.g. "abc123"). They
-  # must be stripped before this value lands in the run-instances
-  # --tag-specifications SHORTHAND: a Value= starting with `"` makes the shorthand
-  # parser terminate the string at the closing quote, then choke on the `|`
-  # separator (ParamValidation: Expected ','), which under set -e aborts the whole
-  # fresh launch. Strip quotes so the joined signature is a plain, parseable,
-  # human-readable tag value. Comparison stays consistent (both sides quote-free).
+  # S3 returns ETags WITH literal surrounding double-quotes (e.g. "abc123"). Strip them
+  # before this lands in the run-instances --tag-specifications SHORTHAND: a Value= starting
+  # with `"` makes the shorthand parser terminate at the closing quote, then choke on the `|`
+  # separator (ParamValidation), aborting the launch under set -e. Quote-free both sides keeps
+  # the comparison consistent.
   idx="${idx//\"/}"
-  repo="${repo//\"/}"
   gw="${gw//\"/}"
-  echo "${idx}|${repo}|${gw}"
+  echo "${idx}|${gw}"
 }
 
 # Authorize an ingress rule idempotently: tolerate ONLY the benign "rule already
@@ -66,14 +65,14 @@ authorize_ingress() { # <description> <args...>
   fi
 }
 
-# Reconcile the index-service SG's :8080-from-VPC ingress rule. Run on EVERY
-# invocation and BOTH paths (reuse + fresh), because the rule's absence is
-# invisible to every downstream gate (the /health probe is loopback-only). A
-# prior interrupted run, manual cleanup, or SG-rule drift could leave the rule
-# missing on an otherwise-running instance; the reuse path must repair it too.
+# Reconcile the index-service SG's bridge-port-RANGE-from-VPC ingress rule. One port per project
+# (8080-8099), so the rule is a range, not a single port. Run on EVERY invocation and BOTH paths
+# (reuse + fresh): the rule's absence is invisible to every downstream gate (the /health probe is
+# loopback-only). A prior interrupted run, manual cleanup, or SG-rule drift could leave it missing
+# on an otherwise-running instance; the reuse path must repair it too. Idempotent (Duplicate ok).
 reconcile_index_sg_ingress() { # <sg>
-  authorize_ingress ":8080 from VPC on $1" \
-    --group-id "$1" --protocol tcp --port 8080 --cidr "${VPC_CIDR:-10.1.0.0/16}"
+  authorize_ingress ":8080-8099 from VPC on $1" \
+    --group-id "$1" --protocol tcp --port 8080-8099 --cidr "${VPC_CIDR:-10.1.0.0/16}"
 }
 
 # Reuse a running index-service instance if present.
@@ -226,21 +225,8 @@ fi
 aws s3 cp "$ROOT/index-service/bootstrap.sh" "s3://$BUCKET/bootstrap.sh" --region "$REGION" >&2
 # Presign with a long expiry so a delayed cloud-init (or a retry) can still fetch.
 BOOT_URL="$(aws s3 presign "s3://$BUCKET/bootstrap.sh" --region "$REGION" --expires-in 3600)"
-# bootstrap.sh now consumes REPO_MANIFEST_JSON (the project's repo set in ONE JSON value,
-# multi-repo 阶段2) instead of REPO_SUBDIR/ARTIFACT_SIG. Today's single-repo deploy is that
-# manifest with ONE entry — built here from REPO_SUBDIR + this repo's S3 ETag (the same value
-# the artifact signature already strips quotes from). JSON lives inside SINGLE quotes in the
-# env file, so its double-quotes and a multipart ETag's `|` are inert (no shell reparse — the
-# lesson behind using one JSON var, not per-repo shell vars). Build it with python's json so a
-# subdir/ETag with a metacharacter can never break out of the string.
-REPO_ETAG="$(QS head-object --bucket "$BUCKET" --key "${REPO_SUBDIR}.tar.gz" --query ETag --output text 2>/dev/null || echo "")"
-REPO_ETAG="${REPO_ETAG//\"/}"
-# Build the manifest via render_manifest --build — the SINGLE manifest-construction authority
-# (same parser the instance validates with), so an invalid subdir fails LOUD here at deploy,
-# not silently later at bootstrap. One TAB-separated row: subdir<TAB>source<TAB>sig.
-REPO_MANIFEST_JSON="$(printf '%s\t%s\t%s\n' "$REPO_SUBDIR" "s3://staged" "$REPO_ETAG" \
-  | python3 "$SCRIPT_DIR/render_manifest.py" --build)" \
-  || { log err "failed to build REPO_MANIFEST_JSON (invalid repo_subdir=$REPO_SUBDIR?)"; exit 1; }
+# bootstrap.sh sets up the BASE host only (no project). Projects are attached later over SSM by
+# deploy_project.sh → activate_project.sh, so user-data carries NO manifest — just the base env.
 UD="$(cat <<EOF
 #!/bin/bash
 set -e
@@ -248,7 +234,6 @@ cat > /etc/index-service.env <<ENV
 BUCKET='$BUCKET'
 REGION='$REGION'
 MAX_FILES='$MAX_FILES'
-REPO_MANIFEST_JSON='$REPO_MANIFEST_JSON'
 ENV
 for i in 1 2 3 4 5 6; do curl -fsSL "$BOOT_URL" -o /opt/bootstrap.sh && break || sleep 10; done
 bash /opt/bootstrap.sh
