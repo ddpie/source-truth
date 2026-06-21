@@ -789,7 +789,7 @@ sys.exit(0 if subdir in repos else 1)
   fi
   bash "$SCRIPT_DIR/lib/activate_gateway.sh" \
     "$REGION" "$GW_INSTANCE" "$GW_RUNTIME_ARN" "$FEISHU_SECRET_ID" \
-    "${LOCALE:-zh}" "" "${FEISHU_API_BASE:-}" "$IDLE_TIMEOUT" \
+    "${LOCALE:-zh}" "" "${FEISHU_API_BASE:-}" "$IDLE_TIMEOUT" "$BUCKET" \
     || { say err "gateway activation failed — backend is up; fix and re-run (or --skip gateway)"; exit 1; }
   say ok "bot-gateway activated on $GW_INSTANCE (salt fetched host-side by run.sh from Secrets Manager)"
 fi
