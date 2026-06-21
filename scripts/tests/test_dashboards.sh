@@ -9,6 +9,7 @@ RENDER="$ROOT/scripts/lib/render_dashboard.py"
 APPLY="$ROOT/scripts/apply-dashboards.sh"
 PROD="$ROOT/infra/monitoring/dashboard.product.json"
 SRE="$ROOT/infra/monitoring/dashboard.sre.json"
+BYPROJ="$ROOT/infra/monitoring/dashboard.by-project.json"
 
 _run=0 _fail=0
 check() { _run=$((_run+1)); if [[ "$2" -eq 0 ]]; then printf '  ok   %s\n' "$1"; else printf '  FAIL %s\n' "$1"; _fail=$((_fail+1)); fi; }
@@ -25,7 +26,7 @@ TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 # --account-id is always supplied: the SRE template uses ${ACCOUNT_ID} in its alarm-widget
 # ARNs (apply-dashboards.sh resolves it via STS), so a render without it would fail-loud on
 # the unresolved placeholder. A template that doesn't use it just ignores the value.
-for tpl in "$PROD" "$SRE"; do
+for tpl in "$PROD" "$SRE" "$BYPROJ"; do
   name="$(basename "$tpl")"
   out="$(python3 "$RENDER" "$tpl" --region ap-northeast-1 --namespace SourceTruth/Gateway --account-id 000000000000 2>"$TMP/err")"; rc=$?
   check "$name renders (rc 0)" "$rc"
@@ -104,11 +105,17 @@ printf '%s' "$sre_out" | python3 -c 'import json,sys; d=json.load(sys.stdin); w=
 check "TraceID shortcut is a text widget (no live log re-scan)" $?
 # the console link must carry the substituted region (a real deep-link, not a placeholder)
 printf '%s' "$sre_out" | grep -q 'us-east-1.console.aws.amazon.com'; check "TraceID shortcut link has the substituted region" $?
+# --- by-project dashboard groups KPIs by projectId (SEARCH on …ByProject metrics) ---
+bp_out="$(python3 "$RENDER" "$BYPROJ" --region us-east-1 --namespace X/Y --account-id 000000000000)"
+printf '%s' "$bp_out" | grep -q 'projectId' && printf '%s' "$bp_out" | grep -q 'ByProject'
+check "by-project dashboard groups by projectId (…ByProject SEARCH)" $?
+printf '%s' "$bp_out" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert all(w["type"] in ("metric","text") for w in d["widgets"]), "by-project widgets must be metric/text"'
+check "by-project widgets are all metric/text (no type:log)" $?
 
 # --- apply wrapper: --dry-run names both dashboards, no AWS ---
 dry="$("$APPLY" --dry-run --region us-east-1 2>&1)"; rc=$?
 check "apply --dry-run exits 0" "$rc"
-[[ "$dry" == *"product"* && "$dry" == *"sre"* ]]; check "dry-run names both dashboards" $?
+[[ "$dry" == *"product"* && "$dry" == *"sre"* && "$dry" == *"by-project"* ]]; check "dry-run names all three dashboards" $?
 
 # --- apply wrapper: --help and unknown flag ---
 "$APPLY" --help >/dev/null 2>&1; check "apply --help exits 0" $?

@@ -1,0 +1,104 @@
+{
+  "_doc": [
+    "BY-PROJECT dashboard (multi-project breakdown). The product/SRE dashboards show the",
+    "ALL-PROJECT rollup; THIS one cuts the project-VARYING KPIs by projectId so ops can see",
+    "which project drives usage / answers worst / runs slowest. Cross-project infra health",
+    "(alarms, card health, cold start, log pipeline) is NOT here — it isn't project-specific;",
+    "it lives on the SRE dashboard as a single shared view.",
+    "",
+    "Reads the projectId-dimensioned companion metrics (…ByProject, from by-project-metrics.json)",
+    "via SEARCH('{NS,projectId} MetricName=\"…ByProject\"', …) so projects auto-discover — no",
+    "hardcoded project ids. With ONE project today, each panel shows a single series; it fans",
+    "out automatically as projects are added. These metrics are SPARSE (dimensioned) — fine for",
+    "breakdown panels; alarms still watch the dense un-dimensioned rollup on the SRE board.",
+    "",
+    "TEMPLATE — ${REGION}/${NAMESPACE} rendered by render_dashboard.py. Edit the template (源在 git).",
+    "HARD CONSTRAINT: every widget is metric/text — NO type:log Insights widgets (cost)."
+  ],
+  "widgets": [
+    {
+      "type": "text",
+      "x": 0, "y": 0, "width": 24, "height": 2,
+      "properties": {
+        "markdown": "# source-truth · 分项目看板\n按**项目**拆分用量与质量（每条线=一个项目，自动发现）。全项目汇总看 **用量看板**；系统健康/告警/冷启动（非项目相关）看 **SRE 看板**。"
+      }
+    },
+    {
+      "type": "metric",
+      "x": 0, "y": 2, "width": 12, "height": 6,
+      "properties": {
+        "title": "提问量 by 项目（每日）",
+        "region": "${REGION}",
+        "view": "timeSeries",
+        "stacked": false,
+        "period": 86400,
+        "metrics": [
+          [{"expression": "SEARCH('{${NAMESPACE},projectId} MetricName=\"QuestionsReceivedByProject\"', 'Sum', 86400)", "label": "", "id": "qbp"}]
+        ]
+      }
+    },
+    {
+      "type": "metric",
+      "x": 12, "y": 2, "width": 12, "height": 6,
+      "properties": {
+        "title": "成功答数 by 项目（每日）",
+        "region": "${REGION}",
+        "view": "timeSeries",
+        "stacked": false,
+        "period": 86400,
+        "metrics": [
+          [{"expression": "SEARCH('{${NAMESPACE},projectId} MetricName=\"AnswerCompletedByProject\"', 'Sum', 86400)", "label": "", "id": "abp"}]
+        ]
+      }
+    },
+    {
+      "type": "metric",
+      "x": 0, "y": 8, "width": 12, "height": 6,
+      "properties": {
+        "title": "失败答数 by 项目（哪个项目答得差）",
+        "region": "${REGION}",
+        "view": "timeSeries",
+        "stacked": false,
+        "period": 86400,
+        "metrics": [
+          [{"expression": "SEARCH('{${NAMESPACE},projectId} MetricName=\"AnswerFailedByProject\"', 'Sum', 86400)", "label": "", "id": "fbp"}]
+        ]
+      }
+    },
+    {
+      "type": "metric",
+      "x": 12, "y": 8, "width": 12, "height": 6,
+      "properties": {
+        "title": "P95 总延迟 by 项目",
+        "region": "${REGION}",
+        "view": "timeSeries",
+        "period": 3600,
+        "yAxis": {"left": {"label": "ms", "showUnits": false, "min": 0}},
+        "metrics": [
+          [{"expression": "SEARCH('{${NAMESPACE},projectId} MetricName=\"AnswerLatencyMsByProject\"', 'p95', 3600)", "label": "", "id": "lbp"}]
+        ]
+      }
+    },
+    {
+      "type": "metric",
+      "x": 0, "y": 14, "width": 12, "height": 6,
+      "properties": {
+        "title": "P95 首字延迟 by 项目（体感）",
+        "region": "${REGION}",
+        "view": "timeSeries",
+        "period": 3600,
+        "yAxis": {"left": {"label": "ms", "showUnits": false, "min": 0}},
+        "metrics": [
+          [{"expression": "SEARCH('{${NAMESPACE},projectId} MetricName=\"FirstTokenMsByProject\"', 'p95', 3600)", "label": "", "id": "ftbp"}]
+        ]
+      }
+    },
+    {
+      "type": "text",
+      "x": 12, "y": 14, "width": 12, "height": 6,
+      "properties": {
+        "markdown": "### 说明\n- 每条线 = 一个 `projectId`，由 SEARCH 自动发现，新增项目无需改看板。\n- 这些是 **projectId 维度**的指标（`…ByProject`），稀疏、供分组展示；**告警仍盯无维度汇总**（SRE 看板）。\n- 成功率/失败率请在本看板对照「成功答数」「失败答数」与 **用量看板** 的提问量自行比较；按项目的比率合成需要逐项目 metric math（项目集合稳定后再加）。\n- 单项目阶段每图只有一条线，属正常。"
+      }
+    }
+  ]
+}

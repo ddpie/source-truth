@@ -34,9 +34,10 @@ infra/                  Infrastructure as code (MVP starts with agentcore toolki
   monitoring/           Monitoring (CloudWatch side; scripts/boto3, not a CDK stack)
     queries/metric-filters/a-class-metrics.json  Single source of A-class metric intent (counts/percentiles/distributions → metric-filter)
     queries/metric-filters/alarm-metrics.json    Dedicated dense alarm filters (one per card_health kind, defaultValue:0)
+    queries/metric-filters/by-project-metrics.json  projectId-dimensioned KPI companion filters (multi-project breakdown; the un-dimensioned rollup stays in a-class)
     queries/insights/*.logsinsights              B-class dedup/retention Insights queries (DAU etc., paired with a scheduled pre-aggregation Lambda)
     lambda/dau_preaggregate.py                   B-class DAU pre-aggregation Lambda (daily StartQuery→PutMetricData, pure stdlib+boto3)
-    dashboard.product.json / dashboard.sre.json  Dashboard templates (${REGION}/${NAMESPACE} placeholders; product-usage / SRE-health pages)
+    dashboard.product.json / dashboard.sre.json / dashboard.by-project.json  Dashboard templates (${REGION}/${NAMESPACE}/${ACCOUNT_ID} placeholders; product-usage / SRE-health (alarms on top) / by-project pages)
   (p2) lib/             runtime / codegraph(index-service) / gateway stacks
 config/                 Config-driven: i18n.json (card / alarm / error copy), alarm-thresholds.json (alarm thresholds, operator-tunable), projects.example.json (project-routing schema template; the real config lives at .local/projects.json — deployment-specific, gitignored)
 scripts/                Operational lifecycle

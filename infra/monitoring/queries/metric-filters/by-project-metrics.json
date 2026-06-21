@@ -1,0 +1,70 @@
+{
+  "_doc": [
+    "PER-PROJECT metric-filters (multi-repo / multi-project breakdown). These are COMPANIONS",
+    "to the un-dimensioned a-class metrics, NOT replacements: the plain QuestionsReceived etc.",
+    "stay the cheap, dense, all-project ROLLUP (and what the alarms watch); these add a",
+    "projectId dimension so the dashboard can break the same signal down BY project.",
+    "",
+    "WHY separate metric NAMES (…ByProject) instead of adding projectId to the existing ones:",
+    "a CloudWatch metric-filter with `dimensions` CANNOT also set defaultValue (mutually",
+    "exclusive — a dimensioned metric is inherently sparse) and emitting a dimension also",
+    "REMOVES the no-dimension aggregate. Keeping a distinct dimensioned metric preserves BOTH:",
+    "the dense rollup (existing) AND the per-project cut (here). Cost is bounded — only the few",
+    "highest-value KPIs are dimensioned, and projectId is low-cardinality (≤ ~10 projects).",
+    "",
+    "Dashboards read these via SEARCH('{NS,projectId} MetricName=\"…ByProject\"', …) so they",
+    "auto-discover projects without hardcoding ids. Sparse (no defaultValue) — for breakdown",
+    "panels, not alarms; alarms keep watching the dense un-dimensioned rollup.",
+    "",
+    "Apply with: scripts/apply-metric-filters.sh --defs <this file> (same applier/contract)."
+  ],
+  "metricNamespace": "SourceTruth/Gateway",
+  "logGroup": "/source-truth/bot-gateway",
+  "metrics": [
+    {
+      "name": "QuestionsReceivedByProject",
+      "event": "question_received",
+      "filterPattern": "{ $.metric IS TRUE && $.event = \"question_received\" && $.projectId = \"*\" }",
+      "metricValue": "1",
+      "unit": "Count",
+      "dimensions": {"projectId": "$.projectId"},
+      "purpose": "提问量 by 项目（看板按项目分组用；汇总看无维度 QuestionsReceived）"
+    },
+    {
+      "name": "AnswerCompletedByProject",
+      "event": "answer_completed",
+      "filterPattern": "{ $.metric IS TRUE && $.event = \"answer_completed\" && $.projectId = \"*\" }",
+      "metricValue": "1",
+      "unit": "Count",
+      "dimensions": {"projectId": "$.projectId"},
+      "purpose": "成功答数 by 项目"
+    },
+    {
+      "name": "AnswerFailedByProject",
+      "event": "answer_failed",
+      "filterPattern": "{ $.metric IS TRUE && $.event = \"answer_failed\" && $.projectId = \"*\" }",
+      "metricValue": "1",
+      "unit": "Count",
+      "dimensions": {"projectId": "$.projectId"},
+      "purpose": "失败答数 by 项目（哪个项目答得差一眼看出）"
+    },
+    {
+      "name": "AnswerLatencyMsByProject",
+      "event": "answer_completed",
+      "filterPattern": "{ $.metric IS TRUE && $.event = \"answer_completed\" && $.projectId = \"*\" }",
+      "metricValue": "$.latencyMs",
+      "unit": "Milliseconds",
+      "dimensions": {"projectId": "$.projectId"},
+      "purpose": "总延迟 by 项目（分位用 metric 扩展统计 p95/p99）"
+    },
+    {
+      "name": "FirstTokenMsByProject",
+      "event": "answer_first_token",
+      "filterPattern": "{ $.metric IS TRUE && $.event = \"answer_first_token\" && $.projectId = \"*\" }",
+      "metricValue": "$.ttfbMs",
+      "unit": "Milliseconds",
+      "dimensions": {"projectId": "$.projectId"},
+      "purpose": "首字延迟 by 项目（体感关键）"
+    }
+  ]
+}
