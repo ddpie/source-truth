@@ -48,7 +48,7 @@ import { SessionSerializer } from "./serialize-session";
 import { Semaphore } from "./semaphore";
 import { CardWriter } from "./card-writer";
 import { hashUserId } from "./log";
-import { emitMetric, classifyFailure, type FailReason } from "./metrics";
+import { emitMetric, classifyFailure, countEvidenceCitations, type FailReason } from "./metrics";
 import { isDuplicate, forget } from "./dedup";
 import { loadProjectsConfig, resolveRoute, ProjectsConfigMissing, type ProjectsConfig, type ResolvedRoute } from "./project-routing";
 
@@ -1155,7 +1155,7 @@ async function runStreamingInvoke(
       : classifyFailure(error);
     emitMetric("answer_failed", { reason }, { traceId, sessionId, projectId: activeRoute?.projectId });
   } else {
-    const evidenceCitationCount = (finalEvidence.match(/[\w./-]+\.[A-Za-z0-9]+:\d+/g) || []).length;
+    const evidenceCitationCount = countEvidenceCitations(finalEvidence);
     emitMetric("answer_completed", {
       latencyMs: timing.totalMs,
       ttfbMs: timing.ttfbMs,
