@@ -6,7 +6,7 @@
 #   ./scripts/test.sh --lint     仅结构自检（check-invariants）
 #   ./scripts/test.sh --unit     仅 shell 单元测试（scripts/tests/test_*.sh）
 #   ./scripts/test.sh --list     列出发现的 unit 测试文件后退出
-#   ./scripts/test.sh --full     离线套件 + smoke/e2e（需 Docker/AWS）
+#   ./scripts/test.sh --full     离线套件 + e2e（对已部署 Runtime 真实问答；缺部署自动 skip）+ smoke（占位）
 #   ./scripts/test.sh --help     本说明
 #
 # 退出码 0 = 全绿。pre-push 跑离线默认（见 lefthook.yml，p1）。
@@ -132,11 +132,30 @@ run_offline() {
   return "$rc"
 }
 
+# e2e：对已部署 Runtime 跑真实问答（scripts/e2e-probe.py）。
+# 退出码约定：0 全通过；1 有探针失败（真问题，置 rc=1）；2 无法运行（缺 boto3 / 缺
+# .local/deploy-config 的 ARN / 缺 projects.json）——视为 skip，不阻塞离线/无部署环境的 --full。
+run_e2e() {
+  say step "e2e：对已部署 Runtime 跑真实端到端问答"
+  if ! have_cmd python3; then
+    say warn "skip e2e（未安装 python3）"
+    return 0
+  fi
+  python3 "$ROOT/scripts/e2e-probe.py"
+  local erc=$?
+  case "$erc" in
+    0) say ok "e2e：全部探针通过" ; return 0 ;;
+    2) say warn "skip e2e（缺依赖 / 未部署 / 无 projects.json）" ; return 0 ;;
+    *) say err "e2e：有探针失败" ; return 1 ;;
+  esac
+}
+
 run_full() {
   local rc=0
   run_offline || rc=1
   say step "smoke/e2e（--full）"
-  say warn "skip：smoke/e2e 占位，待组件落地（需 Docker/AWS）"
+  say warn "skip：smoke 占位，待组件落地（需 Docker）"
+  run_e2e || rc=1
   return "$rc"
 }
 
