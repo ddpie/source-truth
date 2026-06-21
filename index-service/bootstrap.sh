@@ -149,9 +149,14 @@ require_disk_headroom() {   # $1 = tarball path; budget 4x tarball + 1GiB on /da
 }
 
 # Per-repo BUILD template. %i = the subdir (instance name). Each instance derives its
-# graph.db from HOME=/data/<subdir>/.codegraph and holds /data/<subdir>/.codegraph/.writer.lock.
+# graph.db from HOME=/data/<subdir>/.home/.codegraph and holds /data/<subdir>/.codegraph/.writer.lock.
 # Mirrors the single-repo unit's THREE guards (non-empty check, disk headroom, 64KiB
 # floor) but per-repo. NO `Conflicts=` (same systemd-silent-drop footgun as before).
+# SINGLE-WRITER (不变量2): this build flock and the serve unit's SERVE_FLOCKS lock the SAME
+# file per repo (/data/<subdir>/.codegraph/.writer.lock) — so a build and the resident serve
+# can NEVER open one repo's graph.db concurrently. (The bridge's OWN python .bridge.lock is a
+# DIFFERENT, orthogonal guard: it stops a 2nd bridge PROCESS / gunicorn workers>1, not the
+# build — so the two lock files are intentionally distinct, not a mismatch.)
 cat > /etc/systemd/system/index-build@.service <<UNIT
 [Unit]
 Description=CodeGraph index build for repo %i (single-writer per graph)
@@ -211,14 +216,24 @@ command -v rg >/dev/null || apt-get install -y ripgrep || true
 # the serve unit also flocks each so a stray build@<repo> fails fast. No --mount-root:
 # paths are REPO-RELATIVE, prefixed <repo>/ by the multi-repo bridge.
 SERVE_FLOCKS=""
+BUILD_UNITS=""
 for SUBDIR in $SUBDIRS; do
   SERVE_FLOCKS="$SERVE_FLOCKS /usr/bin/flock $LOCAL_REPO_ROOT/$SUBDIR/.codegraph/.writer.lock"
+  BUILD_UNITS="$BUILD_UNITS index-build@${SUBDIR}.service"
 done
+# REBOOT ORDERING (cross-review CRITICAL): the serve unit MUST start AFTER every per-repo
+# build on a reboot too (bootstrap's enable-loop only orders the FIRST boot). Without this,
+# on reboot systemd could start the bridge before a build finishes — the serve flock then
+# blocks until the build releases it (so NO corruption — the flock is the real guard), but
+# the bridge would sit wedged on the lock instead of cleanly waiting. After=+Wants= the build
+# instances fixes the ordering. Deliberately Wants= NOT Requires= (the original single-repo
+# design's lesson: Requires= + a build failure cascades the bridge down; the warmup health
+# gate + 64KiB floor already refuse to serve a bad graph, so ordering is enough).
 cat > /etc/systemd/system/index-bridge.service <<UNIT
 [Unit]
 Description=CodeGraph MCP HTTP bridge (resident, all project repos)
-After=network-online.target remote-fs.target
-Wants=network-online.target
+After=network-online.target remote-fs.target$BUILD_UNITS
+Wants=network-online.target$BUILD_UNITS
 [Service]
 Environment=HOME=$INDEX_HOME
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
