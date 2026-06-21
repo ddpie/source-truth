@@ -94,6 +94,61 @@ def serve_args(repos, local_root: str) -> str:
     return " ".join(parts)
 
 
+def parse_repos_spec(specs):
+    """Parse multi-repo `--repos` CLI specs into (subdir, source, ref) rows for deploy staging.
+
+    Each spec is ``<subdir>=<source>[@<ref>]`` (ref optional, git branch/tag/commit):
+      code-5x=/path/to/code-5x
+      client=https://github.com/org/client.git@main
+      cfg=s3://bucket/cfg.tar.gz
+    The subdir (LHS) is the on-host name → charset-validated against SUBDIR_RE (it becomes a
+    user/path/unit name). The source (RHS) is passed verbatim to fetch_repo_source (which
+    classifies local/git/s3). ``@<ref>`` is split off the RIGHT (an S3/HTTPS URL has no '@',
+    but a git scp URL like git@host:org/repo CAN — so only treat a trailing '@token' as a ref
+    when the token looks like a ref, i.e. it contains no ':' or '/'; otherwise it's part of the
+    source). Raises ValueError (fail-loud) on a malformed/empty spec, a bad subdir, or a dup.
+
+    Returns a list of (subdir, source, ref) tuples in CLI order.
+    """
+    seen = set()
+    rows = []
+    for spec in specs:
+        if not isinstance(spec, str) or "=" not in spec:
+            raise ValueError(f"--repos entry must be <subdir>=<source>[@<ref>]: {spec!r}")
+        subdir, rhs = spec.split("=", 1)
+        subdir = subdir.strip()
+        rhs = rhs.strip()
+        if not REPO_NAME_OK(subdir):
+            raise ValueError(
+                f"--repos subdir {subdir!r} must match {SUBDIR_RE.pattern} "
+                f"(it becomes a user/path/unit name — no slashes, spaces, dots, or metachars)")
+        if subdir in seen:
+            raise ValueError(f"--repos duplicate subdir {subdir!r} (would share graph.db/HOME → corruption)")
+        if not rhs:
+            raise ValueError(f"--repos entry {spec!r} has an empty source")
+        # Split a trailing @ref only when it's ref-shaped (no ':' or '/'), so a git scp
+        # source (git@host:org/repo) keeps its '@' but `...repo.git@v1.2` yields ref=v1.2.
+        ref = ""
+        source = rhs
+        at = rhs.rfind("@")
+        if at > 0:
+            tail = rhs[at + 1:]
+            if tail and ":" not in tail and "/" not in tail:
+                source = rhs[:at]
+                ref = tail
+        if not source:
+            raise ValueError(f"--repos entry {spec!r} has an empty source (after stripping @ref)")
+        seen.add(subdir)
+        rows.append((subdir, source, ref))
+    if not rows:
+        raise ValueError("--repos given but no valid entries parsed")
+    return rows
+
+
+def REPO_NAME_OK(name) -> bool:  # noqa: N802 - shouty to read like a guard at call sites
+    return isinstance(name, str) and bool(SUBDIR_RE.match(name))
+
+
 def build_manifest(rows) -> str:
     """Build a REPO_MANIFEST_JSON string from (subdir, source, sig) rows — the ONE authority
     for manifest construction (deploy/provision call this instead of hand-rolling json.dumps,
@@ -123,6 +178,7 @@ def main(argv):
     field = None
     serve_root = None
     build = False
+    parse_spec = []  # --repos <subdir=source[@ref]> ... → emit TAB rows for the deploy loop
     args = []
     i = 1
     while i < len(argv):
@@ -135,9 +191,23 @@ def main(argv):
         elif argv[i] == "--build":
             build = True
             i += 1
+        elif argv[i] == "--parse-spec":
+            # all following args are repo specs (consumed to end)
+            parse_spec = argv[i + 1:]
+            i = len(argv)
         else:
             args.append(argv[i])
             i += 1
+
+    if parse_spec:
+        try:
+            rows = parse_repos_spec(parse_spec)
+        except ValueError as e:
+            sys.stderr.write(f"render_manifest --parse-spec: {e}\n")
+            return 1
+        for subdir, source, ref in rows:
+            sys.stdout.write(f"{subdir}\t{source}\t{ref}\n")
+        return 0
 
     if build:
         rows = []

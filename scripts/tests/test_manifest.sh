@@ -110,5 +110,21 @@ check "--build rejects an invalid subdir (fail-loud at deploy)" $?
 printf 'ok\t\t\n' | python3 "$R" --build >/dev/null 2>/dev/null; [[ $? -ne 0 ]]
 check "--build rejects an empty source" $?
 
+# --- --parse-spec: parse multi-repo --repos CLI specs into TAB rows for the deploy loop ---
+out="$(python3 "$R" --parse-spec 'code-5x=/path/to/code-5x' 'client=https://github.com/org/client.git@main' 'cfg=s3://b/cfg.tar.gz')"; rc=$?
+check "--parse-spec parses local/git@ref/s3 (rc 0)" "$rc"
+[[ "$(printf '%s\n' "$out" | wc -l)" -eq 3 ]]; check "--parse-spec emits one row per repo" $?
+printf '%s\n' "$out" | sed -n '2p' | grep -qP '^client\thttps://github.com/org/client\.git\tmain$'; check "--parse-spec splits @ref off a git source" $?
+# a git scp URL (git@host:...) must NOT have its '@' mis-split as a ref
+python3 "$R" --parse-spec 'svc=git@github.com:org/svc.git' | grep -qP '^svc\tgit@github.com:org/svc\.git\t$'; check "--parse-spec keeps git scp '@' (no false ref split)" $?
+# ...but a git scp URL WITH a real trailing @ref still splits the ref
+python3 "$R" --parse-spec 'svc=git@github.com:org/svc.git@v1.2' | grep -qP '\tv1\.2$'; check "--parse-spec splits a real @ref off a git scp URL" $?
+# fail-loud: bad subdir, duplicate, missing '='
+python3 "$R" --parse-spec 'Bad Name=/x' >/dev/null 2>/dev/null; [[ $? -ne 0 ]]; check "--parse-spec rejects an invalid subdir" $?
+python3 "$R" --parse-spec 'a=/x' 'a=/y' >/dev/null 2>/dev/null; [[ $? -ne 0 ]]; check "--parse-spec rejects a duplicate subdir" $?
+python3 "$R" --parse-spec 'noequals' >/dev/null 2>/dev/null; [[ $? -ne 0 ]]; check "--parse-spec rejects a spec with no '='" $?
+# round-trip: --parse-spec output (minus ref col) feeds --build to a valid manifest
+python3 "$R" --parse-spec 'a=/x' 'b=s3://q/b.tgz' | cut -f1,2 | python3 "$R" --build | python3 "$R" --field subdir | tr '\n' ' ' | grep -q 'a b '; check "--parse-spec → --build round-trips to a valid manifest" $?
+
 echo "  ran=$_run failed=$_fail"
 [[ "$_fail" -eq 0 ]]
