@@ -813,6 +813,11 @@ else
     || say warn "  apply-dashboards failed (non-fatal) — re-run ./scripts/apply-dashboards.sh --region $REGION"
   bash "$SCRIPT_DIR/apply-metric-filters.sh" --region "$REGION" \
     || say warn "  apply-metric-filters failed (non-fatal; log group may not exist until the gateway logs once) — re-run later"
+  # Per-project breakdown filters (projectId-dimensioned companions; the by-project dashboard
+  # reads these). Separate defs so the rollup metrics above stay dense/un-dimensioned.
+  bash "$SCRIPT_DIR/apply-metric-filters.sh" --region "$REGION" \
+    --defs "$ROOT/infra/monitoring/queries/metric-filters/by-project-metrics.json" \
+    || say warn "  apply-metric-filters (by-project) failed (non-fatal) — re-run later"
   bash "$SCRIPT_DIR/apply-alarms.sh" --region "$REGION" \
     || say warn "  apply-alarms failed (non-fatal) — re-run ./scripts/apply-alarms.sh --region $REGION"
   bash "$SCRIPT_DIR/apply-dau-lambda.sh" --region "$REGION" \

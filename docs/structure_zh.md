@@ -34,9 +34,10 @@ infra/                  基础设施即代码（MVP 先 agentcore toolkit / boto
   monitoring/           监控（CloudWatch 侧；scripts/boto3，非 CDK stack）
     queries/metric-filters/a-class-metrics.json  A 类指标口径单一事实源（计数/分位/分布 → metric-filter）
     queries/metric-filters/alarm-metrics.json    告警专用稠密 filter（每 card_health kind 一条，defaultValue:0）
+    queries/metric-filters/by-project-metrics.json  按 projectId 维度的 KPI 伴生 filter（多项目分组用；无维度汇总仍在 a-class）
     queries/insights/*.logsinsights              B 类去重/留存的 Insights 查询（DAU 等，配定时预聚合 Lambda）
     lambda/dau_preaggregate.py                   B 类 DAU 预聚合 Lambda（每日 StartQuery→PutMetricData，纯 stdlib+boto3）
-    dashboard.product.json / dashboard.sre.json  看板模板（${REGION}/${NAMESPACE} 占位；产品用量 / SRE 健康两页）
+    dashboard.product.json / dashboard.sre.json / dashboard.by-project.json  看板模板（${REGION}/${NAMESPACE}/${ACCOUNT_ID} 占位；产品用量 / SRE 健康（顶部告警）/ 分项目三页）
   (p2) lib/             runtime / codegraph(index-service) / gateway 各 stack
 config/                 配置驱动：i18n.json（卡片 / 告警 / 错误文案）、alarm-thresholds.json（告警阈值，运维可调）、projects.example.json（项目路由 schema 模板；真实配置在 .local/projects.json，部署相关、gitignore）
 scripts/                运维生命周期
