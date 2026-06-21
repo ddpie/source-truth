@@ -79,21 +79,32 @@ codegraph 索引吃内存、随仓库增大而增长，按仓库规模选机型�
 
 在[飞书开放平台](https://open.feishu.cn)创建并配置应用：
 
-1. **创建企业自建应用**，记下 `App ID`（`cli_...`）和 `App Secret`。
-2. **权限（scope）**：开通发消息 / 读消息相关权限（`im:message`、`im:message:send_as_bot`），以及卡片相关权限。
-3. **事件订阅**：启用**长连接**模式（不是 webhook）。订阅这两个事件：
+1. **创建企业自建应用**：开放平台 →「开发者后台」→「创建应用」→「企业自建应用」。建好后在
+   「凭证与基础信息」页记下 `App ID`（`cli_...`）和 `App Secret`。
+2. **权限（scope）**：在「权限管理」开通以下（少一个都会让对应功能静默失败）：
+   - `im:message`、`im:message.group_at_msg`（读群里 @ 机器人的消息）；
+   - `im:message:send_as_bot`（以机器人身份发消息 / 回复，调 `im/v1/messages`）；
+   - `im:resource`（消息表情回应——网关用「处理中」表情标记正在应答，调 reaction 接口）；
+   - **CardKit 卡片**：开通卡片相关权限（搜索「卡片」开通互动卡片/卡片实例相关 scope，对应 `cardkit/v1/cards` 接口；
+     缺它则卡片建不出来）。
+3. **事件订阅**：启用**长连接**模式（不是 webhook——本系统是长驻订阅，不暴露公网回调）。订阅这两个事件：
    - `im.message.receive_v1`（收到群消息）
    - `card.action.trigger`（卡片按钮点击：停止 / 追问 / 澄清）
-4. **机器人**：启用机器人能力；把它的 `open_id`（`ou_...`）记为 `FEISHU_BOT_OPEN_ID`（用于判断群里 @ 的对象）。
-5. **存密钥**：`App Secret` 属敏感信息，**绝不提交进仓库**。`install.sh` 会替你把 `App ID` / `App Secret` /
-   机器人 `open_id` 写进 **Secrets Manager**（密钥名 `source-truth/feishu-app`）——按提示粘贴即可，
-   无需手动建密钥。网关运行时由 `run.sh` 从 Secrets Manager 取出注入进程环境（不落盘）。
+4. **机器人**：在「机器人」页启用机器人能力；把它的 `open_id`（`ou_...`）记为 `FEISHU_BOT_OPEN_ID`
+   （用于判断群里 @ 的对象）。
+5. **发布生效**：以上权限 / 事件 / 机器人改动需「创建版本并发布」（企业内部可走自助审批）后才对线上生效；
+   只保存草稿不发布，机器人不会响应。
+6. **存密钥**：`App Secret` 属敏感信息，**绝不提交进仓库**。`install.sh` 在「添加项目」时会问你
+   `App ID` / `App Secret` / 机器人 `open_id`，并替你写进 **Secrets Manager**，密钥名按项目区分：
+   `source-truth/feishu-<projectId>`（如 `source-truth/feishu-mygame`）——按提示粘贴即可，无需手动建密钥。
+   网关运行时由 `run.sh` 从 Secrets Manager 取出注入进程环境（不落盘）。
 
    > 若手动管理（不走 install.sh）：自行建一个 Secrets Manager 密钥，内容为 JSON
    > `{"app_id":"...","app_secret":"...","bot_open_id":"..."}`，密钥名以 `source-truth/` 开头（IAM 已按此前缀授权），
-   > 然后部署时设 `FEISHU_SECRET_ID=<密钥名>` 让 gateway 阶段激活。
+   > 再把它填进 `.local/projects.json` 对应项目的 `feishuSecretId`（或部署时设 `FEISHU_SECRET_ID=<密钥名>`），
+   > 让 gateway 阶段激活。
 
-6. 把机器人**拉进目标群**，记下群 `chat_id`（`oc_...`）。
+7. 把机器人**拉进目标群**，记下群 `chat_id`（`oc_...`）。
 
 ---
 
