@@ -768,6 +768,24 @@ else
   if [[ ! -f "$SCRIPT_DIR/../.local/projects.json" ]]; then
     say info "no .local/projects.json — gateway runs single-project (no projectId metric dimension)."
     say info "  → for multi-project routing: cp config/projects.example.json .local/projects.json, edit it, re-run."
+  else
+    # DRIFT GUARD: projects.json's `repos` is the repo set the gateway TELLS the agent to query,
+    # and the index serves /data/repo/$REPO_SUBDIR. If projects.json doesn't list the deployed
+    # REPO_SUBDIR, the agent queries a repo the bridge's scope gate rejects → 0 tools, 0 evidence,
+    # a degraded "no answer" (exactly the code-5x-vs-daggerfall-unity drift that bit a live deploy).
+    # Warn loud (not fatal: multi-project configs legitimately list OTHER projects' repos too, and
+    # this gateway may serve a different PROJECT_ID — but the deployed subdir SHOULD appear somewhere).
+    if ! python3 -c '
+import json, sys
+cfg = json.load(open(sys.argv[1])); subdir = sys.argv[2]
+repos = {r for p in cfg.get("projects", {}).values() for r in p.get("repos", [])}
+sys.exit(0 if subdir in repos else 1)
+' "$SCRIPT_DIR/../.local/projects.json" "$REPO_SUBDIR" 2>/dev/null; then
+      say warn "DRIFT: .local/projects.json does NOT list the deployed repo subdir '$REPO_SUBDIR'."
+      say warn "  The gateway will route the agent to the configured repo(s), NOT '$REPO_SUBDIR' →"
+      say warn "  the bridge's scope gate rejects the query → answers come back with no evidence."
+      say warn "  → edit .local/projects.json so the serving project's repos include '$REPO_SUBDIR'."
+    fi
   fi
   bash "$SCRIPT_DIR/lib/activate_gateway.sh" \
     "$REGION" "$GW_INSTANCE" "$GW_RUNTIME_ARN" "$FEISHU_SECRET_ID" \
