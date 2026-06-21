@@ -27,7 +27,7 @@ import { invokeRuntimeStreaming, classifyInvokeOutcome, isTurnCapError, type Aws
 import { decideFinalize, hardFailureMessage, shapeBody } from "./finalize-decision";
 import { createCard, updateContent, closeStreaming, finalizeCard, appendFooter, appendClarify, buildSendCardContent, disableFollowUpButton, appendReasoningPanel, updateReasoningPanel, appendEvidencePanel, updateEvidencePanel, appendOneChart, MAX_CHARTS, appendStopButton, appendStatusLine, updateStatusLine, formatElapsed, appendFeedbackButtons, appendFeedbackReasons, disableFeedbackRow, disableFeedbackReasonRow, type ActionButton } from "./cardkit-client";
 import { extractCharts } from "./extract-charts";
-import { rememberCard, rememberAnswer, lookupCard, lookupByCardId, collectChain, claimCardUiFlag, isAskerAction } from "./card-registry";
+import { rememberCard, rememberAnswer, lookupCard, lookupByCardId, collectChain, claimCardUiFlag, resetCardUiFlag, isAskerAction } from "./card-registry";
 import { composeFollowUpPrompt } from "./followup-context";
 import { removeReaction } from "./reaction";
 import { redactSensitive, redactSteps, redactDeep } from "./redact";
@@ -1060,7 +1060,16 @@ async function runStreamingInvoke(
   // pass the length check, then get dropped at render time → an empty panel even
   // though tools ran (the exact MCP-init-race shape).
   let panelSteps = redactSteps(steps);
-  if (panelSteps.length === 0 && !hardFailed && !clarify && (timing.toolCalls ?? 0) > 0) {
+  // Trigger the synthesized-step fallback whenever retrieval DEMONSTRABLY happened, not only
+  // when tool_use blocks were COUNTED. On a cold-microVM MCP-init race the model emits its
+  // tool calls as raw <invoke> XML in the narration text — those are real retrievals but
+  // `timing.toolCalls` stays 0 (no tool_use block) AND redactSteps drops the XML-markup steps,
+  // so the panel would vanish even though evidence was gathered (the live "偶发缺少分析过程"
+  // bug). Evidence citations in the final answer are a tool-count-independent proof of
+  // retrieval, so OR them into the gate. Genuinely tool-free, evidence-free answers still get
+  // no panel (nothing to show), and clarifications are still excluded below.
+  const didRetrieve = (timing.toolCalls ?? 0) > 0 || countEvidenceCitations(finalEvidence) > 0;
+  if (panelSteps.length === 0 && !hardFailed && !clarify && didRetrieve) {
     panelSteps = [t("card.reasoning.synthesized")];
   }
   // A clarification is a question back to the user, not an answer — don't show a
@@ -1621,6 +1630,10 @@ async function main(): Promise<void> {
                   try {
                     await disableFeedbackRow(fbCardId, fbVote, nextCallbackSeq());
                   } catch (e) {
+                    // ROLL BACK the optimistic flag so a re-click retries the repaint. Without
+                    // this, voteRowPainted stays true after a failed PUT and the row can never
+                    // be greyed by any later click (permanent dead button).
+                    resetCardUiFlag(fbKey, "voteRowPainted");
                     log({ event: "feedback_render_error", op: "disable_row", error: redactSensitive(String(e)).slice(0, 200) });
                   }
                 }
@@ -1629,6 +1642,7 @@ async function main(): Promise<void> {
                   try {
                     await appendFeedbackReasons(fbCardId, nextCallbackSeq());
                   } catch (e) {
+                    resetCardUiFlag(fbKey, "reasonGridAppended");
                     log({ event: "feedback_render_error", op: "append_reasons", error: redactSensitive(String(e)).slice(0, 200) });
                   }
                 }
@@ -1637,6 +1651,12 @@ async function main(): Promise<void> {
           } else {
             log({ event: "feedback_card_unresolved", action: "feedback", messageId: hashUserId(messageId) });
           }
+          // Toast the ACK SYNCHRONOUSLY (independent of the async, best-effort row repaint). The
+          // row-disable PUT can transiently fail/race (no retry on that path), and with no toast
+          // the user saw NOTHING change and re-clicked — the "反馈按钮偶发需多次点击" bug. The
+          // toast confirms the vote was recorded the instant they click, decoupled from the card
+          // mutation. (Vote metric already fired above; this is pure user feedback.)
+          return { toast: { type: "success", content: t("card.feedback.thanks") } };
         } else if (value?.action === "feedback_reason" && typeof value.reasonCode === "string") {
           // 👎-reason pick (enumerated code, never free text). emitMetric runtime-whitelists
           // reasonCode, so even a tampered payload can't inject text. Same per-card-per-user
