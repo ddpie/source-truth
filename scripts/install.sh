@@ -1,18 +1,24 @@
 #!/usr/bin/env bash
-# install.sh — interactive one-click installer for source-truth (customer AWS account).
+# install.sh — interactive installer for source-truth (customer AWS account, multi-project).
 #
-# A friendly front-end over deploy-all.sh: it checks dependencies, collects the few
-# things only a human knows (region, code-repo source, Feishu app credentials),
-# stores the Feishu credentials in AWS Secrets Manager, confirms the plan, then runs
-# the (idempotent) deploy. Re-runs PRE-FILL every answer from the last run
-# (.local/deploy-config), so an upgrade/redeploy is just "Enter through the prompts".
+# A friendly front-end over deploy-all.sh / deploy_project.sh. After a dependency + AWS-identity
+# check it shows an arrow-key MENU of four flows:
+#   • 初始化环境 / init environment only — provision the shared base host, no project
+#       (deploy-all.sh --skip-projects). Lets you stand up AWS first, configure git later.
+#   • 添加项目 / add a project — collect projectId + git repos + bridge port + a Feishu app,
+#       auto-create its Secrets Manager secrets (feishu-<id>, and the global git credential on
+#       first run), write the .local/projects.json entry, then deploy that project.
+#   • 重新部署现有项目 / redeploy — pick a declared project and re-run deploy_project.sh.
+#   • 删除项目 / remove a project — destructive, double-confirmed; tears down its units/runtime/
+#       repo copies + removes it from projects.json (keeps secrets by default; never the global
+#       git credential).
 #
-# Flow (mirrors the reference installer ddpie/lark-mcp-on-agentcore):
-#   check deps → AWS identity → region / repo / model → Feishu credentials
-#   → write secret → confirm → deploy-all.sh
+# Code repos are git-only (R1) and live in .local/projects.json — never on the CLI. The single
+# read-only git credential (R-cred-1) is shared across projects. Re-runs pre-fill region/spec
+# from .local/deploy-config.
 #
-# Non-interactive: pass --yes to accept all pre-filled/default answers (CI/headless).
-# Anything not pre-fillable without a human (first-run Feishu secret) still hard-stops.
+# Non-interactive: --yes accepts pre-filled/default answers; flows needing human-only input
+# (first Feishu/git secret) still hard-stop.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -29,10 +35,10 @@ for a in "$@"; do
       cat <<EOF
 Usage: ./scripts/install.sh [--yes]
 
-Interactive installer. Prompts (arrow-key ↑/↓ menus for region / model / index-host
-machine spec / disk size; free text for repo source + Feishu credentials), stores
-credentials in Secrets Manager, then runs deploy-all.sh. Re-runs pre-fill from
-.local/deploy-config (the persisted value is pre-selected in each menu).
+Interactive installer. Shows an arrow-key menu: init environment / add a project /
+redeploy a project / remove a project. Code repos are git-only and live in
+.local/projects.json; per-project Feishu + the shared git credential are created in
+Secrets Manager. Re-runs pre-fill region/spec from .local/deploy-config.
 
   --yes   Accept all pre-filled/default answers without prompting (headless).
 EOF
@@ -172,12 +178,8 @@ REGION_OPTIONS=(
   "us-west-2        Oregon 俄勒冈"
   "$MANUAL_SENTINEL"
 )
-MODEL_OPTIONS=(
-  "global.anthropic.claude-opus-4-8   Opus 4.8 (global profile，默认)"
-  "apac.anthropic.claude-opus-4-8     Opus 4.8 (APAC profile)"
-  "us.anthropic.claude-opus-4-8       Opus 4.8 (US profile)"
-  "$MANUAL_SENTINEL"
-)
+# (Model is a per-project concern — set per project in .local/projects.json; the deploy uses the
+# global default otherwise. So install.sh no longer prompts for it, and there's no MODEL menu.)
 # index-service host (ARM Graviton). codegraph indexing is memory-bound and scales
 # with repo size; t4g = burstable/cheap, m7g = sustained memory-optimized for big repos.
 INSTANCE_OPTIONS=(
@@ -228,139 +230,218 @@ say ok "AWS account: $ACCOUNT"
 # Pre-fill defaults from the last run, if any.
 safe_source_env "$CONFIG_FILE"
 
-# ---- 2. core config ------------------------------------------------------------
-echo
-say step "2/5 部署配置 / Deployment config"
-# Region: arrow-key menu of common regions (+ manual entry). Pre-selects the
-# persisted region on a re-run; defaults to Tokyo on first run.
-pick_field REGION "AWS 区域 / region (↑/↓ 选择，回车确认)" \
-  "${DEPLOY_REGION:-ap-northeast-1}" "AWS 区域代码 / region code" "${REGION_OPTIONS[@]}"
+PROJECTS_CFG="$ROOT/.local/projects.json"
 
-# Repo source / git ref / Feishu creds can't be enumerated — keep them as free text.
-ask REPO_SRC     "代码仓库 (本地路径 / git URL / s3://) / repo source" "${INSTALL_REPO_SRC:-}"
-while [[ -z "$REPO_SRC" ]]; do
-  # In --yes (non-interactive) mode `ask` never blocks, so an empty repo with no
-  # pre-fill would loop forever — hard-fail instead of spinning.
-  if [[ "$ASSUME_YES" == true ]]; then
-    say err "代码仓库未提供且无可预填值 / repo source required but none provided (headless mode)."
-    exit 1
+# ask_region <var> : the region menu is shared by every flow (pre-selects persisted).
+ask_region() {
+  pick_field "$1" "AWS 区域 / region (↑/↓ 选择，回车确认)" \
+    "${DEPLOY_REGION:-ap-northeast-1}" "AWS 区域代码 / region code" "${REGION_OPTIONS[@]}"
+}
+
+# project_ids : print existing projectIds from .local/projects.json, one per line (empty if none).
+project_ids() {
+  [[ -f "$PROJECTS_CFG" ]] || return 0
+  python3 -c 'import json,sys
+try: print("\n".join(json.load(open(sys.argv[1])).get("projects",{})))
+except Exception: pass' "$PROJECTS_CFG"
+}
+
+# ============================================================
+# FLOW: 初始化环境 / init environment only (shared base host, no project)
+# ============================================================
+flow_init_env() {
+  echo; say step "初始化环境（不挂项目）/ init environment only"
+  local REGION INSTANCE_TYPE ROOT_VOLUME_GB
+  ask_region REGION
+  pick_field INSTANCE_TYPE "索引主机机型 (ARM·决定 CPU/内存) / index host type" \
+    "${DEPLOY_INSTANCE_TYPE:-t4g.large}" "EC2 机型 (ARM)" "${INSTANCE_OPTIONS[@]}"
+  pick_field ROOT_VOLUME_GB "索引主机磁盘 / index host disk GiB" \
+    "${DEPLOY_ROOT_VOLUME_GB:-30}" "磁盘大小 GiB" "${DISK_OPTIONS[@]}"
+  while ! [[ "$ROOT_VOLUME_GB" =~ ^[0-9]+$ ]] || (( ROOT_VOLUME_GB < 8 )); do
+    [[ "$ASSUME_YES" == true ]] && { say err "磁盘大小无效 / invalid disk size '$ROOT_VOLUME_GB'"; exit 1; }
+    say warn "磁盘大小需为 ≥8 的整数 GiB / disk must be an integer GiB ≥ 8."
+    ask ROOT_VOLUME_GB "磁盘大小 GiB" "30"
+  done
+  echo; say info "将只起共享底座（VPC/NAT/EC2/镜像），不挂任何项目。之后用「添加项目」上线机器人。"
+  confirm "开始初始化环境？/ Initialize the base environment now?" || { say info "已取消"; exit 0; }
+  say step "部署底座 / Deploying base host (several minutes)"
+  exec "$SCRIPT_DIR/deploy-all.sh" --region "$REGION" \
+    --instance-type "$INSTANCE_TYPE" --root-volume-gb "$ROOT_VOLUME_GB" --skip-projects
+}
+
+# ============================================================
+# FLOW: 添加项目 / add a project (interactive → projects.json + secrets → deploy)
+# ============================================================
+flow_add_project() {
+  echo; say step "添加项目 / add a project"
+  local REGION; ask_region REGION
+  mkdir -p "$ROOT/.local"
+  [[ -f "$PROJECTS_CFG" ]] || echo '{"refreshIntervalSec":300,"projects":{}}' > "$PROJECTS_CFG"
+
+  local PID
+  ask PID "项目 ID（小写字母数字与连字符）/ projectId (^[a-z0-9-]+$)" ""
+  [[ "$PID" =~ ^[a-z0-9][a-z0-9-]*$ ]] || { say err "projectId 非法 / invalid projectId '$PID'"; exit 1; }
+  if project_ids | grep -qx "$PID"; then
+    say err "项目 '$PID' 已存在 / already exists — use 'redeploy' to update it."; exit 1
   fi
-  say warn "代码仓库不能为空 / repo source is required."
-  ask REPO_SRC   "代码仓库 (本地路径 / git URL / s3://) / repo source" ""
-done
-# Offer --repo-ref only for git sources.
-REPO_REF=""
-case "$REPO_SRC" in
-  *.git|git@*|ssh://*|git://*|https://github.com/*|https://gitlab.com/*|https://bitbucket.org/*)
-    ask REPO_REF "git 分支/标签/提交（留空=默认分支）/ git ref (blank=default)" "${INSTALL_REPO_REF:-}" ;;
-esac
 
-# Model: arrow-key menu of common Bedrock Opus profiles (+ manual entry).
-pick_field MODEL "Bedrock 模型 / model (↑/↓ 选择，回车确认)" \
-  "${DEPLOY_MODEL:-global.anthropic.claude-opus-4-8}" "Bedrock 模型 id / model id" "${MODEL_OPTIONS[@]}"
+  # repos: loop git URL + subdir + ref until blank.
+  local REPOS_JSON="[]" RGIT RSUB RREF
+  say info "逐个添加该项目的代码仓库（git 地址留空结束）/ add repos (blank git URL = done):"
+  while true; do
+    ask RGIT "  仓库 git 地址 / repo git URL (blank=done)" ""
+    [[ -z "$RGIT" ]] && break
+    ask RSUB "    on-host 子目录名 / subdir (^[a-z0-9-]+$)" ""
+    [[ "$RSUB" =~ ^[a-z0-9][a-z0-9-]*$ ]] || { say warn "subdir 非法，跳过该仓 / invalid subdir, skipped"; continue; }
+    ask RREF "    分支/标签（留空=默认分支）/ ref (blank=default)" ""
+    REPOS_JSON="$(RGIT="$RGIT" RSUB="$RSUB" RREF="$RREF" python3 -c '
+import json,os,sys
+a=json.loads(sys.argv[1]); a.append({"subdir":os.environ["RSUB"],"git":os.environ["RGIT"],"ref":os.environ["RREF"]}); print(json.dumps(a))' "$REPOS_JSON")"
+  done
+  [[ "$REPOS_JSON" != "[]" ]] || { say err "至少要一个仓库 / need at least one repo"; exit 1; }
 
-# Index host machine spec (CPU/memory) — arrow-key menu. The leading token is the
-# EC2 instance type passed straight to deploy-all.sh's --instance-type.
-pick_field INSTANCE_TYPE "索引主机机型 (ARM·决定 CPU/内存) / index host type (↑/↓，回车)" \
-  "${DEPLOY_INSTANCE_TYPE:-t4g.large}" "EC2 机型 (ARM) / instance type" "${INSTANCE_OPTIONS[@]}"
-
-# Root disk (gp3) size in GiB — arrow-key menu (+ manual entry for any size).
-pick_field ROOT_VOLUME_GB "索引主机磁盘 / index host disk GiB (↑/↓，回车)" \
-  "${DEPLOY_ROOT_VOLUME_GB:-30}" "磁盘大小 GiB / disk size in GiB" "${DISK_OPTIONS[@]}"
-# Validate a manually-entered disk size: deploy-all passes this straight to
-# run-instances; a non-integer would surface as an opaque EC2 error minutes later.
-while ! [[ "$ROOT_VOLUME_GB" =~ ^[0-9]+$ ]] || (( ROOT_VOLUME_GB < 8 )); do
-  if [[ "$ASSUME_YES" == true ]]; then
-    say err "磁盘大小无效 / invalid disk size: '$ROOT_VOLUME_GB' (需要 ≥8 的整数 GiB)."
-    exit 1
+  # port: suggest max-existing+1 (base 8080).
+  local SUGGEST_PORT PORT
+  SUGGEST_PORT="$(python3 -c 'import json,sys
+try: ps=[p.get("port",0) for p in json.load(open(sys.argv[1])).get("projects",{}).values()]
+except Exception: ps=[]
+print((max(ps)+1) if ps else 8080)' "$PROJECTS_CFG")"
+  ask PORT "bridge 端口（建议未用值）/ bridge port" "$SUGGEST_PORT"
+  if ! [[ "$PORT" =~ ^[0-9]+$ ]] || (( PORT < 1024 || PORT > 65535 )); then
+    say err "端口非法 / invalid port '$PORT' (1024-65535)"; exit 1
   fi
-  say warn "磁盘大小需为 ≥8 的整数 GiB / disk size must be an integer GiB ≥ 8."
-  ask ROOT_VOLUME_GB "磁盘大小 GiB / disk size in GiB" "30"
-done
-
-# ---- 3. Feishu credentials → Secrets Manager -----------------------------------
-echo
-say step "3/5 飞书应用凭证 / Feishu app credentials"
-SECRET_NAME="${FEISHU_SECRET_ID:-source-truth/feishu-app}"
-HAS_SECRET=false
-if aws secretsmanager describe-secret --secret-id "$SECRET_NAME" --region "$REGION" >/dev/null 2>&1; then
-  HAS_SECRET=true
-  say info "已存在密钥 / secret exists: $SECRET_NAME"
-fi
-UPDATE_SECRET=true
-if [[ "$HAS_SECRET" == true ]]; then
-  if [[ "$ASSUME_YES" == true ]]; then
-    UPDATE_SECRET=false   # keep existing creds on headless re-run
-  else
-    confirm "更新飞书凭证？(否=沿用现有) / update Feishu credentials? (no=keep existing)" || UPDATE_SECRET=false
+  if project_ids | while read -r p; do python3 -c 'import json,sys; d=json.load(open(sys.argv[1]))["projects"]; sys.exit(0 if d.get(sys.argv[2],{}).get("port")==int(sys.argv[3]) else 1)' "$PROJECTS_CFG" "$p" "$PORT" && echo "$p"; done | grep -q .; then
+    say err "端口 $PORT 已被占用 / port already used by another project"; exit 1
   fi
-fi
-if [[ "$UPDATE_SECRET" == true ]]; then
-  ask        FEISHU_APP_ID      "飞书 App ID"        "${FEISHU_APP_ID:-}"
+
+  # Feishu app credentials → source-truth/feishu-<pid> (auto secret id).
+  local FEISHU_APP_ID FEISHU_APP_SECRET FEISHU_BOT_OPEN_ID SECRET_ID
+  ask        FEISHU_APP_ID      "飞书 App ID" ""
   ask_secret FEISHU_APP_SECRET  "飞书 App Secret（输入不回显）/ (hidden)"
-  ask        FEISHU_BOT_OPEN_ID "机器人 open_id（可留空）/ bot open_id (optional)" "${FEISHU_BOT_OPEN_ID:-}"
-  if [[ -z "$FEISHU_APP_ID" || -z "$FEISHU_APP_SECRET" ]]; then
-    say err "App ID 和 App Secret 必填 / App ID and App Secret are required."
-    exit 1
+  ask        FEISHU_BOT_OPEN_ID "机器人 open_id（可留空）/ bot open_id (optional)" ""
+  [[ -n "$FEISHU_APP_ID" && -n "$FEISHU_APP_SECRET" ]] || { say err "App ID 和 App Secret 必填"; exit 1; }
+  SECRET_ID="source-truth/feishu-${PID}"
+  local SJSON
+  SJSON="$(_AID="$FEISHU_APP_ID" _AS="$FEISHU_APP_SECRET" _BO="${FEISHU_BOT_OPEN_ID:-}" python3 -c '
+import os,json; print(json.dumps({"app_id":os.environ["_AID"],"app_secret":os.environ["_AS"],"bot_open_id":os.environ.get("_BO","")}))')"
+  aws secretsmanager create-secret --name "$SECRET_ID" --secret-string "$SJSON" --region "$REGION" \
+      --description "source-truth Feishu app creds for project $PID" >/dev/null 2>&1 \
+    || aws secretsmanager put-secret-value --secret-id "$SECRET_ID" --secret-string "$SJSON" --region "$REGION" >/dev/null
+  unset FEISHU_APP_SECRET SJSON
+  say ok "飞书凭证已写入 / stored: $SECRET_ID"
+
+  # first-run git read-only credential (R-cred-1, global, reused by later projects).
+  if ! aws secretsmanager describe-secret --secret-id source-truth/git-credentials --region "$REGION" >/dev/null 2>&1; then
+    local GIT_TOKEN
+    ask_secret GIT_TOKEN "git 只读凭证（PAT/token，首次配置，后续项目复用；公开仓可留空）/ git read-only token (blank for public repos)"
+    if [[ -n "$GIT_TOKEN" ]]; then
+      aws secretsmanager create-secret --name source-truth/git-credentials --secret-string "$GIT_TOKEN" --region "$REGION" \
+        --description "source-truth read-only git credential (R-cred-1)" >/dev/null \
+        && say ok "git 凭证已写入 / stored: source-truth/git-credentials"
+      unset GIT_TOKEN
+    fi
   fi
-fi
 
-# ---- 4. confirm ----------------------------------------------------------------
-echo
-say step "4/5 确认 / Confirm"
-echo "  AWS account : $ACCOUNT"
-echo "  region      : $REGION"
-echo "  repo        : $REPO_SRC${REPO_REF:+  (ref: $REPO_REF)}"
-echo "  model       : $MODEL"
-echo "  index host  : $INSTANCE_TYPE  (disk ${ROOT_VOLUME_GB} GiB gp3)"
-echo "  Feishu secret: $SECRET_NAME ($([[ "$UPDATE_SECRET" == true ]] && echo '将写入/update' || echo '沿用/keep'))"
-echo
-if ! confirm "开始部署？/ Start deployment now?"; then
-  say info "已取消。配置已记住，下次运行会预填。/ Cancelled — answers remembered for next run."
-  # Persist the non-secret choices so a later run pre-fills even after a cancel.
-  # (deploy-all.sh persists these when it actually runs; on a cancel it never does,
-  # so mirror the menu choices here too — region/model/spec/disk all pre-select.)
-  update_env "$CONFIG_FILE" DEPLOY_REGION "$REGION"
-  update_env "$CONFIG_FILE" DEPLOY_MODEL "$MODEL"
-  update_env "$CONFIG_FILE" DEPLOY_INSTANCE_TYPE "$INSTANCE_TYPE"
-  update_env "$CONFIG_FILE" DEPLOY_ROOT_VOLUME_GB "$ROOT_VOLUME_GB"
-  update_env "$CONFIG_FILE" INSTALL_REPO_SRC "$REPO_SRC"
-  [[ -n "$REPO_REF" ]] && update_env "$CONFIG_FILE" INSTALL_REPO_REF "$REPO_REF"
-  exit 0
-fi
+  # Write the project entry into projects.json.
+  PID="$PID" PORT="$PORT" SECRET_ID="$SECRET_ID" REPOS_JSON="$REPOS_JSON" python3 -c '
+import json,os,sys
+cfg=json.load(open(sys.argv[1]))
+cfg.setdefault("projects",{})[os.environ["PID"]]={"port":int(os.environ["PORT"]),"feishuSecretId":os.environ["SECRET_ID"],"repos":json.loads(os.environ["REPOS_JSON"])}
+json.dump(cfg,open(sys.argv[1],"w"),ensure_ascii=False,indent=2)' "$PROJECTS_CFG"
+  say ok "已写入清单 / wrote projects.json: $PID (port=$PORT, secret=$SECRET_ID)"
 
-# Write/return the secret (JSON the gateway's run.sh expects). Pass the values via
-# ENVIRONMENT, not argv: process arguments are world-readable on Linux
-# (/proc/<pid>/cmdline, `ps auxww`), so an App Secret in argv leaks to any local
-# user for the lifetime of the python process (cross-review HIGH). Env vars of a
-# process are not exposed in cmdline and python is install.sh's direct child.
-if [[ "$UPDATE_SECRET" == true ]]; then
-  SECRET_JSON="$(_AID="$FEISHU_APP_ID" _ASEC="$FEISHU_APP_SECRET" _BOID="${FEISHU_BOT_OPEN_ID:-}" python3 -c '
-import os, json
-print(json.dumps({"app_id": os.environ["_AID"], "app_secret": os.environ["_ASEC"], "bot_open_id": os.environ.get("_BOID", "")}))
-')"
-  if [[ "$HAS_SECRET" == true ]]; then
-    aws secretsmanager put-secret-value --secret-id "$SECRET_NAME" \
-      --secret-string "$SECRET_JSON" --region "$REGION" >/dev/null
-  else
-    aws secretsmanager create-secret --name "$SECRET_NAME" \
-      --description "source-truth Feishu app credentials (app_id/app_secret/bot_open_id)" \
-      --secret-string "$SECRET_JSON" --region "$REGION" >/dev/null
+  echo; confirm "现在部署项目 $PID？/ Deploy project $PID now?" || { say info "清单已保存，稍后可用「重新部署」/ saved; deploy later via redeploy"; exit 0; }
+  # Ensure the shared base exists (idempotent no-op if already up), then deploy this project.
+  say step "确保底座就绪 / ensuring shared base (idempotent)"
+  "$SCRIPT_DIR/deploy-all.sh" --region "$REGION" --skip-projects \
+    || { say err "底座部署失败 / base deploy failed — fix and re-run"; exit 1; }
+  say step "部署项目 / deploying project $PID"
+  exec bash "$SCRIPT_DIR/lib/deploy_project.sh" "$REGION" "$PID"
+}
+
+# ============================================================
+# FLOW: 重新部署现有项目 / redeploy an existing project
+# ============================================================
+flow_redeploy() {
+  echo; say step "重新部署现有项目 / redeploy an existing project"
+  local REGION; ask_region REGION
+  mapfile -t PIDS < <(project_ids)
+  [[ ${#PIDS[@]} -gt 0 ]] || { say err "清单无项目 / no projects in projects.json — use 'add a project' first"; exit 1; }
+  local SEL; pick SEL 0 "${PIDS[@]}"
+  exec bash "$SCRIPT_DIR/lib/deploy_project.sh" "$REGION" "$SEL"
+}
+
+# ============================================================
+# FLOW: 删除项目 / remove a project (destructive; double-confirm; keep secrets by default)
+# ============================================================
+flow_remove_project() {
+  echo; say step "删除项目 / remove a project"
+  local REGION; ask_region REGION
+  mapfile -t PIDS < <(project_ids)
+  [[ ${#PIDS[@]} -gt 0 ]] || { say err "清单无项目 / no projects to remove"; exit 1; }
+  local SEL; pick SEL 0 "${PIDS[@]}"
+  say warn "删除项目 '$SEL' 是破坏性操作：停 bridge@/gateway@、删 runtime、删其代码副本、从清单移除。"
+  local CONFIRM
+  ask CONFIRM "请输入项目 ID 以确认 / type the projectId to confirm" ""
+  [[ "$CONFIRM" == "$SEL" ]] || { say info "未匹配，已取消 / cancelled"; exit 0; }
+  safe_source_env "$CONFIG_FILE"
+  local IID="${INDEX_SERVICE_INSTANCE:-}"
+  # Stop + disable this project's host units and drop its repo copies (best-effort, via SSM).
+  if [[ -n "$IID" ]]; then
+    say info "停用主机上的 bridge/gateway/refresh 单元并清理代码副本 / cleaning host units + repo copies"
+    local RM_CMD="set +e
+systemctl disable --now bot-gateway@${SEL}.service 2>/dev/null
+systemctl disable --now index-bridge-${SEL}.service 2>/dev/null
+for t in \$(systemctl list-units 'index-refresh-*' --all --no-legend | awk '{print \$1}'); do :; done
+rm -f /etc/bot-gateway-${SEL}.env /etc/index-projects/${SEL}.json
+for d in \$(python3 -c \"import json;print(' '.join(r['subdir'] for r in json.load(open('/etc/index-projects/${SEL}.json'))['repos']))\" 2>/dev/null); do
+  systemctl disable --now index-refresh-\$d.timer index-bridge@\$d 2>/dev/null; rm -rf /data/repo/\$d; done
+echo removed-${SEL}"
+    local PF; PF="$(mktemp /tmp/rm-ssm.XXXX.json)"
+    printf '%s' "$RM_CMD" | python3 -c 'import sys,json; print(json.dumps({"commands": sys.stdin.read().split("\n")}))' > "$PF"
+    aws ssm send-command --region "$REGION" --instance-ids "$IID" --document-name AWS-RunShellScript \
+      --parameters "file://$PF" >/dev/null 2>&1 || say warn "  SSM cleanup command failed (host units may remain; clean manually)"
+    rm -f "$PF"
   fi
-  unset FEISHU_APP_SECRET SECRET_JSON   # don't keep the plaintext around
-  say ok "Feishu 凭证已写入 Secrets Manager / stored in Secrets Manager: $SECRET_NAME"
-fi
+  # Delete this project's runtime (best-effort).
+  local RT_VAR="RUNTIME_ARN_${SEL//-/_}" RT
+  RT="$(safe_source_env "$CONFIG_FILE"; echo "${!RT_VAR:-}")" 2>/dev/null || RT=""
+  if [[ -n "$RT" ]] && [[ -f "$SCRIPT_DIR/lib/delete_runtime.py" ]]; then
+    python3 "$SCRIPT_DIR/lib/delete_runtime.py" --region "$REGION" --arn "$RT" 2>/dev/null \
+      && say ok "runtime 已删除 / deleted: $RT" || say warn "  runtime 删除失败，可手动删 / delete manually: $RT"
+  fi
+  # Remove from projects.json + clear the per-project config key.
+  SEL="$SEL" python3 -c 'import json,os,sys
+cfg=json.load(open(sys.argv[1])); cfg.get("projects",{}).pop(os.environ["SEL"],None)
+json.dump(cfg,open(sys.argv[1],"w"),ensure_ascii=False,indent=2)' "$PROJECTS_CFG"
+  update_env "$CONFIG_FILE" "RUNTIME_ARN_${SEL//-/_}" ""
+  say ok "项目 '$SEL' 已从清单移除 / removed from projects.json"
+  # Feishu secret: keep by default; offer to delete. git credential is GLOBAL — never touched.
+  if confirm "同时删除该项目飞书密钥 source-truth/feishu-$SEL？(默认否) / also delete its Feishu secret? (default no)"; then
+    aws secretsmanager delete-secret --secret-id "source-truth/feishu-$SEL" --region "$REGION" \
+      --force-delete-without-recovery >/dev/null 2>&1 \
+      && say ok "飞书密钥已删除 / Feishu secret deleted" || say warn "  飞书密钥删除失败 / delete failed"
+  fi
+  say ok "完成 / done (git 全局凭证保留；其余项目不受影响)"
+}
 
-# Persist what deploy-all + the gateway phase need to read back.
-update_env "$CONFIG_FILE" FEISHU_SECRET_ID "$SECRET_NAME"
-update_env "$CONFIG_FILE" INSTALL_REPO_SRC "$REPO_SRC"
-[[ -n "$REPO_REF" ]] && update_env "$CONFIG_FILE" INSTALL_REPO_REF "$REPO_REF"
-
-# ---- 5. deploy -----------------------------------------------------------------
+# ---- main menu (arrow-key) -----------------------------------------------------
 echo
-say step "5/5 部署 / Deploying (this can take several minutes)"
-DEPLOY_ARGS=(--region "$REGION" --repo "$REPO_SRC" --model "$MODEL" \
-  --instance-type "$INSTANCE_TYPE" --root-volume-gb "$ROOT_VOLUME_GB")
-[[ -n "$REPO_REF" ]] && DEPLOY_ARGS+=(--repo-ref "$REPO_REF")
-say info "exec: ./scripts/deploy-all.sh ${DEPLOY_ARGS[*]}"
-exec "$SCRIPT_DIR/deploy-all.sh" "${DEPLOY_ARGS[@]}"
+MENU_OPTIONS=(
+  "初始化环境（不挂项目）/ init environment only"
+  "添加项目      / add a project"
+  "重新部署现有项目 / redeploy an existing project"
+  "删除项目      / remove a project"
+)
+# Default the cursor to "add a project" once a base host exists, else "init environment".
+MENU_DEFAULT=0
+[[ -n "${INDEX_SERVICE_INSTANCE:-}" ]] && MENU_DEFAULT=1
+say step "选择操作 / choose an action (↑/↓，回车)"
+pick MENU_CHOICE "$MENU_DEFAULT" "${MENU_OPTIONS[@]}"
+case "$MENU_CHOICE" in
+  初始化环境*)   flow_init_env ;;
+  添加项目*)     flow_add_project ;;
+  重新部署*)     flow_redeploy ;;
+  删除项目*)     flow_remove_project ;;
+  *) say err "未知选项 / unknown choice"; exit 2 ;;
+esac
