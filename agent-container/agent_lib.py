@@ -168,16 +168,18 @@ DEFAULT_MAX_TURNS = 60
 # COLD-START retry budget. The MCP-init race (model narrates tool calls as text
 # because the CodeGraph MCP HTTP handshake hasn't registered the tools yet) is a
 # WARMUP problem: the first failed attempt establishes the connection, so a retry
-# usually lands warm. But back-to-back retries with NO gap can BOTH lose the race on
-# a very cold VM (e.g. right after a redeploy spins fresh microVMs) — observed live
-# (card st-e70f824f…): two cold attempts → honest 查询失败, but the user shouldn't
-# have hit it at all. So we (a) allow up to COLD_START_MAX_RETRIES re-runs (was a
-# single retry), and (b) SLEEP a short, growing backoff BEFORE each retry so the MCP
-# handshake has wall-clock time to finish on the warming VM. Total added latency is
-# bounded (0.8s + 1.6s = 2.4s worst case) and only paid on a genuine cold start — a
-# warm run never retries. Operator-tunable via env.
-COLD_START_MAX_RETRIES = 2
-COLD_START_BACKOFF_BASE_S = 0.8
+# usually lands warm. But back-to-back retries with too SHORT a gap can BOTH lose the
+# race on a very cold VM (e.g. right after a redeploy spins fresh microVMs). Observed
+# live AGAIN (card st-b323e77b…): 2 retries with 0.8s+1.6s=2.4s total warmup still
+# EXHAUSTED → 查询失败. The MCP HTTP handshake on a cold microVM can need longer than a
+# couple seconds, so the cumulative warmup window was too small. So we (a) allow up to
+# COLD_START_MAX_RETRIES re-runs, and (b) SLEEP a growing backoff BEFORE each retry so
+# the handshake has wall-clock time to finish. With the defaults below the cumulative
+# warmup is 1.5+3+6+12 ≈ 22.5s worst case (4 retries) — generous enough to win the race
+# on a fresh-redeploy cold VM, and ONLY paid on a genuine cold start (a warm run never
+# retries; most cold starts clear on retry 1). Both knobs are operator-tunable via env.
+COLD_START_MAX_RETRIES = 4
+COLD_START_BACKOFF_BASE_S = 1.5
 
 
 def _env_cold_start_retries() -> int:
@@ -191,6 +193,20 @@ def _env_cold_start_retries() -> int:
     except (TypeError, ValueError):
         return COLD_START_MAX_RETRIES
     return n if n >= 0 else COLD_START_MAX_RETRIES
+
+
+def _env_cold_start_backoff_base() -> float:
+    """Cold-start backoff base seconds from ``COLD_START_BACKOFF_BASE_S`` (operator-tunable).
+    Each retry sleeps base*2**attempt before re-running, so the cumulative warmup window
+    grows geometrically. Falls back to the default on unset/invalid/non-positive."""
+    raw = os.environ.get("COLD_START_BACKOFF_BASE_S")
+    if raw is None:
+        return COLD_START_BACKOFF_BASE_S
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return COLD_START_BACKOFF_BASE_S
+    return v if v > 0 else COLD_START_BACKOFF_BASE_S
 
 
 def build_options_dict(
@@ -484,6 +500,7 @@ async def run_agent(
     last_num_turns: int | None = None
 
     max_retries = _env_cold_start_retries()
+    backoff_base = _env_cold_start_backoff_base()
     try:
         # Bounded cold-start retry loop. Attempt 0 is the real run; each subsequent
         # attempt re-runs ONLY when the prior one is the cold-start failure shape (leak
@@ -533,7 +550,7 @@ async def run_agent(
                 break
 
             # Back off BEFORE the next attempt so the MCP handshake has time to finish.
-            backoff_s = COLD_START_BACKOFF_BASE_S * (2 ** attempt)
+            backoff_s = backoff_base * (2 ** attempt)
             _perf("mcp_init_race_retry", (time.perf_counter() - t0) * 1000,
                   attempt=attempt, num_turns=last_num_turns, backoff_s=backoff_s, traceId=trace_id)
             _plog("mcp_init_race_retry", attempt=attempt, num_turns=last_num_turns,
