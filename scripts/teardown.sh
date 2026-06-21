@@ -248,7 +248,11 @@ if [[ "$INCLUDE_SHARED" == true ]]; then
   aws iam remove-role-from-instance-profile --instance-profile-name source-truth-index-profile --role-name source-truth-index-role >/dev/null 2>&1 || true
   del "instance profile source-truth-index-profile" aws iam delete-instance-profile --instance-profile-name source-truth-index-profile
   aws iam detach-role-policy --role-name source-truth-index-role --policy-arn arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore >/dev/null 2>&1 || true
-  aws iam delete-role-policy --role-name source-truth-index-role --policy-name s3-artifacts >/dev/null 2>&1 || true
+  # Delete ALL inline policies before the role (delete-role fails if any remain). Enumerate
+  # rather than name them (the set grew: s3-artifacts, secrets-read, cloudwatch-logs, …).
+  for p in $(aws iam list-role-policies --role-name source-truth-index-role --query 'PolicyNames[]' --output text 2>/dev/null || echo ""); do
+    aws iam delete-role-policy --role-name source-truth-index-role --policy-name "$p" >/dev/null 2>&1 || true
+  done
   del "IAM role source-truth-index-role" aws iam delete-role --role-name source-truth-index-role
   # Runtime role: delete any inline policies, then the role.
   for p in $(aws iam list-role-policies --role-name SourceTruthAgentRuntimeRole --query 'PolicyNames[]' --output text 2>/dev/null || echo ""); do
