@@ -311,6 +311,23 @@ def test_track_tool_latency_emits_one_line_per_completed_tool(caplog):
     assert rows[0]["latency_ms"] >= 0
 
 
+def test_track_tool_latency_stamps_traceId_and_logs_tool_call(caplog):
+    # traceId on BOTH the tool_call (start) and tool_latency (close) lines so the cross-VM
+    # trace (scripts/trace.sh) can join per-tool timing into the request timeline — the
+    # "logs too sparse via traceId" gap (the lines existed but had no traceId to match on).
+    import json as _json
+    import logging
+    pending: dict = {}
+    with caplog.at_level(logging.INFO, logger="agent"):
+        agent_lib._track_tool_latency(_MsgWith([_ToolUseBlock("t9", "mcp__codegraph__codegraph_symbol_search")]), pending, "st-abc123")
+        agent_lib._track_tool_latency(_MsgWith([_ToolResultBlock("t9")]), pending, "st-abc123")
+    calls = [_json.loads(r.message) for r in caplog.records if '"tool_call"' in r.message]
+    lats = [_json.loads(r.message) for r in caplog.records if '"tool_latency"' in r.message]
+    assert len(calls) == 1 and calls[0]["traceId"] == "st-abc123" and calls[0]["tool"].endswith("symbol_search")
+    assert len(lats) == 1 and lats[0]["traceId"] == "st-abc123"
+    assert calls[0]["toolUseId"] == "t9" and lats[0]["toolUseId"] == "t9"
+
+
 def test_track_tool_latency_ignores_unmatched_result(caplog):
     import logging
     pending: dict = {}

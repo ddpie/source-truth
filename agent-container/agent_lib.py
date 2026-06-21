@@ -424,7 +424,7 @@ async def run_agent(
             if not first_emitted:
                 first_emitted = True
                 _perf("agent_first_message", (time.perf_counter() - t0) * 1000, traceId=trace_id)
-            zero_result_retrievals += _track_tool_latency(message, pending)
+            zero_result_retrievals += _track_tool_latency(message, pending, trace_id)
             _maybe_log_result(message)
             if _message_has_tool_use(message):
                 saw_tool_use = True
@@ -728,12 +728,18 @@ def _is_empty_retrieval(name: str, block: Any) -> bool:
     return False
 
 
-def _track_tool_latency(message: Any, pending: dict[str, tuple[str, float]]) -> int:
+def _track_tool_latency(message: Any, pending: dict[str, tuple[str, float]], trace_id: str = "") -> int:
     """Time each tool round-trip: open a timer on a tool_use block, close + emit a
     `tool_latency` perf line on the matching tool_result. Best-effort + duck-typed
     (no SDK import); a shape we don't recognize is simply ignored. The per-tool
     breakdown (esp. Grep/Read on EFS vs codegraph MCP) is the issue-#2 lever for
     deciding whether to cut tool calls or speed up file I/O.
+
+    Every tool_latency line carries traceId so the cross-VM trace (scripts/trace.sh)
+    can JOIN per-tool timing into the request timeline — without it the lines exist but
+    are invisible to a traceId lookup (the "logs too sparse via traceId" gap). Also logs
+    a tool_use `tool_call` line (start) and a tool_result `tool_result` line (close) so a
+    trace shows WHICH tools ran and in what order, not just the run total.
 
     Returns the number of EMPTY-RETRIEVAL results closed by this message (a retrieval tool that
     came back with no match -- the 检索空命中 signal, correlates with index staleness/blind spots).
@@ -752,6 +758,15 @@ def _track_tool_latency(message: Any, pending: dict[str, tuple[str, float]]) -> 
             # Don't require input non-None — a no-arg tool call would be missed.
             if tool_id is not None and name is not None:
                 pending[tool_id] = (name, now)  # tool_use opened
+                # Log the call START (tool name + a short arg preview) so a trace shows the
+                # actual tool sequence. arg preview is truncated + best-effort (never raise).
+                try:
+                    arg = getattr(block, "input", None)
+                    preview = json.dumps(arg, ensure_ascii=False)[:160] if arg is not None else ""
+                except Exception:  # noqa: BLE001
+                    preview = ""
+                logger.info(json.dumps({"event": "tool_call", "tool": name, "toolUseId": str(tool_id)[:40],
+                                        "args": preview, "traceId": trace_id}))
                 continue
             result_id = getattr(block, "tool_use_id", None)
             if result_id is not None and result_id in pending:
@@ -760,9 +775,10 @@ def _track_tool_latency(message: Any, pending: dict[str, tuple[str, float]]) -> 
                 if empty:
                     empty_retrievals += 1
                 _perf("tool_latency", (now - start) * 1000, tool=name,
-                      is_error=getattr(block, "is_error", None), empty_retrieval=empty)
+                      is_error=getattr(block, "is_error", None), empty_retrieval=empty,
+                      toolUseId=str(result_id)[:40], traceId=trace_id)
     except Exception as exc:  # noqa: BLE001 - perf logging must never break the stream
-        logger.warning(json.dumps({"event": "tool_latency_log_failed", "error": str(exc)}))
+        logger.warning(json.dumps({"event": "tool_latency_log_failed", "error": str(exc), "traceId": trace_id}))
     return empty_retrievals
 
 
