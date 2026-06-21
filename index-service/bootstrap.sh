@@ -38,11 +38,15 @@
 #     single root volume (size it via provision_index_service's root volume).
 #
 # Inputs via environment (deploy-all.sh writes /etc/index-service.env first):
-#   BUCKET, REGION, MAX_FILES, REPO_MANIFEST_JSON
-#   REPO_MANIFEST_JSON is the project's repo set in ONE JSON value (multi-repo 阶段2):
-#     {"repos":[{"subdir":"<name>","source":"...","sig":"<etag>"}, ...]}
-#   ONE JSON var (not per-repo shell vars) because a per-repo S3 ETag can contain `|`
-#   (multipart) which a sourced env file parses as a shell pipe → bootstrap crash.
+#   BUCKET, REGION, MAX_FILES, REPO_MANIFEST_JSON, GIT_SECRET_ID (optional)
+#   REPO_MANIFEST_JSON is ONE project's repo set in ONE JSON value (multi-project + git refresh):
+#     {"projectId":"<id>","port":<int>,
+#      "repos":[{"subdir":"<name>","git":"<url>","ref":"<branch?>","refreshIntervalSec":<int?>}, ...]}
+#   ONE JSON var (not per-repo shell vars) because a git URL/ref can carry `@`/`:` that a sourced
+#   env file would mangle (and the project hit `|`-in-env crashes before adopting one JSON var).
+#   Code source is git-only (R1): each repo is `git clone`d to /data/repo/<subdir> using a
+#   read-only credential fetched host-side from Secrets Manager (GIT_SECRET_ID), then refreshed
+#   on a per-repo systemd timer (git pull); codegraph's resident file-watcher re-indexes in-place.
 set -euxo pipefail
 exec > /var/log/index-svc-bootstrap.log 2>&1
 
@@ -122,9 +126,37 @@ RENDER_MANIFEST="$APP/render_manifest.py"
 printf '%s' "$REPO_MANIFEST_JSON" > /etc/index-manifest.json
 SUBDIRS="$(python3 "$RENDER_MANIFEST" --field subdir /etc/index-manifest.json)" \
   || { echo "BOOTSTRAP_FAILED: invalid REPO_MANIFEST_JSON (see render_manifest error above)"; exit 1; }
+# Top-level scalars: this project's id (→ systemd instance name index-bridge@<id>) and its bridge
+# port. render_manifest validates the whole manifest, so a bad projectId/port fails loud here.
+PROJECT_ID="$(python3 "$RENDER_MANIFEST" --field projectId /etc/index-manifest.json)" \
+  || { echo "BOOTSTRAP_FAILED: manifest missing/invalid projectId"; exit 1; }
+BRIDGE_PORT="$(python3 "$RENDER_MANIFEST" --field port /etc/index-manifest.json)" \
+  || { echo "BOOTSTRAP_FAILED: manifest missing/invalid port"; exit 1; }
 # The serve unit's full --workspace/--local-workspace argv (one pair per repo).
 SERVE_ARGS="$(python3 "$RENDER_MANIFEST" --serve-args "$LOCAL_REPO_ROOT" /etc/index-manifest.json)" \
   || { echo "BOOTSTRAP_FAILED: could not render serve args from manifest"; exit 1; }
+
+# --- git credential (R-cred-1): one read-only token in Secrets Manager, fetched HOST-SIDE -----
+# Never passed through user-data / SSM command bodies (those land in CloudTrail). For https
+# remotes we expose it via a GIT_ASKPASS helper; ssh remotes use the host key (out of scope here).
+# Best-effort at bootstrap (public repos need no token); the refresh timer units reference the
+# same askpass via GIT_CRED_ENV_LINES below.
+GIT_CRED_ENV_LINES=""
+if [ -n "${GIT_SECRET_ID:-}" ]; then
+  GIT_TOKEN="$(aws secretsmanager get-secret-value --region "$REGION" --secret-id "$GIT_SECRET_ID" \
+    --query SecretString --output text 2>/dev/null || echo "")"
+  if [ -n "$GIT_TOKEN" ]; then
+    # askpass prints the token on any git credential prompt (username or password); a read-only
+    # PAT works as the password and most hosts accept any/empty username with a PAT.
+    printf '#!/bin/sh\nexec echo "%s"\n' "$GIT_TOKEN" > /opt/idx/git-askpass.sh
+    chmod 700 /opt/idx/git-askpass.sh
+    export GIT_ASKPASS=/opt/idx/git-askpass.sh GIT_TERMINAL_PROMPT=0
+    GIT_CRED_ENV_LINES=$'Environment=GIT_ASKPASS=/opt/idx/git-askpass.sh\nEnvironment=GIT_TERMINAL_PROMPT=0'
+    unset GIT_TOKEN   # don't keep the plaintext in the shell env
+  else
+    echo "WARN: GIT_SECRET_ID set but secret empty/unreadable — git clone will work only for public repos"
+  fi
+fi
 
 # --- per-repo extract to LOCAL disk + per-repo BUILD unit (single-writer per graph) ---
 # NO EFS: each repo lives only on LOCAL disk at /data/repo/<subdir>. codegraph indexes
@@ -137,17 +169,6 @@ SERVE_ARGS="$(python3 "$RENDER_MANIFEST" --serve-args "$LOCAL_REPO_ROOT" /etc/in
 # unit (index-bridge) opens ALL repos' graph.db read-write and holds EACH repo's flock,
 # so a stray `systemctl restart index-build@<subdir>` while the bridge is up fails fast
 # on that repo's flock (clean failure, never a 2nd concurrent writer).
-require_disk_headroom() {   # $1 = tarball path; budget 4x tarball + 1GiB on /data
-  local tb_kb avail_kb need_kb
-  tb_kb="$(du -k "$1" 2>/dev/null | cut -f1 || echo 0)"
-  avail_kb="$(df -Pk /data | awk 'NR==2{print $4}')"
-  need_kb=$(( tb_kb * 4 + 1048576 ))
-  if [ "${avail_kb:-0}" -lt "$need_kb" ]; then
-    echo "BOOTSTRAP_FAILED: insufficient /data space: avail=${avail_kb}KiB need>=${need_kb}KiB (tarball ${tb_kb}KiB). Grow the root volume."
-    exit 1
-  fi
-}
-
 # Per-repo BUILD template. %i = the subdir (instance name). Each instance derives its
 # graph.db from HOME=/data/<subdir>/.home/.codegraph and holds /data/<subdir>/.codegraph/.writer.lock.
 # Mirrors the single-repo unit's THREE guards (non-empty check, disk headroom, 64KiB
@@ -162,7 +183,7 @@ cat > /etc/systemd/system/index-build@.service <<UNIT
 Description=CodeGraph index build for repo %i (single-writer per graph)
 After=network-online.target remote-fs.target
 Wants=network-online.target
-Before=index-bridge.service
+Before=index-bridge@.service
 [Service]
 Type=oneshot
 RemainAfterExit=yes
@@ -176,35 +197,27 @@ ExecStart=/usr/bin/flock -n $LOCAL_REPO_ROOT/%i/.codegraph/.writer.lock $BIN --g
 ExecStartPost=/bin/bash -c 'sz=\$(du -sb $LOCAL_REPO_ROOT/%i/.home/.codegraph/graph.db 2>/dev/null | cut -f1); [ "\${sz:-0}" -ge 65536 ] || { echo "FATAL: %i graph.db is \${sz:-0} bytes (<64KiB) — empty/corrupt graph"; exit 1; }'
 UNIT
 
-# Extract each repo (freshness-stamped per repo) and build its graph. The per-repo
-# `: "\${SUBDIR:?}"` is implicit: render_manifest already rejected an empty/invalid
-# subdir, and we iterate ONLY its validated output — but guard again before any rm -rf.
+# Clone each repo to LOCAL disk via git (R1: git is the only source). git_fetch.sh is idempotent
+# (clone if absent, fetch+reset if present) and prints GIT_FETCH_FAILED on failure. The per-repo
+# `: "${SUBDIR:?}"` guards again before git touches a path, even though render_manifest already
+# rejected an empty/invalid subdir. Graph dirs (.codegraph/.home) are git's siblings under $WS,
+# NOT inside the cloned tree, so they survive a re-clone.
+GIT_FETCH="$APP/git_fetch.sh"
+[ -f "$GIT_FETCH" ] || { echo "BOOTSTRAP_FAILED: git_fetch.sh not in app bundle ($GIT_FETCH)"; exit 1; }
 while IFS= read -r SUBDIR; do
-  : "${SUBDIR:?BOOTSTRAP_FAILED: empty subdir from manifest (refusing rm -rf on repo root)}"
+  : "${SUBDIR:?BOOTSTRAP_FAILED: empty subdir from manifest (refusing git op on repo root)}"
   WS="$LOCAL_REPO_ROOT/$SUBDIR"
-  # Per-repo sig (S3 ETag) for the freshness stamp — look it up by subdir from the manifest
-  # using the SHIPPED parser (PYTHONPATH=$APP so `import render_manifest` resolves).
-  WANT_SIG="$(PYTHONPATH="$APP" python3 -c 'import sys; from render_manifest import parse_manifest; repos=parse_manifest(open("/etc/index-manifest.json").read()); print(next((r["sig"] for r in repos if r["subdir"]==sys.argv[1]), "") or "unset")' "$SUBDIR" 2>/dev/null || echo unset)"
-  SIG_STAMP="$WS/.artifact_sig"
-  HAVE_SIG="$(cat "$SIG_STAMP" 2>/dev/null || echo none)"
+  GIT_URL="$(python3 "$RENDER_MANIFEST" --repo-field git "$SUBDIR" /etc/index-manifest.json)" \
+    || { echo "BOOTSTRAP_FAILED: no git url for $SUBDIR"; exit 1; }
+  GIT_REF="$(python3 "$RENDER_MANIFEST" --repo-field ref "$SUBDIR" /etc/index-manifest.json || echo "")"
+  # git_fetch clones into $WS (must be empty/absent on first boot; idempotent fetch+reset after).
+  # Graph dirs live INSIDE $WS (.codegraph/.home) — the proven single-repo layout that the build
+  # and serve units already reference. They're created AFTER the clone (clone needs an empty dir)
+  # and are git-untracked, so `git reset --hard` on refresh never removes them. codegraph indexes
+  # $WS with HOME=$WS/.home; it tolerates its own graph dir living under the workspace (verified).
+  retry_net bash "$GIT_FETCH" "$SUBDIR" "$GIT_URL" "$GIT_REF" "$WS" \
+    || { echo "BOOTSTRAP_FAILED: git fetch $SUBDIR"; exit 1; }
   mkdir -p "$WS/.codegraph" "$WS/.home/.codegraph"
-  # SOURCE PRESENT? = any entry under $WS that is NOT our scaffolding (.codegraph/.home/
-  # .artifact_sig). find -quit stops at the first hit (cheap). Re-extract when: no source
-  # tree, or the staged snapshot changed.
-  HAS_SOURCE="$(find "$WS" -mindepth 1 -maxdepth 1 \
-    ! -name .codegraph ! -name .home ! -name .artifact_sig -print -quit 2>/dev/null)"
-  if [ -z "$HAS_SOURCE" ] || [ "$HAVE_SIG" != "$WANT_SIG" ]; then
-    retry_net aws s3 cp "s3://$BUCKET/${SUBDIR}.tar.gz" /tmp/repo.tar.gz --region "$REGION"
-    require_disk_headroom /tmp/repo.tar.gz
-    # The tarball's top-level dir IS <subdir>; extract into LOCAL_REPO_ROOT so it lands
-    # at $WS. Drop only the stale SOURCE tree, NOT .codegraph/.home/.artifact_sig (preserve
-    # the graph dirs; the extract overwrites the source files).
-    find "$WS" -mindepth 1 -maxdepth 1 \
-      ! -name .codegraph ! -name .home ! -name .artifact_sig -exec rm -rf {} +
-    tar xzf /tmp/repo.tar.gz -C "$LOCAL_REPO_ROOT"
-    echo "$WANT_SIG" > "$SIG_STAMP"
-    rm -f /tmp/repo.tar.gz
-  fi
 done <<< "$SUBDIRS"
 
 # Install ripgrep for fast, .gitignore-aware search (apt has it on Ubuntu 24.04).
@@ -229,9 +242,13 @@ done
 # instances fixes the ordering. Deliberately Wants= NOT Requires= (the original single-repo
 # design's lesson: Requires= + a build failure cascades the bridge down; the warmup health
 # gate + 64KiB floor already refuse to serve a bad graph, so ordering is enough).
-cat > /etc/systemd/system/index-bridge.service <<UNIT
+# PER-PROJECT serve unit (template): index-bridge@<projectId>. %i = projectId. Each project's
+# bridge serves ONLY its own repos (SERVE_ARGS, built from this project's manifest) on its OWN
+# port (BRIDGE_PORT) — so project A's process has no handle to project B's graph (A 档逻辑隔离).
+# Multiple projects on one host = multiple index-bridge@<id> instances on distinct ports.
+cat > /etc/systemd/system/index-bridge@.service <<UNIT
 [Unit]
-Description=CodeGraph MCP HTTP bridge (resident, all project repos)
+Description=CodeGraph MCP HTTP bridge for project %i (resident)
 After=network-online.target remote-fs.target$BUILD_UNITS
 Wants=network-online.target$BUILD_UNITS
 [Service]
@@ -239,11 +256,30 @@ Environment=HOME=$INDEX_HOME
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
 Environment=CODEGRAPH_MAX_FILES=$MAX_FILES
 WorkingDirectory=$APP
-ExecStart=$SERVE_FLOCKS /usr/bin/python3 -m http_bridge $SERVE_ARGS --host 0.0.0.0 --port 8080 --mount-root ""
+ExecStart=$SERVE_FLOCKS /usr/bin/python3 -m http_bridge $SERVE_ARGS --host 0.0.0.0 --port $BRIDGE_PORT --mount-root ""
 Restart=always
 RestartSec=5
 [Install]
 WantedBy=multi-user.target
+UNIT
+
+# --- per-repo refresh timer: git pull on a schedule; codegraph's file-watcher re-indexes ------
+# The timer's service does ONE thing: git pull this repo's working tree (git_fetch.sh). It NEVER
+# spawns a codegraph process — the resident index-bridge@<projectId> has its own file-watcher that
+# picks up the changed files and incrementally re-indexes the in-memory graph within seconds
+# (verified spike). So the single-writer-per-graph invariant is untouched, and there is no blip.
+# OnUnitActiveSec is per-repo (manifest refreshIntervalSec, default 300s). GIT_CRED_ENV_LINES
+# injects the same host-side askpass the initial clone used.
+cat > /etc/systemd/system/index-refresh@.service <<UNIT
+[Unit]
+Description=Scheduled git pull for repo %i (codegraph watcher re-indexes in-place)
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=oneshot
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+$GIT_CRED_ENV_LINES
+ExecStart=/bin/bash -c '$APP/git_fetch.sh %i "\$(python3 $RENDER_MANIFEST --repo-field git %i /etc/index-manifest.json)" "\$(python3 $RENDER_MANIFEST --repo-field ref %i /etc/index-manifest.json)" $LOCAL_REPO_ROOT/%i'
 UNIT
 
 systemctl daemon-reload
@@ -258,7 +294,24 @@ for SUBDIR in $SUBDIRS; do
     exit 1
   fi
 done
-systemctl enable --now index-bridge.service  # the resident reader serves all repos
+systemctl enable --now "index-bridge@${PROJECT_ID}.service"  # resident reader for THIS project's repos
+
+# Per-repo refresh timers: OnUnitActiveSec = that repo's refreshIntervalSec (manifest), default 300.
+for SUBDIR in $SUBDIRS; do
+  IV="$(python3 "$RENDER_MANIFEST" --repo-field refreshIntervalSec "$SUBDIR" /etc/index-manifest.json 2>/dev/null || echo "")"
+  [ -n "$IV" ] && [ "$IV" != "None" ] || IV=300
+  cat > "/etc/systemd/system/index-refresh@${SUBDIR}.timer" <<TIMER
+[Unit]
+Description=Refresh timer for repo ${SUBDIR}
+[Timer]
+OnBootSec=${IV}s
+OnUnitActiveSec=${IV}s
+Unit=index-refresh@${SUBDIR}.service
+[Install]
+WantedBy=timers.target
+TIMER
+  systemctl enable --now "index-refresh@${SUBDIR}.timer"
+done
 
 # --- bot-gateway: co-located Feishu long-connection gateway -----------------
 # The gateway runs ON this same host (a second resident service alongside the
