@@ -43,7 +43,7 @@ import { classifyWsError } from "./index-core";
 import { sdkEventToImEvent } from "./sdk-event";
 import { sendReply } from "./reply";
 import { imReply, imSendToChat } from "./feishu-http";
-import { getSessionId } from "./session-map";
+import { getSessionId, setBusyProbe } from "./session-map";
 import { SessionSerializer } from "./serialize-session";
 import { Semaphore } from "./semaphore";
 import { CardWriter } from "./card-writer";
@@ -179,6 +179,11 @@ function gracefulShutdown(sig: string): void {
 // serialize-session.ts for the why; it's a tested module so the critical
 // concurrency logic doesn't live untested in this entry shell.
 const sessionSerializer = new SessionSerializer();
+// Enable warm-session borrowing in session-map: a new chat/thread reuses an IDLE
+// warm session (one not mid-invoke) instead of cold-starting a fresh microVM.
+// "Idle" == not queued/running on the serializer; without this probe wired,
+// session-map treats every session as busy and never borrows (pre-pool behaviour).
+setBusyProbe((sessionId) => sessionSerializer.isBusy(sessionId));
 // GLOBAL invoke concurrency gate. Per-session serialization bounds same-session
 // turns but NOT distinct sessions — a burst of N different users in a busy group
 // would otherwise fire N concurrent AgentCore invokes (cost/throttle/memory). Cap
