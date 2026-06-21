@@ -54,7 +54,8 @@ scripts/                Operational lifecycle
   install.sh            Interactive one-click install (check deps→Feishu creds→config→confirm→deploy-all; pre-fills on re-run)
   deploy-all.sh         Canonical one-click deploy (artifacts→IAM→network→index-service→image→Runtime→gateway; idempotent)
   lib/provision_*.sh + deploy_runtime.py + wait_index_health.sh  deploy-all.sh phase implementations
-  lib/resolve_repo.sh   --repo multi-source resolver (local / git URL / s3://) → normalized local dir
+  lib/deploy_project.sh + wait_base_host.sh + delete_runtime.py  Multi-project orchestration: build base / await base ready / delete per-project runtime
+  lib/resolve_repo.sh   Multi-source repo resolver (local / git / s3); now referenced by tests only, main path is git-only
   lib/activate_gateway.sh  Write /etc/bot-gateway.env + start bot-gateway.service via SSM (gateway co-located with the index host)
   lib/stop_gateway.sh   Stop the old instance's gateway via SSM (break-before-make on blue-green swap; prevents two gateways racing the Feishu long-connection)
   deploy.sh             Deprecated compatibility shim (delegates to deploy-all.sh)

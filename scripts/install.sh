@@ -300,15 +300,39 @@ a=json.loads(sys.argv[1]); a.append({"subdir":os.environ["RSUB"],"git":os.enviro
   done
   [[ "$REPOS_JSON" != "[]" ]] || { say err "至少要一个仓库 / need at least one repo"; exit 1; }
 
-  # port: suggest max-existing+1 (base 8080).
+  # subdir 是全局键（决定 /data/repo/<subdir>、graph.db、systemd 单元名）。两个项目用同名
+  # subdir 会共享同一份 graph.db（违反单写者，索引会损坏），删一个项目还会误删另一个的副本。
+  # 所以这里既查本项目内部重复，也查与已有项目的冲突，命中即 fail-loud。
+  if ! REPOS_JSON="$REPOS_JSON" python3 -c '
+import json, os, sys
+new = [r["subdir"] for r in json.loads(os.environ["REPOS_JSON"])]
+if len(new) != len(set(new)):
+    sys.stderr.write("本项目内 subdir 重复 / duplicate subdir within this project\n"); sys.exit(1)
+try:
+    projects = json.load(open(sys.argv[1])).get("projects", {})
+except Exception:
+    projects = {}
+used = {r["subdir"]: pid for pid, p in projects.items() for r in p.get("repos", [])}
+clash = [(s, used[s]) for s in new if s in used]
+if clash:
+    sys.stderr.write("subdir 已被其他项目占用 / subdir already used by another project: "
+                     + ", ".join(f"{s} (项目 {pid})" for s, pid in clash) + "\n"); sys.exit(1)
+' "$PROJECTS_CFG"; then
+    say err "subdir 冲突——换个不重名的子目录名 / subdir clash; pick unique subdir names"; exit 1
+  fi
+
+  # port: 在 8080-8099（安全组放行段）里挑第一个没被占用的；占满则报错（最多 20 个项目）。
   local SUGGEST_PORT PORT
   SUGGEST_PORT="$(python3 -c 'import json,sys
-try: ps=[p.get("port",0) for p in json.load(open(sys.argv[1])).get("projects",{}).values()]
-except Exception: ps=[]
-print((max(ps)+1) if ps else 8080)' "$PROJECTS_CFG")"
+try: used={p.get("port") for p in json.load(open(sys.argv[1])).get("projects",{}).values()}
+except Exception: used=set()
+free=[p for p in range(8080,8100) if p not in used]
+print(free[0] if free else "")' "$PROJECTS_CFG")"
+  [[ -n "$SUGGEST_PORT" ]] || { say err "8080-8099 端口已占满（最多 20 个项目）/ no free port in 8080-8099 (max 20 projects)"; exit 1; }
   ask PORT "bridge 端口（建议未用值）/ bridge port" "$SUGGEST_PORT"
-  if ! [[ "$PORT" =~ ^[0-9]+$ ]] || (( PORT < 1024 || PORT > 65535 )); then
-    say err "端口非法 / invalid port '$PORT' (1024-65535)"; exit 1
+  # 必须落在安全组放行的 8080-8099 内——否则 runtime 连不上 bridge，会静默退化成「无证据」回答。
+  if ! [[ "$PORT" =~ ^[0-9]+$ ]] || (( PORT < 8080 || PORT > 8099 )); then
+    say err "端口必须在 8080-8099（安全组只放行这一段）/ port must be 8080-8099 (only this range is open in the SG); got '$PORT'"; exit 1
   fi
   if project_ids | while read -r p; do python3 -c 'import json,sys; d=json.load(open(sys.argv[1]))["projects"]; sys.exit(0 if d.get(sys.argv[2],{}).get("port")==int(sys.argv[3]) else 1)' "$PROJECTS_CFG" "$p" "$PORT" && echo "$p"; done | grep -q .; then
     say err "端口 $PORT 已被占用 / port already used by another project"; exit 1
