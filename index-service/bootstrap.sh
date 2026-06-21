@@ -285,6 +285,13 @@ if aws s3api head-object --bucket "$BUCKET" --key bot-gateway.tar.gz --region "$
   retry_net aws s3 cp "s3://$BUCKET/bot-gateway.tar.gz" /tmp/gw.tar.gz --region "$REGION"
   tar xzf /tmp/gw.tar.gz -C "$GW_APP"
   rm -f /tmp/gw.tar.gz
+  # The gateway resolves card copy at __dirname/../../config/i18n.json — from
+  # /opt/bot-gateway/dist that is /opt/config. The tarball ships config/ under the gateway
+  # dir, so relocate it to /opt/config (parent of GW_APP) where the runtime path expects it.
+  if [ -d "$GW_APP/config" ]; then
+    rm -rf /opt/config
+    mv "$GW_APP/config" /opt/config
+  fi
   # Install ALL deps (typescript/@types live in devDependencies and `npm run build`
   # = `tsc` needs them), compile TS → dist/, THEN prune devDeps so the resident
   # service runs on prod-only modules. A bare `npm ci --omit=dev` would skip tsc and

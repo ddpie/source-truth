@@ -451,7 +451,16 @@ else
   TMP_GW="$(mktemp /tmp/bot-gateway.XXXX.tar.gz)"
   # Deterministic (see above): keeps the gateway tarball's ETag stable across reruns
   # when its source is unchanged, so the ArtifactSig staleness check is meaningful.
-  ( cd "$ROOT/bot-gateway" && tar --sort=name --mtime='UTC 2020-01-01' --owner=0 --group=0 --numeric-owner -cf - src tsconfig.json package.json package-lock.json run.sh | gzip -n > "$TMP_GW" )
+  # Bundle the repo's config/ INTO the tarball under a top-level `config/`: the gateway
+  # resolves card copy at __dirname/../../config/i18n.json = /opt/config on the host, so
+  # bootstrap extracts this config/ to /opt/config. Staged from a temp dir that holds both
+  # bot-gateway/* and config/ so the archive has the right top-level layout.
+  GW_STAGE="$(mktemp -d /tmp/gw-stage.XXXX)"
+  cp -r "$ROOT/bot-gateway/src" "$ROOT/bot-gateway/tsconfig.json" "$ROOT/bot-gateway/package.json" \
+        "$ROOT/bot-gateway/package-lock.json" "$ROOT/bot-gateway/run.sh" "$GW_STAGE"/
+  cp -r "$ROOT/config" "$GW_STAGE/config"
+  ( cd "$GW_STAGE" && tar --sort=name --mtime='UTC 2020-01-01' --owner=0 --group=0 --numeric-owner -cf - src tsconfig.json package.json package-lock.json run.sh config | gzip -n > "$TMP_GW" )
+  rm -rf "$GW_STAGE"
   run aws s3 cp "$TMP_GW" "s3://$BUCKET/bot-gateway.tar.gz" --region "$REGION"
   say ok "artifacts staged"
 fi
