@@ -12,7 +12,7 @@ Contract (the parts that MUST be right, per the plan's 最小可执行规格):
   - StartQuery is ASYNC: poll GetQueryResults until status=Complete (bounded + backoff),
     never read results synchronously (would get empty data).
   - Time window + timezone: query a FULL local day [00:00, 24:00) for the TARGET date in
-    the configured zone (default Asia/Tokyo, matching ops reality), not UTC, so day
+    the configured zone (default Asia/Shanghai = 东八区 UTC+8, the game team's zone), not UTC, so day
     boundaries don't smear DAU. Default target = "yesterday" in that zone.
   - Empty result → PutMetricData 0 EXPLICITLY: a zero-activity day must show as 0, not a
     gap (a gap breaks the dashboard line + same-day-over-day math). B-class self-controls
@@ -68,8 +68,9 @@ def _zone_offset_seconds(tz_name: str, when_utc: datetime) -> int:
     # Fallback only for NON-DST zones (exact year-round). DST zones are deliberately NOT
     # here: a fixed offset would be wrong half the year, and silently wrong is worse than
     # the explicit 0 (UTC) you get for an unknown zone. The Lambda's default + ops zone is
-    # Asia/Tokyo (no DST), so this fallback is exact for the real deployment; zoneinfo
-    # handles everything else when tzdata is present (it is, on the python3.x Lambda runtime).
+    # Asia/Shanghai (东八区, no DST → always +8), so this fallback is exact for the real
+    # deployment; zoneinfo handles everything else when tzdata is present (it is, on the
+    # python3.x Lambda runtime).
     static = {"Asia/Tokyo": 9 * 3600, "Asia/Shanghai": 8 * 3600, "UTC": 0}
     return static.get(tz_name, 0)
 
@@ -105,14 +106,14 @@ def parse_dau(results: list[list[dict[str, str]]]) -> tuple[int, int]:
 
 def handler(event: dict[str, Any] | None, context: Any = None) -> dict[str, Any]:
     """EventBridge-triggered entry. Env:
-       LOG_GROUP (default /source-truth/bot-gateway), TZ_NAME (default Asia/Tokyo),
+       LOG_GROUP (default /source-truth/bot-gateway), TZ_NAME (default Asia/Shanghai = 东八区),
        TARGET_DATE (optional YYYY-MM-DD; default = yesterday in TZ_NAME),
        POLL_TIMEOUT_S (default 120), AWS region from the Lambda env.
     """
     import boto3  # imported here so the pure helpers above unit-test without boto3
 
     log_group = os.environ.get("LOG_GROUP", "/source-truth/bot-gateway")
-    tz_name = os.environ.get("TZ_NAME", "Asia/Tokyo")
+    tz_name = os.environ.get("TZ_NAME", "Asia/Shanghai")
     poll_timeout = int(os.environ.get("POLL_TIMEOUT_S", "120"))
     now_utc = datetime.now(timezone.utc)
 
@@ -128,8 +129,25 @@ def handler(event: dict[str, Any] | None, context: Any = None) -> dict[str, Any]
     logs = boto3.client("logs")
     cw = boto3.client("cloudwatch")
 
-    qid = logs.start_query(logGroupName=log_group, startTime=start, endTime=end,
-                           queryString=build_query())["queryId"]
+    # The whole window can predate the log group (the first day(s) after a fresh deploy:
+    # "yesterday" is before the group existed). CloudWatch then rejects StartQuery with
+    # MalformedQueryException ("end date ... before the log groups creation time"). That's
+    # a genuine ZERO-activity day, not a failure — emit DAU=0 (the explicit-zero contract)
+    # instead of erroring and leaving a dashboard gap. Any OTHER StartQuery error still raises.
+    try:
+        qid = logs.start_query(logGroupName=log_group, startTime=start, endTime=end,
+                               queryString=build_query())["queryId"]
+    except Exception as exc:  # noqa: BLE001 - inspect message; boto3 ClientError type varies
+        msg = str(exc)
+        if "before the log groups creation" in msg or "MalformedQueryException" in msg:
+            ts0 = datetime.fromtimestamp(start + 12 * 3600, tz=timezone.utc)
+            cw.put_metric_data(Namespace=NAMESPACE, MetricData=[{
+                "MetricName": METRIC_NAME, "Timestamp": ts0, "Value": 0.0, "Unit": "Count",
+                "Dimensions": [{"Name": "saltWeak", "Value": "false"}],
+            }])
+            return {"date": target.isoformat(), "dau": 0, "weakRows": 0,
+                    "window": [start, end], "note": "window predates log group → DAU=0"}
+        raise
 
     # Poll to Complete (bounded + linear backoff). StartQuery is async — reading early
     # yields empty/partial data.
