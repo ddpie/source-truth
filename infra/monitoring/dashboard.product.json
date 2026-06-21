@@ -464,6 +464,48 @@
           ]
         ]
       }
+    },
+    {
+      "type": "text",
+      "x": 0, "y": 31, "width": 24, "height": 2,
+      "properties": {
+        "markdown": "## 使用规律\n按小时看提问量分布，找出使用高峰时段（决定暖机 / 扩容时机）；追问深度反映一次提问通常要追几轮才问清。"
+      }
+    },
+    {
+      "type": "metric",
+      "x": 0, "y": 33, "width": 12, "height": 6,
+      "properties": {
+        "title": "每小时提问量（找使用高峰时段）",
+        "region": "${REGION}",
+        "view": "timeSeries",
+        "stacked": false,
+        "period": 3600,
+        "stat": "Sum",
+        "yAxis": {"left": {"label": "次/小时", "showUnits": false, "min": 0}},
+        "metrics": [
+          ["${NAMESPACE}", "QuestionsReceived", {"label": "提问量", "color": "#1f77b4"}]
+        ]
+      }
+    },
+    {
+      "type": "metric",
+      "x": 12, "y": 33, "width": 12, "height": 6,
+      "properties": {
+        "title": "首次提问 vs 追问（每日；追问占比高=话题需多轮才问清）",
+        "region": "${REGION}",
+        "view": "timeSeries",
+        "stacked": true,
+        "period": 86400,
+        "stat": "Sum",
+        "yAxis": {"left": {"label": "次", "showUnits": false, "min": 0}},
+        "metrics": [
+          ["${NAMESPACE}", "QuestionsReceived", {"id": "tot", "visible": false}],
+          ["${NAMESPACE}", "FollowupQuestions", {"label": "追问", "color": "#ff7f0e"}],
+          [{"expression": "tot - FILL(fu, 0)", "label": "首次提问", "id": "first", "color": "#2ca02c"}],
+          ["${NAMESPACE}", "FollowupQuestions", {"id": "fu", "visible": false}]
+        ]
+      }
     }
   ]
 }

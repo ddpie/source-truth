@@ -65,6 +65,33 @@
       "unit": "Milliseconds",
       "dimensions": {"projectId": "$.projectId"},
       "purpose": "首字延迟 by 项目（体感关键）"
+    },
+    {
+      "name": "EvidenceCitationsByProject",
+      "event": "answer_completed",
+      "filterPattern": "{ $.metric IS TRUE && $.event = \"answer_completed\" && $.projectId = \"*\" }",
+      "metricValue": "$.evidenceCitationCount",
+      "unit": "Count",
+      "dimensions": {"projectId": "$.projectId"},
+      "purpose": "代码检索充分度 by 项目（每答引用代码处数，看哪个项目答得「有据」）"
+    },
+    {
+      "name": "RuntimeColdStartsByProject",
+      "event": "runtime_cold_start",
+      "filterPattern": "{ $.metric IS TRUE && $.event = \"runtime_cold_start\" && $.projectId = \"*\" }",
+      "metricValue": "1",
+      "unit": "Count",
+      "dimensions": {"projectId": "$.projectId"},
+      "purpose": "冷启动次数 by 项目（哪个项目暖机命中差，对比提问量看是否值得调 idle）"
+    },
+    {
+      "name": "FeedbackVotedByProject",
+      "event": "feedback_voted",
+      "filterPattern": "{ $.metric IS TRUE && $.event = \"feedback_voted\" && $.projectId = \"*\" }",
+      "metricValue": "1",
+      "unit": "Count",
+      "dimensions": {"projectId": "$.projectId"},
+      "purpose": "反馈投票数 by 项目（结合 vote 维度可算各项目点赞率/覆盖率）"
     }
   ]
 }
