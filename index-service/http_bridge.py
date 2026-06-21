@@ -263,13 +263,14 @@ def build_bridge(
     # limit and rebuilds instead of loading the warm graph.
     max_files = int(os.environ.get("CODEGRAPH_MAX_FILES", "10000"))
 
-    # MULTI-REPO graph isolation (不变量2): codegraph locates graph.db via $HOME/.codegraph,
-    # so with >1 repo each session MUST spawn codegraph with a DISTINCT HOME or they'd all
-    # read/write the SAME /data/.codegraph graph (collision → corruption + wrong-repo answers).
-    # Per-repo HOME = <workspace>/.home — exactly where bootstrap's index-build@<repo> unit
-    # builds that repo's graph. With ONE repo, home=None → inherit the process HOME (the
-    # pre-multi-repo single-graph-at-$HOME/.codegraph layout, byte-identical).
-    multi = len(workspaces) > 1
+    # GRAPH-HOME COORDINATION (不变量2): codegraph locates graph.db via $HOME/.codegraph, so the
+    # SERVE session MUST point at the SAME $HOME the BUILD wrote to, or it finds no graph and
+    # re-scans into an empty one (→ /health 503, "0 nodes"). bootstrap's index-build@<repo> unit
+    # ALWAYS builds with HOME=<workspace>/.home (per-repo, even for a single repo), so serve must
+    # ALWAYS use that same per-repo HOME — NOT just when multi-repo. (An earlier version only set
+    # it for >1 repo, so the single-repo serve inherited HOME=/data and served an empty
+    # /data/.codegraph while the build sat at <ws>/.home — caught in the first real deploy.)
+    # Per-repo HOME also gives multi-repo its required graph isolation (distinct HOME per repo).
     repos: list[_Repo] = []
     for ws, local in workspaces:
         # SINGLE-WRITER GUARD per workspace — acquired HERE (before the worker spawns
@@ -277,7 +278,7 @@ def build_bridge(
         # http_bridge:app --workers N) can't bypass it and spawn duplicate writers. Each
         # workspace takes its OWN flock (see acquire_singleton_writer_lock / _WRITER_LOCK_FDS).
         acquire_singleton_writer_lock(ws)
-        home = (ws.rstrip("/") + "/.home") if multi else None
+        home = ws.rstrip("/") + "/.home"
         repos.append(_Repo(
             name=posixpath.basename(ws.rstrip("/")),
             workspace=ws,
