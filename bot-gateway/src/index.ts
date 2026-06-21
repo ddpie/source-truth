@@ -48,7 +48,7 @@ import { SessionSerializer } from "./serialize-session";
 import { Semaphore } from "./semaphore";
 import { CardWriter } from "./card-writer";
 import { hashUserId } from "./log";
-import { emitMetric, type FailReason } from "./metrics";
+import { emitMetric, classifyFailure, type FailReason } from "./metrics";
 import { isDuplicate, forget } from "./dedup";
 import { loadProjectsConfig, resolveRoute, ProjectsConfigMissing, type ProjectsConfig, type ResolvedRoute } from "./project-routing";
 
@@ -1148,7 +1148,11 @@ async function runStreamingInvoke(
       timedOut ? "upstream_throttle"
       : turnCapped ? "turn_capped"
       : leakFailed ? "cold_start_mcp_race"
-      : "unknown";
+      // A hard non-200 failure: classify from the backend error string (IAM 403 →
+      // auth_denied, throttle/429/503 → upstream_throttle) so the failure-by-reason
+      // dashboard distinguishes a permission misconfig from a real outage, instead of
+      // burying every non-200 under "unknown" (the first real deploy's 403 showed as unknown).
+      : classifyFailure(error);
     emitMetric("answer_failed", { reason }, { traceId, sessionId, projectId: activeRoute?.projectId });
   } else {
     const evidenceCitationCount = (finalEvidence.match(/[\w./-]+\.[A-Za-z0-9]+:\d+/g) || []).length;

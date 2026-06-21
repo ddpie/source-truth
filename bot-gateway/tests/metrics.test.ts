@@ -1,4 +1,4 @@
-import { emitMetric, setMetricSink } from "../src/metrics";
+import { emitMetric, setMetricSink, classifyFailure } from "../src/metrics";
 
 // Capture emitted records via the injectable sink.
 let records: Array<Record<string, unknown>>;
@@ -120,5 +120,28 @@ describe("emitMetric — best-effort (never breaks the hot path §1)", () => {
     // default sink does JSON.stringify; ensure the wrapping try/catch swallows it
     setMetricSink((r) => { JSON.stringify(r); });
     expect(() => emitMetric("answer_completed", { bad: circular }, { traceId: "st-1" })).not.toThrow();
+  });
+});
+
+describe("classifyFailure — backend error → FailReason (failure-by-reason dashboard)", () => {
+  it("maps IAM/authorization errors to auth_denied", () => {
+    expect(classifyFailure('HTTP 403: User ... is not authorized to perform: bedrock-agentcore:InvokeAgentRuntime')).toBe("auth_denied");
+    expect(classifyFailure("AccessDeniedException")).toBe("auth_denied");
+    expect(classifyFailure("403 Forbidden")).toBe("auth_denied");
+  });
+  it("maps throttle / rate-limit / 429 / 503 to upstream_throttle", () => {
+    expect(classifyFailure("ThrottlingException: Rate exceeded")).toBe("upstream_throttle");
+    expect(classifyFailure("HTTP 429: too many requests")).toBe("upstream_throttle");
+    expect(classifyFailure("ServiceUnavailable (503)")).toBe("upstream_throttle");
+  });
+  it("falls back to unknown for empty/unrecognized errors", () => {
+    expect(classifyFailure("")).toBe("unknown");
+    expect(classifyFailure(undefined)).toBe("unknown");
+    expect(classifyFailure(null)).toBe("unknown");
+    expect(classifyFailure("some weird internal error xyz")).toBe("unknown");
+  });
+  it("does not misclassify a 403 substring inside an unrelated number", () => {
+    // \b403\b must not match e.g. "14039" — guards against false auth_denied.
+    expect(classifyFailure("latency was 14039ms")).toBe("unknown");
   });
 });
