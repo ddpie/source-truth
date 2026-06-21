@@ -5,7 +5,8 @@
 | 脚本 | 阶段 | 状态 | 职责 |
 |------|------|------|------|
 | `check-invariants.sh` | p0 | 已实现 | 快速无网络结构 lint：AGENTS / CLAUDE / structure / 双语配对 / 顶层目录存在性。pre-commit 与 `test.sh --lint` 调用。 |
-| `test.sh` | p1 | 已实现 | 单一分层测试入口：离线默认（lint + unit + typecheck）/ `--full`（加 smoke / e2e）。详见下方「用法」。 |
+| `test.sh` | p1 | 已实现 | 单一分层测试入口：离线默认（lint + unit + typecheck）/ `--full`（加 e2e；smoke 仍占位）。详见下方「用法」。 |
+| `e2e-probe.py` | p1 | 已实现 | `test.sh --full` 的 e2e 组件：对已部署 Runtime 跑真实问答（boto3 InvokeAgentRuntime + 流式），**发送与 gateway 完全一致的 payload** `{prompt, traceId, repos}`。校验只读边界（`permission_denials` 空）、无 `errors`、答案含 `文件:行号` 出处。ARN/region/repos 从 `.local/{deploy-config,projects.json}` 读（不写死）；缺依赖/未部署退出码 2（test.sh 视为 skip，不阻塞）。纯逻辑（region 优先级 / payload 形状）有单测 `tests/test_e2e_probe.sh`。 |
 | `lib/common.sh` | p1 | 已实现 | 共享 shell：格式化输出（`say`）+ 依赖检查（`have_cmd` / `require_cmd`）。可被单测 source。 |
 | `tests/test_*.sh` | p1 | 已实现 | 纯 bash 单元测试（无外部依赖）；`test.sh` 的 unit 层自动发现并运行。 |
 | `check-versions.sh` | p1 | 已实现 | 无网络版本固定防漂移守卫：基础镜像 digest / requirements.txt 全 ==-pin / requirements.lock 一致 / Node 主版本 / claude-code npm pin（**例外：允许 `@latest`，仅 WARN 放行**，运维 2026-06-19 决定 CLI 跟随最新版本）。`test.sh --lint` 调用。 |
@@ -23,7 +24,7 @@
 ./scripts/test.sh --unit    # 仅单元测试（shell test_*.sh + 各组件 pytest）
 ./scripts/test.sh --list    # 列出发现的 shell unit 测试文件
 ./scripts/test.sh --list-py # 列出发现的 Python 测试目录（<component>/tests）
-./scripts/test.sh --full    # 离线套件 + smoke/e2e（占位，待组件落地）
+./scripts/test.sh --full    # 离线套件 + e2e（对已部署 Runtime 跑真实问答；缺部署则自动 skip）。smoke 仍占位
 ```
 
 退出码 0 = 全部通过。unit 层运行两类测试：`scripts/tests/test_*.sh`（纯 bash）+ 各组件 `<component>/tests/test_*.py`
