@@ -381,6 +381,13 @@ async def run_agent(
     )
 
     qfn = query_fn if query_fn is not None else _default_query_fn()
+    # Run-context anchor: the agent side previously logged nothing about WHAT it was asked
+    # (only timing milestones), so a trace couldn't show the prompt size / model / repo scope.
+    # Log it once at run start (prompt LENGTH only — never the text, which can carry a pasted
+    # secret; mirrors the gateway's redaction discipline). Best-effort via _plog.
+    _plog("agent_run_start", promptChars=len(prompt or ""), repos=repos,
+          model=(model or os.environ.get("ANTHROPIC_MODEL") or "")[:60],
+          maxTurns=_env_max_turns())
     # Perf: time-to-first-message (agent loop warmup + first model turn) and total
     # run (the dominant end-to-end cost — model turns + tool round-trips). Paired
     # with the gateway's invoke_timing, this localizes "where the 55s went".
