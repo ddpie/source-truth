@@ -42,7 +42,11 @@ print("DEFAULT_IV=" + shlex.quote(str(cfg.get("refreshIntervalSec", 300))))
 print("REPO_SPECS_JSON=" + shlex.quote(json.dumps(specs, separators=(",", ":"))))
 PY
 }
-eval "$(read_proj)" || { say err "could not read project '$PID' from projects.json"; exit 1; }
+# Capture to a var THEN eval: `eval "$(read_proj)"` can't see read_proj's exit code (command
+# substitution failure is masked, eval "" returns 0), so a missing/invalid project would slip
+# through to a cryptic `PORT: unbound variable` under set -u. Check rc explicitly.
+_PROJ_VARS="$(read_proj)" || { say err "could not read project '$PID' from projects.json"; exit 1; }
+eval "$_PROJ_VARS"
 
 # Build this project's REPO_MANIFEST_JSON via the single build authority (fail-loud on bad input).
 REPO_MANIFEST_JSON="$(REPO_SPECS_JSON="$REPO_SPECS_JSON" PID="$PID" PORT="$PORT" DEFAULT_IV="$DEFAULT_IV" \
@@ -134,6 +138,20 @@ if [[ -z "$FEISHU_SECRET" ]]; then
   say warn "project $PID has no feishuSecretId — backend (bridge+runtime) is up, but NO gateway/bot."
   say warn "  → add \"feishuSecretId\" to projects.json (install.sh add-project creates it), then re-run."
   exit 0
+fi
+# LOG_HASH_SALT (host-shared, project-agnostic): ensure the secret EXISTS before the FIRST gateway
+# starts. hashUserId de-identification is only sound if the salt is SECRET (log.ts falls back to a
+# PUBLIC repo constant when unset → telemetry stamps saltWeak). This is also done in deploy-all's
+# loop, but deploy_project is reached DIRECTLY by install.sh's add-project (which bypasses that
+# loop), so create-if-absent here too. create only on NOT-FOUND — never rotate (would break
+# DAU/retention correlation). Best-effort: run.sh reads it host-side; never blocks the gateway.
+if ! aws secretsmanager describe-secret --region "$REGION" --secret-id source-truth/log-hash-salt >/dev/null 2>&1; then
+  GW_SALT="$(openssl rand -hex 32 2>/dev/null || head -c32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+  aws secretsmanager create-secret --region "$REGION" --name source-truth/log-hash-salt \
+    --secret-string "$GW_SALT" --description 'source-truth gateway LOG_HASH_SALT (telemetry de-identification)' >/dev/null 2>&1 \
+    && say ok "created LOG_HASH_SALT in Secrets Manager" \
+    || say warn "could not create source-truth/log-hash-salt; gateway runs with weak public fallback (saltWeak)"
+  unset GW_SALT
 fi
 PROJECT_ID="$PID" bash "$SCRIPT_DIR/activate_gateway.sh" \
   "$REGION" "$IID" "$RT_ARN" "$FEISHU_SECRET" \

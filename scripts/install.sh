@@ -389,13 +389,22 @@ flow_remove_project() {
   # Stop + disable this project's host units and drop its repo copies (best-effort, via SSM).
   if [[ -n "$IID" ]]; then
     say info "停用主机上的 bridge/gateway/refresh 单元并清理代码副本 / cleaning host units + repo copies"
+    # IMPORTANT ordering: read this project's subdirs from its manifest FIRST (into SUBS), then
+    # disable each repo's refresh timer + build unit and drop its repo copy, and only AFTER that
+    # rm the manifest. (Deleting the manifest before reading it would leave the refresh timers
+    # git-pull-ing deleted repos forever and leak /data/repo copies.) The bridge is a CONCRETE
+    # unit index-bridge-<projectId> (already disabled above) — NOT a per-subdir template.
     local RM_CMD="set +e
 systemctl disable --now bot-gateway@${SEL}.service 2>/dev/null
 systemctl disable --now index-bridge-${SEL}.service 2>/dev/null
-for t in \$(systemctl list-units 'index-refresh-*' --all --no-legend | awk '{print \$1}'); do :; done
-rm -f /etc/bot-gateway-${SEL}.env /etc/index-projects/${SEL}.json
-for d in \$(python3 -c \"import json;print(' '.join(r['subdir'] for r in json.load(open('/etc/index-projects/${SEL}.json'))['repos']))\" 2>/dev/null); do
-  systemctl disable --now index-refresh-\$d.timer index-bridge@\$d 2>/dev/null; rm -rf /data/repo/\$d; done
+SUBS=\$(python3 -c \"import json;print(' '.join(r['subdir'] for r in json.load(open('/etc/index-projects/${SEL}.json'))['repos']))\" 2>/dev/null)
+for d in \$SUBS; do
+  systemctl disable --now index-refresh-\$d.timer index-refresh-\$d.service index-build@\$d.service 2>/dev/null
+  rm -f /etc/systemd/system/index-refresh-\$d.service /etc/systemd/system/index-refresh-\$d.timer
+  rm -rf /data/repo/\$d
+done
+rm -f /etc/bot-gateway-${SEL}.env /etc/index-projects/${SEL}.json /etc/systemd/system/index-bridge-${SEL}.service
+systemctl daemon-reload
 echo removed-${SEL}"
     local PF; PF="$(mktemp /tmp/rm-ssm.XXXX.json)"
     printf '%s' "$RM_CMD" | python3 -c 'import sys,json; print(json.dumps({"commands": sys.stdin.read().split("\n")}))' > "$PF"
