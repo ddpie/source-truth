@@ -41,16 +41,19 @@
 ./scripts/install.sh
 ```
 
-它会：
+它是一个**箭头菜单**（↑/↓ 选、回车确认），四个流程见 [6.5 多项目](#65多项目一台机器多个机器人)。
+首次部署的典型顺序：
 
 1. **查依赖**：`aws` / `python3` / `docker` / `git`，并校验 AWS 凭证可用；
-2. **问配置**：区域、模型、**索引主机机型与磁盘**（见下表）、代码仓来源（本地 / git / s3）。重跑沿用上次答案；
-3. **收飞书凭证**：`App Secret` 输入不回显；把 `{app_id, app_secret, bot_open_id}` 写进 **Secrets Manager**
-   （密钥名默认 `source-truth/feishu-app`，凭证不落盘、不进仓库）；
-4. **确认**清单后，调用 `deploy-all.sh` 端到端启动后端 **+ 网关**。
+2. **选「添加项目」**（底座不存在会自动先建）：填 projectId → 逐个加仓库（**git 地址** + 子目录 + 分支）→
+   bridge 端口（自动建议）→ 飞书 App 凭证（自动写入 `source-truth/feishu-<项目>`）→ 首次再给一个只读 git
+   凭证（写入全局 `source-truth/git-credentials`，后续项目复用）；
+3. 写入 `.local/projects.json` 并部署该项目（底座 + 该项目的 bridge + runtime + gateway）。
 
-索引主机是整套系统唯一一台 EC2（同机跑 codegraph 索引 + bridge + bot-gateway，全 ARM）。codegraph 索引
-吃内存、随仓库增大而增长，按仓库规模选机型；磁盘存放仓库副本、`graph.db` 与 tarball，按仓库体积选容量：
+> 想先把 AWS 环境拉起来、之后再配 git？选「**初始化环境（不挂项目）**」：只起共享底座，机型/磁盘见下表。
+
+索引主机是整套系统唯一一台 EC2（同机跑 codegraph 索引 + 各项目 bridge + 各项目 bot-gateway，全 ARM）。
+codegraph 索引吃内存、随仓库增大而增长，按仓库规模选机型；磁盘存放各仓 git 副本与 `graph.db`，按总体积选容量：
 
 | 机型 | vCPU / 内存 | 适用 |
 |---|---|---|
@@ -60,14 +63,13 @@
 | `m7g.xlarge` | 4C / 16G | 大仓·稳定 |
 | `m7g.2xlarge` | 8C / 32G | 超大仓 / 多仓 |
 
-磁盘默认 30 GiB，可选 50 / 100 / 200 GiB 或自定义容量。对应 `deploy-all.sh` 的
-`--instance-type` / `--root-volume-gb`。
+磁盘默认 30 GiB，可选 50 / 100 / 200 GiB 或自定义容量。
 
 成功后应看到：
 
-- 后端各阶段完成，最后 **Phase 6** 打印 `bot-gateway is active`，整体 `deploy-all complete`；
-- 状态写进 `.local/deploy-config`（含 `AGENT_RUNTIME_ARN`、`INDEX_SERVICE_IP`、`FEISHU_SECRET_ID` 等）；
-- 直接按第五节验证即可（网关已在 index 主机上以 `bot-gateway.service` 长驻）。
+- 底座各阶段完成，每个项目打印 `index-bridge-<项目>` 健康 + `bot-gateway@<项目> is active`，整体 `deploy-all complete`；
+- 状态写进 `.local/deploy-config`（含每项目 `RUNTIME_ARN_<项目>`、`INDEX_SERVICE_IP` 等）；
+- 直接按第五节验证即可（各项目网关已在 index 主机上以 `bot-gateway@<项目>.service` 长驻）。
 
 > 无人值守 / CI：`./scripts/install.sh --yes` 接受所有预填值（首次仍需已存在的飞书密钥）。
 
@@ -137,11 +139,10 @@ aws ssm start-session --region <r> --target <INDEX_SERVICE_INSTANCE>
 
 > 运维聚合命令 `ops.sh status` 尚未实现（规划中，p2）；当前用下面的手动命令。
 
-**代码更新了，刷新索引**（蓝绿替换 index-service 实例，不动网关/runtime）：
-
-```bash
-./scripts/deploy-all.sh --region <r> --repo /path/to/repo --refresh-index
-```
+**代码更新了，刷新索引**：**无需手动操作**。每个仓库按 `refreshIntervalSec`（默认 300 秒）由 systemd timer
+定时 `git pull`，常驻 codegraph 的 file-watcher 在几秒内增量重建该仓的内存图——不重启、无中断。改频率就改
+`.local/projects.json` 里该仓/该项目的 `refreshIntervalSec`，再「重新部署该项目」。`--refresh-index` 现在只
+用于**换索引服务自身的代码/机型**（蓝绿换整机），不再用于刷新业务代码。多项目部署见第 6.5 节。
 
 **只重部署 runtime**（改了 agent 镜像 / system prompt 后）：重跑 `deploy-all.sh`（镜像与 runtime 阶段幂等）。
 注意热 microVM 会使用旧镜像约 15 分钟，直到被回收。
@@ -230,6 +231,39 @@ aws ssm start-session --region <r> --target <INDEX_SERVICE_INSTANCE>
 
 ---
 
+## 6.5、多项目（一台机器多个机器人）
+
+一台索引主机可承载多个互相隔离的项目：机器人（独立飞书 App）⟷ 项目 一一对应，项目 ⟷ 仓库 一对多。
+项目间逻辑隔离（各自进程 + 端口 + 服务端 scope，A 档），同团队互信项目共机即可；互不信任的项目仍应分机器。
+
+**唯一声明处**是 `.local/projects.json`（不入库）。每个项目一条：`port`（该项目 bridge 端口，全机唯一）、
+`feishuSecretId`（由「添加项目」自动生成，**勿手填**）、`repos`（每个仓 `{subdir, git, ref?,
+refreshIntervalSec?}`，**git-only**）。顶层 `refreshIntervalSec` 是全局默认刷新间隔。
+
+全部操作走 `./scripts/install.sh` 的箭头菜单：
+
+- **初始化环境（不挂项目）**：只起共享底座（VPC/NAT/EC2/镜像），不挂任何项目。适合先把 AWS 环境拉起来、
+  之后再凭 git 地址与凭证挂项目（即「先部署环境、后配置 git」）。
+- **添加项目**：交互填 projectId → 逐个加仓库（git 地址 + 子目录 + 分支）→ bridge 端口（自动建议下一个未用值）
+  → 飞书 App 凭证（自动写入 `source-truth/feishu-<项目>`）→ 首次还会收一个**只读 git 凭证**写入全局
+  `source-truth/git-credentials`（后续项目复用）。随后写入清单并部署该项目（其余项目不受影响）。
+- **重新部署现有项目**：改了某项目的仓库集合 / 端口 / 刷新间隔后，选它重跑（幂等）。
+- **删除项目**（破坏性，需打项目名二次确认）：停并删除该项目的 bridge/gateway/runtime 与代码副本、从清单移除；
+  飞书密钥默认保留（会单独问是否删），**全局 git 凭证绝不删**；其余项目不受影响。
+
+**代码来源只支持 git（R1）**：本地目录 / S3 不再支持（它们没有可定时 pull 的上游）。私有仓需要那一份只读
+凭证（GitHub/GitLab PAT 或 deploy key，所有仓共用一份）。索引主机在私有子网经 NAT 出网 clone/pull。
+
+排查某项目：主机上单元名都带项目/仓库标识——`index-bridge-<项目>.service`、`bot-gateway@<项目>.service`、
+`index-refresh-<仓库>.timer`、`index-build@<仓库>.service`；日志 `journalctl -u <单元>`。各项目 bridge 在
+各自端口（`curl 127.0.0.1:<port>/health`）。
+
+> 直接用 `deploy-all.sh`（不走 install.sh）：它会起底座 + 遍历 `.local/projects.json` 部署每个项目；
+> `--skip-projects` 只起底座。但**飞书 / git 凭证仍需先存在于 Secrets Manager**——这些只有 install.sh 的
+> 「添加项目」会交互创建，所以新项目首次务必走 install.sh。
+
+---
+
 ## 七、排错（症状 → 原因 → 处置）
 
 | 症状 | 可能原因 | 处置 |
@@ -259,23 +293,29 @@ aws ssm start-session --region <r> --target <INDEX_SERVICE_INSTANCE>
 
 ## 附录 A：手动 deploy-all.sh
 
-`install.sh` 是 `deploy-all.sh` 的交互式前端。如需在 CI / 脚本中运行，或精确控制参数，可直接调用：
+`install.sh` 是 `deploy-all.sh` 的交互式前端。代码仓库**不再走命令行**——它们在 `.local/projects.json` 里声明
+（git-only），由 deploy-all 起底座后遍历部署。直接调用：
 
 ```bash
-# 全新账号 / 新区域可执行、幂等、可重复。失败重跑会继续未完成部分。
-./scripts/deploy-all.sh --region ap-northeast-1 --repo <本地路径 | git URL | s3://...> \
-  [--repo-ref <分支/标签/提交>] [--model <id>] [--instance-type t4g.large] [--root-volume-gb 30]
+# 起底座 + 部署 .local/projects.json 里的每个项目。幂等、可重复、新账号可跑。
+./scripts/deploy-all.sh --region ap-northeast-1 [--instance-type t4g.large] [--root-volume-gb 30] [--model <默认id>]
+
+# 只起共享底座、不挂项目（init-env）：
+./scripts/deploy-all.sh --region <r> --skip-projects
 
 # 只打印计划、不动资源：
-./scripts/deploy-all.sh --region <r> --repo <src> --dry-run
+./scripts/deploy-all.sh --region <r> --dry-run
 
-# 跳过某阶段（可重复）：artifacts|iam|network|index-svc|image|runtime|gateway
-./scripts/deploy-all.sh --region <r> --repo <src> --skip gateway
+# 跳过某阶段（可重复）：artifacts|iam|network|index-svc|image|runtime|gateway|monitoring
+./scripts/deploy-all.sh --region <r> --skip monitoring
+
+# 部署/重部署单个项目（底座须已就绪）：
+./scripts/deploy_project.sh <r> <projectId>   # 即 scripts/lib/deploy_project.sh
 ```
 
-gateway 阶段要激活网关，需要 `FEISHU_SECRET_ID`（指向一个 Secrets Manager 密钥，内容为
-`{"app_id","app_secret","bot_open_id"}` 的 JSON，密钥名以 `source-truth/` 开头）。`install.sh` 会创建它并持久化到
-`.local/deploy-config`；手动运行则自行 `export FEISHU_SECRET_ID=...`，否则 gateway 阶段会跳过（只部署后端）。
+**前提**：`.local/projects.json` 里每个项目的 `feishuSecretId` 指向的飞书密钥、以及全局
+`source-truth/git-credentials`（私有仓只读凭证）**必须已存在于 Secrets Manager**。这些只有
+`install.sh` 的「添加项目」会交互创建，所以**新项目首次务必走 install.sh**；deploy-all 只消费它们。
 
 ## 附录 B：本地手动启动网关（开发调试）
 
