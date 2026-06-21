@@ -94,12 +94,35 @@ def serve_args(repos, local_root: str) -> str:
     return " ".join(parts)
 
 
+def build_manifest(rows) -> str:
+    """Build a REPO_MANIFEST_JSON string from (subdir, source, sig) rows — the ONE authority
+    for manifest construction (deploy/provision call this instead of hand-rolling json.dumps,
+    so a bad subdir/source fails LOUD at deploy via the SAME parse_manifest the instance uses,
+    not silently later at bootstrap). `rows` is an iterable of (subdir, source, sig) tuples.
+
+    Round-trips through parse_manifest: build the dict, dump it, RE-PARSE to validate, and
+    return the canonical dump. Raises ValueError (fail-loud) on any invalid row.
+    """
+    repos = []
+    for subdir, source, sig in rows:
+        entry = {"subdir": subdir, "source": source}
+        if sig:
+            entry["sig"] = sig
+        repos.append(entry)
+    raw = json.dumps({"repos": repos})
+    parse_manifest(raw)  # VALIDATE (raises ValueError on bad subdir/dup/empty source/...)
+    return raw
+
+
 def main(argv):
     # Read the manifest from argv[1] (a path) or stdin; --field <name> prints just that column
     # one-per-line (for a shell `for subdir in $(... --field subdir)` loop); --serve-args
-    # <local_root> prints the bridge serve unit's --workspace/--local-workspace argv.
+    # <local_root> prints the bridge serve unit's --workspace/--local-workspace argv;
+    # --build reads TAB-separated `subdir<TAB>source<TAB>sig` rows from stdin and emits a
+    # validated REPO_MANIFEST_JSON (the single manifest-construction authority).
     field = None
     serve_root = None
+    build = False
     args = []
     i = 1
     while i < len(argv):
@@ -109,9 +132,32 @@ def main(argv):
         elif argv[i] == "--serve-args" and i + 1 < len(argv):
             serve_root = argv[i + 1]
             i += 2
+        elif argv[i] == "--build":
+            build = True
+            i += 1
         else:
             args.append(argv[i])
             i += 1
+
+    if build:
+        rows = []
+        for line in sys.stdin:
+            line = line.rstrip("\n")
+            if not line:
+                continue
+            cols = line.split("\t")
+            if len(cols) < 2:
+                sys.stderr.write(f"render_manifest --build: row needs subdir<TAB>source[<TAB>sig]: {line!r}\n")
+                return 2
+            subdir, source = cols[0], cols[1]
+            sig = cols[2] if len(cols) > 2 else ""
+            rows.append((subdir, source, sig))
+        try:
+            sys.stdout.write(build_manifest(rows) + "\n")
+        except ValueError as e:
+            sys.stderr.write(f"render_manifest --build: INVALID manifest: {e}\n")
+            return 1
+        return 0
 
     if args:
         try:

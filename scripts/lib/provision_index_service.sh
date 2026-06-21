@@ -235,7 +235,12 @@ BOOT_URL="$(aws s3 presign "s3://$BUCKET/bootstrap.sh" --region "$REGION" --expi
 # subdir/ETag with a metacharacter can never break out of the string.
 REPO_ETAG="$(QS head-object --bucket "$BUCKET" --key "${REPO_SUBDIR}.tar.gz" --query ETag --output text 2>/dev/null || echo "")"
 REPO_ETAG="${REPO_ETAG//\"/}"
-REPO_MANIFEST_JSON="$(REPO_SUBDIR="$REPO_SUBDIR" REPO_ETAG="$REPO_ETAG" python3 -c 'import json,os; print(json.dumps({"repos":[{"subdir":os.environ["REPO_SUBDIR"],"source":"s3://staged","sig":os.environ["REPO_ETAG"]}]}))')"
+# Build the manifest via render_manifest --build — the SINGLE manifest-construction authority
+# (same parser the instance validates with), so an invalid subdir fails LOUD here at deploy,
+# not silently later at bootstrap. One TAB-separated row: subdir<TAB>source<TAB>sig.
+REPO_MANIFEST_JSON="$(printf '%s\t%s\t%s\n' "$REPO_SUBDIR" "s3://staged" "$REPO_ETAG" \
+  | python3 "$SCRIPT_DIR/render_manifest.py" --build)" \
+  || { log err "failed to build REPO_MANIFEST_JSON (invalid repo_subdir=$REPO_SUBDIR?)"; exit 1; }
 UD="$(cat <<EOF
 #!/bin/bash
 set -e
