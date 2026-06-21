@@ -27,7 +27,7 @@ import { invokeRuntimeStreaming, classifyInvokeOutcome, isTurnCapError, type Aws
 import { decideFinalize, hardFailureMessage, shapeBody } from "./finalize-decision";
 import { createCard, updateContent, closeStreaming, finalizeCard, appendFooter, appendClarify, buildSendCardContent, disableFollowUpButton, appendReasoningPanel, updateReasoningPanel, appendEvidencePanel, updateEvidencePanel, appendOneChart, MAX_CHARTS, appendStopButton, appendStatusLine, updateStatusLine, formatElapsed, appendFeedbackButtons, appendFeedbackReasons, disableFeedbackRow, disableFeedbackReasonRow, type ActionButton } from "./cardkit-client";
 import { extractCharts } from "./extract-charts";
-import { rememberCard, rememberAnswer, lookupCard, collectChain, claimCardUiFlag, isAskerAction } from "./card-registry";
+import { rememberCard, rememberAnswer, lookupCard, lookupByCardId, collectChain, claimCardUiFlag, isAskerAction } from "./card-registry";
 import { composeFollowUpPrompt } from "./followup-context";
 import { removeReaction } from "./reaction";
 import { redactSensitive, redactSteps, redactDeep } from "./redact";
@@ -1530,7 +1530,14 @@ async function main(): Promise<void> {
           // card owner is exactly who should give that single quality signal, and it aligns with
           // stop / bare-reply (both asker-gated). User-level metric → hashUserId, no traceId.
           const fbVote: "up" | "down" = value.vote;   // capture the narrowed literal (the async closure below widens value.vote back to string|undefined)
-          const fbEntry = lookupCard(messageId);
+          // Resolve by open_message_id first; if that misses (the callback's message id
+          // doesn't always equal the registered one — the live card_unresolved deny), fall
+          // back to the card_id the button now carries (reliable secondary index). Use the
+          // RESOLVED message id for the per-card UI-flag claims below (claimCardUiFlag keys on
+          // the registry's message id, which differs from the callback's when resolved by card_id).
+          const fbByCard = lookupCard(messageId) ? undefined : lookupByCardId(value.card_id);
+          const fbEntry = lookupCard(messageId) ?? fbByCard?.entry;
+          const fbKey = fbByCard?.messageId ?? messageId;
           const fbCardId = value.card_id || fbEntry?.cardId;
           const fbSession = fbEntry?.sessionId;
           const voterHash = hashUserId(operatorOpenId);
@@ -1588,9 +1595,9 @@ async function main(): Promise<void> {
           // live: 👍/👎 infinitely re-clickable). Awaiting disable→append applies them in seq
           // order so both stick.
           if (fbCardId) {
-            const paintRow = claimCardUiFlag(messageId, "voteRowPainted");
+            const paintRow = claimCardUiFlag(fbKey, "voteRowPainted");
             // Append the reason grid only on a 👎, and only the first time for THIS card.
-            const appendReasons = fbVote === "down" && claimCardUiFlag(messageId, "reasonGridAppended");
+            const appendReasons = fbVote === "down" && claimCardUiFlag(fbKey, "reasonGridAppended");
             if (paintRow || appendReasons) {
               void (async () => {
                 if (paintRow) {
@@ -1617,7 +1624,9 @@ async function main(): Promise<void> {
           // 👎-reason pick (enumerated code, never free text). emitMetric runtime-whitelists
           // reasonCode, so even a tampered payload can't inject text. Same per-card-per-user
           // guard so a reason can't be double-submitted; disable the chosen reason button in place.
-          const frEntry = lookupCard(messageId);
+          const frByCard = lookupCard(messageId) ? undefined : lookupByCardId(value.card_id);
+          const frEntry = lookupCard(messageId) ?? frByCard?.entry;
+          const frKey = frByCard?.messageId ?? messageId;
           const frCardId = value.card_id || frEntry?.cardId;
           // ASKER-SCOPED, FAIL CLOSED (same as the vote above): the reason grid is a card-global
           // element revealed by the asker's 👎, so without this gate any member could pick the
@@ -1643,7 +1652,7 @@ async function main(): Promise<void> {
           // TTL — a pick on a still-live card must never re-disable). The metric stays per-user
           // above. element_ids are the SHORT index form fbr_<i> (feedbackReasonEid) — fbr_<code>
           // overflowed Feishu's 20-char limit.
-          if (frCardId && claimCardUiFlag(messageId, "reasonRowPainted")) {
+          if (frCardId && claimCardUiFlag(frKey, "reasonRowPainted")) {
             void disableFeedbackReasonRow(frCardId, value.reasonCode, nextCallbackSeq())
               .catch((e) => log({ event: "feedback_render_error", op: "disable_reason_row", error: redactSensitive(String(e)).slice(0, 200) }));
           } else if (!frCardId) {

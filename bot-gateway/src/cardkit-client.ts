@@ -619,7 +619,7 @@ export const FEEDBACK_ROW_EID = "feedback_row";
  *  `chosen` (set after a click) renders BOTH buttons disabled — the chosen one with a ✓ — so
  *  re-clicking does nothing (the buttons are inert). value.action="feedback" keeps them
  *  disjoint from follow_up/stop and the marker emoji. NOT asker-scoped: anyone may rate. */
-export function buildFeedbackButtons(chosen?: "up" | "down"): unknown[] {
+export function buildFeedbackButtons(chosen?: "up" | "down", cardId?: string): unknown[] {
   const voteBtn = (vote: "up" | "down", eid: string, key: string) => {
     const picked = chosen === vote;
     const label = t(key);
@@ -632,7 +632,10 @@ export function buildFeedbackButtons(chosen?: "up" | "down"): unknown[] {
         // When the row is in its chosen/disabled state, ALL vote buttons are disabled so a
         // re-click is impossible; value.action="noop" is belt-and-suspenders for a racing tap.
         disabled: chosen !== undefined,
-        value: chosen !== undefined ? { action: "noop", eid } : { action: "feedback", vote, eid },
+        // card_id in the value (like the stop button) so the callback resolves the card even
+        // when its open_message_id doesn't match the registered message id (the live
+        // card_unresolved deny). NOT included on the inert noop state.
+        value: chosen !== undefined ? { action: "noop", eid } : { action: "feedback", vote, eid, card_id: cardId },
       }],
     };
   };
@@ -677,7 +680,7 @@ const FEEDBACK_REASON_COLS = 2;
  *  a pick) renders every button disabled — the chosen one with a ✓ — so re-picking is inert.
  *  Buttons carry the enumerated reasonCode (in value, for the metric, never free text → no PII);
  *  the DOM element_id is the short index form fbr_<i> to stay within Feishu's 20-char limit. */
-export function buildFeedbackReasonGrid(chosen?: string): unknown[] {
+export function buildFeedbackReasonGrid(chosen?: string, cardId?: string): unknown[] {
   const reasonBtn = (code: string) => {
     const picked = chosen === code;
     const label = t(`card.feedback.reason.${code}`);
@@ -687,7 +690,9 @@ export function buildFeedbackReasonGrid(chosen?: string): unknown[] {
       text: { tag: "plain_text", content: picked ? `✓ ${label}` : label },
       type: picked ? "primary_text" : "default", size: "small", width: "fill",
       disabled: chosen !== undefined,
-      value: chosen !== undefined ? { action: "noop", eid } : { action: "feedback_reason", reasonCode: code, eid },
+      // card_id in the value so the reason callback resolves the card even when its
+      // open_message_id doesn't match the registered message id (see buildFeedbackButtons).
+      value: chosen !== undefined ? { action: "noop", eid } : { action: "feedback_reason", reasonCode: code, eid, card_id: cardId },
     };
   };
   // Column-major fill into FEEDBACK_REASON_COLS equal columns (each column stacks its buttons
@@ -702,8 +707,8 @@ export function buildFeedbackReasonGrid(chosen?: string): unknown[] {
 }
 
 /** After a 👎, the prompt line + the reason grid (appended together). */
-export function buildFeedbackReasonElements(): unknown[] {
-  return [{ tag: "markdown", content: t("card.feedback.reason.prompt") }, ...buildFeedbackReasonGrid()];
+export function buildFeedbackReasonElements(cardId?: string): unknown[] {
+  return [{ tag: "markdown", content: t("card.feedback.reason.prompt") }, ...buildFeedbackReasonGrid(undefined, cardId)];
 }
 
 /** Replace the whole reason grid with its disabled/chosen state (same-tag column_set PUT by the
@@ -721,7 +726,7 @@ export async function appendFeedbackButtons(cardId: string, sequence: number): P
   await larkApi("POST", `/open-apis/cardkit/v1/cards/${cardId}/elements`, JSON.stringify({
     type: "append",
     sequence,
-    elements: JSON.stringify(buildFeedbackButtons()),
+    elements: JSON.stringify(buildFeedbackButtons(undefined, cardId)),
   }));
 }
 
@@ -730,7 +735,7 @@ export async function appendFeedbackReasons(cardId: string, sequence: number): P
   await larkApi("POST", `/open-apis/cardkit/v1/cards/${cardId}/elements`, JSON.stringify({
     type: "append",
     sequence,
-    elements: JSON.stringify(buildFeedbackReasonElements()),
+    elements: JSON.stringify(buildFeedbackReasonElements(cardId)),
   }));
 }
 

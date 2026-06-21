@@ -100,6 +100,13 @@ export function isAskerAction(askerOpenId: string | undefined, operatorOpenId: s
 export interface ChainTurn { question?: string; answer?: string }
 
 const registry = new Map<string, CardEntry>();
+// Secondary index: cardId → messageId. A card-action callback (feedback / stop) carries the
+// CardKit card_id but its `open_message_id` does NOT always equal the message id the card was
+// sent + registered under (observed live: feedback denied with card:null because lookup by
+// open_message_id missed). With the button value carrying card_id, this lets us resolve the
+// SAME CardEntry by card_id when the message-id lookup misses. Kept in sync by rememberCard /
+// forgetCard / the eviction path.
+const cardIdIndex = new Map<string, string>();
 
 export function rememberCard(
   messageId: string,
@@ -121,9 +128,16 @@ export function rememberCard(
   // messageId, it MUST preserve these flags (spread `...prev`) or it reopens the 300315
   // duplicate-element conflict class (a vote after re-record would re-paint/re-append).
   registry.set(messageId, { cardId, sessionId, question: clippedQuestion, answer: prev?.answer, parentMessageId, askerOpenId });
+  cardIdIndex.set(cardId, messageId);
   if (registry.size > MAX_ENTRIES) {
     const oldest = registry.keys().next().value;
-    if (oldest !== undefined) registry.delete(oldest);
+    if (oldest !== undefined) {
+      const evicted = registry.get(oldest);
+      registry.delete(oldest);
+      // Keep the secondary index in lockstep: only drop the cardId mapping if it still
+      // points at the evicted messageId (a re-record may have repointed it elsewhere).
+      if (evicted && cardIdIndex.get(evicted.cardId) === oldest) cardIdIndex.delete(evicted.cardId);
+    }
   }
 }
 
@@ -192,6 +206,20 @@ export function lookupCard(messageId: string): CardEntry | undefined {
   return registry.get(messageId);
 }
 
+/** Resolve a card entry + its messageId by CardKit card_id (the secondary index). Used by
+ *  card-action callbacks (feedback / stop) whose `open_message_id` may not match the stored
+ *  key — the button value carries card_id, so this is the reliable resolution path. Returns
+ *  {messageId, entry} or undefined when unknown (evicted / restart). */
+export function lookupByCardId(cardId: string | undefined): { messageId: string; entry: CardEntry } | undefined {
+  if (!cardId) return undefined;
+  const messageId = cardIdIndex.get(cardId);
+  if (!messageId) return undefined;
+  const entry = registry.get(messageId);
+  return entry ? { messageId, entry } : undefined;
+}
+
 export function forgetCard(messageId: string): void {
+  const e = registry.get(messageId);
   registry.delete(messageId);
+  if (e && cardIdIndex.get(e.cardId) === messageId) cardIdIndex.delete(e.cardId);
 }
