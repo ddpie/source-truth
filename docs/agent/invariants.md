@@ -79,7 +79,7 @@
 ## 7. 密钥不得入库
 
 - **不变量**：飞书 `App ID/Secret`、token 等不得提交进仓库；使用 Secrets Manager（运行时取出注入进程 env）。
-- **以谁为准**：`scripts/install.sh`（交互式把凭证写进 Secrets Manager 密钥 `source-truth/feishu-app`）；
+- **以谁为准**：`scripts/install.sh`（交互式把凭证按项目写进 Secrets Manager 密钥 `source-truth/feishu-<projectId>`）；
   `bot-gateway/run.sh`（启动时从 Secrets Manager 取出注入进程 env，不落盘）；`.local/` gitignored。
 - **机检**：gitleaks pre-commit（规划）；`deploy-all.sh`/`bootstrap.sh` 的 user-data 与 `/etc/bot-gateway.env`
   只写非敏感配置（后者只存密钥**名**，不存密钥值）。
