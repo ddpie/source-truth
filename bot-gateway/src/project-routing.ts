@@ -7,9 +7,11 @@
  * not the file extension):
  *   {
  *     "projects": {
- *       "<projectId>": { "endpoint": "http://host:port/mcp", "repos": ["repoA", "repoB"] }
+ *       "<projectId>": { "port": 8080, "repos": ["repoA", "repoB"] }
  *     }
  *   }
+ * Each project's bridge listens on its own `port` on the shared index host; the agent
+ * endpoint is DERIVED as http://127.0.0.1:<port>/mcp (gateway + bridge are co-located).
  *
  * WHICH project a gateway serves is bound by the PROJECT_ID env var, NOT by a bot_id map in
  * this file — the bot identity (Feishu app_id) is env-only (FEISHU_APP_ID), never committed,
@@ -22,15 +24,13 @@
  *  - Unknown / ambiguous PROJECT_ID at resolve time → FAIL CLOSED (returns null; the caller
  *    refuses to derive a route and logs — never falls back to an arbitrary project).
  *
- * Stage 1 ships INDEPENDENTLY of index-service multi-repo: `endpoint` may still point at
- * today's single-repo bridge, proving the routing layer on its own.
  */
 
 import { readFileSync } from "fs";
 import { resolve } from "path";
 
 export interface ProjectConfig {
-  endpoint: string;        // CODEGRAPH_MCP_URL for this project's bridge
+  port: number;            // this project's bridge listen port (host-unique; required)
   repos: string[];         // repo subdirs this project's agent may query
 }
 
@@ -61,13 +61,22 @@ export function validateProjectsConfig(raw: unknown): ProjectsConfig {
   if (!projects || typeof projects !== "object") throw new Error("projects config: missing 'projects' object");
   if (Object.keys(projects as object).length === 0) throw new Error("projects config: 'projects' is empty");
 
-  // Validate each project entry.
+  // Validate each project entry. Ports must be host-unique (each project's bridge binds its
+  // own port on the shared index host); a duplicate would make two projects' bridges collide.
+  const seenPorts = new Set<number>();
+  const out: Record<string, ProjectConfig> = {};
   for (const [pid, pv] of Object.entries(projects as Record<string, unknown>)) {
     if (!pv || typeof pv !== "object") throw new Error(`project '${pid}': must be an object`);
-    const { endpoint, repos } = pv as Record<string, unknown>;
-    if (typeof endpoint !== "string" || !ENDPOINT_RE.test(endpoint)) {
-      throw new Error(`project '${pid}': endpoint must be an http(s) URL, got ${JSON.stringify(endpoint)}`);
+    const { port, repos } = pv as Record<string, unknown>;
+    if (typeof port !== "number" || !Number.isInteger(port) || port <= 0) {
+      throw new Error(`project '${pid}': port must be a positive integer, got ${JSON.stringify(port)}`);
     }
+    if (seenPorts.has(port)) throw new Error(`projects config: duplicate port ${port} across projects`);
+    seenPorts.add(port);
+    // The endpoint is DERIVED (gateway + bridge are co-located on the index host), never
+    // declared — validate the derived URL so a bad port still fails ENDPOINT_RE loudly.
+    const endpoint = `http://127.0.0.1:${port}/mcp`;
+    if (!ENDPOINT_RE.test(endpoint)) throw new Error(`project '${pid}': derived endpoint invalid (${endpoint})`);
     if (!Array.isArray(repos) || repos.length === 0) {
       throw new Error(`project '${pid}': repos must be a non-empty array`);
     }
@@ -79,9 +88,10 @@ export function validateProjectsConfig(raw: unknown): ProjectsConfig {
       if (seen.has(r)) throw new Error(`project '${pid}': duplicate repo '${r}'`);
       seen.add(r);
     }
+    out[pid] = { port, repos: repos as string[] };
   }
 
-  return { projects: projects as Record<string, ProjectConfig> };
+  return { projects: out };
 }
 
 /**
@@ -164,5 +174,6 @@ export function resolveRoute(cfg: ProjectsConfig, projectId: string | undefined 
   }
   const project = cfg.projects[pid];
   if (!project) return null;   // explicit PROJECT_ID naming an undeclared project → fail closed
-  return { projectId: pid, endpoint: project.endpoint, repos: [...project.repos] };
+  // Endpoint is derived from the port (gateway + bridge co-located on the index host).
+  return { projectId: pid, endpoint: `http://127.0.0.1:${project.port}/mcp`, repos: [...project.repos] };
 }
