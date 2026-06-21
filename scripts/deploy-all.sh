@@ -177,6 +177,25 @@ if [[ -n "$REPO_PATH" ]]; then
   if [[ "$REPO_KIND" == "git" ]]; then
     require_cmd git "install git to clone a git --repo source" || exit 1
   fi
+  # FAIL-LOUD on a subdir/source-basename mismatch for a LOCAL --repo. A local dir is staged
+  # `tar -C dirname basename`, so the tarball's TOP-LEVEL dir is the source basename — but the
+  # index host extracts to /data/repo and SERVES /data/repo/$REPO_SUBDIR. If a persisted/old
+  # --repo-subdir (e.g. code-5x) differs from the basename (e.g. source-truth), the extract
+  # lands at /data/repo/<basename> while serve reads /data/repo/<subdir> → 0-node graph, 503,
+  # with NO clear cause (burned a real deploy). git/s3 sources can't hit this (fetched INTO a
+  # dir named $REPO_SUBDIR), so guard the local case only. Override intentionally with
+  # --repo-subdir <basename>, or rename to match.
+  if [[ "$REPO_KIND" == "local" ]]; then
+    _repo_base="$(basename "${REPO_PATH%/}")"
+    if [[ "$_repo_base" != "$REPO_SUBDIR" ]]; then
+      say err "local --repo basename '$_repo_base' != --repo-subdir '$REPO_SUBDIR'."
+      say err "  The staged tarball's top dir is '$_repo_base' but the index host serves"
+      say err "  /data/repo/$REPO_SUBDIR → they'd mismatch and the bridge would serve a 0-node"
+      say err "  graph (503). Pass --repo-subdir $_repo_base (or rename the dir / clear the"
+      say err "  persisted REPO_SUBDIR in .local/deploy-config)."
+      exit 2
+    fi
+  fi
 else
   # No --repo this run: reuse the persisted subdir (reconcile path). Keep the old
   # basename fallback so a config that predates this resolver still works.
