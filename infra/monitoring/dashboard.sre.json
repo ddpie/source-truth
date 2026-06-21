@@ -652,8 +652,74 @@
     },
     {
       "type": "text",
+      "x": 0, "y": 48, "width": 24, "height": 2,
+      "properties": {
+        "markdown": "## 🎯 服务目标（SLO）达成情况\n下面三张单值卡显示当前周期的实际值；旁边折线图把 SLO 阈值画成红线，曲线越过红线即违约。阈值随产品要求可调（仅看板展示，不触发告警——告警在顶部）。"
+      }
+    },
+    {
+      "type": "metric",
+      "x": 0, "y": 50, "width": 8, "height": 4,
+      "properties": {
+        "title": "回答成功率（目标 ≥ 95%）",
+        "region": "${REGION}",
+        "view": "singleValue",
+        "period": 86400,
+        "sparkline": true,
+        "metrics": [
+          ["${NAMESPACE}", "AnswerCompleted", {"id": "ok", "visible": false, "stat": "Sum"}],
+          ["${NAMESPACE}", "AnswerFailedTotal", {"id": "ko", "visible": false, "stat": "Sum"}],
+          [{"expression": "100*ok/(ok+ko)", "label": "成功率 %", "id": "sr"}]
+        ]
+      }
+    },
+    {
+      "type": "metric",
+      "x": 8, "y": 50, "width": 8, "height": 4,
+      "properties": {
+        "title": "P95 首字延迟（目标 ≤ 10s）",
+        "region": "${REGION}",
+        "view": "singleValue",
+        "period": 86400,
+        "sparkline": true,
+        "metrics": [
+          ["${NAMESPACE}", "FirstTokenMs", {"label": "P95 首字 ms", "stat": "p95"}]
+        ]
+      }
+    },
+    {
+      "type": "metric",
+      "x": 16, "y": 50, "width": 8, "height": 4,
+      "properties": {
+        "title": "P95 回答总耗时（目标 ≤ 90s）",
+        "region": "${REGION}",
+        "view": "singleValue",
+        "period": 86400,
+        "sparkline": true,
+        "metrics": [
+          ["${NAMESPACE}", "AnswerLatencyMs", {"label": "P95 总耗时 ms", "stat": "p95"}]
+        ]
+      }
+    },
+    {
+      "type": "metric",
+      "x": 0, "y": 54, "width": 24, "height": 6,
+      "properties": {
+        "title": "P95 首字延迟 vs SLO 阈值（红线=10s；越线即违约）",
+        "region": "${REGION}",
+        "view": "timeSeries",
+        "period": 3600,
+        "yAxis": {"left": {"label": "ms", "showUnits": false, "min": 0}},
+        "metrics": [
+          ["${NAMESPACE}", "FirstTokenMs", {"label": "P95 首字", "stat": "p95", "color": "#1f77b4"}]
+        ],
+        "annotations": {"horizontal": [{"label": "SLO 10s", "value": 10000, "color": "#d62728"}]}
+      }
+    },
+    {
+      "type": "text",
       "x": 0,
-      "y": 48,
+      "y": 60,
       "width": 24,
       "height": 5,
       "properties": {
