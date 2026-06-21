@@ -1208,7 +1208,12 @@ async function main(): Promise<void> {
     projectsConfig = loadProjectsConfig();
     activeRoute = resolveRoute(projectsConfig, PROJECT_ID);
     if (activeRoute) {
-      log({ event: "project_route_resolved", projectId: activeRoute.projectId, repos: activeRoute.repos.length });
+      // Log the actual repo NAMES + endpoint, not just a count: this is the routing the
+      // gateway forwards to the agent, and a name mismatch vs the index's served repo is a
+      // silent "no evidence" failure (the live code-5x→daggerfall-unity drift). Names make it
+      // diagnosable at a glance.
+      log({ event: "project_route_resolved", projectId: activeRoute.projectId,
+            repos: activeRoute.repos, repoCount: activeRoute.repos.length, endpoint: activeRoute.endpoint });
     } else {
       // Ambiguous (multiple projects, no PROJECT_ID) or PROJECT_ID names an undeclared
       // project — fail closed: serve without a projectId rather than guess (logged).
