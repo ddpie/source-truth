@@ -20,14 +20,14 @@
       "type": "text",
       "x": 0, "y": 0, "width": 24, "height": 2,
       "properties": {
-        "markdown": "# source-truth · 分项目看板\n按**项目**拆分用量与质量（每条线=一个项目，自动发现）。全项目汇总看 **用量看板**；系统健康/告警/冷启动（非项目相关）看 **SRE 看板**。"
+        "markdown": "# source-truth · 分项目看板\n按项目拆分使用量与回答质量（每条曲线对应一个项目，自动识别）。全项目汇总见 **用量看板**；系统健康 / 告警 / 冷启动（非项目相关）见 **健康看板**。"
       }
     },
     {
       "type": "metric",
       "x": 0, "y": 2, "width": 12, "height": 6,
       "properties": {
-        "title": "提问量 by 项目（每日）",
+        "title": "各项目提问量（每日）",
         "region": "${REGION}",
         "view": "timeSeries",
         "stacked": false,
@@ -41,7 +41,7 @@
       "type": "metric",
       "x": 12, "y": 2, "width": 12, "height": 6,
       "properties": {
-        "title": "成功答数 by 项目（每日）",
+        "title": "各项目成功回答数（每日）",
         "region": "${REGION}",
         "view": "timeSeries",
         "stacked": false,
@@ -55,7 +55,7 @@
       "type": "metric",
       "x": 0, "y": 8, "width": 12, "height": 6,
       "properties": {
-        "title": "失败答数 by 项目（哪个项目答得差）",
+        "title": "各项目失败回答数",
         "region": "${REGION}",
         "view": "timeSeries",
         "stacked": false,
@@ -69,7 +69,7 @@
       "type": "metric",
       "x": 12, "y": 8, "width": 12, "height": 6,
       "properties": {
-        "title": "P95 总延迟 by 项目",
+        "title": "各项目 P95 回答总耗时",
         "region": "${REGION}",
         "view": "timeSeries",
         "period": 3600,
@@ -83,7 +83,7 @@
       "type": "metric",
       "x": 0, "y": 14, "width": 12, "height": 6,
       "properties": {
-        "title": "P95 首字延迟 by 项目（体感）",
+        "title": "各项目 P95 首字延迟",
         "region": "${REGION}",
         "view": "timeSeries",
         "period": 3600,

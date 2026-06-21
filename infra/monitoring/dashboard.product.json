@@ -24,7 +24,7 @@
       "width": 24,
       "height": 2,
       "properties": {
-        "markdown": "# source-truth · 用量看板\n机器人用了多少、答得好不好。数据来自网关结构化日志经 CloudWatch 指标化（非实时扫日志）。延迟/健康看 **SRE 看板**。"
+        "markdown": "# source-truth · 用量看板（产品）\n机器人的使用量与回答质量。数据来自网关日志（非实时扫描）。回答延迟与系统健康看 **健康看板**。"
       }
     },
     {
@@ -210,7 +210,7 @@
       "width": 12,
       "height": 6,
       "properties": {
-        "title": "证据覆盖（每答平均引用代码处数）",
+        "title": "代码检索充分度（每答平均引用代码处数）",
         "region": "${REGION}",
         "view": "timeSeries",
         "period": 86400,
@@ -382,7 +382,7 @@
       "width": 12,
       "height": 6,
       "properties": {
-        "title": "答案产出趋势（成功 / 失败 / 中止，每日）",
+        "title": "回答产出趋势（成功 / 失败 / 用户中止，每日）",
         "region": "${REGION}",
         "view": "timeSeries",
         "stacked": true,
