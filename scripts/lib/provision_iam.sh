@@ -29,12 +29,18 @@ aws iam put-role-policy --role-name "$INDEX_ROLE" --policy-name s3-artifacts --p
   \"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",
   \"Action\":[\"s3:GetObject\",\"s3:ListBucket\"],
   \"Resource\":[\"arn:aws:s3:::${BUCKET}\",\"arn:aws:s3:::${BUCKET}/*\"]}]}" >/dev/null
-# Inline policy: read the Feishu app credentials from Secrets Manager. The
-# co-located bot-gateway's run.sh fetches the secret at start (creds never touch
-# disk). Scoped to this project's secret-name prefix (source-truth/*) so the
-# instance can't read unrelated secrets. The 6-char suffix Secrets Manager appends
-# is covered by the trailing wildcard.
-aws iam put-role-policy --role-name "$INDEX_ROLE" --policy-name feishu-secret --policy-document "{
+# Inline policy: read source-truth/* secrets from Secrets Manager (host-side, never on disk):
+#   - source-truth/feishu-<projectId>  — each project's gateway creds (run.sh fetches at start)
+#   - source-truth/git-credentials     — the read-only git token (R-cred-1) activate_project.sh
+#                                        fetches to clone/pull each repo
+#   - source-truth/log-hash-salt       — telemetry de-identification salt
+# The source-truth/* prefix already covers ALL of these (incl. the 6-char suffix Secrets Manager
+# appends, via the trailing wildcard) and nothing outside the project, so no change is needed as
+# new per-project / git secrets are added — they all live under this one prefix by construction.
+# Remove the old policy name (renamed feishu-secret → secrets-read) on a re-run of an existing
+# role, so we don't leave an orphaned inline policy behind. Best-effort (absent on a fresh role).
+aws iam delete-role-policy --role-name "$INDEX_ROLE" --policy-name feishu-secret >/dev/null 2>&1 || true
+aws iam put-role-policy --role-name "$INDEX_ROLE" --policy-name secrets-read --policy-document "{
   \"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",
   \"Action\":[\"secretsmanager:GetSecretValue\"],
   \"Resource\":[\"arn:aws:secretsmanager:${REGION}:${ACCOUNT}:secret:source-truth/*\"]}]}" >/dev/null
