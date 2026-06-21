@@ -73,17 +73,45 @@ def parse_manifest(raw: str):
     return out
 
 
+def serve_args(repos, local_root: str) -> str:
+    """Build the bridge serve unit's --workspace/--local-workspace argv (multi-repo 阶段2).
+
+    The serve side is ONE bridge process loading every repo (the design's per-project process
+    topology), so its ExecStart needs a `--workspace <dir> --local-workspace <dir>` pair PER
+    repo. Each repo lives at ``<local_root>/<subdir>`` on the index host (where bootstrap
+    extracts it). Emitting this here (not assembled in shell) keeps the corruption-critical
+    bootstrap thin and makes the arg construction unit-testable.
+
+    subdir is already charset-validated by parse_manifest (^[a-z0-9][a-z0-9-]*$ — no spaces,
+    quotes, or shell metacharacters), so the paths are safe to place on a command line.
+    Returns a single space-joined string in manifest (repo-declaration) order.
+    """
+    root = local_root.rstrip("/")
+    parts = []
+    for r in repos:
+        d = f"{root}/{r['subdir']}"
+        parts.append(f"--workspace {d} --local-workspace {d}")
+    return " ".join(parts)
+
+
 def main(argv):
     # Read the manifest from argv[1] (a path) or stdin; --field <name> prints just that column
-    # one-per-line (for a shell `for subdir in $(... --field subdir)` loop).
+    # one-per-line (for a shell `for subdir in $(... --field subdir)` loop); --serve-args
+    # <local_root> prints the bridge serve unit's --workspace/--local-workspace argv.
     field = None
+    serve_root = None
     args = []
     i = 1
     while i < len(argv):
         if argv[i] == "--field" and i + 1 < len(argv):
-            field = argv[i + 1]; i += 2
+            field = argv[i + 1]
+            i += 2
+        elif argv[i] == "--serve-args" and i + 1 < len(argv):
+            serve_root = argv[i + 1]
+            i += 2
         else:
-            args.append(argv[i]); i += 1
+            args.append(argv[i])
+            i += 1
 
     if args:
         try:
@@ -100,7 +128,9 @@ def main(argv):
         sys.stderr.write(f"render_manifest: INVALID manifest: {e}\n")
         return 1
 
-    if field:
+    if serve_root is not None:
+        sys.stdout.write(serve_args(repos, serve_root) + "\n")
+    elif field:
         if field not in ("subdir", "source", "sig", "ref"):
             sys.stderr.write(f"render_manifest: unknown --field '{field}'\n")
             return 2

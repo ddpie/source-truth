@@ -76,5 +76,21 @@ python3 "$R" "$TMP/m.json" >/dev/null 2>/dev/null; [[ $? -ne 0 ]]; check "missin
 # --- stdin path works too (bootstrap may pipe the env var) ---
 echo '{"repos":[{"subdir":"x","source":"s3://b/x"}]}' | python3 "$R" --field subdir | grep -qx 'x'; check "reads manifest from stdin" $?
 
+# --- --serve-args: the bridge serve unit's --workspace/--local-workspace argv ---
+mk '{"repos":[{"subdir":"client","source":"s3://b/a"},{"subdir":"backend-svc","source":"s3://b/b"}]}'
+sa="$(python3 "$R" --serve-args /data/repo "$TMP/m.json")"; rc=$?
+check "--serve-args emits (rc 0)" "$rc"
+[[ "$sa" == "--workspace /data/repo/client --local-workspace /data/repo/client --workspace /data/repo/backend-svc --local-workspace /data/repo/backend-svc" ]]
+check "serve args pair each repo by path, in manifest order" $?
+# single repo → one pair (single-repo deploy expressed via the same path)
+mk '{"repos":[{"subdir":"code-5x","source":"s3://b/a"}]}'
+sa1="$(python3 "$R" --serve-args /data/repo/ "$TMP/m.json")"   # trailing slash on root is normalized
+[[ "$sa1" == "--workspace /data/repo/code-5x --local-workspace /data/repo/code-5x" ]]
+check "single-repo serve args (root trailing slash normalized)" $?
+# an INVALID manifest must fail --serve-args too (no half-rendered command line)
+mk '{"repos":[{"subdir":"a b","source":"s3://b/a"}]}'
+python3 "$R" --serve-args /data/repo "$TMP/m.json" >/dev/null 2>/dev/null; [[ $? -ne 0 ]]
+check "--serve-args rejects an invalid manifest (no partial argv)" $?
+
 echo "  ran=$_run failed=$_fail"
 [[ "$_fail" -eq 0 ]]
