@@ -3,15 +3,18 @@ import { writeFileSync, mkdtempSync, rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
+// Schema (single-host multi-project): each project declares a `port` (its bridge's listen
+// port on the index host); the endpoint is DERIVED as http://127.0.0.1:<port>/mcp (gateway and
+// bridge are co-located). No `endpoint` field is accepted (pre-launch — no back-compat).
 const MULTI = {
   projects: {
-    "game-a": { endpoint: "http://index-a.internal:8080/mcp", repos: ["code-5x", "code-5x-svc"] },
-    "game-b": { endpoint: "http://10.1.1.20:8081/mcp", repos: ["backend"] },
+    "game-a": { port: 8080, repos: ["code-5x", "code-5x-svc"] },
+    "game-b": { port: 8081, repos: ["backend"] },
   },
 };
 const SOLE = {
   projects: {
-    "source-truth": { endpoint: "http://index.source-truth.internal:8080/mcp", repos: ["code-5x"] },
+    "source-truth": { port: 8080, repos: ["code-5x"] },
   },
 };
 
@@ -34,27 +37,36 @@ describe("validateProjectsConfig — fail-loud on bad config", () => {
     expect(() => validateProjectsConfig({ projects: {} })).toThrow(/'projects' is empty/);
   });
 
-  it("rejects a malformed endpoint", () => {
-    const bad = { projects: { p: { endpoint: "ftp://x", repos: ["r"] } } };
-    expect(() => validateProjectsConfig(bad)).toThrow(/endpoint must be an http/);
-    const bad2 = { projects: { p: { endpoint: "not a url", repos: ["r"] } } };
-    expect(() => validateProjectsConfig(bad2)).toThrow(/endpoint must be an http/);
+  it("rejects a missing port (port is required pre-launch)", () => {
+    const bad = { projects: { p: { repos: ["r"] } } };
+    expect(() => validateProjectsConfig(bad)).toThrow(/port/i);
+  });
+
+  it("rejects a non-integer / non-positive port", () => {
+    expect(() => validateProjectsConfig({ projects: { p: { port: "8080", repos: ["r"] } } })).toThrow(/port/i);
+    expect(() => validateProjectsConfig({ projects: { p: { port: 0, repos: ["r"] } } })).toThrow(/port/i);
+    expect(() => validateProjectsConfig({ projects: { p: { port: 1.5, repos: ["r"] } } })).toThrow(/port/i);
+  });
+
+  it("rejects duplicate ports across projects", () => {
+    const bad = { projects: { a: { port: 8080, repos: ["x"] }, b: { port: 8080, repos: ["y"] } } };
+    expect(() => validateProjectsConfig(bad)).toThrow(/duplicate port/i);
   });
 
   it("rejects empty/missing repos", () => {
-    const bad = { projects: { p: { endpoint: "http://x/mcp", repos: [] } } };
+    const bad = { projects: { p: { port: 8080, repos: [] } } };
     expect(() => validateProjectsConfig(bad)).toThrow(/repos must be a non-empty array/);
   });
 
   it("rejects an illegal repo name (charset guard against injection into path/unit/pgrep)", () => {
     for (const bad of ["../etc", "Code5x", "a b", "repo;rm", "a_b"]) {
-      const cfg = { projects: { p: { endpoint: "http://x/mcp", repos: [bad] } } };
+      const cfg = { projects: { p: { port: 8080, repos: [bad] } } };
       expect(() => validateProjectsConfig(cfg)).toThrow(/repo name must match/);
     }
   });
 
   it("rejects a duplicate repo within a project", () => {
-    const bad = { projects: { p: { endpoint: "http://x/mcp", repos: ["r", "r"] } } };
+    const bad = { projects: { p: { port: 8080, repos: ["r", "r"] } } };
     expect(() => validateProjectsConfig(bad)).toThrow(/duplicate repo/);
   });
 });
@@ -63,12 +75,16 @@ describe("resolveRoute — explicit projectId, sole-project default, fail-closed
   const multi = validateProjectsConfig(MULTI);
   const sole = validateProjectsConfig(SOLE);
 
-  it("resolves an explicit projectId to its endpoint + repos", () => {
+  it("resolves an explicit projectId to its DERIVED loopback endpoint + repos", () => {
     const r = resolveRoute(multi, "game-a");
     expect(r).not.toBeNull();
     expect(r!.projectId).toBe("game-a");
-    expect(r!.endpoint).toBe("http://index-a.internal:8080/mcp");
+    expect(r!.endpoint).toBe("http://127.0.0.1:8080/mcp");
     expect(r!.repos).toEqual(["code-5x", "code-5x-svc"]);
+  });
+
+  it("derives a distinct endpoint per project port", () => {
+    expect(resolveRoute(multi, "game-b")!.endpoint).toBe("http://127.0.0.1:8081/mcp");
   });
 
   it("defaults to the SOLE project when no projectId is given (zero-config single-project)", () => {
