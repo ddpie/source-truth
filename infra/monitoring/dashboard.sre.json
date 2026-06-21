@@ -151,8 +151,59 @@
       }
     },
     {
+      "type": "metric",
+      "x": 0, "y": 26, "width": 12, "height": 6,
+      "properties": {
+        "title": "成功率 / 失败率（占提问；体感质量底线）",
+        "region": "${REGION}",
+        "view": "timeSeries",
+        "period": 3600,
+        "yAxis": {"left": {"min": 0, "max": 1, "label": "占比", "showUnits": false}},
+        "metrics": [
+          ["${NAMESPACE}", "AnswerCompleted", {"id": "ok", "visible": false, "stat": "Sum"}],
+          ["${NAMESPACE}", "AnswerFailedTotal", {"id": "fl", "visible": false, "stat": "Sum"}],
+          ["${NAMESPACE}", "QuestionsReceived", {"id": "qq", "visible": false, "stat": "Sum"}],
+          [{"expression": "ok / qq", "label": "成功率", "id": "okr", "color": "#2ca02c"}],
+          [{"expression": "fl / qq", "label": "失败率", "id": "flr", "color": "#d62728"}]
+        ]
+      }
+    },
+    {
+      "type": "metric",
+      "x": 12, "y": 26, "width": 12, "height": 6,
+      "properties": {
+        "title": "取证深度：平均证据数/答 与 平均工具调用/答",
+        "region": "${REGION}",
+        "view": "timeSeries",
+        "period": 3600,
+        "metrics": [
+          ["${NAMESPACE}", "EvidenceCitations", {"label": "平均证据数/答", "stat": "Average", "color": "#9467bd"}],
+          ["${NAMESPACE}", "ToolCalls", {"label": "平均工具调用/答", "stat": "Average", "color": "#1f77b4"}],
+          ["${NAMESPACE}", "TurnCount", {"label": "平均轮次/答", "stat": "Average", "color": "#17becf", "yAxis": "right"}]
+        ],
+        "yAxis": {"left": {"min": 0, "showUnits": false}, "right": {"min": 0, "label": "轮次", "showUnits": false}}
+      }
+    },
+    {
+      "type": "metric",
+      "x": 0, "y": 32, "width": 24, "height": 6,
+      "properties": {
+        "title": "延迟均值 vs 分位（均值被异常值拉偏的程度；社区共识盯分位）",
+        "region": "${REGION}",
+        "view": "timeSeries",
+        "period": 3600,
+        "yAxis": {"left": {"label": "ms", "showUnits": false, "min": 0}},
+        "metrics": [
+          ["${NAMESPACE}", "AnswerLatencyMs", {"label": "均值", "stat": "Average", "color": "#aec7e8"}],
+          ["...", {"label": "p50", "stat": "p50", "color": "#2ca02c"}],
+          ["...", {"label": "p95", "stat": "p95", "color": "#ff7f0e"}],
+          ["...", {"label": "p99", "stat": "p99", "color": "#d62728"}]
+        ]
+      }
+    },
+    {
       "type": "text",
-      "x": 0, "y": 26, "width": 24, "height": 5,
+      "x": 0, "y": 38, "width": 24, "height": 5,
       "properties": {
         "markdown": "## 🔍 按 TraceID 查全链路日志（网关 + agent 两侧合并）\nTraceID 在飞书卡片底部；网关与 agent microVM 两侧日志统一用 `traceId` 串联。\n\n**最省事（推荐，输入 traceId 一个参数即可，其余全自动）：**\n```\n./scripts/trace.sh st-xxxx\n```\n区域、两个 log group（agent 组按 runtime 自动发现）、时间窗、查询、按时间合并——全部自动包装；输出标 `GW`/`AGT` 来源并抽取 latency/工具数/出处数/错误等关键字段。\n\n**控制台手查**：[打开 Logs Insights](https://${REGION}.console.aws.amazon.com/cloudwatch/home?region=${REGION}#logsV2:logs-insights) → 勾选 `/source-truth/bot-gateway` + `/aws/bedrock-agentcore/runtimes/<runtime>-DEFAULT`，把 `st-xxxx` 换成你的 traceId 运行：\n```\nfields @timestamp, @logStream, event, @message | filter @message like /st-xxxx/ | sort @timestamp asc\n```"
       }
