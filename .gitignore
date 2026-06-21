@@ -43,3 +43,10 @@ Thumbs.db
 
 # Local deploy state (account-specific, not committed)
 .local/
+
+# codegraph local graph/home artifacts (RocksDB graph.db + per-repo HOME); never commit.
+# Created by a local codegraph-server run and by the index host's per-repo build
+# (HOME=<repo>/.home). Pure generated data.
+.home/
+.codegraph/
+.artifact_sig

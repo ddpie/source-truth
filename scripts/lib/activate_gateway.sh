@@ -86,9 +86,14 @@ sleep 2
 systemctl is-active bot-gateway.service"
 
 say info "activating bot-gateway on $IID (writing /etc/bot-gateway.env + restarting service)"
+# Encode the multi-line command as ONE JSON STRING (not a list): the `commands=[...]`
+# wrapper already supplies the list brackets, so json.dumps must emit the STRING element
+# only — `json.dumps([...])` produced `commands=[["..."]]` (a list-of-list) which AWS
+# rejects with "Invalid type for parameter Parameters.commands[0] ... valid types: str"
+# (gateway activation never worked through this path until this fix).
 CID="$(aws ssm send-command --region "$REGION" --instance-ids "$IID" \
   --document-name AWS-RunShellScript \
-  --parameters "commands=[$(printf '%s' "$REMOTE_CMD" | python3 -c 'import sys,json; print(json.dumps([sys.stdin.read()]))')]" \
+  --parameters "commands=[$(printf '%s' "$REMOTE_CMD" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))')]" \
   --query Command.CommandId --output text 2>/dev/null || echo "")"
 if [[ -z "$CID" ]]; then
   say err "activate_gateway: send-command failed (SSM unreachable? check instance + NAT egress)"; exit 1
