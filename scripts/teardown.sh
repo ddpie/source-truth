@@ -68,7 +68,7 @@ by_tag() { Q describe-"$1" --filters "Name=tag:Name,Values=$2" --query "${3}[0].
 is_set() { [[ -n "${1:-}" && "${1:-}" != "None" ]]; }
 
 # --- discover (config first, then tag) ---
-RT_ID="${AGENT_RUNTIME_ID:-}"
+# (AgentCore runtimes are enumerated directly at delete time — see phase 1 below — not from config.)
 # Discover ALL index-service instances by tag, then UNION with the two config-recorded
 # ids — there can be MORE than one alive (a blue-green overlap window, or a failed-refresh
 # leftover), and the old tag query used `Reservations[].Instances[0]` (first per
@@ -91,7 +91,7 @@ NAT="${NAT_GATEWAY:-}"; is_set "$NAT" || NAT="$(Q describe-nat-gateways --filter
 ZONE_ID="${INDEX_DNS_ZONE_ID:-}"
 
 say step "teardown plan — region $REGION, account ${ACCOUNT:-?}"
-say info "  AgentCore runtime : ${RT_ID:-<none>}"
+say info "  AgentCore runtimes: all source_truth_agent* (enumerated at delete)"
 say info "  index-service EC2 : ${ALL_INSTANCES:-<none>}"
 say info "  NAT gateway       : ${NAT:-<none>} (+ its Elastic IP)"
 say info "  VPC + subnets/RT/IGW/SG : ${VPC:-<none>}"
@@ -132,18 +132,40 @@ wait_gone() {
   return 1
 }
 
-# ---- 1. AgentCore runtime (boto3; no aws-cli verb in older CLIs) ----
-if is_set "$RT_ID"; then
-  if python3 - "$REGION" "$RT_ID" <<'PY' 2>/dev/null; then say ok "deleted runtime $RT_ID"; else say warn "skip/failed runtime (may already be gone)"; fi
+# ---- 1. AgentCore runtime(s) (boto3; no aws-cli verb in older CLIs) ----
+# Multi-project: there is ONE runtime PER project, named source_truth_agent_<projectId> (plus the
+# legacy single source_truth_agent). The config no longer records a single AGENT_RUNTIME_ID, so
+# ENUMERATE every runtime whose name starts with source_truth_agent and delete each — otherwise a
+# per-project runtime survives teardown and keeps billing (cross-review HIGH).
+say info "deleting all source_truth_agent* AgentCore runtimes ..."
+python3 - "$REGION" <<'PY' 2>/dev/null || say warn "runtime enumeration/delete had issues (some may already be gone)"
 import sys, boto3
-region, rid = sys.argv[1], sys.argv[2]
-boto3.client("bedrock-agentcore-control", region_name=region).delete_agent_runtime(agentRuntimeId=rid)
+region = sys.argv[1]
+c = boto3.client("bedrock-agentcore-control", region_name=region)
+deleted = 0
+token = None
+ids = []
+while True:
+    kw = {"maxResults": 100}
+    if token: kw["nextToken"] = token
+    resp = c.list_agent_runtimes(**kw)
+    for rt in resp.get("agentRuntimes", []):
+        if rt.get("agentRuntimeName", "").startswith("source_truth_agent"):
+            ids.append(rt["agentRuntimeId"])
+    token = resp.get("nextToken")
+    if not token: break
+for rid in ids:
+    try:
+        c.delete_agent_runtime(agentRuntimeId=rid); deleted += 1
+        print(f"deleted runtime {rid}")
+    except Exception as e:
+        print(f"skip {rid}: {e}")
+print(f"runtimes deleted: {deleted}")
 PY
-  # The runtime holds requester-managed ENIs in the private subnet; AWS releases them
-  # ASYNCHRONOUSLY (often 1-5 min). We wait for them to clear before the VPC teardown
-  # below (an ENI still attached makes delete-subnet/SG/VPC fail with
-  # DependencyViolation → those strand). The wait is keyed on the index SG further down.
-fi
+# The runtimes hold requester-managed ENIs in the private subnet; AWS releases them
+# ASYNCHRONOUSLY (often 1-5 min). We wait for them to clear before the VPC teardown below
+# (an ENI still attached makes delete-subnet/SG/VPC fail with DependencyViolation). The wait is
+# keyed on the index SG further down.
 
 # ---- 2. EC2 index-service instance(s) — terminate EVERY discovered one ----
 # Iterate the full deduped union (tag-discovered + both config ids), not just the two

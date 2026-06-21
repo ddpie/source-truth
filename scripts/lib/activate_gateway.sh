@@ -168,5 +168,5 @@ while (( SECONDS < DEADLINE )); do
       ;;
   esac
 done
-say err "activate_gateway: timed out waiting for SSM command to finish (${GATEWAY_ACTIVATE_TIMEOUT_SECS:-120}s)"
+say err "activate_gateway: timed out waiting for SSM command to finish (${GATEWAY_ACTIVATE_TIMEOUT_SECS:-360}s)"
 exit 1
