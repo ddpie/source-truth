@@ -1527,7 +1527,10 @@ async function main(): Promise<void> {
           const fbAsker = fbEntry?.askerOpenId;
           const fbAllowed = isAskerAction(fbAsker, operatorOpenId);
           if (!fbAllowed) {
-            log({ event: "feedback_denied", card: fbCardId ?? null, reason: fbAsker ? "not_asker" : "asker_unknown" });
+            // entryFound distinguishes the two deny causes: a card we can't resolve
+            // (evicted / failed card with no stored asker) vs a genuine non-asker click.
+            log({ event: "feedback_denied", card: fbCardId ?? null,
+                  reason: !fbEntry ? "card_unresolved" : (fbAsker ? "not_asker" : "asker_unknown") });
             return {};
           }
           // PER-CARD-PER-USER VOTE GUARD (cross-review P1 #1/#1b): the cb: key only catches a
