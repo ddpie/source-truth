@@ -5,7 +5,7 @@
  * AND to resume the same warm session.
  */
 
-import { rememberCard, rememberAnswer, lookupCard, forgetCard, collectChain, claimCardUiFlag, isAskerAction } from "../src/card-registry";
+import { rememberCard, rememberAnswer, lookupCard, lookupByCardId, forgetCard, collectChain, claimCardUiFlag, isAskerAction } from "../src/card-registry";
 
 describe("card registry", () => {
   it("remembers and looks up a card_id by message_id", () => {
@@ -191,5 +191,36 @@ describe("isAskerAction — fail-closed asker gate (stop / feedback / feedback_r
   it("does NOT treat two empty ids as a match (both-empty must not authorize)", () => {
     expect(isAskerAction("", "")).toBe(false);
     expect(isAskerAction(undefined, undefined)).toBe(false);
+  });
+});
+
+describe("lookupByCardId — resolve a card by CardKit card_id (feedback callback fallback)", () => {
+  it("resolves the entry + messageId by card_id", () => {
+    rememberCard("om_byc1", "card_byc1", "sess-byc", "Q?", undefined, "ou_asker1");
+    const got = lookupByCardId("card_byc1");
+    expect(got?.messageId).toBe("om_byc1");
+    expect(got?.entry.cardId).toBe("card_byc1");
+    expect(got?.entry.askerOpenId).toBe("ou_asker1");
+  });
+
+  it("returns undefined for an unknown / empty card_id", () => {
+    expect(lookupByCardId("card_does_not_exist")).toBeUndefined();
+    expect(lookupByCardId(undefined)).toBeUndefined();
+    expect(lookupByCardId("")).toBeUndefined();
+  });
+
+  it("the card_id index is dropped when the card is forgotten", () => {
+    rememberCard("om_byc2", "card_byc2", "s");
+    expect(lookupByCardId("card_byc2")?.messageId).toBe("om_byc2");
+    forgetCard("om_byc2");
+    expect(lookupByCardId("card_byc2")).toBeUndefined();
+    expect(lookupCard("om_byc2")).toBeUndefined();
+  });
+
+  it("resolves the SAME entry whether looked up by message id or card id", () => {
+    rememberCard("om_byc3", "card_byc3", "s3", "Qx", undefined, "ou_x");
+    const byMsg = lookupCard("om_byc3");
+    const byCard = lookupByCardId("card_byc3")?.entry;
+    expect(byCard).toBe(byMsg); // same object reference
   });
 });
