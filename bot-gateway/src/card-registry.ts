@@ -86,6 +86,15 @@ export function claimCardUiFlag(messageId: string, flag: "voteRowPainted" | "rea
   return true;
 }
 
+/** Roll back a UI flag claimed by claimCardUiFlag when the write it gated FAILED, so a later
+ *  (re)click can retry the one-shot write. Without this, the flag stays set after a failed
+ *  card PUT and every subsequent click is a silent no-op — a permanently dead feedback row
+ *  (the "must click multiple times / never works" bug). No-op if the card is unknown. */
+export function resetCardUiFlag(messageId: string, flag: "voteRowPainted" | "reasonGridAppended" | "reasonRowPainted"): void {
+  const e = registry.get(messageId);
+  if (e) e[flag] = false;
+}
+
 /** FAIL-CLOSED asker check shared by the asker-scoped card actions (stop / feedback /
  *  feedback_reason): true ONLY when the card's asker is known AND equals the operator who
  *  clicked. Returns false if either id is empty/undefined — a card whose asker we can't
