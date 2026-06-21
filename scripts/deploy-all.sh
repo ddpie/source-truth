@@ -368,12 +368,21 @@ else
   # times out). Globbing every .py makes new modules ship automatically; tests/
   # live in a subdir and are excluded by the top-level-only glob.
   TMP_IDX="$(mktemp /tmp/index-service.XXXX.tar.gz)"
+  # Stage the index-service top-level .py + requirements.txt PLUS the shared manifest
+  # parser (scripts/lib/render_manifest.py) into one dir, so bootstrap.sh on the instance
+  # can validate + iterate REPO_MANIFEST_JSON with the SAME parser the deploy/tests use
+  # (no duplicated validation logic on the host). tests/ live in a subdir and are excluded
+  # by the top-level-only copy.
   # DETERMINISTIC archive: pin sort order, mtime, and owner, and `gzip -n` (no name/
   # timestamp in the gzip header). Otherwise the tarball's bytes — hence its S3 ETag —
   # change on every run even when content is identical, which makes the index-host
   # ArtifactSig staleness check (provision_index_service.sh) ALWAYS report stale and
   # makes --refresh-index rebuild the instance every run for no reason (cross-review HIGH).
-  ( cd "$ROOT/index-service" && tar --sort=name --mtime='UTC 2020-01-01' --owner=0 --group=0 --numeric-owner -cf - ./*.py requirements.txt | gzip -n > "$TMP_IDX" )
+  IDX_STAGE="$(mktemp -d /tmp/idx-stage.XXXX)"
+  cp "$ROOT"/index-service/*.py "$ROOT"/index-service/requirements.txt "$IDX_STAGE"/
+  cp "$ROOT"/scripts/lib/render_manifest.py "$IDX_STAGE"/
+  ( cd "$IDX_STAGE" && tar --sort=name --mtime='UTC 2020-01-01' --owner=0 --group=0 --numeric-owner -cf - ./*.py requirements.txt | gzip -n > "$TMP_IDX" )
+  rm -rf "$IDX_STAGE"
   run aws s3 cp "$TMP_IDX" "s3://$BUCKET/index-service.tar.gz" --region "$REGION"
 
   # repo to index. EXCLUDE .git / vendored deps / build caches: codegraph already
