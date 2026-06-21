@@ -32,7 +32,7 @@
       "comparisonOperator": "GreaterThanOrEqualToThreshold",
       "treatMissingData": "notBreaching",
       "severity": "critical",
-      "alarmDescription": "竞泄复发：agent 原始 <invoke> XML 泄漏到用户卡片。出现即异常（dense metric, >=1/5min 即告警）。查 num_turns/cache_read 冷启动竞速。"
+      "alarmDescription": "工具调用泄漏：agent 的原始工具调用指令文本（<invoke> XML）漏进了用户卡片。出现即异常（dense metric, >=1/5min 即告警）。排查冷启动重试：看 num_turns / cache_read。"
     },
     {
       "name": "FinalizeFailed",
@@ -45,7 +45,7 @@
       "comparisonOperator": "GreaterThanOrEqualToThreshold",
       "treatMissingData": "notBreaching",
       "severity": "critical",
-      "alarmDescription": "冻卡：finalize 失败，卡片停在“分析中”不收尾。出现即异常（dense metric, >=1/5min 即告警）。"
+      "alarmDescription": "卡片未正常结束：finalize 失败，卡片停在“分析中”不收尾。出现即异常（dense metric, >=1/5min 即告警）。"
     },
     {
       "name": "AnswerFailedBurst",
