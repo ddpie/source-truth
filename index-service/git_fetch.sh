@@ -28,8 +28,29 @@ fail() { echo "GIT_FETCH_FAILED: $SUBDIR $*" >&2; exit 1; }
 # Non-interactive: never block on a credential/host-key prompt (would hang the timer).
 export GIT_TERMINAL_PROMPT=0
 
+# Protect the codegraph state dirs from `git reset --hard`. The live graph.db / HOME live INSIDE
+# the worktree (.codegraph/ and .home/ under $DEST). They're normally untracked, so reset leaves
+# them alone — but if the upstream repo ever TRACKED a path named .codegraph/.home, `reset --hard`
+# (run every refresh) would overwrite/destroy the live graph.db with no signal. Two guards:
+#  1. mark them in .git/info/exclude so git always treats them as untracked (idempotent);
+#  2. FAIL LOUD if upstream actually tracks such a path — that repo is unsupported here, and
+#     silently clobbering its graph every 5 min would be far worse than a clear error.
+guard_graph_dirs() {  # $1 = repo dir (must contain .git)
+  local d="$1" exclude="$1/.git/info/exclude"
+  if [ -f "$exclude" ] && ! grep -qxF "/.codegraph/" "$exclude" 2>/dev/null; then
+    { echo "/.codegraph/"; echo "/.home/"; } >> "$exclude" 2>/dev/null || true
+  fi
+  # Check EACH path separately with plain ls-files (non-empty output = upstream tracks something
+  # under it). NOT `--error-unmatch .codegraph .home` together: that returns non-zero if EITHER is
+  # unmatched, so a repo tracking only .codegraph (but not .home) would be missed.
+  if [ -n "$(git -C "$d" ls-files .codegraph .home 2>/dev/null)" ]; then
+    fail "upstream repo tracks a .codegraph/.home path — unsupported (would clobber the live graph on reset)"
+  fi
+}
+
 if [ -d "$DEST/.git" ]; then
   git -C "$DEST" fetch --quiet --prune origin || fail "fetch failed"
+  guard_graph_dirs "$DEST"
   if [ -n "$REF" ]; then
     # Prefer the remote-tracking ref (branch); fall back to a tag/sha of the same name.
     git -C "$DEST" reset --hard --quiet "origin/$REF" 2>/dev/null \
@@ -56,6 +77,7 @@ else
   else
     git clone --quiet "$URL" "$DEST" || fail "clone failed"
   fi
+  guard_graph_dirs "$DEST"
 fi
 
 HEAD_SHA="$(git -C "$DEST" rev-parse --short HEAD 2>/dev/null || echo '?')"
