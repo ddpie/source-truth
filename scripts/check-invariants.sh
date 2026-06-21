@@ -46,8 +46,9 @@ for d in agent-container bot-gateway index-service infra config scripts docs; do
   [[ -d "$d" ]] && ok "顶层目录存在: $d" || err "structure 引用的顶层目录缺失: $d"
 done
 
-# 6. 设计真相源已导入
-for f in docs/design/requirements_zh.md docs/design/architecture-overview_zh.md; do
+# 6. 设计真相源已导入（structure_*.md 收录的 design/ 权威依据；改名/删除须同步两处）
+for f in docs/design/requirements_zh.md docs/design/architecture-overview_zh.md \
+         docs/design/agent-container_zh.md docs/design/multi-repo-isolation_zh.md; do
   [[ -f "$f" ]] && ok "设计真相源: $f" || err "缺少设计真相源: $f"
 done
 

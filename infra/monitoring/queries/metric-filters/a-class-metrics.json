@@ -103,7 +103,7 @@
       "filterPattern": "{ $.metric IS TRUE && $.event = \"answer_completed\" }",
       "metricValue": "$.numToolCalls",
       "unit": "Count",
-      "purpose": "每答工具调用数 (取证强度)"
+      "purpose": "每答工具调用数（代码检索充分度）"
     },
     {
       "name": "ToolErrors",
@@ -178,7 +178,7 @@
       "dimensions": { "kind": "$.kind" },
       "_sparse": "NO defaultValue with dimensions (CloudWatch constraint) — this dimensioned metric is SPARSE (a kind's stream only gets points when that kind fires). kind is low-cardinality (5) so the dimension is safe, but for STABLE alarming on toolcall_leak_detected / finalize_failed, 阶段3 adds a dedicated per-kind filter WITH defaultValue:0 (dense) per the plan. This metric is for the dashboard breakdown.",
       "_alarm": "toolcall_leak_detected / finalize_failed 超阈值 → 告警 (plan 阶段3, 专用稠密 filter).",
-      "purpose": "卡片健康 by kind (泄漏剥离/冻卡/双答/幂等重发/心跳停滞)"
+      "purpose": "卡片健康 by kind (工具调用泄漏剥离/卡片未正常结束/重复回答/幂等重发拦截/心跳停滞)"
     }
   ]
 }
