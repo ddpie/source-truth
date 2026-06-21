@@ -867,7 +867,7 @@ async function runStreamingInvoke(
   // Include the (redacted, truncated) backend error body so a 429/400/403/503 are
   // distinguishable to operators — not just an opaque status code. The user-facing
   // card stays generic; only the log carries the reason.
-  if (httpFailed) log({ event: "invoke_http_error", card: cardId, status, detail: error ? redactSensitive(error).slice(0, 300) : undefined });
+  if (httpFailed) log({ event: "invoke_http_error", card: cardId, status, detail: error ? redactSensitive(error).slice(0, 300) : undefined, traceId });
 
   // A Bedrock model-access denial (common on a freshly-deployed account where
   // model access isn't enabled yet) is operator-actionable, not a transient —
@@ -1032,9 +1032,9 @@ async function runStreamingInvoke(
   // card always ends up finalized (header green, streaming off, stop button gone)
   // even if one mid-step write failed.
   await writer.write((seq) => updateContent(cardId, finalText, seq)
-    .catch((e) => { log({ event: "finalize_content_error", card: cardId, error: redactSensitive(String(e)).slice(0, 300) }); throw e; }));
+    .catch((e) => { tlog({ event: "finalize_content_error", card: cardId, error: redactSensitive(String(e)).slice(0, 300) }); throw e; }));
   await writer.write((seq) => closeStreaming(cardId, seq)
-    .catch((e) => { log({ event: "close_streaming_error", card: cardId, error: redactSensitive(String(e)).slice(0, 300) }); throw e; }));
+    .catch((e) => { tlog({ event: "close_streaming_error", card: cardId, error: redactSensitive(String(e)).slice(0, 300) }); throw e; }));
 
   // 4. Finalize: header → green "回答完成" (or 已停止 / 查询失败) + reasoning panel
   //    collapsed. The full-card PUT rebuilds the body (conclusion + panel), which
