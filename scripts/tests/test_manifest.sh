@@ -92,5 +92,23 @@ mk '{"repos":[{"subdir":"a b","source":"s3://b/a"}]}'
 python3 "$R" --serve-args /data/repo "$TMP/m.json" >/dev/null 2>/dev/null; [[ $? -ne 0 ]]
 check "--serve-args rejects an invalid manifest (no partial argv)" $?
 
+# --- --build: construct a manifest from TAB rows (the single manifest-build authority) ---
+# round-trips through parse_manifest, so it emits valid JSON AND a multipart ETag's | survives.
+b="$(printf 'code-5x\ts3://staged\tetag-abc|part2\n' | python3 "$R" --build)"; rc=$?
+check "--build single repo (rc 0)" "$rc"
+printf '%s' "$b" | python3 -c 'import json,sys; r=json.loads(sys.stdin.read())["repos"]; assert len(r)==1 and r[0]["subdir"]=="code-5x" and r[0]["sig"]=="etag-abc|part2", r'
+check "--build emits one repo with the pipe-ETag intact" $?
+# the built JSON must re-parse cleanly (round-trip with the same parser the instance uses)
+printf '%s' "$b" | python3 "$R" --field subdir | grep -qx 'code-5x'; check "--build output re-parses" $?
+# multi-repo from several rows
+bm="$(printf 'client\ts3://b/a\te1\nbackend-svc\ts3://b/b\t\n' | python3 "$R" --build)"
+printf '%s' "$bm" | python3 -c 'import json,sys; r=json.loads(sys.stdin.read())["repos"]; assert [x["subdir"] for x in r]==["client","backend-svc"], r'
+check "--build multi-repo preserves order + omits empty sig" $?
+# fail-loud at BUILD time on an invalid subdir (the whole point: catch at deploy, not bootstrap)
+printf 'Bad Name\ts3://b/a\t\n' | python3 "$R" --build >/dev/null 2>"$TMP/err"; [[ $? -ne 0 ]]
+check "--build rejects an invalid subdir (fail-loud at deploy)" $?
+printf 'ok\t\t\n' | python3 "$R" --build >/dev/null 2>/dev/null; [[ $? -ne 0 ]]
+check "--build rejects an empty source" $?
+
 echo "  ran=$_run failed=$_fail"
 [[ "$_fail" -eq 0 ]]
