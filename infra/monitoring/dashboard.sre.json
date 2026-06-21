@@ -35,17 +35,14 @@
       "width": 24,
       "height": 3,
       "properties": {
-        "title": "🚨 告警状态（4 条：竞泄复发 / 冻卡 / 失败突增 / 日志管道存活）",
+        "title": "🚨 告警状态（4 条：竞泄复发 / 冻卡 / 失败突增 / 日志管道存活）— 含 OK，红=触发",
         "alarms": [
           "arn:aws:cloudwatch:${REGION}:${ACCOUNT_ID}:alarm:source-truth-ToolcallLeakDetected",
           "arn:aws:cloudwatch:${REGION}:${ACCOUNT_ID}:alarm:source-truth-FinalizeFailed",
           "arn:aws:cloudwatch:${REGION}:${ACCOUNT_ID}:alarm:source-truth-AnswerFailedBurst",
           "arn:aws:cloudwatch:${REGION}:${ACCOUNT_ID}:alarm:source-truth-LogPipelineStalled"
         ],
-        "sortBy": "stateUpdatedTimestamp",
-        "states": [
-          "ALARM"
-        ]
+        "sortBy": "stateUpdatedTimestamp"
       }
     },
     {
