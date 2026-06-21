@@ -44,10 +44,24 @@
 它会：
 
 1. **查依赖**：`aws` / `python3` / `docker` / `git`，并校验 AWS 凭证可用；
-2. **问配置**（带默认值，回车即接受；重跑预填上次答案）：区域、**代码仓来源**（本地 / git / s3）、模型、索引机型；
+2. **问配置**：区域、模型、**索引主机机型与磁盘**（见下表）、代码仓来源（本地 / git / s3）。重跑沿用上次答案；
 3. **收飞书凭证**：`App Secret` 输入不回显；把 `{app_id, app_secret, bot_open_id}` 写进 **Secrets Manager**
    （密钥名默认 `source-truth/feishu-app`，凭证不落盘、不进仓库）；
 4. **确认**清单后，调用 `deploy-all.sh` 端到端启动后端 **+ 网关**。
+
+索引主机是整套系统唯一一台 EC2（同机跑 codegraph 索引 + bridge + bot-gateway，全 ARM）。codegraph 索引
+吃内存、随仓库增大而增长，按仓库规模选机型；磁盘存放仓库副本、`graph.db` 与 tarball，按仓库体积选容量：
+
+| 机型 | vCPU / 内存 | 适用 |
+|---|---|---|
+| `t4g.large`（默认） | 2C / 8G | 小中仓，突发型省钱 |
+| `t4g.xlarge` | 4C / 16G | 中大仓 |
+| `m7g.large` | 2C / 8G | 内存型，持续负载更稳 |
+| `m7g.xlarge` | 4C / 16G | 大仓·稳定 |
+| `m7g.2xlarge` | 8C / 32G | 超大仓 / 多仓 |
+
+磁盘默认 30 GiB，可选 50 / 100 / 200 GiB 或自定义容量。对应 `deploy-all.sh` 的
+`--instance-type` / `--root-volume-gb`。
 
 成功后应看到：
 
@@ -247,7 +261,7 @@ aws ssm start-session --region <r> --target <INDEX_SERVICE_INSTANCE>
 ```bash
 # 全新账号 / 新区域可执行、幂等、可重复。失败重跑会继续未完成部分。
 ./scripts/deploy-all.sh --region ap-northeast-1 --repo <本地路径 | git URL | s3://...> \
-  [--repo-ref <分支/标签/提交>] [--model <id>] [--instance-type t4g.large]
+  [--repo-ref <分支/标签/提交>] [--model <id>] [--instance-type t4g.large] [--root-volume-gb 30]
 
 # 只打印计划、不动资源：
 ./scripts/deploy-all.sh --region <r> --repo <src> --dry-run
