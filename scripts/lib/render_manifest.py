@@ -1,26 +1,31 @@
 #!/usr/bin/env python3
 """render_manifest.py — validate REPO_MANIFEST_JSON and emit per-repo records.
 
-Pure + side-effect free. The multi-repo manifest (multi-repo-isolation plan 阶段2) describes a
-project's repo set in ONE JSON value, deliberately NOT a set of shell variables — a per-repo
-S3 ETag can contain `|` (multipart upload, e.g. `da58…-3`), and naked `|` in a sourced env
-file is parsed as a shell pipe and crashes bootstrap under `set -e` (the project hit this twice
-single-repo). So bootstrap reads ONE `REPO_MANIFEST_JSON` and calls this to validate + iterate.
+Pure + side-effect free. A project's repo set is described in ONE JSON value, deliberately NOT a
+set of shell variables — a git URL / ref can contain characters (`@`, `:`) that a naked sourced
+env file would mangle, and the project hit `|`-in-env crashes twice before adopting one JSON var.
+So bootstrap reads ONE `REPO_MANIFEST_JSON` and calls this to validate + iterate.
 
-Manifest shape:
-    { "repos": [ { "subdir": "<name>", "source": "<git url | s3:// | local path>",
-                   "sig": "<artifact signature / ETag>" }, ... ] }
+Manifest shape (single-host multi-project + git refresh; code source is git-only, pre-launch):
+    { "projectId": "<id>", "port": <int>,
+      "repos": [ { "subdir": "<name>", "git": "<git url>", "ref": "<branch/tag?>",
+                   "refreshIntervalSec": <int?> }, ... ] }
 
 Validation (fail-loud — a bad manifest must crash the deploy up front, never half-provision):
+  - `projectId` matches ^[a-z0-9][a-z0-9-]*$ (it becomes a systemd instance / path / metric dim);
+  - `port` present and an integer (the bridge's listen port; one per project, host-unique);
   - non-empty `repos` array;
-  - each `subdir` matches ^[a-z0-9-]+$  (it becomes a useradd name / path / systemd unit /
-    pgrep pattern — an unchecked name is a privileged-config injection; plan 不变量3 + 阶段2);
+  - each `subdir` matches ^[a-z0-9-]+$ (it becomes a useradd name / path / systemd unit /
+    pgrep pattern — an unchecked name is a privileged-config injection);
   - `subdir` unique (two repos sharing a subdir would share graph.db/HOME → corruption);
-  - `source` present and non-empty (empty → rm -rf root-wipe risk; plan 不变量3);
-  - `sig` optional (defaults to "" → bootstrap treats as "always re-extract").
+  - `git` present and non-empty (the ONLY source field — R1; no local/S3 fallback);
+  - `ref` optional (defaults to "" → clone default branch);
+  - `refreshIntervalSec` optional, integer if present (per-repo and top-level).
 
-Emits one NDJSON record per repo on stdout: {"subdir","source","sig"} — the bootstrap loop
-reads these (or `--field subdir` prints just the subdir column for a shell `for` loop).
+Emits one NDJSON record per repo on stdout: {"subdir","git","ref","sig","refreshIntervalSec"}.
+`--field <name>` prints a top-level scalar (projectId/port) or a per-repo column for a shell loop;
+`--repo-field <name> <subdir>` prints one repo's field; `--serve-args <root>` prints the bridge
+serve unit's --workspace/--local-workspace argv.
 """
 import json
 import re
@@ -31,17 +36,19 @@ import sys
 # (cross-review CRITICAL). Must start with an alphanumeric (no leading '-'), or a name like
 # "-rf" becomes a CLI option flag instead of a value (option injection, cross-review MEDIUM).
 SUBDIR_RE = re.compile(r"\A[a-z0-9][a-z0-9-]*\Z")
+# projectId is also a systemd instance name (index-bridge@<id>) / path segment / metric dim.
+PROJECT_ID_RE = SUBDIR_RE
 
 
 def parse_manifest(raw: str):
     """Parse + validate a REPO_MANIFEST_JSON string. Returns the list of repo dicts
-    (each {subdir, source, sig}). Raises ValueError (fail-loud) on any problem."""
-    try:
-        obj = json.loads(raw)
-    except (ValueError, TypeError) as e:
-        raise ValueError(f"REPO_MANIFEST_JSON is not valid JSON: {e}")
-    if not isinstance(obj, dict):
-        raise ValueError("manifest must be a JSON object")
+    (each {subdir, git, ref, sig, refreshIntervalSec}). Raises ValueError on any problem.
+
+    The top-level projectId/port are validated here too (fail-loud), but parse_manifest returns
+    only the repo list; callers that need the scalars read them via parse_top() / --field."""
+    obj = _load_obj(raw)
+    _validate_top(obj)
+
     repos = obj.get("repos")
     if not isinstance(repos, list) or not repos:
         raise ValueError("manifest.repos must be a non-empty array")
@@ -63,24 +70,66 @@ def parse_manifest(raw: str):
         if subdir in seen:
             raise ValueError(f"{where}: duplicate subdir '{subdir}' (would share graph.db/HOME → corruption)")
         seen.add(subdir)
-        source = r.get("source")
-        if not isinstance(source, str) or not source.strip():
-            raise ValueError(f"{where}: 'source' must be a non-empty string (empty risks an rm -rf root-wipe)")
+        git = r.get("git")
+        if not isinstance(git, str) or not git.strip():
+            raise ValueError(f"{where}: 'git' must be a non-empty git URL (R1: code source is git-only)")
+        ref = r.get("ref")
+        if ref is not None and not isinstance(ref, str):
+            raise ValueError(f"{where}: 'ref' must be a string if present")
         sig = r.get("sig")
         if sig is not None and not isinstance(sig, str):
             raise ValueError(f"{where}: 'sig' must be a string if present")
-        out.append({"subdir": subdir, "source": source, "sig": sig or "", "ref": r.get("ref") or ""})
+        interval = r.get("refreshIntervalSec")
+        if interval is not None and not isinstance(interval, int):
+            raise ValueError(f"{where}: 'refreshIntervalSec' must be an integer seconds if present")
+        out.append({"subdir": subdir, "git": git, "ref": ref or "", "sig": sig or "",
+                    "refreshIntervalSec": interval})
     return out
 
 
-def serve_args(repos, local_root: str) -> str:
-    """Build the bridge serve unit's --workspace/--local-workspace argv (multi-repo 阶段2).
+def parse_top(raw: str):
+    """Return the validated top-level scalars {projectId, port, refreshIntervalSec}.
+    Validates the whole manifest (incl. repos) so a --field projectId never reports a bad
+    manifest as fine."""
+    obj = _load_obj(raw)
+    _validate_top(obj)
+    parse_manifest(raw)  # full repo validation too (fail-loud regardless of which field is asked)
+    return {"projectId": obj["projectId"], "port": obj["port"],
+            "refreshIntervalSec": obj.get("refreshIntervalSec")}
 
-    The serve side is ONE bridge process loading every repo (the design's per-project process
-    topology), so its ExecStart needs a `--workspace <dir> --local-workspace <dir>` pair PER
-    repo. Each repo lives at ``<local_root>/<subdir>`` on the index host (where bootstrap
-    extracts it). Emitting this here (not assembled in shell) keeps the corruption-critical
-    bootstrap thin and makes the arg construction unit-testable.
+
+def _load_obj(raw: str):
+    try:
+        obj = json.loads(raw)
+    except (ValueError, TypeError) as e:
+        raise ValueError(f"REPO_MANIFEST_JSON is not valid JSON: {e}")
+    if not isinstance(obj, dict):
+        raise ValueError("manifest must be a JSON object")
+    return obj
+
+
+def _validate_top(obj):
+    pid = obj.get("projectId")
+    if not isinstance(pid, str) or not PROJECT_ID_RE.match(pid):
+        raise ValueError(
+            f"manifest.projectId {pid!r} must match {PROJECT_ID_RE.pattern} "
+            f"(it becomes a systemd instance / path / metric dimension)")
+    port = obj.get("port")
+    if not isinstance(port, int) or isinstance(port, bool):
+        raise ValueError("manifest.port must be an integer (the bridge listen port, host-unique)")
+    top_interval = obj.get("refreshIntervalSec")
+    if top_interval is not None and not isinstance(top_interval, int):
+        raise ValueError("manifest.refreshIntervalSec must be an integer seconds if present")
+
+
+def serve_args(repos, local_root: str) -> str:
+    """Build the bridge serve unit's --workspace/--local-workspace argv.
+
+    The serve side is ONE bridge process loading every repo of THIS project (the design's
+    per-project process topology), so its ExecStart needs a `--workspace <dir> --local-workspace
+    <dir>` pair PER repo. Each repo lives at ``<local_root>/<subdir>`` on the index host. Emitting
+    this here (not assembled in shell) keeps the corruption-critical bootstrap thin and makes the
+    arg construction unit-testable.
 
     subdir is already charset-validated by parse_manifest (^[a-z0-9][a-z0-9-]*$ — no spaces,
     quotes, or shell metacharacters), so the paths are safe to place on a command line.
@@ -94,140 +143,56 @@ def serve_args(repos, local_root: str) -> str:
     return " ".join(parts)
 
 
-def parse_repos_spec(specs):
-    """Parse multi-repo `--repos` CLI specs into (subdir, source, ref) rows for deploy staging.
+def build_multi_manifest(project_id: str, port: int, repos, default_interval=None) -> str:
+    """Build a per-project REPO_MANIFEST_JSON — the ONE authority for manifest construction
+    (deploy/provision call this instead of hand-rolling json.dumps, so a bad subdir/git/port
+    fails LOUD at deploy via the SAME parse_manifest the instance uses, not silently later at
+    bootstrap). `repos` is an iterable of dicts each with subdir + git (+ optional ref/
+    refreshIntervalSec). A per-repo interval falls back to default_interval.
 
-    Each spec is ``<subdir>=<source>[@<ref>]`` (ref optional, git branch/tag/commit):
-      code-5x=/path/to/code-5x
-      client=https://github.com/org/client.git@main
-      cfg=s3://bucket/cfg.tar.gz
-    The subdir (LHS) is the on-host name → charset-validated against SUBDIR_RE (it becomes a
-    user/path/unit name). The source (RHS) is passed verbatim to fetch_repo_source (which
-    classifies local/git/s3). ``@<ref>`` is split off the RIGHT (an S3/HTTPS URL has no '@',
-    but a git scp URL like git@host:org/repo CAN — so only treat a trailing '@token' as a ref
-    when the token looks like a ref, i.e. it contains no ':' or '/'; otherwise it's part of the
-    source). Raises ValueError (fail-loud) on a malformed/empty spec, a bad subdir, or a dup.
-
-    Returns a list of (subdir, source, ref) tuples in CLI order.
+    Round-trips through parse_manifest to validate, and returns the canonical dump. Raises
+    ValueError (fail-loud) on any invalid input.
     """
-    seen = set()
-    rows = []
-    for spec in specs:
-        if not isinstance(spec, str) or "=" not in spec:
-            raise ValueError(f"--repos entry must be <subdir>=<source>[@<ref>]: {spec!r}")
-        subdir, rhs = spec.split("=", 1)
-        subdir = subdir.strip()
-        rhs = rhs.strip()
-        if not REPO_NAME_OK(subdir):
-            raise ValueError(
-                f"--repos subdir {subdir!r} must match {SUBDIR_RE.pattern} "
-                f"(it becomes a user/path/unit name — no slashes, spaces, dots, or metachars)")
-        if subdir in seen:
-            raise ValueError(f"--repos duplicate subdir {subdir!r} (would share graph.db/HOME → corruption)")
-        if not rhs:
-            raise ValueError(f"--repos entry {spec!r} has an empty source")
-        # Split a trailing @ref only when it's ref-shaped (no ':' or '/'), so a git scp
-        # source (git@host:org/repo) keeps its '@' but `...repo.git@v1.2` yields ref=v1.2.
-        ref = ""
-        source = rhs
-        at = rhs.rfind("@")
-        if at > 0:
-            tail = rhs[at + 1:]
-            if tail and ":" not in tail and "/" not in tail:
-                source = rhs[:at]
-                ref = tail
-        if not source:
-            raise ValueError(f"--repos entry {spec!r} has an empty source (after stripping @ref)")
-        seen.add(subdir)
-        rows.append((subdir, source, ref))
-    if not rows:
-        raise ValueError("--repos given but no valid entries parsed")
-    return rows
-
-
-def REPO_NAME_OK(name) -> bool:  # noqa: N802 - shouty to read like a guard at call sites
-    return isinstance(name, str) and bool(SUBDIR_RE.match(name))
-
-
-def build_manifest(rows) -> str:
-    """Build a REPO_MANIFEST_JSON string from (subdir, source, sig) rows — the ONE authority
-    for manifest construction (deploy/provision call this instead of hand-rolling json.dumps,
-    so a bad subdir/source fails LOUD at deploy via the SAME parse_manifest the instance uses,
-    not silently later at bootstrap). `rows` is an iterable of (subdir, source, sig) tuples.
-
-    Round-trips through parse_manifest: build the dict, dump it, RE-PARSE to validate, and
-    return the canonical dump. Raises ValueError (fail-loud) on any invalid row.
-    """
-    repos = []
-    for subdir, source, sig in rows:
-        entry = {"subdir": subdir, "source": source}
-        if sig:
-            entry["sig"] = sig
-        repos.append(entry)
-    raw = json.dumps({"repos": repos})
-    parse_manifest(raw)  # VALIDATE (raises ValueError on bad subdir/dup/empty source/...)
+    if not isinstance(port, int) or isinstance(port, bool):
+        raise ValueError(f"port must be an integer, got {port!r}")
+    out_repos = []
+    for r in repos:
+        entry = {"subdir": r["subdir"], "git": r["git"], "ref": r.get("ref") or ""}
+        iv = r.get("refreshIntervalSec")
+        entry["refreshIntervalSec"] = iv if isinstance(iv, int) else default_interval
+        out_repos.append(entry)
+    body = {"projectId": project_id, "port": port, "repos": out_repos}
+    if default_interval is not None:
+        body["refreshIntervalSec"] = default_interval
+    raw = json.dumps(body)
+    parse_manifest(raw)  # VALIDATE (raises ValueError on bad subdir/dup/empty git/bad port/...)
     return raw
 
 
 def main(argv):
-    # Read the manifest from argv[1] (a path) or stdin; --field <name> prints just that column
-    # one-per-line (for a shell `for subdir in $(... --field subdir)` loop); --serve-args
-    # <local_root> prints the bridge serve unit's --workspace/--local-workspace argv;
-    # --build reads TAB-separated `subdir<TAB>source<TAB>sig` rows from stdin and emits a
-    # validated REPO_MANIFEST_JSON (the single manifest-construction authority).
+    # Read the manifest from a path arg or stdin.
+    #   --field <name>           : print a top-level scalar (projectId/port) OR a per-repo column
+    #                              (subdir/git/ref/sig/refreshIntervalSec) one-per-line.
+    #   --repo-field <name> <sub>: print one repo's field (by subdir).
+    #   --serve-args <root>      : print the bridge serve unit's --workspace/--local-workspace argv.
     field = None
+    repo_field = None      # (name, subdir)
     serve_root = None
-    build = False
-    parse_spec = []  # --repos <subdir=source[@ref]> ... → emit TAB rows for the deploy loop
     args = []
     i = 1
     while i < len(argv):
         if argv[i] == "--field" and i + 1 < len(argv):
             field = argv[i + 1]
             i += 2
+        elif argv[i] == "--repo-field" and i + 2 < len(argv):
+            repo_field = (argv[i + 1], argv[i + 2])
+            i += 3
         elif argv[i] == "--serve-args" and i + 1 < len(argv):
             serve_root = argv[i + 1]
             i += 2
-        elif argv[i] == "--build":
-            build = True
-            i += 1
-        elif argv[i] == "--parse-spec":
-            # all following args are repo specs (consumed to end)
-            parse_spec = argv[i + 1:]
-            i = len(argv)
         else:
             args.append(argv[i])
             i += 1
-
-    if parse_spec:
-        try:
-            rows = parse_repos_spec(parse_spec)
-        except ValueError as e:
-            sys.stderr.write(f"render_manifest --parse-spec: {e}\n")
-            return 1
-        for subdir, source, ref in rows:
-            sys.stdout.write(f"{subdir}\t{source}\t{ref}\n")
-        return 0
-
-    if build:
-        rows = []
-        for line in sys.stdin:
-            line = line.rstrip("\n")
-            if not line:
-                continue
-            cols = line.split("\t")
-            if len(cols) < 2:
-                sys.stderr.write(f"render_manifest --build: row needs subdir<TAB>source[<TAB>sig]: {line!r}\n")
-                return 2
-            subdir, source = cols[0], cols[1]
-            sig = cols[2] if len(cols) > 2 else ""
-            rows.append((subdir, source, sig))
-        try:
-            sys.stdout.write(build_manifest(rows) + "\n")
-        except ValueError as e:
-            sys.stderr.write(f"render_manifest --build: INVALID manifest: {e}\n")
-            return 1
-        return 0
 
     if args:
         try:
@@ -238,6 +203,9 @@ def main(argv):
     else:
         raw = sys.stdin.read()
 
+    TOP_FIELDS = ("projectId", "port")
+    REPO_FIELDS = ("subdir", "git", "ref", "sig", "refreshIntervalSec")
+
     try:
         repos = parse_manifest(raw)
     except ValueError as e:
@@ -246,15 +214,36 @@ def main(argv):
 
     if serve_root is not None:
         sys.stdout.write(serve_args(repos, serve_root) + "\n")
-    elif field:
-        if field not in ("subdir", "source", "sig", "ref"):
-            sys.stderr.write(f"render_manifest: unknown --field '{field}'\n")
+        return 0
+
+    if repo_field is not None:
+        name, subdir = repo_field
+        if name not in REPO_FIELDS:
+            sys.stderr.write(f"render_manifest: unknown --repo-field '{name}'\n")
             return 2
-        for r in repos:
-            sys.stdout.write(r[field] + "\n")
-    else:
-        for r in repos:
-            sys.stdout.write(json.dumps(r, ensure_ascii=False) + "\n")
+        match = next((r for r in repos if r["subdir"] == subdir), None)
+        if match is None:
+            sys.stderr.write(f"render_manifest: no repo with subdir '{subdir}'\n")
+            return 2
+        val = match[name]
+        sys.stdout.write(("" if val is None else str(val)) + "\n")
+        return 0
+
+    if field is not None:
+        if field in TOP_FIELDS:
+            top = parse_top(raw)
+            sys.stdout.write(str(top[field]) + "\n")
+            return 0
+        if field in REPO_FIELDS:
+            for r in repos:
+                val = r[field]
+                sys.stdout.write(("" if val is None else str(val)) + "\n")
+            return 0
+        sys.stderr.write(f"render_manifest: unknown --field '{field}'\n")
+        return 2
+
+    for r in repos:
+        sys.stdout.write(json.dumps(r, ensure_ascii=False) + "\n")
     return 0
 
 
