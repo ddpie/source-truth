@@ -14,7 +14,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/common.sh"
 
 REGION="$1"; IID="$2"; RUNTIME_ARN="$3"; SECRET_ID="$4"
-LOCALE="${5:-zh}"; LOG_HASH_SALT="${6:-}"; FEISHU_API_BASE="${7:-}"; IDLE_TIMEOUT="${8:-}"
+LOCALE="${5:-zh}"; LOG_HASH_SALT="${6:-}"; FEISHU_API_BASE="${7:-}"; IDLE_TIMEOUT="${8:-}"; BUCKET="${9:-}"
 
 [[ -n "$IID" && "$IID" != "None" ]] || { say err "activate_gateway: missing index instance id"; exit 2; }
 [[ -n "$RUNTIME_ARN" ]] || { say err "activate_gateway: missing RUNTIME_ARN"; exit 2; }
@@ -80,6 +80,29 @@ if [[ -n "$PROJECTS_B64" ]]; then
 echo '${PROJECTS_B64}' | base64 -d > '${HOST_PROJECTS_PATH}'
 chmod 644 '${HOST_PROJECTS_PATH}'"
 fi
+# REBUILD-IF-STALE (cross-review: a re-staged bot-gateway.tar.gz never took effect because
+# activate only restarted — the gateway is BUILT on the instance at bootstrap, so without a
+# fresh instance the dist stayed old; a deploy without --refresh-index silently shipped stale
+# gateway code). Re-pull the tarball, and rebuild ONLY when its content hash changed (a stamp
+# gates the ~90s npm ci+build so a flagless reconcile re-run is still fast). Needs BUCKET.
+if [[ -n "$BUCKET" ]]; then
+  REMOTE_CMD="${REMOTE_CMD}
+GW=/opt/bot-gateway
+aws s3 cp s3://${BUCKET}/bot-gateway.tar.gz /tmp/gw.tar.gz --region ${REGION}
+NEW_SIG=\$(sha256sum /tmp/gw.tar.gz | cut -d' ' -f1)
+OLD_SIG=\$(cat \$GW/.src_sig 2>/dev/null || echo none)
+if [ \"\$NEW_SIG\" != \"\$OLD_SIG\" ] || [ ! -f \$GW/dist/index.js ]; then
+  echo \"gateway source changed (\$OLD_SIG -> \$NEW_SIG) or dist missing — rebuilding\"
+  tar xzf /tmp/gw.tar.gz -C \$GW
+  if [ -d \$GW/config ]; then rm -rf /opt/config; mv \$GW/config /opt/config; fi
+  ( cd \$GW && npm ci && npm run build && npm prune --omit=dev ) || { echo 'BOOTSTRAP_FAILED: gateway rebuild'; exit 1; }
+  [ -f \$GW/dist/index.js ] || { echo 'BOOTSTRAP_FAILED: gateway build produced no dist/index.js'; exit 1; }
+  echo \"\$NEW_SIG\" > \$GW/.src_sig
+else
+  echo 'gateway source unchanged — skipping rebuild'
+fi
+rm -f /tmp/gw.tar.gz"
+fi
 REMOTE_CMD="${REMOTE_CMD}
 systemctl restart bot-gateway.service
 sleep 2
@@ -104,7 +127,10 @@ if [[ -z "$CID" ]]; then
 fi
 
 # Poll the invocation to completion (bounded). Surface the unit's is-active status.
-DEADLINE=$(( SECONDS + ${GATEWAY_ACTIVATE_TIMEOUT_SECS:-120} ))
+# Default deadline is generous: when BUCKET is set the remote step may rebuild the gateway
+# (npm ci + tsc, ~60-120s) before restarting, so 120s could time out mid-build. 360s covers it;
+# the no-rebuild path (source unchanged) still returns in seconds.
+DEADLINE=$(( SECONDS + ${GATEWAY_ACTIVATE_TIMEOUT_SECS:-360} ))
 while (( SECONDS < DEADLINE )); do
   sleep 5
   STATUS="$(aws ssm get-command-invocation --region "$REGION" --command-id "$CID" \
@@ -112,11 +138,14 @@ while (( SECONDS < DEADLINE )); do
   case "$STATUS" in
     Success)
       OUT="$(aws ssm get-command-invocation --region "$REGION" --command-id "$CID" \
-        --instance-id "$IID" --query StandardOutputContent --output text 2>/dev/null | tr -d '[:space:]' || echo "")"
-      if [[ "$OUT" == "active" ]]; then
+        --instance-id "$IID" --query StandardOutputContent --output text 2>/dev/null || echo "")"
+      # The final command is `systemctl is-active`; with the rebuild step there are now log
+      # lines BEFORE it, so check the LAST non-empty line == active (not the whole blob).
+      LAST="$(printf '%s' "$OUT" | grep -v '^[[:space:]]*$' | tail -1 | tr -d '[:space:]')"
+      if [[ "$LAST" == "active" ]]; then
         say ok "bot-gateway is active on $IID"; exit 0
       fi
-      say err "bot-gateway started but is not active (status: ${OUT:-unknown}). Inspect: aws ssm start-session --target $IID ; journalctl -u bot-gateway -n 50"
+      say err "bot-gateway started but is not active (last line: ${LAST:-unknown}). Inspect: aws ssm start-session --target $IID ; journalctl -u bot-gateway -n 50; tail -50 /var/log/bot-gateway.log"
       exit 1
       ;;
     Failed|Cancelled|TimedOut)
