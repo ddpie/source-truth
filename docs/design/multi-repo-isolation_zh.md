@@ -1,7 +1,6 @@
 # 多项目 / 多仓库的索引与隔离设计
 
-> MVP 之后的能力（MVP 只支持单仓只读主分支，见 [`requirements_zh.md`](requirements_zh.md)）。
-> 本文定义最终设计与安全底线。系统总览见
+> 本文定义多项目 / 多仓的最终设计与安全底线；落地现状见 §7。系统总览见
 > [`architecture-overview_zh.md`](architecture-overview_zh.md)。
 
 ## 1. 需求
@@ -131,35 +130,36 @@ agent 会话（注入本项目服务地址）
 
 ## 7. 实现现状
 
-分阶段落地，**安全闸门 §4.1 就位之前不扩大使用范围**。
+落地形态：**单机多项目，逻辑隔离（进程 + 端口 + 服务端 scope gate）**，机器人（独立飞书 App）1:1 项目、
+项目 1:N 仓库，全部共用一台 index EC2。
 
-**第一阶段（已落地）— 网关路由层**：`bot-gateway/src/project-routing.ts`。
+- **配置真相源**：`.local/projects.json`（不进 git，模板 `config/projects.example.json`），每个项目一条：
+  `port`（该项目 bridge 端口，全机唯一）、`feishuSecretId`、`repos`（每仓 `{subdir, git, ref?,
+  refreshIntervalSec?}`，git-only）。网关启动时校验，配置错即启动失败。
+- **网关路由**（`bot-gateway/src/project-routing.ts`）：网关服务哪个项目由 `PROJECT_ID` 绑定（唯一项目零配置
+  自动命中），解析出该项目的仓库集合与 bridge 端口，`projectId` 写入监控指标。
+- **索引侧多图**：每个仓库独立 `graph.db` / HOME / 写锁；每个项目一个 bridge 进程 `index-bridge-<projectId>`
+  在独立端口只服务本项目仓库（`activate_project.sh`）。
+- **每项目独立 runtime**：`source_truth_agent_<projectId>`，其 `CODEGRAPH_MCP_URL` 指向本项目 bridge 端口——
+  agent 取证连接按项目隔离。
 
-- 配置放 `.local/projects.json`（不进 git），样例模板 `config/projects.example.json`；路径由
-  `PROJECTS_CONFIG_PATH` 环境变量指定。
-- 网关服务哪个项目由 `PROJECT_ID` 绑定；唯一项目则零配置自动命中。
-- 出错就拒绝，配置错误即启动失败：缺字段 / 重复 / 格式错 → 启动报错；`PROJECT_ID` 未知 → 拒绝派生路由（不回退）；
-  配置文件不存在 → 降级为不带项目标识照常服务。
-- `projectId` 已写入监控指标；`repos` 已转发给 agent。
-- 服务地址已解析但尚未真正驱动 agent 切换连接——按项目切换服务地址随第二阶段落地。
-
-**第二、三阶段（未落地）**：索引服务侧多图（每仓独立 `graph.db` / HOME / 写锁 / 端口 + 分头查询）和
-服务端硬隔离（越界仓库名拒绝 + realpath 防穿越）。安全闸门到位前不扩大使用范围。
+**安全说明**：当前是逻辑隔离（A 档，适用互相信任的项目同机）。§4.5 的操作系统级隔离（独立系统用户 / `0700`，
+防 RCE 后横向读取）尚未做——互不信任的项目须分机器。服务端越界仓名拒绝 + realpath 防穿越（§4.1）为强化项。
 
 ## 8. 定时刷新
 
-问答对新鲜度只要求分钟级。用**定时拉取**起步——无需在源仓配任何东西，不对外暴露端点（零新增攻击面）。
-webhook / 文件监听暂只预留接口。
+问答对新鲜度只要求分钟级。**落地形态**：每个仓库一个 systemd timer（`index-refresh-<subdir>.timer`，默认
+300s，`projects.json` 可配）周期性 `git pull`；常驻 codegraph `--mcp` 进程的 file-watcher 在文件落盘后数秒内
+增量重建内存图——无重启、无第二个写者。不对外暴露端点（零新增攻击面）；webhook / push 触发为预留项。
 
-定时器周期性「拉取来源 → 有变化才重建」，复用同一套机制（每仓写锁、独占写入、精确匹配僵尸进程、限内存）。
-约束：
+满足的约束：
 
-1. **不重入**：上次未结束时不能再次触发（并发写 → 0 节点）。「不重入」要么靠调度层串行，要么靠机器侧写锁
-   把「拉取 + 重建」整段包住——必须明确用哪一层。
-2. **副本原子切换**：不能原地 `rm -rf` 再写（服务进程实时 `open()` 读磁盘会冲突）。先解包到
-   `<目录>.new`，再 `rename` 整体切换。
-3. **有变化才重建**：比对 commit / ETag，没变化跳过。
-4. **失败必须告警**：否则索引会静默停在旧版本，答案基于过期代码——对「代码是唯一依据」是隐性致命伤。
+1. **不重入**：刷新只 `git pull`（幂等），不另起 codegraph 进程；watcher 串行处理文件事件——天然不重入，不会
+   并发写同一张图。
+2. **接受 pull 瞬间中间态**：原地 `git pull`（不做 `.new`+rename）；watcher 是文件粒度增量，pull 半途的瞬间
+   读到中间态会被下一个文件事件纠正。graph.db / HOME 在工作树内，由 `git_fetch.sh` 的围栏与 `git reset --hard` 隔离（见 §4.2 / 不变量5）。
+3. **有变化才重建**：HEAD 未变即无文件事件，watcher 自然跳过。
+4. **失败必须告警**：`git pull` 失败打 `GIT_FETCH_FAILED` 标记（可接监控），不让索引静默停在旧版本。
 
 ## 9. 项目术语表：让中文提问命中英文代码
 

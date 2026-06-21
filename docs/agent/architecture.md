@@ -9,16 +9,20 @@ structure）描述系统*是什么*；本文描述*一次提问如何在系统�
 
 ```
 策划在飞书群 @机器人 提问
-  → bot-gateway（TypeScript 长驻服务，bot-gateway/src/index.ts）
+  → bot-gateway（TypeScript 长驻服务，bot-gateway/src/index.ts；**每个项目一个网关进程
+      `bot-gateway@<projectId>`，各连自己的飞书 App**）
       · 通过长连接事件订阅消费 IM 事件（类比 lark-cli event consume）
       · 事件去重（飞书会重投；按 event_id 幂等）
       · 解析 @提及与问题文本，open_id → 内部 userId
+      · 项目路由：本进程的 `PROJECT_ID` → 该项目的仓库集合 + 该项目 bridge 端口
+        （src/project-routing.ts）；据此设定取证用的 `CODEGRAPH_MCP_URL` 指向本项目 bridge
       · 会话路由：(chat_id / thread_id) → runtimeSessionId（src/session-map.ts，DDB+TTL）
         —— 同一问答链复用同一暖 microVM；不同用户/会话绝不共用会话，否则上下文串扰
       · 先创建一张 CardKit 卡片（「正在思考…」），拿到 card_id 供后续流式更新
-      · SigV4 签名调 AgentCore InvokeAgentRuntime（src/sigv4.ts），
+      · SigV4 签名调 AgentCore InvokeAgentRuntime（src/sigv4.ts），目标为**本项目专属的
+        Runtime**（`source_truth_agent_<projectId>`），
         path = /runtimes/<encodeURIComponent(runtimeArn)>/invocations，带 runtimeSessionId
-  → AgentCore Runtime（Firecracker microVM，每会话独立容器）
+  → AgentCore Runtime（Firecracker microVM，每会话独立容器；每个项目一套独立 Runtime）
       · 秒级冷启；空闲达 idleRuntimeSessionTimeout（默认 900 秒 / 15 分钟，部署时显式配置）后回收；
         Session Storage 约 14 天过期。网关的 session 复用 TTL 与该 idle 值同源对齐（见下文「Runtime 调参」）
       · microVM 内运行 agent-container（Python，agent-container/agent.py）
@@ -38,18 +42,25 @@ structure）描述系统*是什么*；本文描述*一次提问如何在系统�
       · 结构化日志 + hashUserId 脱敏（src/log.ts，用户/会话标识不落明文，MVP 仅防滥用）
 ```
 
-## 数据面：代码如何进入 index-service、索引如何更新（MVP 实况）
+## 数据面：代码如何进入 index-service、索引如何更新
 
-**当前 MVP 的实际管线**（一次性快照构建，靠重部署刷新——**没有** webhook / git pull / inotify
-增量 / 夜间 CI；那是 post-MVP 目标形态，未实现）：
+代码以 **git 为唯一来源**：每个仓库 `git clone` 到 index-service 本地，定时 `git pull` 保持新鲜，常驻
+codegraph 的 file-watcher 增量重建内存图。
 
-![数据面五段管线：deploy-all 打包→S3，bootstrap 解包，index-build 建图，index-bridge 常驻只读，会话 microVM 远程取证](../assets/data-plane.svg)
+![数据面管线：activate_project 用只读 git 凭证 clone 各仓到本地，systemd timer 定时 git pull，常驻 codegraph 的 file-watcher 增量重建内存图，会话 microVM 经 HTTP 远程取证](../assets/data-plane.svg)
 
-**唯一一份代码、本地副本**：仓库只在 index-service 的**本地磁盘** `/data/repo/<subdir>`；codegraph-server
-索引该本地副本，文件读取工具也读取该副本。**会话 microVM 不挂任何文件系统**——全部源码经 index-service 的 HTTP 接口读取，没有共享挂载，故没有副本同步问题。**刷新方式**：代码与索引都冻结在
-部署时的 S3 tarball 快照，**要更新主分支代码 / 索引必须重新部署**（替换 index-service 实例重跑 bootstrap）——
-当前没有随 git push 自动刷新的链路。注：codegraph-server 的 `--serve` 带 file-watcher 增量是已实测的
-引擎能力，但 MVP 用 `--mcp` 未启用，留作 post-MVP。
+> 注：上图 SVG 待重绘以匹配本节；以正文为准。
+
+**唯一一份代码、本地副本**：仓库只在 index-service 的**本地磁盘** `/data/repo/<subdir>`，由
+`index-service/activate_project.sh` 用单一**只读 git 凭证**（Secrets Manager
+`source-truth/git-credentials`，host 侧取出）`git clone` 各仓到本地；codegraph-server 索引该本地副本，
+文件读取工具也读取该副本。**会话 microVM 不挂任何文件系统**——全部源码经 index-service 的 HTTP 接口读取，
+没有共享挂载，故没有副本同步问题。
+
+**刷新方式（git，自动）**：每个仓库一个 systemd timer `index-refresh-<subdir>.timer`（默认 300 秒，
+可经 `projects.json` 的 `refreshIntervalSec` 配置）周期性 `git pull`；常驻 codegraph（`--mcp --graph-only`）
+进程的 file-watcher 在数秒内对内存图做增量重建——无须重启、无第二个写者、无服务抖动。代码新鲜度因此是
+分钟级，无需重新部署。
 
 ## 会话隔离模型（README 未展开）
 
@@ -117,8 +128,13 @@ source-truth 不同于「在容器外把 AI 当远程 MCP 客户端」的常见�
    + 启动；飞书凭证运行时从 Secrets Manager 取（不落盘）。注意飞书长连接是**全局单例**（同 app 只能一个
    client，否则争抢事件）——故蓝绿换 index 实例时，gateway 走 **break-before-make**（先停旧实例网关、确认长连接断开，
    再启动新实例网关），与 index/codegraph 的 make-before-break 相反。
-3. **独立 CodeGraph 索引服务**——常驻服务，建图时独占写入 graph.db（部署时建图一次）、stdio→streamable-HTTP 接口，对会话容器暴露只读**定位 + 读文件**查询。（持 clone / inotify 增量为 post-MVP，未实现）
-4. **代码仓只在 index-service 本地**——它在本地磁盘持唯一一份代码副本（部署时写入代码 + 建索引），既供 codegraph 索引、又经 HTTP 接口的文件工具服务给会话容器；会话 microVM 不挂任何文件系统（无共享挂载）。
+3. **独立 CodeGraph 索引服务**——常驻服务，单写者独占 graph.db、stdio→streamable-HTTP 接口，对会话容器
+   暴露只读**定位 + 读文件**查询；每个项目一个 bridge 进程 `index-bridge-<projectId>`（各占独立端口
+   8080/8081/…，仅服务该项目的仓库，靠重复 `--workspace` 限定范围），其 file-watcher 对定时 git pull 的
+   变更做增量重建（详见「数据面」）。
+4. **代码仓只在 index-service 本地**——它在本地磁盘持唯一一份代码副本，由 `activate_project.sh` 用只读 git
+   凭证 `git clone` 写入、systemd timer 定时 `git pull` 刷新，既供 codegraph 索引、又经 HTTP 接口的文件工具
+   服务给会话容器；会话 microVM 不挂任何文件系统（无共享挂载）。
 
 通用运维惯例：ARM64 容器 + DockerImageAsset、CDK / boto3 混合 IaC 分工、飞书 SDK / CardKit 生态、
 空闲缩零按量计费、按游戏项目隔离机器人、结构化 JSON 日志 + hashUserId 脱敏、`deploy/ops/test` 三类脚本。
@@ -126,9 +142,8 @@ source-truth 不同于「在容器外把 AI 当远程 MCP 客户端」的常见�
 ## 待验证技术点（POC 优先，影响架构定型）
 
 - CodeGraph 对前端 Unity 风格 C# 与后端 Node.js（及 Lua 元表等动态模式）的索引召回率；
-- push→索引端到端时延 + 首次全量索引耗时（社区 13 万文件约 1 小时量级）；
+- 首次全量索引耗时（社区 13 万文件约 1 小时量级）；
 - CodeGraph stdio→HTTP 转换（mcp-proxy 类）的稳定性、并发、路径对齐（工具返回仓库相对路径，如 `Assets/Scripts/Foo.cs`）；
-- 本地仓库副本上 inotify 增量索引的可靠性（post-MVP）；
 - 经 HTTP 接口读文件的延迟（索引精准读取 vs 全仓文本检索兜底两条路径）；
 - 飞书流式卡片频控、VChart 图表组件边界、动态组件回调路由。
 
