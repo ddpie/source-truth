@@ -25,7 +25,7 @@
       "width": 24,
       "height": 2,
       "properties": {
-        "markdown": "# source-truth · SRE / 健康看板\n**顶部为告警状态**（红=触发）。下方：延迟分位（看 **p95/p99 不看平均**）、成败/中止、卡片健康、取证深度、冷启动。失败与中止分开（中止=用户主动停，非故障）。全链路排障见底部 TraceID 区。"
+        "markdown": "# source-truth · 健康看板（工程 / 运维）\n顶部为告警状态（绿=正常，红=触发）。以下依次为：回答延迟分位（建议关注 P95/P99，平均值受少数极慢请求影响）、回答结果分布、卡片渲染异常、单次回答的代码检索次数、冷启动。故障排查请用底部的 TraceID 全链路日志查询。"
       }
     },
     {
@@ -35,7 +35,7 @@
       "width": 24,
       "height": 3,
       "properties": {
-        "title": "🚨 告警状态（4 条：竞泄复发 / 冻卡 / 失败突增 / 日志管道存活）— 含 OK，红=触发",
+        "title": "🚨 告警状态（绿=正常 / 红=触发）：原始工具指令文本泄漏到卡片 · 卡片未正常结束 · 回答失败率激增 · 日志管道中断",
         "alarms": [
           "arn:aws:cloudwatch:${REGION}:${ACCOUNT_ID}:alarm:source-truth-ToolcallLeakDetected",
           "arn:aws:cloudwatch:${REGION}:${ACCOUNT_ID}:alarm:source-truth-FinalizeFailed",
@@ -52,7 +52,7 @@
       "width": 24,
       "height": 3,
       "properties": {
-        "markdown": "## 关键体感指标（实时）\n下面三块单值卡：成功率（成功/提问）、P95 总延迟、P95 首字延迟——一眼看健康。"
+        "markdown": "## 核心健康指标（近 1 小时）\n回答成功率、回答总耗时 P95、首字延迟 P95（首字延迟 = 用户发出问题到看到第一个字的时间）。"
       }
     },
     {
@@ -134,7 +134,7 @@
       "width": 8,
       "height": 4,
       "properties": {
-        "title": "P95 首字延迟（体感）",
+        "title": "P95 首字延迟",
         "region": "${REGION}",
         "view": "singleValue",
         "period": 3600,
@@ -158,7 +158,7 @@
       "width": 12,
       "height": 6,
       "properties": {
-        "title": "总延迟分位（p50 / p95 / p99）",
+        "title": "回答总耗时分位（p50 / p95 / p99，单位 ms）",
         "region": "${REGION}",
         "view": "timeSeries",
         "period": 300,
@@ -205,7 +205,7 @@
       "width": 12,
       "height": 6,
       "properties": {
-        "title": "首字延迟分位（p50 / p95 / p99）— 体感关键",
+        "title": "首字延迟分位（用户最先感知；p50/p95/p99，单位 ms）",
         "region": "${REGION}",
         "view": "timeSeries",
         "period": 300,
@@ -252,7 +252,7 @@
       "width": 12,
       "height": 6,
       "properties": {
-        "title": "失败分布 by reason（仅真故障，不含中止）",
+        "title": "失败原因分布（只统计真故障，不含用户主动中止）",
         "region": "${REGION}",
         "view": "timeSeries",
         "stacked": true,
@@ -276,7 +276,7 @@
       "width": 12,
       "height": 6,
       "properties": {
-        "title": "成功 / 失败 / 中止（计数）",
+        "title": "成功 / 失败 / 用户中止（次数）",
         "region": "${REGION}",
         "view": "timeSeries",
         "period": 300,
@@ -316,7 +316,7 @@
       "width": 12,
       "height": 6,
       "properties": {
-        "title": "卡片健康 by kind（泄漏剥离 / 冻卡 / 双答 / 幂等重发 / 心跳停滞）",
+        "title": "卡片渲染异常分类（指令文本漏出 / 卡片未正常结束 / 重复回答 / 重发拦截 / 心跳中断）",
         "region": "${REGION}",
         "view": "timeSeries",
         "stacked": true,
@@ -340,7 +340,7 @@
       "width": 12,
       "height": 6,
       "properties": {
-        "title": "工具调用/答（取证强度）、工具错误、澄清触发",
+        "title": "单次回答的代码检索次数 / 检索报错数 / 澄清触发次数（均值）",
         "region": "${REGION}",
         "view": "timeSeries",
         "period": 300,
@@ -392,7 +392,7 @@
       "width": 12,
       "height": 6,
       "properties": {
-        "title": "冷启动：频率（次数）与占比",
+        "title": "冷启动（新容器首次响应）：次数与占比",
         "region": "${REGION}",
         "view": "timeSeries",
         "period": 3600,
@@ -443,7 +443,7 @@
       "width": 12,
       "height": 6,
       "properties": {
-        "title": "冷启动耗时分位（microVM spin-up 折进首字，p50/p95）— 与暖启动延迟分开",
+        "title": "冷启动额外耗时（新容器启动时间，算进首字延迟；p50/p95）——与已就绪容器分开看",
         "region": "${REGION}",
         "view": "timeSeries",
         "period": 3600,
@@ -482,7 +482,7 @@
       "width": 12,
       "height": 6,
       "properties": {
-        "title": "成功率 / 失败率（占提问；体感质量底线）",
+        "title": "成功率 / 失败率（占总提问；质量底线）",
         "region": "${REGION}",
         "view": "timeSeries",
         "period": 3600,
@@ -548,7 +548,7 @@
       "width": 12,
       "height": 6,
       "properties": {
-        "title": "取证深度：平均证据数/答 与 平均工具调用/答",
+        "title": "代码检索充分度（均值）：每答引用代码处数 + 检索次数",
         "region": "${REGION}",
         "view": "timeSeries",
         "period": 3600,
@@ -602,7 +602,7 @@
       "width": 24,
       "height": 6,
       "properties": {
-        "title": "延迟均值 vs 分位（均值被异常值拉偏的程度；社区共识盯分位）",
+        "title": "回答耗时：平均值 vs 分位（对比平均值受少数极慢请求的偏移，说明应关注分位而非平均）",
         "region": "${REGION}",
         "view": "timeSeries",
         "period": 3600,
