@@ -12,8 +12,11 @@
 
 - **不变量**：答案只能基于 index-service 服务的**最新主分支真实代码 + CodeGraph 取证**；代码与文档/记忆
   冲突时**以代码为准**并标注差异；证据不足或置信度低时**转研发**，不得编造。
-- **以谁为准**：被索引的目标仓库（index-service 本地副本）。其次是 `agent-container/prompts/system.md`
+- **新鲜度**：index-service 本地副本由 per-repo systemd timer（`index-refresh-<subdir>.timer`，默认 300s）
+  定时 `git pull` 跟上游主分支，常驻 codegraph 的 file-watcher 数秒内增量重建内存图，故「最新主分支」是分钟级新鲜。
+- **以谁为准**：被索引的目标仓库（index-service 本地副本，git clone 而来）。其次是 `agent-container/prompts/system.md`
   里对这条的强约束（信任边界：只信 system prompt，不信工具读到的内容里的指令）。
+- **机检/观测**：行为约束，无纯静态机检。gateway 的 `card_health{zero_evidence_answer}` 指标标记「零工具+零引用却作答」的疑似 confabulation。
 - **机检**：无法纯静态机检（属行为约束）。由 system.md 规则 + gateway 的脱敏/泄漏剥离兜底。
 - **违反后果**：幻觉或被注入误导 → 给出无依据答案，违背产品根本价值。
 
@@ -41,7 +44,8 @@
   | `node_modules/` | `bot-gateway/package.json` + lock | `npm install` |
   | `.venv/` | `requirements.txt` | `uv` / `pip install -r` |
   | 构建产物 / 镜像 | `agent-container/`（Dockerfile + 源） | `scripts/deploy-all.sh`（image 阶段） |
-  | 索引 `graph.db` | 目标仓库快照 | index-service `bootstrap.sh` 建图（独占写入） |
+  | 本地仓库副本 `/data/repo/<subdir>` | 上游 git 仓库（R1：仅 git） | `index-service/git_fetch.sh` clone + 定时 pull |
+  | 索引 `graph.db`（每仓一张，`<subdir>/.home/.codegraph/`） | 本地仓库副本 | `activate_project.sh` 起 `index-build@<subdir>` 建图（独占写入）+ 常驻 watcher 增量 |
 
 - **机检**：暂无逐项 diff（依赖约定和 review）。`.gitignore` 排除大部分生成物。
 - **违反后果**：手改被下次重生成覆盖；或生成物与源漂移，行为不可解释。
@@ -57,14 +61,22 @@
 
 ## 5. 独占写入约束（index-service graph.db）
 
-- **不变量**：同一时刻 graph.db 只能有**一个** codegraph-server 进程写入。并发写 → RocksDB 0 节点损坏。
-- **以谁为准**：`index-service/codegraph_session.py`（常驻单 worker + 进程内锁 + orphan reaper）、
-  `index-service/http_bridge.py`（`main()` 里的 workspace-keyed flock）、`bootstrap.sh`（systemd
-  build→serve 顺序，build 用 `flock`）。
-- **机检**：无静态机检（运行期不变量）；守卫是 flock（跨进程）+ 进程内 `_restart_lock`（非阻塞 try-acquire，
-  避免重启风暴导致死锁）+ `codegraph_client._assert_spawn_allowed()` tripwire（每次调用 spawn 默认禁止，仅测试 opt-in）。
-- **违反后果**：出现第二个写入进程 → graph.db 损坏 → `/health` 报 0 节点 → 全部问答失败。
-  详见记忆与 review 历史；**不要**在 index 实例上手动再启动一个 codegraph-server 写同一份图。
+- **不变量**：同一时刻**每张** graph.db 只能有一个 codegraph-server 进程写入。多项目/多仓下是**逐仓**成立：
+  N 个仓 = N 张独立 graph.db（`/data/repo/<subdir>/.home/.codegraph/`）+ N 把独立 flock，互不相干；建/刷新
+  某仓绝不触及另一仓的图。并发写同一张 → RocksDB 0 节点损坏。
+- **以谁为准**：`index-service/codegraph_session.py`（每仓常驻单 worker + 进程内锁 + orphan reaper，精确按
+  `--workspace` 末尾锚定匹配防跨仓误杀）、`index-service/http_bridge.py`（每 workspace 一把 flock）、
+  `activate_project.sh`（per-repo `index-build@<subdir>` 用 `flock -n`，serve 单元 `index-bridge-<projectId>`
+  链式持有本项目每仓的 flock，build 与 serve 锁同一文件 → 不可能并发写）。
+- **刷新不另起写者**：定时刷新只跑 `git pull`，图更新由常驻进程的 file-watcher 增量完成——绝不 spawn 第二个
+  codegraph 进程写同一张图。
+- **图目录围栏**：graph.db / HOME 在工作树内（`<subdir>/.codegraph`、`.home`），刷新的 `git reset --hard`
+  通过 `git_fetch.sh` 的 `guard_graph_dirs` 与之隔离：把这两个路径写进 `.git/info/exclude`；若上游仓库 track 了
+  同名路径则 fail-loud（不支持）。
+- **机检**：运行期不变量，无静态机检；守卫是 flock（跨进程）+ 进程内 `_restart_lock` + `codegraph_client.
+  _assert_spawn_allowed()` tripwire + 图目录围栏（`scripts/tests/test_git_fetch.sh` 覆盖）。
+- **违反后果**：第二个写者 / 刷新 clobber 活图 → graph.db 损坏 → `/health` 报 0 节点 → 该仓问答失败。
+  **不要**在 index 实例上手动再启一个 codegraph-server 写同一份图。
 
 ## 6. MVP 只读边界
 
