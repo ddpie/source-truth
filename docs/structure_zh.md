@@ -54,7 +54,8 @@ scripts/                运维生命周期
   install.sh            交互式一键安装（查依赖→飞书凭证→配置→确认→调 deploy-all；重跑预填）
   deploy-all.sh         一键部署 canonical（artifacts→IAM→network→index-service→镜像→Runtime→gateway；幂等）
   lib/provision_*.sh + deploy_runtime.py + wait_index_health.sh  deploy-all.sh 的各阶段实现
-  lib/resolve_repo.sh   --repo 多来源解析（本地 / git URL / s3://）→ 统一成本地目录
+  lib/deploy_project.sh + wait_base_host.sh + delete_runtime.py  多项目编排：建底座 / 等底座就绪 / 删 per-project runtime
+  lib/resolve_repo.sh   多来源 repo 解析（本地 / git / s3）；现仅单测引用，主链路已改 git-only
   lib/activate_gateway.sh  经 SSM 写 /etc/bot-gateway.env + 启动 bot-gateway.service（gateway 与索引同主机）
   lib/stop_gateway.sh   经 SSM 停止旧实例 gateway（蓝绿换实例 break-before-make，避免双网关抢占飞书长连接）
   deploy.sh             已废弃兼容垫片（转发到 deploy-all.sh）
