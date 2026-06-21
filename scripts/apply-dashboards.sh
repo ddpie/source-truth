@@ -86,6 +86,16 @@ fi
 
 [[ "$DRY_RUN" -eq 0 ]] && { require_cmd aws "install/configure the AWS CLI" || exit 1; }
 
+# Account id — needed to render alarm-widget ARNs (${ACCOUNT_ID}). Resolve via STS on a
+# real run; --dry-run uses a placeholder so the template still substitutes + validates.
+ACCOUNT_ID=""
+if [[ "$DRY_RUN" -eq 0 ]]; then
+  ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text 2>/dev/null || echo "")"
+  [[ -n "$ACCOUNT_ID" && "$ACCOUNT_ID" != "None" ]] || { say err "could not resolve AWS account id (sts get-caller-identity)"; exit 2; }
+else
+  ACCOUNT_ID="000000000000"
+fi
+
 # Per-run stderr capture (NOT a fixed /tmp path — two concurrent runs would clobber
 # each other and cross-report errors). Cleaned up on exit.
 ERRF="$(mktemp)"
@@ -98,7 +108,7 @@ for entry in "${TEMPLATES[@]}"; do
   [[ -f "$tpl" ]] || { say err "template not found: $tpl"; rc=1; continue; }
 
   # Render + validate (fails loud on banned widget type / unresolved placeholder).
-  body="$(python3 "$RENDER" "$tpl" --region "$REGION" --namespace "$NAMESPACE")" || {
+  body="$(python3 "$RENDER" "$tpl" --region "$REGION" --namespace "$NAMESPACE" --account-id "$ACCOUNT_ID")" || {
     say err "render failed for $tpl (see message above) — $name NOT applied"
     rc=1; continue
   }
