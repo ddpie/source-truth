@@ -154,7 +154,7 @@
       "type": "text",
       "x": 0, "y": 26, "width": 24, "height": 5,
       "properties": {
-        "markdown": "## 🔍 按 TraceID 查全链路日志\nTraceID 在飞书卡片顶部，网关与 agent 两侧日志统一用 `traceId`。\n\n[打开 Logs Insights](https://${REGION}.console.aws.amazon.com/cloudwatch/home?region=${REGION}#logsV2:logs-insights) → 勾选日志组 `/source-truth/bot-gateway` 与 `/aws/bedrock-agentcore/runtimes/...`，运行：\n\n```\nfields @timestamp, @logStream, event, @message | filter traceId = \"st-xxxx\" | sort @timestamp asc\n```"
+        "markdown": "## 🔍 按 TraceID 查全链路日志（网关 + agent 两侧合并）\nTraceID 在飞书卡片底部；网关与 agent microVM 两侧日志统一用 `traceId` 串联。\n\n**最省事（推荐，输入 traceId 一个参数即可，其余全自动）：**\n```\n./scripts/trace.sh st-xxxx\n```\n区域、两个 log group（agent 组按 runtime 自动发现）、时间窗、查询、按时间合并——全部自动包装；输出标 `GW`/`AGT` 来源并抽取 latency/工具数/出处数/错误等关键字段。\n\n**控制台手查**：[打开 Logs Insights](https://${REGION}.console.aws.amazon.com/cloudwatch/home?region=${REGION}#logsV2:logs-insights) → 勾选 `/source-truth/bot-gateway` + `/aws/bedrock-agentcore/runtimes/<runtime>-DEFAULT`，把 `st-xxxx` 换成你的 traceId 运行：\n```\nfields @timestamp, @logStream, event, @message | filter @message like /st-xxxx/ | sort @timestamp asc\n```"
       }
     }
   ]
