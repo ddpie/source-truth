@@ -61,12 +61,15 @@ if [[ -z "$ZONE_ID" || "$ZONE_ID" == "None" ]]; then
     }
   else
     say info "creating private hosted zone $ZONE_NAME for $VPC_ID" >&2
-    # CallerReference stable per VPC. Surface errors (don't 2>/dev/null-swallow) so a
-    # genuine failure is actionable instead of a silent set -e abort.
+    # CallerReference must be UNIQUE per creation, NOT stable: Route53 retains caller references
+    # for DELETED zones, so a stable "source-truth-${VPC_ID}" collides with HostedZoneAlreadyExists
+    # on a teardown→redeploy of the same VPC (the zone is gone but the reference lingers). The
+    # find-or-create above (by-VPC then by-name) is what guarantees idempotency — we only reach
+    # here when no zone exists — so the reference just needs to be unique. Add a timestamp+pid.
     create_out="$(R create-hosted-zone --name "$ZONE_NAME" \
       --vpc "VPCRegion=${REGION},VPCId=${VPC_ID}" \
       --hosted-zone-config "Comment=source-truth index-service stable endpoint,PrivateZone=true" \
-      --caller-reference "source-truth-${VPC_ID}" \
+      --caller-reference "source-truth-${VPC_ID}-$(date +%s)-$$" \
       --query 'HostedZone.Id' --output text 2>&1)" || {
       say err "create-hosted-zone failed: $create_out"; exit 1
     }
