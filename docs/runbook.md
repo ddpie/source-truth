@@ -148,6 +148,20 @@ aws ssm start-session --region <r> --target <INDEX_SERVICE_INSTANCE>
 关键事件：`card_closed`（一次问答结束）、`reply_context_replayed`（追问带上上文）、
 `card_write_dropped` / `finalize_error`（卡片写失败）、`invoke_http_error`（后端非 200）。
 
+**按 traceId 查全链路（网关 + agent microVM 合并时间线）**：一次问答横跨两个 log group
+（网关 `/source-truth/bot-gateway` + agent 的 `/aws/bedrock-agentcore/runtimes/<runtime>-DEFAULT`），
+二者用同一 `traceId` 串联。一条命令把两侧查询 + 合并都包好——只需输入 traceId（区域、两个 log group、
+时间窗、查询、排序全自动）：
+
+```bash
+./scripts/trace.sh st-731080073903468d83a0fbe1249b5dc3   # traceId 取自卡片底部或 answer_* 日志行
+#   --since-hours N（默认 6）扩大回溯窗；--raw 不合并、两侧原样输出
+```
+
+输出按时间合并、标 `GW`/`AGT` 来源，并自动抽取关键字段（latencyMs / numToolCalls / turnCount /
+evidenceCitationCount / status / error）。后端 403/超时这类「卡片失败但不知卡在哪一段」的问题，
+一眼定位是网关、invoke、还是 agent 侧。
+
 **查看 index-service 日志**（同一台实例）：
 
 ```bash
