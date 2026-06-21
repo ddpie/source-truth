@@ -32,6 +32,7 @@ class _PerRepoFake:
     def __init__(self, workspace, **_kw):
         self.workspace = workspace
         self.name = workspace.rstrip("/").rsplit("/", 1)[-1]
+        self.home = _kw.get("home")  # capture the per-repo HOME the bridge passed (不变量2)
         self.calls = 0
         self.healthy = True
         self.health_detail = "ok"
@@ -308,3 +309,22 @@ def test_pair_workspaces_rejects_duplicate_workspace():
     from http_bridge import pair_workspaces
     with pytest.raises(ValueError):
         pair_workspaces(["/data/repo/a", "/data/repo/a/"], ["/data/repo/a", "/data/repo/a"])
+
+
+def test_multi_repo_sessions_get_distinct_per_repo_home(monkeypatch):
+    # 不变量2: each repo's session must spawn codegraph with its OWN HOME (<ws>/.home),
+    # else all N sessions share /data/.codegraph and collide. Distinct + correct.
+    _build_multi(monkeypatch, names=("alpha", "beta"))
+    homes = {n: _PerRepoFake.registry[n].home for n in ("alpha", "beta")}
+    assert homes["alpha"] == "/data/repo/alpha/.home", homes
+    assert homes["beta"] == "/data/repo/beta/.home", homes
+    assert homes["alpha"] != homes["beta"]
+
+
+def test_single_repo_session_home_is_none(monkeypatch):
+    # One repo → home=None → inherit process HOME (pre-multi-repo single-graph layout).
+    _PerRepoFake.registry.clear()
+    monkeypatch.setattr(http_bridge, "CodegraphSession", lambda ws, **kw: _PerRepoFake(ws, **kw))
+    monkeypatch.setattr(http_bridge, "acquire_singleton_writer_lock", lambda ws: None)
+    http_bridge.build_bridge(workspaces=[("/data/repo/solo", "/data/repo/solo")], port=8957)
+    assert _PerRepoFake.registry["solo"].home is None

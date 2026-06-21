@@ -472,3 +472,32 @@ def test_acquire_restart_lock_waits_for_a_held_lock():
     timed_out, got_after_release = asyncio.run(scenario())
     assert timed_out is True            # blocked while held
     assert got_after_release is True    # acquired once free
+
+
+# ── per-repo HOME isolation (multi-repo 不变量2): each session's codegraph subprocess
+#    must get a DISTINCT HOME so its graph.db ($HOME/.codegraph) doesn't collide ──
+def test_params_no_home_inherits_env():
+    # Single-repo (home=None): env is None → subprocess inherits the parent env unchanged
+    # (the pre-multi-repo behavior, graph at the process $HOME/.codegraph).
+    s = CodegraphSession("/data/repo/code-5x", max_files=10000)
+    p = s._params()
+    assert p.env is None
+
+
+def test_params_home_sets_isolated_home_and_keeps_path():
+    # Multi-repo (home set): env carries the per-repo HOME AND preserves PATH (else codegraph
+    # can't resolve its own deps — a {"HOME":...}-only env would break the spawn).
+    import os
+    s = CodegraphSession("/data/repo/alpha", max_files=10000, home="/data/repo/alpha/.home")
+    p = s._params()
+    assert p.env is not None
+    assert p.env["HOME"] == "/data/repo/alpha/.home"
+    assert "PATH" in p.env and p.env["PATH"] == os.environ.get("PATH", p.env["PATH"])
+    # workspace still on argv regardless of HOME
+    assert "/data/repo/alpha" in p.args
+
+
+def test_distinct_homes_for_distinct_repos():
+    a = CodegraphSession("/data/repo/a", home="/data/repo/a/.home")._params()
+    b = CodegraphSession("/data/repo/b", home="/data/repo/b/.home")._params()
+    assert a.env["HOME"] != b.env["HOME"]
