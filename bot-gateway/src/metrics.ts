@@ -75,6 +75,28 @@ export function classifyFailure(error: string | undefined | null): FailReason {
       || /\b429\b/.test(e) || e.includes("serviceunavailable") || /\b503\b/.test(e)) return "upstream_throttle";
   return "unknown";
 }
+
+// Source/config file extensions a citation path can end in (game repos: C#/Unity + configs).
+// Used to count evidence citations — a cited <path>.<ext> is a real code reference whether or
+// not it carries a :line. Anchored to these extensions so prose like "v1.2" or "etc." isn't
+// miscounted as a file.
+const _CITE_EXT = "cs|json|jsonc|cfg|ini|txt|xml|csv|tsv|py|ts|js|tsx|jsx|cpp|cc|h|hpp|java|go|rs|md|yaml|yml|sql|shader|asset|prefab|unity|gd|lua";
+const _CITE_RE = new RegExp(String.raw`[\w./\\-]*[\w-]+\.(?:${_CITE_EXT})(?::\d+)?`, "gi");
+
+/** Count DISTINCT source-file citations in an answer's evidence section. Replaces a stricter
+ *  regex that required <path>:<line> and so scored 0 for the very common form where the agent
+ *  cites `Assets/Scripts/Foo.cs` + a method name but no line number (a real, evidence-backed
+ *  answer was undercounted as 0 → the 证据覆盖率 dashboard understated quality). Matches a path
+ *  ending in a known source/config extension, with or without :line, and DEDUPES by path (a
+ *  file cited 3× counts once). Pure + exported for unit testing. */
+export function countEvidenceCitations(evidence: string | undefined | null): number {
+  if (!evidence) return 0;
+  const paths = new Set<string>();
+  for (const m of evidence.matchAll(_CITE_RE)) {
+    paths.add(m[0].replace(/:\d+$/, "").toLowerCase());  // strip :line, dedupe case-insensitively
+  }
+  return paths.size;
+}
 const FEEDBACK_REASON_CODES: ReadonlySet<string> = new Set<FeedbackReasonCode>([
   "inaccurate", "no_evidence", "off_topic", "outdated",
   "too_slow", "hard_to_understand", "too_shallow", "other",

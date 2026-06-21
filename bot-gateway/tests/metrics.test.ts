@@ -1,4 +1,4 @@
-import { emitMetric, setMetricSink, classifyFailure } from "../src/metrics";
+import { emitMetric, setMetricSink, classifyFailure, countEvidenceCitations } from "../src/metrics";
 
 // Capture emitted records via the injectable sink.
 let records: Array<Record<string, unknown>>;
@@ -143,5 +143,36 @@ describe("classifyFailure — backend error → FailReason (failure-by-reason da
   it("does not misclassify a 403 substring inside an unrelated number", () => {
     // \b403\b must not match e.g. "14039" — guards against false auth_denied.
     expect(classifyFailure("latency was 14039ms")).toBe("unknown");
+  });
+});
+
+describe("countEvidenceCitations — distinct cited source files (with or without :line)", () => {
+  it("counts file paths WITHOUT line numbers (the common citation form)", () => {
+    const ev = "- `Assets/Scripts/Game/WeatherManager.cs`: SetWeather()\n- `Assets/Resources/WeatherTable.json`: the table";
+    expect(countEvidenceCitations(ev)).toBe(2);
+  });
+  it("counts file:line too, and DEDUPES a file cited multiple times", () => {
+    const ev = "Foo.cs:42 does X; Foo.cs also does Y; see Bar.json:10 and Bar.json again";
+    expect(countEvidenceCitations(ev)).toBe(2); // Foo.cs + Bar.json, deduped
+  });
+  it("matches the real weather-answer evidence (5 distinct files)", () => {
+    const ev = `
+      - Assets/Resources/WeatherTable.json: 6 climates x 4 seasons
+      - Assets/Scripts/Game/WeatherManager.cs: SetWeather() then ClearAllWeather()
+      - Assets/Scripts/Game/PlayerWeather.cs: RainParticles/SnowParticles
+      - Assets/Scripts/Game/Questing/Actions/Weather.cs: quest condition
+      - Assets/Game/Addons/UnityConsole/DefaultCommands.cs: set_weather`;
+    expect(countEvidenceCitations(ev)).toBe(5);
+  });
+  it("does NOT miscount prose dots (v1.2, etc., 100.) as files", () => {
+    expect(countEvidenceCitations("version v1.2 released; probabilities sum to 100. see etc.")).toBe(0);
+  });
+  it("empty / null → 0", () => {
+    expect(countEvidenceCitations("")).toBe(0);
+    expect(countEvidenceCitations(null)).toBe(0);
+    expect(countEvidenceCitations(undefined)).toBe(0);
+  });
+  it("is case-insensitive on the extension but dedupes case-folded paths", () => {
+    expect(countEvidenceCitations("Foo.CS and foo.cs")).toBe(1);
   });
 });
