@@ -65,14 +65,17 @@ authorize_ingress() { # <description> <args...>
   fi
 }
 
-# Reconcile the index-service SG's bridge-port-RANGE-from-VPC ingress rule. One port per project
-# (8080-8099), so the rule is a range, not a single port. Run on EVERY invocation and BOTH paths
-# (reuse + fresh): the rule's absence is invisible to every downstream gate (the /health probe is
-# loopback-only). A prior interrupted run, manual cleanup, or SG-rule drift could leave it missing
-# on an otherwise-running instance; the reuse path must repair it too. Idempotent (Duplicate ok).
+# Reconcile the index-service SG's bridge-port-RANGE ingress rule. One port per project
+# (8080-8099), so the rule is a range. Source is the index SG ITSELF (self-referencing), NOT the
+# whole VPC CIDR: the AgentCore runtimes are launched INTO this same SG (deploy_project.sh passes
+# INDEX_SERVICE_SG as the runtime SG), so SG members reach each other's bridge ports, but an
+# arbitrary VPC host can't — the bridge has no MCP authn, so VPC-wide ingress would let any VPC
+# peer (or a compromised peer runtime) read another project's indexed source (cross-review MEDIUM).
+# Run on EVERY invocation and BOTH paths (reuse + fresh): the rule's absence is invisible to every
+# downstream gate (the /health probe is loopback-only). Idempotent (Duplicate ok).
 reconcile_index_sg_ingress() { # <sg>
-  authorize_ingress ":8080-8099 from VPC on $1" \
-    --group-id "$1" --protocol tcp --port 8080-8099 --cidr "${VPC_CIDR:-10.1.0.0/16}"
+  authorize_ingress ":8080-8099 from SG members on $1" \
+    --group-id "$1" --protocol tcp --port 8080-8099 --source-group "$1"
 }
 
 # Reuse a running index-service instance if present.

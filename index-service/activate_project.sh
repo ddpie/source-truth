@@ -56,10 +56,15 @@ if [ -n "${GIT_SECRET_ID:-}" ]; then
   GIT_TOKEN="$(aws secretsmanager get-secret-value --region "$REGION" --secret-id "$GIT_SECRET_ID" \
     --query SecretString --output text 2>/dev/null || echo "")"
   if [ -n "$GIT_TOKEN" ]; then
-    printf '#!/bin/sh\nexec echo "%s"\n' "$GIT_TOKEN" > /opt/idx/git-askpass.sh
+    # The askpass helper is STATIC (cats a separate token file) — the token is never interpolated
+    # into a script, so a token containing "/$/backtick can't break out or be command-substituted.
+    # Both files are created under `umask 077` (created restricted from the start — no chmod-after-
+    # write window where the token file is briefly world-readable). The token file holds ONLY the
+    # raw token; the askpass + env file hold no secret.
+    ( umask 077; printf '%s' "$GIT_TOKEN" > /opt/idx/git-token )
+    ( umask 077; printf '#!/bin/sh\nexec cat /opt/idx/git-token\n' > /opt/idx/git-askpass.sh )
     chmod 700 /opt/idx/git-askpass.sh
-    printf 'GIT_ASKPASS=/opt/idx/git-askpass.sh\nGIT_TERMINAL_PROMPT=0\n' > /etc/index-git.env
-    chmod 600 /etc/index-git.env
+    ( umask 077; printf 'GIT_ASKPASS=/opt/idx/git-askpass.sh\nGIT_TERMINAL_PROMPT=0\n' > /etc/index-git.env )
     export GIT_ASKPASS=/opt/idx/git-askpass.sh GIT_TERMINAL_PROMPT=0
     unset GIT_TOKEN
   else
@@ -87,7 +92,13 @@ while IFS= read -r SUBDIR; do
   BUILD_UNITS="$BUILD_UNITS index-build@${SUBDIR}.service"
   SERVE_FLOCKS="$SERVE_FLOCKS /usr/bin/flock $WS/.codegraph/.writer.lock"
 
-  # Concrete refresh unit + timer for this repo (git url/ref baked in — non-secret).
+  # Concrete refresh unit + timer for this repo. ExecStart re-reads git url/ref from THIS
+  # project's manifest at run time (via render_manifest --repo-field) rather than baking them
+  # into the unit text: that (a) preserves an EMPTY ref correctly — git_fetch treats "" as
+  # "default branch" — instead of an unquoted empty systemd arg collapsing and shifting the
+  # positional args (which made the DEST arg empty and every pull fail); and (b) keeps the git
+  # URL/ref out of the ExecStart line, so a value with whitespace or a leading dash can't become
+  # an extra/option arg. The whole command is one `bash -c` so the $(...) lookups run on the host.
   cat > "/etc/systemd/system/index-refresh-${SUBDIR}.service" <<UNIT
 [Unit]
 Description=Scheduled git pull for repo ${SUBDIR} (codegraph watcher re-indexes in-place)
@@ -97,7 +108,7 @@ Wants=network-online.target
 Type=oneshot
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
 EnvironmentFile=-/etc/index-git.env
-ExecStart=$GIT_FETCH ${SUBDIR} ${GIT_URL} ${GIT_REF} ${WS}
+ExecStart=/bin/bash -c 'GU="\$(python3 $RENDER_MANIFEST --repo-field git ${SUBDIR} ${MANIFEST})"; GR="\$(python3 $RENDER_MANIFEST --repo-field ref ${SUBDIR} ${MANIFEST})"; exec $GIT_FETCH ${SUBDIR} "\$GU" "\$GR" ${WS}'
 UNIT
   cat > "/etc/systemd/system/index-refresh-${SUBDIR}.timer" <<UNIT
 [Unit]
