@@ -34,6 +34,7 @@ CONFIG_FILE="$ROOT/.local/deploy-config"
 TEMPLATES=(
   "$ROOT/infra/monitoring/dashboard.product.json:product"
   "$ROOT/infra/monitoring/dashboard.sre.json:sre"
+  "$ROOT/infra/monitoring/dashboard.by-project.json:by-project"
 )
 
 REGION="" NAMESPACE="" PREFIX="source-truth" DRY_RUN=0
