@@ -32,6 +32,7 @@ export type FailReason =
   | "turn_capped"
   | "aborted"
   | "upstream_throttle"
+  | "auth_denied"
   | "encoding_error"
   | "unknown";
 
@@ -56,8 +57,24 @@ export type CardHealthKind =
 
 const FAIL_REASONS: ReadonlySet<string> = new Set<FailReason>([
   "cold_start_mcp_race", "coldstart_retry_exhausted", "turn_capped", "aborted",
-  "upstream_throttle", "encoding_error", "unknown",
+  "upstream_throttle", "auth_denied", "encoding_error", "unknown",
 ]);
+
+/** Classify a backend invoke error string into a FailReason for the failure-by-reason
+ *  dashboard. A bare "unknown" for every non-200 hides distinct, actionable causes (an IAM
+ *  403 vs a throttle vs a transient 5xx need different fixes). Pattern-match the error text;
+ *  fall back to "unknown" when nothing recognizable. Pure + exported for unit testing. */
+export function classifyFailure(error: string | undefined | null): FailReason {
+  const e = (error || "").toLowerCase();
+  if (!e) return "unknown";
+  // IAM / authorization: "not authorized to perform", "403", "accessdenied", "forbidden".
+  if (e.includes("not authorized") || e.includes("accessdenied") || e.includes("access denied")
+      || e.includes("forbidden") || /\b403\b/.test(e)) return "auth_denied";
+  // Throttling / rate limit / 429 / 503 backpressure.
+  if (e.includes("throttl") || e.includes("rate exceeded") || e.includes("too many requests")
+      || /\b429\b/.test(e) || e.includes("serviceunavailable") || /\b503\b/.test(e)) return "upstream_throttle";
+  return "unknown";
+}
 const FEEDBACK_REASON_CODES: ReadonlySet<string> = new Set<FeedbackReasonCode>([
   "inaccurate", "no_evidence", "off_topic", "outdated",
   "too_slow", "hard_to_understand", "too_shallow", "other",
