@@ -58,6 +58,18 @@ aws iam put-role-policy --role-name "$INDEX_ROLE" --policy-name cloudwatch-logs 
     {\"Effect\":\"Allow\",\"Action\":[\"logs:CreateLogStream\",\"logs:PutLogEvents\",\"logs:DescribeLogStreams\",\"logs:PutRetentionPolicy\"],
      \"Resource\":[\"arn:aws:logs:${REGION}:${ACCOUNT}:log-group:/source-truth/*\",
                    \"arn:aws:logs:${REGION}:${ACCOUNT}:log-group:/source-truth/*:*\"]}]}" >/dev/null
+# Inline policy: the co-located bot-gateway invokes the AgentCore Runtime. The gateway runs
+# as a systemd unit ON the index host (co-location) and therefore uses THIS instance role —
+# but the role had no bedrock-agentcore perm, so every invoke 403'd ("not authorized to
+# perform bedrock-agentcore:InvokeAgentRuntime") and EVERY answer failed (the gateway never
+# ran end-to-end before, so this surfaced only at the first real E2E). Grant invoke on this
+# project's runtime(s). Resource is the runtime ARN family for the account/region (the runtime
+# id suffix varies across redeploys), scoped to source_truth_agent-*. Idempotent upsert.
+aws iam put-role-policy --role-name "$INDEX_ROLE" --policy-name agentcore-invoke --policy-document "{
+  \"Version\":\"2012-10-17\",\"Statement\":[
+    {\"Effect\":\"Allow\",\"Action\":[\"bedrock-agentcore:InvokeAgentRuntime\"],
+     \"Resource\":[\"arn:aws:bedrock-agentcore:${REGION}:${ACCOUNT}:runtime/source_truth_agent-*\",
+                   \"arn:aws:bedrock-agentcore:${REGION}:${ACCOUNT}:runtime/source_truth_agent-*/*\"]}]}" >/dev/null
 if ! aws iam get-instance-profile --instance-profile-name "$INDEX_PROFILE" >/dev/null 2>&1; then
   aws iam create-instance-profile --instance-profile-name "$INDEX_PROFILE" >/dev/null
   aws iam add-role-to-instance-profile --instance-profile-name "$INDEX_PROFILE" --role-name "$INDEX_ROLE" >/dev/null
