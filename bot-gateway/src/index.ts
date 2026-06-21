@@ -626,6 +626,12 @@ async function runStreamingInvoke(
   // a non-abort throw skips the delete and leaks one AbortController per failed
   // invoke for the lifetime of this always-on process.
   let result: Awaited<ReturnType<typeof invokeRuntimeStreaming>>;
+  // Anchor the request at the gateway→runtime boundary: a trace can then show the invoke
+  // START (with prompt size, repo scope, follow-up flag) before the first token, not just
+  // milestones. promptChars only — never the prompt text (redaction discipline; it can carry
+  // a pasted secret). traceId joins it to the agent side.
+  tlog({ event: "invoke_start", card: cardId, sessionId, promptChars: prompt.length,
+         repos: activeRoute?.repos ?? null, isFollowUp });
   try {
     result = await invokeRuntimeStreaming(
     { runtimeArn: RUNTIME_ARN, region: REGION, sessionId, prompt, traceId, repos: activeRoute?.repos },
