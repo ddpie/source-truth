@@ -7,11 +7,15 @@
  * not the file extension):
  *   {
  *     "projects": {
- *       "<projectId>": { "port": 8080, "repos": ["repoA", "repoB"] }
+ *       "<projectId>": { "port": 8080,
+ *                        "repos": [ { "subdir": "repoA", "git": "…", "ref": "…" }, … ] }
  *     }
  *   }
- * Each project's bridge listens on its own `port` on the shared index host; the agent
- * endpoint is DERIVED as http://127.0.0.1:<port>/mcp (gateway + bridge are co-located).
+ * ONE projects.json is consumed by BOTH the gateway (needs the subdir SET for scope) and the
+ * deploy orchestration (needs git/ref per repo). The gateway reads each repo object's `subdir`
+ * and ignores git/ref (those are validated index-side by render_manifest). Each project's bridge
+ * listens on its own `port` on the shared index host; the agent endpoint is DERIVED as
+ * http://127.0.0.1:<port>/mcp (gateway + bridge are co-located).
  *
  * WHICH project a gateway serves is bound by the PROJECT_ID env var, NOT by a bot_id map in
  * this file — the bot identity (Feishu app_id) is env-only (FEISHU_APP_ID), never committed,
@@ -80,15 +84,24 @@ export function validateProjectsConfig(raw: unknown): ProjectsConfig {
     if (!Array.isArray(repos) || repos.length === 0) {
       throw new Error(`project '${pid}': repos must be a non-empty array`);
     }
+    // repos entries are OBJECTS {subdir, git, ref?} (one projects.json shared with deploy).
+    // The gateway only needs each repo's `subdir` (the scope set); git/ref are deploy-side and
+    // validated index-side by render_manifest, so they're not re-checked here.
     const seen = new Set<string>();
+    const subdirs: string[] = [];
     for (const r of repos) {
-      if (typeof r !== "string" || !REPO_NAME_RE.test(r)) {
-        throw new Error(`project '${pid}': repo name must match ${REPO_NAME_RE} (got ${JSON.stringify(r)})`);
+      if (!r || typeof r !== "object") {
+        throw new Error(`project '${pid}': each repo must be an object {subdir, git, …}, got ${JSON.stringify(r)}`);
       }
-      if (seen.has(r)) throw new Error(`project '${pid}': duplicate repo '${r}'`);
-      seen.add(r);
+      const subdir = (r as Record<string, unknown>).subdir;
+      if (typeof subdir !== "string" || !REPO_NAME_RE.test(subdir)) {
+        throw new Error(`project '${pid}': repo subdir must match ${REPO_NAME_RE} (got ${JSON.stringify(subdir)})`);
+      }
+      if (seen.has(subdir)) throw new Error(`project '${pid}': duplicate repo '${subdir}'`);
+      seen.add(subdir);
+      subdirs.push(subdir);
     }
-    out[pid] = { port, repos: repos as string[] };
+    out[pid] = { port, repos: subdirs };
   }
 
   return { projects: out };

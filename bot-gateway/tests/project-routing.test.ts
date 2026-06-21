@@ -3,18 +3,21 @@ import { writeFileSync, mkdtempSync, rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
-// Schema (single-host multi-project): each project declares a `port` (its bridge's listen
-// port on the index host); the endpoint is DERIVED as http://127.0.0.1:<port>/mcp (gateway and
-// bridge are co-located). No `endpoint` field is accepted (pre-launch — no back-compat).
+// Schema (single-host multi-project): each project declares a `port` (its bridge's listen port
+// on the index host) and `repos` as OBJECTS {subdir, git, ref?} — ONE projects.json shared with
+// the deploy side. The gateway extracts each repo's `subdir` (the scope set) and ignores git/ref.
+// The endpoint is DERIVED as http://127.0.0.1:<port>/mcp (gateway + bridge co-located). No
+// `endpoint` field (pre-launch — no back-compat).
+const repo = (subdir: string) => ({ subdir, git: `https://github.com/org/${subdir}.git` });
 const MULTI = {
   projects: {
-    "game-a": { port: 8080, repos: ["code-5x", "code-5x-svc"] },
-    "game-b": { port: 8081, repos: ["backend"] },
+    "game-a": { port: 8080, repos: [repo("code-5x"), repo("code-5x-svc")] },
+    "game-b": { port: 8081, repos: [repo("backend")] },
   },
 };
 const SOLE = {
   projects: {
-    "source-truth": { port: 8080, repos: ["code-5x"] },
+    "source-truth": { port: 8080, repos: [repo("code-5x")] },
   },
 };
 
@@ -38,18 +41,18 @@ describe("validateProjectsConfig — fail-loud on bad config", () => {
   });
 
   it("rejects a missing port (port is required pre-launch)", () => {
-    const bad = { projects: { p: { repos: ["r"] } } };
+    const bad = { projects: { p: { repos: [repo("r")] } } };
     expect(() => validateProjectsConfig(bad)).toThrow(/port/i);
   });
 
   it("rejects a non-integer / non-positive port", () => {
-    expect(() => validateProjectsConfig({ projects: { p: { port: "8080", repos: ["r"] } } })).toThrow(/port/i);
-    expect(() => validateProjectsConfig({ projects: { p: { port: 0, repos: ["r"] } } })).toThrow(/port/i);
-    expect(() => validateProjectsConfig({ projects: { p: { port: 1.5, repos: ["r"] } } })).toThrow(/port/i);
+    expect(() => validateProjectsConfig({ projects: { p: { port: "8080", repos: [repo("r")] } } })).toThrow(/port/i);
+    expect(() => validateProjectsConfig({ projects: { p: { port: 0, repos: [repo("r")] } } })).toThrow(/port/i);
+    expect(() => validateProjectsConfig({ projects: { p: { port: 1.5, repos: [repo("r")] } } })).toThrow(/port/i);
   });
 
   it("rejects duplicate ports across projects", () => {
-    const bad = { projects: { a: { port: 8080, repos: ["x"] }, b: { port: 8080, repos: ["y"] } } };
+    const bad = { projects: { a: { port: 8080, repos: [repo("x")] }, b: { port: 8080, repos: [repo("y")] } } };
     expect(() => validateProjectsConfig(bad)).toThrow(/duplicate port/i);
   });
 
@@ -58,15 +61,20 @@ describe("validateProjectsConfig — fail-loud on bad config", () => {
     expect(() => validateProjectsConfig(bad)).toThrow(/repos must be a non-empty array/);
   });
 
-  it("rejects an illegal repo name (charset guard against injection into path/unit/pgrep)", () => {
+  it("rejects a non-object repo entry (repos are {subdir, git, …} objects)", () => {
+    const bad = { projects: { p: { port: 8080, repos: ["code-5x"] } } };
+    expect(() => validateProjectsConfig(bad)).toThrow(/must be an object/);
+  });
+
+  it("rejects an illegal repo subdir (charset guard against injection into path/unit/pgrep)", () => {
     for (const bad of ["../etc", "Code5x", "a b", "repo;rm", "a_b"]) {
-      const cfg = { projects: { p: { port: 8080, repos: [bad] } } };
-      expect(() => validateProjectsConfig(cfg)).toThrow(/repo name must match/);
+      const cfg = { projects: { p: { port: 8080, repos: [{ subdir: bad, git: "https://x/y.git" }] } } };
+      expect(() => validateProjectsConfig(cfg)).toThrow(/repo subdir must match/);
     }
   });
 
   it("rejects a duplicate repo within a project", () => {
-    const bad = { projects: { p: { port: 8080, repos: ["r", "r"] } } };
+    const bad = { projects: { p: { port: 8080, repos: [repo("r"), repo("r")] } } };
     expect(() => validateProjectsConfig(bad)).toThrow(/duplicate repo/);
   });
 });
