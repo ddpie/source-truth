@@ -87,11 +87,19 @@ class CodegraphSession:
         graph_only: bool = True,
         max_files: int = 10000,
         excludes: tuple[str, ...] = DEFAULT_EXCLUDES,
+        home: str | None = None,
     ) -> None:
         self._workspace = workspace
         self._graph_only = graph_only
         self._max_files = max_files
         self._excludes = excludes
+        # MULTI-REPO graph isolation (不变量2): codegraph-server locates its graph.db via
+        # $HOME/.codegraph, so N sessions in ONE bridge process MUST each spawn codegraph
+        # with a DISTINCT HOME — else every session reads/writes the SAME /data/.codegraph
+        # graph and they collide (corruption + wrong-repo answers). `home` is that per-repo
+        # dir (e.g. /data/repo/<subdir>/.home, where the build unit wrote the graph). None =
+        # inherit the process HOME (single-repo: byte-identical to before).
+        self._home = home
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
         self._session: ClientSession | None = None
@@ -139,7 +147,15 @@ class CodegraphSession:
         args += ["--max-files", str(self._max_files)]
         for ex in self._excludes:
             args += ["--exclude", ex]
-        return StdioServerParameters(command="codegraph-server", args=args)
+        # Per-repo HOME isolates this session's graph.db (multi-repo). Pass the FULL
+        # current env with HOME overridden (NOT just {"HOME": ...} — stdio_client would
+        # otherwise spawn codegraph with ONLY that var, losing PATH so the binary can't
+        # even resolve its own deps). None → env=None → inherit the parent env unchanged.
+        env = None
+        if self._home is not None:
+            env = dict(os.environ)
+            env["HOME"] = self._home
+        return StdioServerParameters(command="codegraph-server", args=args, env=env)
 
     # ---- lifecycle -----------------------------------------------------------
 

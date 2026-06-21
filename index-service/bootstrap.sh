@@ -38,27 +38,26 @@
 #     single root volume (size it via provision_index_service's root volume).
 #
 # Inputs via environment (deploy-all.sh writes /etc/index-service.env first):
-#   BUCKET, REGION, REPO_SUBDIR (e.g. code-5x), MAX_FILES
+#   BUCKET, REGION, MAX_FILES, REPO_MANIFEST_JSON
+#   REPO_MANIFEST_JSON is the project's repo set in ONE JSON value (multi-repo 阶段2):
+#     {"repos":[{"subdir":"<name>","source":"...","sig":"<etag>"}, ...]}
+#   ONE JSON var (not per-repo shell vars) because a per-repo S3 ETag can contain `|`
+#   (multipart) which a sourced env file parses as a shell pipe → bootstrap crash.
 set -euxo pipefail
 exec > /var/log/index-svc-bootstrap.log 2>&1
 
 # shellcheck disable=SC1091
 source /etc/index-service.env
 
-# REPO_SUBDIR MUST be non-empty before any path is built from it: LOCAL_WORKSPACE
-# is "$LOCAL_REPO_ROOT/$REPO_SUBDIR", and the freshness re-extract does
-# `rm -rf "$LOCAL_WORKSPACE"`. set -u does NOT catch an empty-but-set var, so an
-# empty REPO_SUBDIR would make that path the repo ROOT and `rm -rf` would wipe the
-# whole tree. The :? form errors on unset OR empty — abort loudly before building paths.
-: "${REPO_SUBDIR:?BOOTSTRAP_FAILED: REPO_SUBDIR must be set and non-empty}"
+: "${REPO_MANIFEST_JSON:?BOOTSTRAP_FAILED: REPO_MANIFEST_JSON must be set and non-empty}"
 
 export DEBIAN_FRONTEND=noninteractive
-INDEX_HOME=/data                       # codegraph graph.db lives here (LOCAL disk)
+INDEX_HOME=/data                       # per-repo graph.db lives under /data/<subdir> (LOCAL disk)
 APP=/opt/idx/app
 BIN=/opt/idx/bin/codegraph-server
-LOCK=/data/.codegraph/.writer.lock
+LOCAL_REPO_ROOT=/data/repo
 
-mkdir -p "$INDEX_HOME/.codegraph" /opt/idx/bin "$APP"
+mkdir -p "$INDEX_HOME" /opt/idx/bin "$APP" "$LOCAL_REPO_ROOT"
 
 # retry a network-dependent command with backoff. On a FRESH account the instance
 # can boot in the private subnet BEFORE the NAT gateway's default route has fully
@@ -115,128 +114,117 @@ retry_net pip3 install --break-system-packages -q --ignore-installed -r "$APP/re
 # turns that into a loud, greppable bootstrap failure here.
 python3 -m pip check >/dev/null 2>&1 || { echo "BOOTSTRAP_FAILED: pip dependency conflict (incompatible transitive deps) — pin the transitive closure in requirements.txt"; exit 1; }
 
-# --- extract the repo to LOCAL disk (deploy stages <repo>.tar.gz in S3) ------
-# NO EFS: the repo lives only on LOCAL disk at /data/repo/<subdir>. codegraph
-# indexes it, and the bridge reads/greps/globs it there; the agent reads code
-# over the HTTP bridge, so there is no shared filesystem to populate. The bridge
-# rewrites paths to REPO-RELATIVE form via path_align (--mount-root "" below), so
-# the agent sees plain repo-relative paths like Assets/Foo.cs (no mount prefix).
+# --- validate the manifest with the SHIPPED parser (same one deploy/tests use) ----
+# render_manifest.py is staged into the app dir (deploy-all stages it alongside the
+# bridge). Fail loud here on a bad manifest — never half-provision repos.
+RENDER_MANIFEST="$APP/render_manifest.py"
+[ -f "$RENDER_MANIFEST" ] || { echo "BOOTSTRAP_FAILED: render_manifest.py not in app bundle ($RENDER_MANIFEST)"; exit 1; }
+printf '%s' "$REPO_MANIFEST_JSON" > /etc/index-manifest.json
+SUBDIRS="$(python3 "$RENDER_MANIFEST" --field subdir /etc/index-manifest.json)" \
+  || { echo "BOOTSTRAP_FAILED: invalid REPO_MANIFEST_JSON (see render_manifest error above)"; exit 1; }
+# The serve unit's full --workspace/--local-workspace argv (one pair per repo).
+SERVE_ARGS="$(python3 "$RENDER_MANIFEST" --serve-args "$LOCAL_REPO_ROOT" /etc/index-manifest.json)" \
+  || { echo "BOOTSTRAP_FAILED: could not render serve args from manifest"; exit 1; }
+
+# --- per-repo extract to LOCAL disk + per-repo BUILD unit (single-writer per graph) ---
+# NO EFS: each repo lives only on LOCAL disk at /data/repo/<subdir>. codegraph indexes
+# it; the bridge reads/greps/globs it there; the agent reads over HTTP. The bridge
+# returns REPO-RELATIVE paths prefixed with <repo>/ (--mount-root "" + multi-repo).
 #
-# FRESHNESS: the local copy is fresh per instance, but a reused instance may hold
-# an OLD snapshot. We stamp the deploy's ARTIFACT_SIG (S3 ETag of the staged
-# tarball, passed in the env) under the repo root and RE-EXTRACT whenever the
-# stamp differs (or is missing, or the dir is empty).
-LOCAL_REPO_ROOT=/data/repo
-LOCAL_WORKSPACE="$LOCAL_REPO_ROOT/$REPO_SUBDIR"
-WORKSPACE="$LOCAL_WORKSPACE"               # codegraph indexes the local copy
-SIG_STAMP="$LOCAL_REPO_ROOT/.artifact_sig"
-WANT_SIG="${ARTIFACT_SIG:-unset}"
-HAVE_SIG="$(cat "$SIG_STAMP" 2>/dev/null || echo none)"
-# DISK-FULL GUARD: graph.db (RocksDB) does NOT fail cleanly on ENOSPC — a partial
-# write yields a corrupt/truncated graph that the 64KiB floor can't catch (it's
-# well over 64KiB). The local repo copy + graph.db + the downloaded tarball all
-# live on the single root volume under /data, so check headroom BEFORE extracting
-# and fail LOUDLY rather than silently corrupting. Budget ≈ 4× the tarball
-# (tarball + local tree + graph.db growth); /data free space must exceed it.
-require_disk_headroom() {
-  local tarball_kb avail_kb need_kb
-  tarball_kb="$(du -k /tmp/repo.tar.gz 2>/dev/null | cut -f1 || echo 0)"
+# SINGLE-WRITER PER GRAPH (不变量2): each repo gets its OWN graph.db, HOME, and flock
+# under /data/<subdir> — so building/refreshing one repo never touches another's graph.
+# The build is a per-repo systemd TEMPLATE unit (index-build@<subdir>); the ONE serve
+# unit (index-bridge) opens ALL repos' graph.db read-write and holds EACH repo's flock,
+# so a stray `systemctl restart index-build@<subdir>` while the bridge is up fails fast
+# on that repo's flock (clean failure, never a 2nd concurrent writer).
+require_disk_headroom() {   # $1 = tarball path; budget 4x tarball + 1GiB on /data
+  local tb_kb avail_kb need_kb
+  tb_kb="$(du -k "$1" 2>/dev/null | cut -f1 || echo 0)"
   avail_kb="$(df -Pk /data | awk 'NR==2{print $4}')"
-  need_kb=$(( tarball_kb * 4 + 1048576 ))   # 4x tarball + 1GiB base headroom
+  need_kb=$(( tb_kb * 4 + 1048576 ))
   if [ "${avail_kb:-0}" -lt "$need_kb" ]; then
-    echo "BOOTSTRAP_FAILED: insufficient /data space: avail=${avail_kb}KiB need>=${need_kb}KiB (tarball ${tarball_kb}KiB). Grow the root volume."
+    echo "BOOTSTRAP_FAILED: insufficient /data space: avail=${avail_kb}KiB need>=${need_kb}KiB (tarball ${tb_kb}KiB). Grow the root volume."
     exit 1
   fi
 }
-mkdir -p "$LOCAL_REPO_ROOT"
-# Re-extract if: never extracted, empty tree, or the staged snapshot changed.
-if [ ! -d "$LOCAL_WORKSPACE" ] || [ -z "$(ls -A "$LOCAL_WORKSPACE" 2>/dev/null)" ] || [ "$HAVE_SIG" != "$WANT_SIG" ]; then
-  retry_net aws s3 cp "s3://$BUCKET/${REPO_SUBDIR}.tar.gz" /tmp/repo.tar.gz --region "$REGION"
-  require_disk_headroom                     # fail loud if /data can't hold the extract + graph
-  rm -rf "$LOCAL_WORKSPACE"                 # drop the stale snapshot so the new one is clean
-  tar xzf /tmp/repo.tar.gz -C "$LOCAL_REPO_ROOT"
-  echo "$WANT_SIG" > "$SIG_STAMP"           # stamp AFTER a successful extract
-fi
-# Reclaim the downloaded tarball now that the copy is extracted — it is a dead
-# ~18MB+ file on the size-constrained root volume otherwise (a re-run re-downloads
-# it cheaply when a sig change requires re-extract).
-rm -f /tmp/repo.tar.gz
-# Install ripgrep for fast, .gitignore-aware search (apt has it on Ubuntu 24.04).
-command -v rg >/dev/null || apt-get install -y ripgrep || true
 
-# --- systemd units: build (oneshot, sole writer) THEN serve (resident reader) ---
-cat > /etc/systemd/system/index-build.service <<UNIT
+# Per-repo BUILD template. %i = the subdir (instance name). Each instance derives its
+# graph.db from HOME=/data/<subdir>/.codegraph and holds /data/<subdir>/.codegraph/.writer.lock.
+# Mirrors the single-repo unit's THREE guards (non-empty check, disk headroom, 64KiB
+# floor) but per-repo. NO `Conflicts=` (same systemd-silent-drop footgun as before).
+cat > /etc/systemd/system/index-build@.service <<UNIT
 [Unit]
-Description=CodeGraph index build (single-writer, runs to completion before serve)
+Description=CodeGraph index build for repo %i (single-writer per graph)
 After=network-online.target remote-fs.target
 Wants=network-online.target
-# Order the build BEFORE the bridge so on boot/reconcile the build completes first.
-# NOTE: deliberately NO `Conflicts=index-bridge` — it looks like it would close the
-# `systemctl restart index-build` footgun, but combined with the bridge's
-# Requires=index-build + WantedBy=multi-user.target it forms a contradictory
-# start+stop transaction that systemd SILENTLY drops on every reboot (empirically
-# reproduced on systemd 255 / Ubuntu 24.04: after the first reboot neither unit
-# starts). The single-writer guarantee does NOT need it: the flock below is the
-# real, OS-enforced guard — a `systemctl restart index-build` while the bridge holds
-# the lock just makes the build's `flock -n` fail fast (clean failure), never a
-# second concurrent writer. Before= alone gives the boot ordering we want.
 Before=index-bridge.service
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-Environment=HOME=$INDEX_HOME
+Environment=HOME=$LOCAL_REPO_ROOT/%i/.home
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
-# Belt-and-suspenders: refuse to build unless the LOCAL workspace exists AND is
-# NON-EMPTY — so a partial/empty extract fails loudly instead of building a 0-node
-# graph that would then serve wrong "not found" answers (Requires=index-build
-# keeps the bridge from serving a failed build). `test -d` alone only proves the
-# dir exists, not that it has code. On a REBOOT the user-data bootstrap does NOT
-# re-run, but the local copy persists on the root volume, so this check still holds.
-ExecStartPre=/bin/bash -c '[ -n "\$(ls -A $WORKSPACE 2>/dev/null)" ] || { echo "FATAL: $WORKSPACE is empty — refusing to build a 0-node graph"; exit 1; }'
-# DISK HEADROOM before the WRITER runs (not just at extract time): RocksDB does not
-# fail cleanly on ENOSPC — a partial write yields an oversized-but-corrupt graph the
-# 64KiB floor below cannot catch. On a REBOOT this unit re-runs (bridge Requires=)
-# while the cloud-init headroom check does NOT, so guard the writer itself. Budget
-# ~2.5x the on-disk repo (graph ≈ repo-order-of-magnitude) + 1GiB.
-ExecStartPre=/bin/bash -c 'need=\$(( \$(du -sk $WORKSPACE 2>/dev/null | cut -f1) * 5 / 2 + 1048576 )); avail=\$(df -Pk $INDEX_HOME | awk "NR==2{print \\\$4}"); [ "\${avail:-0}" -ge "\$need" ] || { echo "FATAL: insufficient $INDEX_HOME space for graph build: avail=\${avail}KiB need>=\${need}KiB — grow the root volume"; exit 1; }'
-# flock -n: take the EXCLUSIVE writer lock or FAIL FAST. The resident bridge holds
-# this same lock for its whole life (see index-bridge ExecStart), so if the bridge
-# is up this build refuses immediately (clean failure) instead of opening graph.db
-# as a SECOND concurrent writer → RocksDB 0-node corruption (the #1 failure). On a
-# normal boot/redeploy the bridge isn't up yet (ordering Before=/After= sequences
-# the build ahead of it), so the lock is free and the build proceeds. Build is in-place (codegraph derives
-# graph.db from \$HOME/.codegraph and also keeps a projects/<hash>/memory dir there);
-# a partial/corrupt result is caught THREE ways: the size floor below, the bridge's
-# warmup health-gate (refuses to serve a 0-node graph), and codegraph-server's own
-# stale-LOCK detection + corrupt-graph quarantine on the next open.
-ExecStart=/usr/bin/flock -n $LOCK $BIN --graph-only --workspace $WORKSPACE \\
+ExecStartPre=/bin/bash -c '[ -n "\$(ls -A $LOCAL_REPO_ROOT/%i 2>/dev/null)" ] || { echo "FATAL: $LOCAL_REPO_ROOT/%i is empty — refusing to build a 0-node graph"; exit 1; }'
+ExecStartPre=/bin/bash -c 'need=\$(( \$(du -sk $LOCAL_REPO_ROOT/%i 2>/dev/null | cut -f1) * 5 / 2 + 1048576 )); avail=\$(df -Pk $INDEX_HOME | awk "NR==2{print \\\$4}"); [ "\${avail:-0}" -ge "\$need" ] || { echo "FATAL: insufficient $INDEX_HOME space for %i graph build: avail=\${avail}KiB need>=\${need}KiB"; exit 1; }'
+ExecStart=/usr/bin/flock -n $LOCAL_REPO_ROOT/%i/.codegraph/.writer.lock $BIN --graph-only --workspace $LOCAL_REPO_ROOT/%i \\
   --exclude node_modules --exclude .venv --exclude .git --max-files $MAX_FILES \\
   --run-tool codegraph_symbol_search --tool-args '{"query":"__build__"}'
-# Post-build floor: a real build of a non-empty repo produces a graph.db well
-# above an empty-RocksDB baseline. If it's trivially small the build silently
-# produced ~0 nodes (corrupt/empty) — FAIL the unit so the bridge (Requires=)
-# never serves it, instead of relying solely on the bridge's warmup string-match.
-ExecStartPost=/bin/bash -c 'sz=\$(du -sb $INDEX_HOME/.codegraph/graph.db 2>/dev/null | cut -f1); [ "\${sz:-0}" -ge 65536 ] || { echo "FATAL: graph.db is \${sz:-0} bytes (<64KiB) — build produced an empty/corrupt graph"; exit 1; }'
+ExecStartPost=/bin/bash -c 'sz=\$(du -sb $LOCAL_REPO_ROOT/%i/.home/.codegraph/graph.db 2>/dev/null | cut -f1); [ "\${sz:-0}" -ge 65536 ] || { echo "FATAL: %i graph.db is \${sz:-0} bytes (<64KiB) — empty/corrupt graph"; exit 1; }'
 UNIT
 
+# Extract each repo (freshness-stamped per repo) and build its graph. The per-repo
+# `: "\${SUBDIR:?}"` is implicit: render_manifest already rejected an empty/invalid
+# subdir, and we iterate ONLY its validated output — but guard again before any rm -rf.
+while IFS= read -r SUBDIR; do
+  : "${SUBDIR:?BOOTSTRAP_FAILED: empty subdir from manifest (refusing rm -rf on repo root)}"
+  WS="$LOCAL_REPO_ROOT/$SUBDIR"
+  # Per-repo sig (S3 ETag) for the freshness stamp — look it up by subdir from the manifest
+  # using the SHIPPED parser (PYTHONPATH=$APP so `import render_manifest` resolves).
+  WANT_SIG="$(PYTHONPATH="$APP" python3 -c 'import sys; from render_manifest import parse_manifest; repos=parse_manifest(open("/etc/index-manifest.json").read()); print(next((r["sig"] for r in repos if r["subdir"]==sys.argv[1]), "") or "unset")' "$SUBDIR" 2>/dev/null || echo unset)"
+  SIG_STAMP="$WS/.artifact_sig"
+  HAVE_SIG="$(cat "$SIG_STAMP" 2>/dev/null || echo none)"
+  mkdir -p "$WS/.codegraph" "$WS/.home/.codegraph"
+  # SOURCE PRESENT? = any entry under $WS that is NOT our scaffolding (.codegraph/.home/
+  # .artifact_sig). find -quit stops at the first hit (cheap). Re-extract when: no source
+  # tree, or the staged snapshot changed.
+  HAS_SOURCE="$(find "$WS" -mindepth 1 -maxdepth 1 \
+    ! -name .codegraph ! -name .home ! -name .artifact_sig -print -quit 2>/dev/null)"
+  if [ -z "$HAS_SOURCE" ] || [ "$HAVE_SIG" != "$WANT_SIG" ]; then
+    retry_net aws s3 cp "s3://$BUCKET/${SUBDIR}.tar.gz" /tmp/repo.tar.gz --region "$REGION"
+    require_disk_headroom /tmp/repo.tar.gz
+    # The tarball's top-level dir IS <subdir>; extract into LOCAL_REPO_ROOT so it lands
+    # at $WS. Drop only the stale SOURCE tree, NOT .codegraph/.home/.artifact_sig (preserve
+    # the graph dirs; the extract overwrites the source files).
+    find "$WS" -mindepth 1 -maxdepth 1 \
+      ! -name .codegraph ! -name .home ! -name .artifact_sig -exec rm -rf {} +
+    tar xzf /tmp/repo.tar.gz -C "$LOCAL_REPO_ROOT"
+    echo "$WANT_SIG" > "$SIG_STAMP"
+    rm -f /tmp/repo.tar.gz
+  fi
+done <<< "$SUBDIRS"
+
+# Install ripgrep for fast, .gitignore-aware search (apt has it on Ubuntu 24.04).
+command -v rg >/dev/null || apt-get install -y ripgrep || true
+
+# --- serve unit: ONE bridge process loading ALL repos (per-project topology) ------
+# Holds EVERY repo's writer flock for its whole life (the resident --mcp process opens
+# each graph.db read-write). build_bridge re-takes each per-workspace flock internally;
+# the serve unit also flocks each so a stray build@<repo> fails fast. No --mount-root:
+# paths are REPO-RELATIVE, prefixed <repo>/ by the multi-repo bridge.
+SERVE_FLOCKS=""
+for SUBDIR in $SUBDIRS; do
+  SERVE_FLOCKS="$SERVE_FLOCKS /usr/bin/flock $LOCAL_REPO_ROOT/$SUBDIR/.codegraph/.writer.lock"
+done
 cat > /etc/systemd/system/index-bridge.service <<UNIT
 [Unit]
-Description=CodeGraph MCP HTTP bridge (resident single session)
-After=index-build.service
-Requires=index-build.service
+Description=CodeGraph MCP HTTP bridge (resident, all project repos)
+After=network-online.target remote-fs.target
+Wants=network-online.target
 [Service]
 Environment=HOME=$INDEX_HOME
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
 Environment=CODEGRAPH_MAX_FILES=$MAX_FILES
 WorkingDirectory=$APP
-# Hold the SAME writer lock for the bridge's whole life: the resident --mcp process
-# opens graph.db read-write, so it IS a writer. Holding $LOCK makes the build's
-# flock -n fail fast if anyone tries to run it while we're up — OS-enforced single
-# writer, not just systemd policy. flock keeps the lock until python exits (and
-# propagates SIGTERM on stop), so Restart=always re-acquires cleanly.
-# No --mount-root: the agent has no filesystem mount, so paths are returned
-# REPO-RELATIVE (e.g. Assets/Foo.cs), which is the honest representation.
-ExecStart=/usr/bin/flock $LOCK /usr/bin/python3 -m http_bridge --workspace $WORKSPACE --host 0.0.0.0 --port 8080 --mount-root "" --local-workspace $LOCAL_WORKSPACE
+ExecStart=$SERVE_FLOCKS /usr/bin/python3 -m http_bridge $SERVE_ARGS --host 0.0.0.0 --port 8080 --mount-root ""
 Restart=always
 RestartSec=5
 [Install]
@@ -244,17 +232,18 @@ WantedBy=multi-user.target
 UNIT
 
 systemctl daemon-reload
-# Build first (sole writer). enable --now blocks until the oneshot exits, but the
-# exit STATUS isn't surfaced by enable — so verify Result=success explicitly and
-# fail the bootstrap loudly if the graph didn't build (don't serve a broken index).
-systemctl enable --now index-build.service || true
-BUILD_RESULT="$(systemctl show index-build.service --value -p Result 2>/dev/null || echo unknown)"
-if [ "$BUILD_RESULT" != "success" ]; then
-  echo "BOOTSTRAP_FAILED: index-build Result=$BUILD_RESULT"
-  journalctl -u index-build.service --no-pager | tail -40 || true
-  exit 1
-fi
-systemctl enable --now index-bridge.service  # then the resident reader comes up
+# Build each repo first (sole writer per graph). enable --now blocks until each oneshot
+# exits; verify Result=success per repo and fail loudly if any graph didn't build.
+for SUBDIR in $SUBDIRS; do
+  systemctl enable --now "index-build@${SUBDIR}.service" || true
+  R="$(systemctl show "index-build@${SUBDIR}.service" --value -p Result 2>/dev/null || echo unknown)"
+  if [ "$R" != "success" ]; then
+    echo "BOOTSTRAP_FAILED: index-build@${SUBDIR} Result=$R"
+    journalctl -u "index-build@${SUBDIR}.service" --no-pager | tail -40 || true
+    exit 1
+  fi
+done
+systemctl enable --now index-bridge.service  # the resident reader serves all repos
 
 # --- bot-gateway: co-located Feishu long-connection gateway -----------------
 # The gateway runs ON this same host (a second resident service alongside the

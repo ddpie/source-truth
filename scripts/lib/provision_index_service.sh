@@ -226,15 +226,24 @@ fi
 aws s3 cp "$ROOT/index-service/bootstrap.sh" "s3://$BUCKET/bootstrap.sh" --region "$REGION" >&2
 # Presign with a long expiry so a delayed cloud-init (or a retry) can still fetch.
 BOOT_URL="$(aws s3 presign "s3://$BUCKET/bootstrap.sh" --region "$REGION" --expires-in 3600)"
+# bootstrap.sh now consumes REPO_MANIFEST_JSON (the project's repo set in ONE JSON value,
+# multi-repo 阶段2) instead of REPO_SUBDIR/ARTIFACT_SIG. Today's single-repo deploy is that
+# manifest with ONE entry — built here from REPO_SUBDIR + this repo's S3 ETag (the same value
+# the artifact signature already strips quotes from). JSON lives inside SINGLE quotes in the
+# env file, so its double-quotes and a multipart ETag's `|` are inert (no shell reparse — the
+# lesson behind using one JSON var, not per-repo shell vars). Build it with python's json so a
+# subdir/ETag with a metacharacter can never break out of the string.
+REPO_ETAG="$(QS head-object --bucket "$BUCKET" --key "${REPO_SUBDIR}.tar.gz" --query ETag --output text 2>/dev/null || echo "")"
+REPO_ETAG="${REPO_ETAG//\"/}"
+REPO_MANIFEST_JSON="$(REPO_SUBDIR="$REPO_SUBDIR" REPO_ETAG="$REPO_ETAG" python3 -c 'import json,os; print(json.dumps({"repos":[{"subdir":os.environ["REPO_SUBDIR"],"source":"s3://staged","sig":os.environ["REPO_ETAG"]}]}))')"
 UD="$(cat <<EOF
 #!/bin/bash
 set -e
 cat > /etc/index-service.env <<ENV
 BUCKET='$BUCKET'
 REGION='$REGION'
-REPO_SUBDIR='$REPO_SUBDIR'
 MAX_FILES='$MAX_FILES'
-ARTIFACT_SIG='$CURRENT_SIG'
+REPO_MANIFEST_JSON='$REPO_MANIFEST_JSON'
 ENV
 for i in 1 2 3 4 5 6; do curl -fsSL "$BOOT_URL" -o /opt/bootstrap.sh && break || sleep 10; done
 bash /opt/bootstrap.sh
