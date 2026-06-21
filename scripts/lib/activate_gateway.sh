@@ -86,15 +86,19 @@ sleep 2
 systemctl is-active bot-gateway.service"
 
 say info "activating bot-gateway on $IID (writing /etc/bot-gateway.env + restarting service)"
-# Encode the multi-line command as ONE JSON STRING (not a list): the `commands=[...]`
-# wrapper already supplies the list brackets, so json.dumps must emit the STRING element
-# only — `json.dumps([...])` produced `commands=[["..."]]` (a list-of-list) which AWS
-# rejects with "Invalid type for parameter Parameters.commands[0] ... valid types: str"
-# (gateway activation never worked through this path until this fix).
+# Build --parameters as a JSON FILE: commands is an array where EACH element is ONE
+# command LINE (SSM joins them with newlines and runs the result as a script). Two bugs
+# this avoids: (1) json.dumps([whole_block]) → commands=[["..."]] list-of-list, rejected
+# by AWS; (2) json.dumps(whole_block_with_\n) → a single element whose literal "\n" is NOT
+# a shell newline, so lines ran glued ("...envnecho", "set: Illegal option -c"). Splitting
+# on real newlines into separate array elements is the shape SSM actually expects.
+PARAM_FILE="$(mktemp /tmp/gw-ssm-params.XXXX.json)"
+printf '%s' "$REMOTE_CMD" | python3 -c 'import sys,json; print(json.dumps({"commands": sys.stdin.read().split("\n")}))' > "$PARAM_FILE"
 CID="$(aws ssm send-command --region "$REGION" --instance-ids "$IID" \
   --document-name AWS-RunShellScript \
-  --parameters "commands=[$(printf '%s' "$REMOTE_CMD" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))')]" \
+  --parameters "file://$PARAM_FILE" \
   --query Command.CommandId --output text 2>/dev/null || echo "")"
+rm -f "$PARAM_FILE"
 if [[ -z "$CID" ]]; then
   say err "activate_gateway: send-command failed (SSM unreachable? check instance + NAT egress)"; exit 1
 fi
