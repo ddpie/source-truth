@@ -94,8 +94,53 @@
       }
     },
     {
-      "type": "text",
+      "type": "metric",
       "x": 12, "y": 14, "width": 12, "height": 6,
+      "properties": {
+        "title": "各项目代码检索充分度（每答引用代码处数·均值）",
+        "region": "${REGION}",
+        "view": "timeSeries",
+        "stacked": false,
+        "period": 86400,
+        "yAxis": {"left": {"label": "处/答", "showUnits": false, "min": 0}},
+        "metrics": [
+          [{"expression": "SEARCH('{${NAMESPACE},projectId} MetricName=\"EvidenceCitationsByProject\"', 'Average', 86400)", "label": "", "id": "ecbp"}]
+        ]
+      }
+    },
+    {
+      "type": "metric",
+      "x": 0, "y": 20, "width": 12, "height": 6,
+      "properties": {
+        "title": "各项目冷启动次数（每日）",
+        "region": "${REGION}",
+        "view": "timeSeries",
+        "stacked": false,
+        "period": 86400,
+        "yAxis": {"left": {"label": "次", "showUnits": false, "min": 0}},
+        "metrics": [
+          [{"expression": "SEARCH('{${NAMESPACE},projectId} MetricName=\"RuntimeColdStartsByProject\"', 'Sum', 86400)", "label": "", "id": "csbp"}]
+        ]
+      }
+    },
+    {
+      "type": "metric",
+      "x": 12, "y": 20, "width": 12, "height": 6,
+      "properties": {
+        "title": "各项目反馈投票数（每日·结合 SRE 看板看点赞率）",
+        "region": "${REGION}",
+        "view": "timeSeries",
+        "stacked": false,
+        "period": 86400,
+        "yAxis": {"left": {"label": "票", "showUnits": false, "min": 0}},
+        "metrics": [
+          [{"expression": "SEARCH('{${NAMESPACE},projectId} MetricName=\"FeedbackVotedByProject\"', 'Sum', 86400)", "label": "", "id": "fvbp"}]
+        ]
+      }
+    },
+    {
+      "type": "text",
+      "x": 0, "y": 26, "width": 24, "height": 4,
       "properties": {
         "markdown": "### 说明\n- 每条线 = 一个 `projectId`，由 SEARCH 自动发现，新增项目无需改看板。\n- 这些是 **projectId 维度**的指标（`…ByProject`），稀疏、供分组展示；**告警仍盯无维度汇总**（SRE 看板）。\n- 成功率/失败率请在本看板对照「成功答数」「失败答数」与 **用量看板** 的提问量自行比较；按项目的比率合成需要逐项目 metric math（项目集合稳定后再加）。\n- 单项目阶段每图只有一条线，属正常。"
       }
