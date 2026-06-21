@@ -58,6 +58,9 @@ scripts/                Operational lifecycle
   deploy.sh             Deprecated compatibility shim (delegates to deploy-all.sh)
   (p2) ops.sh           Ops toolkit (status / logs / reindex)
   teardown.sh           Ordered teardown + retained-resource list
+  trace.sh              Merge-query the gateway + agent microVM log groups by traceId for a full-chain timeline (--since-hours / --raw)
+  e2e-probe.py          Run a real end-to-end Q&A against the deployed Runtime; checks read-only boundary + answer provenance (invoked by test.sh --full; auto-skips if not deployed)
+  tests/                shell unit tests test_*.sh (incl. test_e2e_probe.sh: pure-logic tests for e2e-probe)
 docs/
   README.md             Documentation index (audience-grouped entry map)
   structure_zh.md       Authoritative tree (Chinese, bilingual pair)
@@ -68,6 +71,7 @@ docs/
     requirements_zh.md          Requirements & solution review notes (imported)
     architecture-overview_zh.md POC architecture plan (imported)
     agent-container_zh.md       agent-container component implementation contract
+    multi-repo-isolation_zh.md  Multi-repo isolation design (per-repo CodeGraph + server-side scope gate + fan-out)
   agent/                AI-facing docs
     architecture.md     Mental model: how one question crosses the system
     invariants.md       source → generated map + change-X-must-change-Y couplings (7 invariants)

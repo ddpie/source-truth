@@ -29,7 +29,7 @@ Bash（`scripts/`）。会话容器 ARM64-only。
 
 # 各组件依赖见其 README（agent-container: uv；bot-gateway: npm）。
 ./scripts/test.sh           # 已实现。离线默认：lint + unit + typecheck（pre-push 跑这个）
-./scripts/test.sh --full    # 已实现。加 smoke / e2e（需 Docker / AWS；smoke/e2e 目前为占位）
+./scripts/test.sh --full    # 已实现。加 e2e（对已部署 Runtime 跑真实问答，缺部署自动 skip）+ smoke（仍占位）
 # 一键部署（已实现、全新账号/区域可跑、幂等）：artifacts→IAM→network→index-service→镜像→Runtime
 ./scripts/deploy-all.sh --region <r> --repo <path>   # 加 --dry-run 仅打印计划；deploy.sh 已废弃→转发垫片
 ```
@@ -64,8 +64,8 @@ Agent）、`bot-gateway/`（TS 网关 + CardKit）、`index-service/`（CodeGrap
 ## Testing
 
 `./scripts/test.sh`（**已实现**）是单一入口。离线默认安全（lint + unit + typecheck）；`--full` 才跑
-需要 Docker / AWS 的 smoke / e2e（smoke/e2e 目前为占位）。pre-push 跑离线套件。结构自检
-`./scripts/check-invariants.sh` 由 lint 层调用。
+需要 AWS 的 e2e（`scripts/e2e-probe.py`：对已部署 Runtime 跑真实问答，缺部署自动 skip）与 smoke（仍占位）。
+pre-push 跑离线套件。结构自检 `./scripts/check-invariants.sh` 由 lint 层调用。
 
 ## Critical constraints（详见 docs/agent/invariants.md）
 

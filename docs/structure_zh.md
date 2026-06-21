@@ -58,6 +58,9 @@ scripts/                运维生命周期
   deploy.sh             已废弃兼容垫片（转发到 deploy-all.sh）
   (p2) ops.sh           运维工具（status / logs / reindex）
   teardown.sh           有序销毁 + 保留资源清单
+  trace.sh              按 traceId 合并查询网关 + agent microVM 两个 log group 的全链路时间线（--since-hours / --raw）
+  e2e-probe.py          对已部署 Runtime 跑真实端到端问答，校验只读边界 + 答案出处（test.sh --full 调用；缺部署自动 skip）
+  tests/                shell 单测 test_*.sh（含 test_e2e_probe.sh：e2e-probe 纯逻辑单测）
 docs/
   README.md             文档总索引（按受众分类的入口地图）
   structure_zh.md       本文件（权威目录树，双语配对）
@@ -68,6 +71,7 @@ docs/
     requirements_zh.md          需求与方案评审纪要（导入）
     architecture-overview_zh.md POC 架构方案（导入）
     agent-container_zh.md       agent-container 组件实现契约
+    multi-repo-isolation_zh.md  多仓隔离方案（每仓独立 CodeGraph + 服务端 scope gate + fan-out）
   agent/                AI 面向文档
     architecture.md     工作原理：一次提问如何在系统里流转
     invariants.md       源 → 生成物映射 + 改 X 必改 Y 的耦合（7 条不变量）

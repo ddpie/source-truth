@@ -159,8 +159,11 @@ aws ssm start-session --region <r> --target <INDEX_SERVICE_INSTANCE>
 # 实例内：sudo journalctl -u bot-gateway -f
 ```
 
-关键事件：`card_closed`（一次问答结束）、`reply_context_replayed`（追问带上上文）、
+关键事件（网关侧）：`invoke_start`（开始调用 runtime）、`card_sent`（卡片已发出）、
+`card_closed`（一次问答结束）、`reply_context_replayed`（追问带上上文）、
 `card_write_dropped` / `finalize_error`（卡片写失败）、`invoke_http_error`（后端非 200）。
+关键事件（agent microVM 侧，同 traceId）：`agent_run_start`（开跑，记 promptChars / repos / model）、
+`tool_call`（工具调用开始）、`tool_latency`（每次工具调用耗时）。
 
 **按 traceId 查全链路（网关 + agent microVM 合并时间线）**：一次问答横跨两个 log group
 （网关 `/source-truth/bot-gateway` + agent 的 `/aws/bedrock-agentcore/runtimes/<runtime>-DEFAULT`），
@@ -172,9 +175,9 @@ aws ssm start-session --region <r> --target <INDEX_SERVICE_INSTANCE>
 #   --since-hours N（默认 6）扩大回溯窗；--raw 不合并、两侧原样输出
 ```
 
-输出按时间合并、标 `GW`/`AGT` 来源，并自动抽取关键字段（latencyMs / numToolCalls / turnCount /
-evidenceCitationCount / status / error）。后端 403/超时这类「卡片失败但不知卡在哪一段」的问题，
-一眼定位是网关、invoke、还是 agent 侧。
+输出按时间合并、标 `GW`/`AGT` 来源，并自动抽取关键字段（status / detail / error / reason / tool /
+latencyMs / ttfbMs / numToolCalls / toolErrors / turnCount / evidenceCitationCount / num_turns /
+cache_read）。后端 403/超时这类「卡片失败但不知卡在哪一段」的问题，可定位是网关、invoke、还是 agent 侧。
 
 **查看 index-service 日志**（同一台实例）：
 
@@ -198,7 +201,7 @@ aws ssm start-session --region <r> --target <INDEX_SERVICE_INSTANCE>
 ```bash
 # 1. A 类指标 filter（看板读的计数/分位/分布）
 ./scripts/apply-metric-filters.sh --region <r>            # --dry-run 先看计划
-# 2. 看板（产品用量 + SRE 健康两页）
+# 2. 看板（三页：产品用量 + SRE 健康（顶部告警）+ 分项目拆分）
 ./scripts/apply-dashboards.sh --region <r>
 # 3. 告警 + SNS（apply-alarms 会先自动应用告警专用 dense filter，再建 alarm——顺序内建，避免引用空指标）
 ./scripts/apply-alarms.sh --region <r>
@@ -210,9 +213,9 @@ aws ssm start-session --region <r> --target <INDEX_SERVICE_INSTANCE>
 #    每日运行一次，查询前一天的去重活跃用户数。不运行这步则看板 DAU widget 持续为空（其余 widget 不受影响）。
 ```
 
-关键告警：`ToolcallLeakDetected`（工具调用泄漏复发）、`FinalizeFailed`（卡片停在处理中）、
-`LogPipelineStalled`（日志管道存活兜底——监控网关每 60s 的 `gateway_heartbeat` 心跳；只有心跳停止，
-即管道中断或网关异常时才告警，空闲夜晚仍发送心跳，不误报）。
+关键告警：`ToolcallLeakDetected`（工具调用指令文本漏进卡片）、`FinalizeFailed`（卡片未正常结束、停在「分析中」）、
+`AnswerFailedBurst`（回答失败率激增）、`LogPipelineStalled`（日志管道存活兜底——监控网关每 60s 的
+`gateway_heartbeat` 心跳；只有心跳停止，即管道中断或网关异常时才告警，空闲夜晚仍发送心跳，不误报）。
 
 **拆除整套资源（停止计费）**：试用完、或某次部署中途失败留下计费资源（NAT ~$32/月、EIP、EC2）时，一条命令按反依赖顺序清理：
 
