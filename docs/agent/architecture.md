@@ -47,9 +47,7 @@ structure）描述系统*是什么*；本文描述*一次提问如何在系统�
 代码以 **git 为唯一来源**：每个仓库 `git clone` 到 index-service 本地，定时 `git pull` 保持新鲜，常驻
 codegraph 的 file-watcher 增量重建内存图。
 
-![数据面管线：activate_project 用只读 git 凭证 clone 各仓到本地，systemd timer 定时 git pull，常驻 codegraph 的 file-watcher 增量重建内存图，会话 microVM 经 HTTP 远程取证](../assets/data-plane.svg)
-
-> 注：上图 SVG 待重绘以匹配本节；以正文为准。
+![数据面管线：activate_project 用只读 git 凭证 clone 各仓到本地，index-build@ 每仓建图，index-bridge-<projectId> 每项目常驻只读，index-refresh timer 定时 git pull + watcher 增量重建内存图，会话 microVM 经 HTTP 远程取证](../assets/data-plane.svg)
 
 **唯一一份代码、本地副本**：仓库只在 index-service 的**本地磁盘** `/data/repo/<subdir>`，由
 `index-service/activate_project.sh` 用单一**只读 git 凭证**（Secrets Manager
@@ -69,7 +67,7 @@ codegraph 的 file-watcher 增量重建内存图。
 | 内容 | 项目代码（主分支）+ CodeGraph 索引 | Agent 产生的临时文件 |
 | 载体 | index-service 本地副本，经 HTTP 接口服务给所有会话 | AgentCore Session Storage `/mnt/workspace` |
 | 可见性 | 所有会话 | 仅本 microVM |
-| 生命周期 | 持久（部署时构建一次，重部署刷新） | 每会话独占（约 14 天空闲过期） |
+| 生命周期 | 持久（定时 git pull 刷新，分钟级新鲜） | 每会话独占（约 14 天空闲过期） |
 
 ![会话隔离：多个按会话独立的 microVM（各自独占 /mnt/workspace 临时文件）共享同一个只读 index-service 代码副本](../assets/session-isolation.svg)
 
