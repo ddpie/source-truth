@@ -19,14 +19,20 @@
   "widgets": [
     {
       "type": "text",
-      "x": 0, "y": 0, "width": 24, "height": 2,
+      "x": 0,
+      "y": 0,
+      "width": 24,
+      "height": 2,
       "properties": {
         "markdown": "# source-truth · 用量看板\n机器人用了多少、答得好不好。数据来自网关结构化日志经 CloudWatch 指标化（非实时扫日志）。延迟/健康看 **SRE 看板**。"
       }
     },
     {
       "type": "metric",
-      "x": 0, "y": 2, "width": 12, "height": 6,
+      "x": 0,
+      "y": 2,
+      "width": 12,
+      "height": 6,
       "properties": {
         "title": "提问量 / 追问量（每日）",
         "region": "${REGION}",
@@ -35,48 +41,151 @@
         "period": 86400,
         "stat": "Sum",
         "metrics": [
-          ["${NAMESPACE}", "QuestionsReceived", {"label": "提问数", "color": "#1f77b4"}],
-          ["${NAMESPACE}", "FollowupQuestions", {"label": "其中追问数", "color": "#aec7e8"}]
+          [
+            "${NAMESPACE}",
+            "QuestionsReceived",
+            {
+              "label": "提问数",
+              "color": "#1f77b4"
+            }
+          ],
+          [
+            "${NAMESPACE}",
+            "FollowupQuestions",
+            {
+              "label": "其中追问数",
+              "color": "#aec7e8"
+            }
+          ]
         ]
       }
     },
     {
       "type": "metric",
-      "x": 12, "y": 2, "width": 12, "height": 6,
+      "x": 12,
+      "y": 2,
+      "width": 12,
+      "height": 6,
       "properties": {
         "title": "追问占比（追问 / 总提问）",
         "region": "${REGION}",
         "view": "timeSeries",
         "period": 86400,
-        "yAxis": {"left": {"min": 0, "max": 1, "label": "占比", "showUnits": false}},
+        "yAxis": {
+          "left": {
+            "min": 0,
+            "max": 1,
+            "label": "占比",
+            "showUnits": false
+          }
+        },
         "metrics": [
-          ["${NAMESPACE}", "FollowupQuestions", {"id": "fu", "visible": false, "stat": "Sum", "period": 86400}],
-          ["${NAMESPACE}", "QuestionsReceived", {"id": "q", "visible": false, "stat": "Sum", "period": 86400}],
-          [{"expression": "fu / q", "label": "追问占比", "id": "ratio"}]
+          [
+            "${NAMESPACE}",
+            "FollowupQuestions",
+            {
+              "id": "fu",
+              "visible": false,
+              "stat": "Sum",
+              "period": 86400
+            }
+          ],
+          [
+            "${NAMESPACE}",
+            "QuestionsReceived",
+            {
+              "id": "q",
+              "visible": false,
+              "stat": "Sum",
+              "period": 86400
+            }
+          ],
+          [
+            {
+              "expression": "fu / q",
+              "label": "追问占比",
+              "id": "ratio"
+            }
+          ]
         ]
       }
     },
     {
       "type": "metric",
-      "x": 0, "y": 8, "width": 12, "height": 6,
+      "x": 0,
+      "y": 8,
+      "width": 12,
+      "height": 6,
       "properties": {
         "title": "点赞率（赞 / (赞+踩)）与反馈覆盖率（投票数 / 完成数）",
         "region": "${REGION}",
         "view": "timeSeries",
         "period": 86400,
-        "yAxis": {"left": {"min": 0, "max": 1, "label": "占比", "showUnits": false}},
+        "yAxis": {
+          "left": {
+            "min": 0,
+            "max": 1,
+            "label": "占比",
+            "showUnits": false
+          }
+        },
         "metrics": [
-          [{"expression": "up / (up + down)", "label": "点赞率", "id": "likeRate", "color": "#2ca02c"}],
-          [{"expression": "(up + down) / completed", "label": "反馈覆盖率", "id": "coverage", "color": "#ff7f0e"}],
-          ["${NAMESPACE}", "FeedbackVoted", "vote", "up", {"id": "up", "visible": false, "stat": "Sum"}],
-          ["${NAMESPACE}", "FeedbackVoted", "vote", "down", {"id": "down", "visible": false, "stat": "Sum"}],
-          ["${NAMESPACE}", "AnswerCompleted", {"id": "completed", "visible": false, "stat": "Sum"}]
+          [
+            {
+              "expression": "up / (up + down)",
+              "label": "点赞率",
+              "id": "likeRate",
+              "color": "#2ca02c"
+            }
+          ],
+          [
+            {
+              "expression": "(up + down) / completed",
+              "label": "反馈覆盖率",
+              "id": "coverage",
+              "color": "#ff7f0e"
+            }
+          ],
+          [
+            "${NAMESPACE}",
+            "FeedbackVoted",
+            "vote",
+            "up",
+            {
+              "id": "up",
+              "visible": false,
+              "stat": "Sum"
+            }
+          ],
+          [
+            "${NAMESPACE}",
+            "FeedbackVoted",
+            "vote",
+            "down",
+            {
+              "id": "down",
+              "visible": false,
+              "stat": "Sum"
+            }
+          ],
+          [
+            "${NAMESPACE}",
+            "AnswerCompleted",
+            {
+              "id": "completed",
+              "visible": false,
+              "stat": "Sum"
+            }
+          ]
         ]
       }
     },
     {
       "type": "metric",
-      "x": 12, "y": 8, "width": 12, "height": 6,
+      "x": 12,
+      "y": 8,
+      "width": 12,
+      "height": 6,
       "properties": {
         "title": "负反馈原因分布",
         "region": "${REGION}",
@@ -84,13 +193,22 @@
         "period": 2592000,
         "stat": "Sum",
         "metrics": [
-          [{"expression": "SEARCH('{${NAMESPACE},reasonCode} MetricName=\"FeedbackReason\"', 'Sum', 2592000)", "label": "", "id": "reasons"}]
+          [
+            {
+              "expression": "SEARCH('{${NAMESPACE},reasonCode} MetricName=\"FeedbackReason\"', 'Sum', 2592000)",
+              "label": "",
+              "id": "reasons"
+            }
+          ]
         ]
       }
     },
     {
       "type": "metric",
-      "x": 0, "y": 14, "width": 12, "height": 6,
+      "x": 0,
+      "y": 14,
+      "width": 12,
+      "height": 6,
       "properties": {
         "title": "证据覆盖（每答平均引用代码处数）",
         "region": "${REGION}",
@@ -98,13 +216,23 @@
         "period": 86400,
         "stat": "Average",
         "metrics": [
-          ["${NAMESPACE}", "EvidenceCitations", {"label": "平均证据数/答", "color": "#9467bd"}]
+          [
+            "${NAMESPACE}",
+            "EvidenceCitations",
+            {
+              "label": "平均证据数/答",
+              "color": "#9467bd"
+            }
+          ]
         ]
       }
     },
     {
       "type": "metric",
-      "x": 12, "y": 14, "width": 12, "height": 6,
+      "x": 12,
+      "y": 14,
+      "width": 12,
+      "height": 6,
       "properties": {
         "title": "日活用户（DAU · 每日预聚合，东八区自然日去重）",
         "region": "${REGION}",
@@ -112,13 +240,23 @@
         "period": 86400,
         "stat": "Maximum",
         "metrics": [
-          ["${NAMESPACE}", "DAU", {"label": "日活用户数", "color": "#17becf"}]
+          [
+            "${NAMESPACE}",
+            "DAU",
+            {
+              "label": "日活用户数",
+              "color": "#17becf"
+            }
+          ]
         ]
       }
     },
     {
       "type": "metric",
-      "x": 0, "y": 20, "width": 8, "height": 5,
+      "x": 0,
+      "y": 20,
+      "width": 8,
+      "height": 5,
       "properties": {
         "title": "今日提问量",
         "region": "${REGION}",
@@ -127,47 +265,122 @@
         "stat": "Sum",
         "sparkline": true,
         "metrics": [
-          ["${NAMESPACE}", "QuestionsReceived", {"label": "提问数"}]
+          [
+            "${NAMESPACE}",
+            "QuestionsReceived",
+            {
+              "label": "提问数"
+            }
+          ]
         ]
       }
     },
     {
       "type": "metric",
-      "x": 8, "y": 20, "width": 8, "height": 5,
+      "x": 8,
+      "y": 20,
+      "width": 8,
+      "height": 5,
       "properties": {
         "title": "答案成功率（成功 / 提问）",
         "region": "${REGION}",
         "view": "singleValue",
         "period": 86400,
         "sparkline": true,
-        "yAxis": {"left": {"min": 0, "max": 1, "showUnits": false}},
+        "yAxis": {
+          "left": {
+            "min": 0,
+            "max": 1,
+            "showUnits": false
+          }
+        },
         "metrics": [
-          ["${NAMESPACE}", "AnswerCompleted", {"id": "ok", "visible": false, "stat": "Sum"}],
-          ["${NAMESPACE}", "QuestionsReceived", {"id": "qs", "visible": false, "stat": "Sum"}],
-          [{"expression": "ok / qs", "label": "成功率", "id": "sr"}]
+          [
+            "${NAMESPACE}",
+            "AnswerCompleted",
+            {
+              "id": "ok",
+              "visible": false,
+              "stat": "Sum"
+            }
+          ],
+          [
+            "${NAMESPACE}",
+            "QuestionsReceived",
+            {
+              "id": "qs",
+              "visible": false,
+              "stat": "Sum"
+            }
+          ],
+          [
+            {
+              "expression": "ok / qs",
+              "label": "成功率",
+              "id": "sr"
+            }
+          ]
         ]
       }
     },
     {
       "type": "metric",
-      "x": 16, "y": 20, "width": 8, "height": 5,
+      "x": 16,
+      "y": 20,
+      "width": 8,
+      "height": 5,
       "properties": {
         "title": "今日点赞率",
         "region": "${REGION}",
         "view": "singleValue",
         "period": 86400,
         "sparkline": true,
-        "yAxis": {"left": {"min": 0, "max": 1, "showUnits": false}},
+        "yAxis": {
+          "left": {
+            "min": 0,
+            "max": 1,
+            "showUnits": false
+          }
+        },
         "metrics": [
-          ["${NAMESPACE}", "FeedbackVoted", "vote", "up", {"id": "u", "visible": false, "stat": "Sum"}],
-          ["${NAMESPACE}", "FeedbackVoted", "vote", "down", {"id": "d", "visible": false, "stat": "Sum"}],
-          [{"expression": "u / (u + d)", "label": "点赞率", "id": "lr"}]
+          [
+            "${NAMESPACE}",
+            "FeedbackVoted",
+            "vote",
+            "up",
+            {
+              "id": "u",
+              "visible": false,
+              "stat": "Sum"
+            }
+          ],
+          [
+            "${NAMESPACE}",
+            "FeedbackVoted",
+            "vote",
+            "down",
+            {
+              "id": "d",
+              "visible": false,
+              "stat": "Sum"
+            }
+          ],
+          [
+            {
+              "expression": "u / (u + d)",
+              "label": "点赞率",
+              "id": "lr"
+            }
+          ]
         ]
       }
     },
     {
       "type": "metric",
-      "x": 0, "y": 25, "width": 12, "height": 6,
+      "x": 0,
+      "y": 25,
+      "width": 12,
+      "height": 6,
       "properties": {
         "title": "答案产出趋势（成功 / 失败 / 中止，每日）",
         "region": "${REGION}",
@@ -176,25 +389,79 @@
         "period": 86400,
         "stat": "Sum",
         "metrics": [
-          ["${NAMESPACE}", "AnswerCompleted", {"label": "成功", "color": "#2ca02c"}],
-          ["${NAMESPACE}", "AnswerFailedTotal", {"label": "失败", "color": "#d62728"}],
-          ["${NAMESPACE}", "AnswerAborted", {"label": "中止（用户停止）", "color": "#7f7f7f"}]
+          [
+            "${NAMESPACE}",
+            "AnswerCompleted",
+            {
+              "label": "成功",
+              "color": "#2ca02c"
+            }
+          ],
+          [
+            "${NAMESPACE}",
+            "AnswerFailedTotal",
+            {
+              "label": "失败",
+              "color": "#d62728"
+            }
+          ],
+          [
+            "${NAMESPACE}",
+            "AnswerAborted",
+            {
+              "label": "中止（用户停止）",
+              "color": "#7f7f7f"
+            }
+          ]
         ]
       }
     },
     {
       "type": "metric",
-      "x": 12, "y": 25, "width": 12, "height": 6,
+      "x": 12,
+      "y": 25,
+      "width": 12,
+      "height": 6,
       "properties": {
         "title": "澄清触发率（出澄清按钮 / 提问）",
         "region": "${REGION}",
         "view": "timeSeries",
         "period": 86400,
-        "yAxis": {"left": {"min": 0, "max": 1, "label": "占比", "showUnits": false}},
+        "yAxis": {
+          "left": {
+            "min": 0,
+            "max": 1,
+            "label": "占比",
+            "showUnits": false
+          }
+        },
         "metrics": [
-          ["${NAMESPACE}", "ClarifyShown", {"id": "cl", "visible": false, "stat": "Sum"}],
-          ["${NAMESPACE}", "QuestionsReceived", {"id": "qc", "visible": false, "stat": "Sum"}],
-          [{"expression": "cl / qc", "label": "澄清率", "id": "clr", "color": "#bcbd22"}]
+          [
+            "${NAMESPACE}",
+            "ClarifyShown",
+            {
+              "id": "cl",
+              "visible": false,
+              "stat": "Sum"
+            }
+          ],
+          [
+            "${NAMESPACE}",
+            "QuestionsReceived",
+            {
+              "id": "qc",
+              "visible": false,
+              "stat": "Sum"
+            }
+          ],
+          [
+            {
+              "expression": "cl / qc",
+              "label": "澄清率",
+              "id": "clr",
+              "color": "#bcbd22"
+            }
+          ]
         ]
       }
     }

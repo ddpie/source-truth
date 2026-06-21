@@ -22,9 +22,12 @@ fi
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 
 # --- both real templates render to valid JSON with no leftover placeholders ---
+# --account-id is always supplied: the SRE template uses ${ACCOUNT_ID} in its alarm-widget
+# ARNs (apply-dashboards.sh resolves it via STS), so a render without it would fail-loud on
+# the unresolved placeholder. A template that doesn't use it just ignores the value.
 for tpl in "$PROD" "$SRE"; do
   name="$(basename "$tpl")"
-  out="$(python3 "$RENDER" "$tpl" --region ap-northeast-1 --namespace SourceTruth/Gateway 2>"$TMP/err")"; rc=$?
+  out="$(python3 "$RENDER" "$tpl" --region ap-northeast-1 --namespace SourceTruth/Gateway --account-id 000000000000 2>"$TMP/err")"; rc=$?
   check "$name renders (rc 0)" "$rc"
   # valid JSON
   printf '%s' "$out" | python3 -c 'import json,sys; json.load(sys.stdin)' 2>/dev/null; check "$name output is valid JSON" $?
@@ -90,7 +93,7 @@ python3 "$RENDER" "$TMP/empty.json" --region us-east-1 --namespace X/Y >/dev/nul
 [[ "$rc" -ne 0 ]]; check "empty widgets array rejected" $?
 
 # --- SRE latency widget keeps p95/p99 extended statistics (not averages) ---
-sre_out="$(python3 "$RENDER" "$SRE" --region us-east-1 --namespace X/Y)"
+sre_out="$(python3 "$RENDER" "$SRE" --region us-east-1 --namespace X/Y --account-id 000000000000)"
 printf '%s' "$sre_out" | grep -q 'p95' && printf '%s' "$sre_out" | grep -q 'p99'; check "SRE keeps p95/p99 extended stats" $?
 
 # --- SRE has the TraceID → Logs-Insights lookup shortcut (text widget, NOT a type:log widget) ---

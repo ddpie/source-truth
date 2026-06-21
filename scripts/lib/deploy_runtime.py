@@ -13,7 +13,7 @@ Verified against real AWS: created source_truth_agent-xC7N7O63iA (READY),
 real InvokeAgentRuntime returned a real Bedrock answer.
 
 Usage:
-  python3 deploy_runtime.py --region us-east-1 --account 557690613480 \
+  python3 deploy_runtime.py --region us-east-1 --account <your-account-id> \
     --role-arn arn:...:role/SourceTruthAgentRuntimeRole \
     --image <acct>.dkr.ecr.<region>.amazonaws.com/source-truth/agent:latest \
     --model global.anthropic.claude-opus-4-8 [--name source_truth_agent]
