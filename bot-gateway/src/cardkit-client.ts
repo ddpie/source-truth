@@ -512,11 +512,14 @@ export interface ActionButton {
 /** Build the footer elements: a divider + outcome ACTION buttons (retry/narrow,
  *  shown first) + clickable follow-up suggestions. Each gets a stable element_id
  *  echoed in its value so the click callback can disable exactly the one pressed. */
-export function buildFollowUpElements(followUps: string[], actions: ActionButton[] = []): unknown[] {
+export function buildFollowUpElements(followUps: string[], actions: ActionButton[] = [], cardId?: string): unknown[] {
   const elements: unknown[] = [{ tag: "hr" }];
   // Outcome action buttons first (the user's most likely next move on a failed /
   // capped turn). They reuse the follow_up callback path (re-ask value.text); the
   // action kind lets the callback decide whether to replay context.
+  // card_id in the value (like stop/feedback) so the click callback can resolve the card to
+  // DISABLE the pressed button even when its open_message_id doesn't match the registry key
+  // (the live "follow-up fired but button not disabled" — the disable was silently skipped).
   actions.forEach((a, i) => {
     const eid = `action_${a.kind}_${i}`;
     elements.push({
@@ -527,7 +530,7 @@ export function buildFollowUpElements(followUps: string[], actions: ActionButton
       type: "primary",
       size: "small",
       width: "fill",
-      value: { action: "follow_up", text: a.text, eid, fresh: a.kind === "retry" },
+      value: { action: "follow_up", text: a.text, eid, fresh: a.kind === "retry", card_id: cardId },
     });
   });
   if (followUps.length > 0) {
@@ -541,7 +544,7 @@ export function buildFollowUpElements(followUps: string[], actions: ActionButton
         type: "default",
         size: "small",
         width: "fill",
-        value: { action: "follow_up", text: q, eid },
+        value: { action: "follow_up", text: q, eid, card_id: cardId },
       });
     });
     // After the suggested buttons, guide the user that they can ask ANYTHING not
@@ -562,7 +565,7 @@ export function buildFollowUpElements(followUps: string[], actions: ActionButton
  *  action (so the click re-asks that clarified question WITH context replay) — no
  *  new callback path needed. The buttons are `primary` so they read as the main
  *  call-to-action, since the card has no other answer. */
-export function buildClarifyElements(_question: string, options: string[]): unknown[] {
+export function buildClarifyElements(_question: string, options: string[], cardId?: string): unknown[] {
   const elements: unknown[] = [];
   options.slice(0, MAX_CLARIFY_OPTIONS).forEach((q, i) => {
     const eid = `clarify_${i}`;
@@ -575,7 +578,8 @@ export function buildClarifyElements(_question: string, options: string[]): unkn
       width: "fill",
       // Reuse the follow_up action: clicking re-asks `q` as a new turn with the
       // prior context replayed (the callback resolves the parent card → chain).
-      value: { action: "follow_up", text: q, eid },
+      // card_id so the callback can disable the pressed option (see buildFollowUpElements).
+      value: { action: "follow_up", text: q, eid, card_id: cardId },
     });
   });
   return elements;
@@ -743,7 +747,7 @@ export async function appendFeedbackReasons(cardId: string, sequence: number): P
  *  Each button carries the question in its value; when clicked, the card
  *  callback handler feeds it back as a new user message. */
 export async function appendFooter(cardId: string, sequence: number, followUps: string[], actions: ActionButton[] = []): Promise<void> {
-  const elements = buildFollowUpElements(followUps, actions);
+  const elements = buildFollowUpElements(followUps, actions, cardId);
 
   await larkApi("POST", `/open-apis/cardkit/v1/cards/${cardId}/elements`, JSON.stringify({
     type: "append",
@@ -756,7 +760,7 @@ export async function appendFooter(cardId: string, sequence: number, followUps: 
  *  place of appendFooter when the agent asked the user to disambiguate. A leading
  *  hr separates it from the (minimal) body, mirroring appendFooter's layout. */
 export async function appendClarify(cardId: string, sequence: number, question: string, options: string[]): Promise<void> {
-  const elements = [{ tag: "hr" }, ...buildClarifyElements(question, options)];
+  const elements = [{ tag: "hr" }, ...buildClarifyElements(question, options, cardId)];
   await larkApi("POST", `/open-apis/cardkit/v1/cards/${cardId}/elements`, JSON.stringify({
     type: "append",
     sequence,

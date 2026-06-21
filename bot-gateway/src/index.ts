@@ -1481,7 +1481,13 @@ async function main(): Promise<void> {
           // payload has no thread_id, so re-deriving via getSessionId(chatId)
           // would mint a different, cold session). Fall back to the chat-level
           // session if the card isn't in the registry (evicted / pre-restart).
-          const entry = lookupCard(messageId);
+          // Resolve by open_message_id, then fall back to the card_id the button now carries
+          // (the callback's open_message_id doesn't always match the registered key → entry
+          // was undefined → the button disable below was silently skipped, so a clicked
+          // follow-up fired but never greyed out). collectChain also keys on the resolved id.
+          const fuByCard = lookupCard(messageId) ? undefined : lookupByCardId(value.card_id);
+          const entry = lookupCard(messageId) ?? fuByCard?.entry;
+          const fuKey = fuByCard?.messageId ?? messageId;
           const sessionId = entry?.sessionId ?? getSessionId(chatId);
           // A "重新试一次" (retry) button sets value.fresh: the prior turn FAILED
           // (no usable answer), so there's no useful context to carry — and
@@ -1493,7 +1499,7 @@ async function main(): Promise<void> {
           // recomputes at turn-start. A "重新试一次" (retry) button sets value.fresh:
           // the prior turn FAILED (no usable answer), so carry NO context (replaying
           // the failure message would poison the retry) — re-ask the question fresh.
-          const chain = fresh ? [] : collectChain(messageId);
+          const chain = fresh ? [] : collectChain(fuKey);
           const prompt = fresh ? value.text : composeFollowUpPrompt(value.text, chain);
           if (fresh) {
             log({ event: "retry_clicked", chatId: hashUserId(chatId) });
@@ -1512,14 +1518,14 @@ async function main(): Promise<void> {
           const composeBtn = fresh
             ? undefined
             : () => {
-                const c = collectChain(messageId);
+                const c = collectChain(fuKey);
                 if (c.length === 0) return prompt; // still nothing — keep eager (bare)
                 log({ event: "followup_context_replayed_deferred", turns: c.length });
                 return composeFollowUpPrompt(value.text!, c);
               };
           // The new follow-up card's PARENT is the card being followed up, so a
           // follow-up-of-this-follow-up keeps walking the chain.
-          void streamingCardInvoke(sessionId, prompt, { chatId }, credentials, value.text, messageId, operatorOpenId, composeBtn)
+          void streamingCardInvoke(sessionId, prompt, { chatId }, credentials, value.text, fuKey, operatorOpenId, composeBtn)
             .catch((e) => log({ event: "follow_up_error", error: redactSensitive(String(e)).slice(0, 300) }));
           // Mark the clicked button: disable it + ✓ on the original card, so the
           // user sees which one they picked (best-effort, async).
