@@ -11,9 +11,10 @@
     "",
     "Dimensioned metrics (FeedbackVoted by vote, FeedbackReason by reasonCode) use SEARCH() so the",
     "widget auto-discovers dimension values without hardcoding them. DAU is B-class: it reads a",
-    "PRE-AGGREGATED custom metric (${NAMESPACE} DAU) produced by the scheduled Lambda — until that",
-    "Lambda lands (monitoring 阶段1 remaining) the DAU widget shows no data, by design (never a",
-    "real-time log-dedup widget)."
+    "PRE-AGGREGATED custom metric (${NAMESPACE} DAU) produced by the scheduled Lambda (live:",
+    "source-truth-dau-preaggregate, daily 16:30 UTC = 00:30 东八区, counts the prior 东八区 day's",
+    "distinct hashUserId). The widget fills once a full day has accrued; a fresh deploy shows 0",
+    "until then, by design (never a real-time log-dedup widget)."
   ],
   "widgets": [
     {
@@ -105,13 +106,95 @@
       "type": "metric",
       "x": 12, "y": 14, "width": 12, "height": 6,
       "properties": {
-        "title": "日活用户（DAU · 预聚合指标，待定时 Lambda 上线后有数）",
+        "title": "日活用户（DAU · 每日预聚合，东八区自然日去重）",
         "region": "${REGION}",
         "view": "timeSeries",
         "period": 86400,
         "stat": "Maximum",
         "metrics": [
           ["${NAMESPACE}", "DAU", {"label": "日活用户数", "color": "#17becf"}]
+        ]
+      }
+    },
+    {
+      "type": "metric",
+      "x": 0, "y": 20, "width": 8, "height": 5,
+      "properties": {
+        "title": "今日提问量",
+        "region": "${REGION}",
+        "view": "singleValue",
+        "period": 86400,
+        "stat": "Sum",
+        "sparkline": true,
+        "metrics": [
+          ["${NAMESPACE}", "QuestionsReceived", {"label": "提问数"}]
+        ]
+      }
+    },
+    {
+      "type": "metric",
+      "x": 8, "y": 20, "width": 8, "height": 5,
+      "properties": {
+        "title": "答案成功率（成功 / 提问）",
+        "region": "${REGION}",
+        "view": "singleValue",
+        "period": 86400,
+        "sparkline": true,
+        "yAxis": {"left": {"min": 0, "max": 1, "showUnits": false}},
+        "metrics": [
+          ["${NAMESPACE}", "AnswerCompleted", {"id": "ok", "visible": false, "stat": "Sum"}],
+          ["${NAMESPACE}", "QuestionsReceived", {"id": "qs", "visible": false, "stat": "Sum"}],
+          [{"expression": "ok / qs", "label": "成功率", "id": "sr"}]
+        ]
+      }
+    },
+    {
+      "type": "metric",
+      "x": 16, "y": 20, "width": 8, "height": 5,
+      "properties": {
+        "title": "今日点赞率",
+        "region": "${REGION}",
+        "view": "singleValue",
+        "period": 86400,
+        "sparkline": true,
+        "yAxis": {"left": {"min": 0, "max": 1, "showUnits": false}},
+        "metrics": [
+          ["${NAMESPACE}", "FeedbackVoted", "vote", "up", {"id": "u", "visible": false, "stat": "Sum"}],
+          ["${NAMESPACE}", "FeedbackVoted", "vote", "down", {"id": "d", "visible": false, "stat": "Sum"}],
+          [{"expression": "u / (u + d)", "label": "点赞率", "id": "lr"}]
+        ]
+      }
+    },
+    {
+      "type": "metric",
+      "x": 0, "y": 25, "width": 12, "height": 6,
+      "properties": {
+        "title": "答案产出趋势（成功 / 失败 / 中止，每日）",
+        "region": "${REGION}",
+        "view": "timeSeries",
+        "stacked": true,
+        "period": 86400,
+        "stat": "Sum",
+        "metrics": [
+          ["${NAMESPACE}", "AnswerCompleted", {"label": "成功", "color": "#2ca02c"}],
+          ["${NAMESPACE}", "AnswerFailedTotal", {"label": "失败", "color": "#d62728"}],
+          ["${NAMESPACE}", "AnswerAborted", {"label": "中止（用户停止）", "color": "#7f7f7f"}]
+        ]
+      }
+    },
+    {
+      "type": "metric",
+      "x": 12, "y": 25, "width": 12, "height": 6,
+      "properties": {
+        "title": "澄清触发率（出澄清按钮 / 提问）",
+        "region": "${REGION}",
+        "view": "timeSeries",
+        "period": 86400,
+        "yAxis": {"left": {"min": 0, "max": 1, "label": "占比", "showUnits": false}},
+        "metrics": [
+          ["${NAMESPACE}", "ClarifyShown", {"id": "cl", "visible": false, "stat": "Sum"}],
+          ["${NAMESPACE}", "QuestionsReceived", {"id": "qc", "visible": false, "stat": "Sum"}],
+          [{"expression": "cl / qc", "label": "澄清率", "id": "clr", "color": "#bcbd22"}]
         ]
       }
     }
