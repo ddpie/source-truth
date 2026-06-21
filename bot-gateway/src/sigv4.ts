@@ -18,6 +18,23 @@ import { HttpRequest } from "@smithy/protocol-http";
 import { newStreamState, applyEvent, splitTexts } from "./parse-stream";
 
 const SERVICE = "bedrock-agentcore";
+
+// STARTUP 403 GRACE: deploy-all updates the index role's bedrock-agentcore:InvokeAgentRuntime
+// IAM policy (e.g. when the per-project runtime is renamed), and IAM is EVENTUALLY CONSISTENT —
+// for the first minutes after a deploy, an invoke can still 403 AccessDenied even though the
+// policy is correct. Observed live: the first 1-2 questions after a fresh deploy returned a
+// "查询失败" card, then everything succeeded. So we retry a 403 with bounded backoff, but ONLY
+// within a startup window — a PERMANENT 403 (model access off / real missing policy) must still
+// fail fast with the operator hint, never retry-loop. Window/attempts are env-tunable.
+const PROCESS_START_MS = Date.now();
+const STARTUP_403_GRACE_MS = Number(process.env.STARTUP_403_GRACE_MS ?? 180_000); // 3 min
+const STARTUP_403_MAX_RETRIES = Number(process.env.STARTUP_403_MAX_RETRIES ?? 4);
+const STARTUP_403_BASE_DELAY_MS = 1_000;
+function isAccessDenied(status: number, body: string): boolean {
+  if (status !== 403) return false;
+  return /accessdenied|not authorized|don't have access|denied/i.test(body);
+}
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 const SESSION_HEADER = "X-Amzn-Bedrock-AgentCore-Runtime-Session-Id";
 // Ceiling on the SSE line-assembly buffer. A real event is a few KB; this only trips
 // on a stream that never emits a line break (broken/hostile upstream) — a resident-
@@ -227,28 +244,45 @@ export async function invokeRuntimeStreaming(
 ): Promise<{ status: number; answer: string; steps: string[]; aborted: boolean; error: string | null; timing: InvokeTiming }> {
   const t0 = Date.now();
   const timing: InvokeTiming = { signMs: 0, ttfbMs: -1, ttftMs: -1, ttfcMs: -1, lastTokenMs: -1, streamMs: -1, totalMs: 0, events: 0, chars: 0, conclusionMs: -1, toolCalls: 0, toolCallsByName: {}, toolErrors: 0, numTurns: 0 };
-  const signed = await signInvoke(buildInvokeRequest(p), opts);
-  timing.signMs = Date.now() - t0;
-  const tReq = Date.now();
+  // Retry loop: ONLY a startup-window 403 is retried (IAM propagation after a deploy); every
+  // other non-200 returns immediately, and a 403 outside the window fails fast. Re-sign each
+  // attempt (creds/clock change; the signature is time-bound). A 200 breaks out to stream below.
   let res: Response;
-  try {
-    res = await fetch(`https://${signed.hostname}${signed.path}`, {
-      method: signed.method,
-      headers: signed.headers,
-      body: signed.body,
-      signal,
-    });
-  } catch (e) {
-    if (signal?.aborted) return { status: 200, answer: "", steps: [], aborted: true, error: null, timing: { ...timing, totalMs: Date.now() - t0 } };
-    throw e;
-  }
-  timing.ttfbMs = Date.now() - tReq;
-  if (res.status !== 200 || !res.body) {
-    // Capture the error body into BOTH answer (kept for back-compat) and error, so
-    // the caller's accessDenied / turn-cap classifiers (which inspect `error`) can
-    // match an HTTP-level Bedrock denial (e.g. a 403 access-denied), and the body
-    // reason (throttle/validation/denied) is loggable instead of just a status code.
+  let attempt = 0;
+  let tReq = Date.now();   // request-send time of the SUCCEEDING attempt (stream timings below key off it)
+  for (;;) {
+    const signed = await signInvoke(buildInvokeRequest(p), opts);
+    if (attempt === 0) timing.signMs = Date.now() - t0;
+    tReq = Date.now();
+    try {
+      res = await fetch(`https://${signed.hostname}${signed.path}`, {
+        method: signed.method,
+        headers: signed.headers,
+        body: signed.body,
+        signal,
+      });
+    } catch (e) {
+      if (signal?.aborted) return { status: 200, answer: "", steps: [], aborted: true, error: null, timing: { ...timing, totalMs: Date.now() - t0 } };
+      throw e;
+    }
+    timing.ttfbMs = Date.now() - tReq;
+    if (res.status === 200 && res.body) break;   // success → stream below
+
+    // Non-200 (or missing body). Capture the body for classification + logging.
     const bodyText = await res.text();
+    const denied = isAccessDenied(res.status, bodyText);
+    const withinGrace = Date.now() - PROCESS_START_MS < STARTUP_403_GRACE_MS;
+    if (denied && withinGrace && attempt < STARTUP_403_MAX_RETRIES && !signal?.aborted) {
+      attempt++;
+      const delay = STARTUP_403_BASE_DELAY_MS * Math.pow(2, attempt - 1); // 1s,2s,4s,8s
+      console.log(JSON.stringify({ event: "invoke_403_retry", attempt, delayMs: delay,
+        detail: "transient AccessDenied within startup grace (IAM propagation) — retrying" }));
+      await sleep(delay);
+      if (signal?.aborted) return { status: 200, answer: "", steps: [], aborted: true, error: null, timing: { ...timing, totalMs: Date.now() - t0 } };
+      continue;
+    }
+    // Terminal non-200: surface body in BOTH answer (back-compat) and error so the caller's
+    // accessDenied / turn-cap classifiers match and the reason is loggable.
     return {
       status: res.status,
       answer: bodyText,
