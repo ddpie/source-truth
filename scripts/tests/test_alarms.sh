@@ -49,9 +49,12 @@ check "each alarm has required put-metric-alarm fields" "$bad"
 printf '%s' "$out" | python3 -c 'import json,sys; assert all(json.loads(l)["alarmName"].startswith("source-truth-") for l in sys.stdin if l.strip())'
 check "default prefix applied to alarm names" $?
 
-# the liveness backstop watches the HEARTBEAT (not a traffic metric), fires only on MISSING
-# data: GatewayHeartbeat >= 1 with treatMissingData=breaching → alive→OK, pipeline dead→ALARM.
-# Watching a traffic-driven metric would false-page on a quiet night (cross-review HIGH).
+# the liveness backstop watches the HEARTBEAT (not a traffic metric) as a dead-man's switch:
+# LessThanThreshold 1 + treatMissingData=breaching → heartbeats present (Sum≥1) → NOT <1 → OK;
+# pipeline dead → metric MISSING → breaching → ALARM. The operator MUST be LessThan: a
+# GreaterThanOrEqual would fire whenever heartbeats ARE present (inverted — a live deploy
+# tripped it on [5,5,1]) and stay OK if the pipeline died to 0/absent. Watching a traffic
+# metric would false-page on a quiet night (cross-review HIGH).
 printf '%s\n' "$out" | python3 -c '
 import json,sys
 rows=[json.loads(l) for l in sys.stdin if l.strip()]
@@ -59,9 +62,9 @@ live=[r for r in rows if r["alarmName"].endswith("LogPipelineStalled")]
 assert len(live)==1, "LogPipelineStalled missing"
 assert live[0]["treatMissingData"]=="breaching", "liveness must be breaching"
 assert live[0]["metricName"]=="GatewayHeartbeat", "liveness MUST watch the heartbeat, not a traffic metric"
-assert live[0]["comparisonOperator"]=="GreaterThanOrEqualToThreshold", "liveness fires on MISSING data, not low-but-present"
+assert live[0]["comparisonOperator"]=="LessThanThreshold", "liveness is a dead-mans-switch: fire on LOW/absent (LessThan), NOT GreaterThanOrEqual (which pages when ALIVE)"
 '
-check "liveness backstop = breaching on GatewayHeartbeat (fires only on missing)" $?
+check "liveness backstop = LessThan+breaching on GatewayHeartbeat (dead-mans-switch)" $?
 
 # topic arn wired into actions when provided
 printf '%s' "$(python3 "$RENDER" "$THRESH" --namespace X/Y --topic-arn arn:aws:sns:r:1:t)" | python3 -c 'import json,sys; r=json.loads(sys.stdin.readline()); assert r["alarmActions"]==["arn:aws:sns:r:1:t"] and r["okActions"]==["arn:aws:sns:r:1:t"]'
