@@ -1181,6 +1181,18 @@ async function runStreamingInvoke(
       evidenceCitationCount,
       coldStart,
     }, { traceId, sessionId, projectId: activeRoute?.projectId });
+    // ZERO-EVIDENCE OBSERVABILITY (prime-directive integrity backstop): a clean success that did
+    // NO retrieval (no tool calls AND no 供研发复核 citations) yet emitted a non-trivial answer is
+    // the confabulation shape the system prompt explicitly forbids (system.md: "0 工具调用就不能
+    //给事实性结论"). It is NOT necessarily wrong — an honest "我查不到/超出范围" reply is also
+    // tool-free and citation-free and is CORRECT behavior — so we do NOT block the card (blocking
+    // would punish honest no-answers). Instead we make it OBSERVABLE/alarmable so the real rate of
+    // uncited confident answers can be measured before deciding on any enforcement. clarify turns
+    // are already excluded (this is the non-clarify success branch). Body length gate skips the
+    // trivial/greeting case. (Cross-review finding, this loop.)
+    if ((timing.toolCalls ?? 0) === 0 && evidenceCitationCount === 0 && finalText.trim().length > 40) {
+      emitMetric("card_health", { kind: "zero_evidence_answer" }, { traceId, sessionId, projectId: activeRoute?.projectId });
+    }
   }
   } catch (finalizeErr) {
     // The finalize composition threw unexpectedly. The card is still mid-stream
@@ -1575,8 +1587,16 @@ async function main(): Promise<void> {
           if (!fbAllowed) {
             // entryFound distinguishes the two deny causes: a card we can't resolve
             // (evicted / failed card with no stored asker) vs a genuine non-asker click.
-            log({ event: "feedback_denied", card: fbCardId ?? null,
-                  reason: !fbEntry ? "card_unresolved" : (fbAsker ? "not_asker" : "asker_unknown") });
+            const denyReason = !fbEntry ? "card_unresolved" : (fbAsker ? "not_asker" : "asker_unknown");
+            log({ event: "feedback_denied", card: fbCardId ?? null, reason: denyReason });
+            // A GENUINE non-asker (the card's asker is known and it isn't them) gets an explanatory
+            // toast instead of a silent no-op — otherwise their click looks broken (they don't know
+            // feedback is asker-scoped). The unresolved/asker-unknown cases stay silent: we can't
+            // truthfully say "not your card" when we don't know whose it is, and those are rare
+            // edge states (evicted/pre-restart cards), so a misleading toast would be worse.
+            if (denyReason === "not_asker") {
+              return { toast: { type: "info", content: t("card.feedback.notAsker") } };
+            }
             return {};
           }
           // PER-CARD-PER-USER VOTE GUARD (cross-review P1 #1/#1b): the cb: key only catches a
@@ -1670,7 +1690,13 @@ async function main(): Promise<void> {
           // reason. Only the asker may. Unknown asker → refuse (can't verify).
           const frAsker = frEntry?.askerOpenId;
           if (!isAskerAction(frAsker, operatorOpenId)) {
-            log({ event: "feedback_reason_denied", card: frCardId ?? null, reason: frAsker ? "not_asker" : "asker_unknown" });
+            const frDeny = frAsker ? "not_asker" : "asker_unknown";
+            log({ event: "feedback_reason_denied", card: frCardId ?? null, reason: frDeny });
+            // Same as the vote deny: a genuine non-asker gets the explanatory toast; unknown-asker
+            // stays silent (can't truthfully claim it's "not theirs").
+            if (frDeny === "not_asker") {
+              return { toast: { type: "info", content: t("card.feedback.notAsker") } };
+            }
             return {};
           }
           const reasonHash = hashUserId(operatorOpenId);
