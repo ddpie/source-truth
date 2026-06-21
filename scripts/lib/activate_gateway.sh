@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
-# activate_gateway.sh <region> <instance_id> <runtime_arn> <feishu_secret_id> [locale] [log_hash_salt] [feishu_api_base]
+# activate_gateway.sh <region> <instance_id> <runtime_arn> <feishu_secret_id> [locale] [log_hash_salt] [feishu_api_base] [idle_timeout] [bucket]
+# Requires PROJECT_ID in the environment (which project's gateway to (re)activate).
 #
-# Writes /etc/bot-gateway.env on the index-service host (which also runs the
-# gateway, see index-service/bootstrap.sh) and (re)starts bot-gateway.service —
-# all via SSM send-command, because the host is in a private subnet. Idempotent:
-# safe to re-run; it overwrites the env file with current values and restarts.
+# Writes /etc/bot-gateway-<projectId>.env on the index-service host (which also runs the
+# gateways, see index-service/bootstrap.sh) and enable/(re)starts bot-gateway@<projectId> — all
+# via SSM send-command, because the host is in a private subnet. Idempotent: safe to re-run; it
+# overwrites the env file with current values and restarts. One gateway instance PER project, each
+# bound to its own Feishu app (long-connection, no port), coexisting on the shared host.
 #
 # Runs AFTER the AgentCore runtime exists (RUNTIME_ARN must be real). The Feishu
 # app credentials are NOT written here — only the SECRET ID goes in the env file;
@@ -65,6 +67,15 @@ fi
 [[ -n "$PROJECT_ID" ]] && ENV_BODY="${ENV_BODY}
 PROJECT_ID='${PROJECT_ID}'"
 
+# Per-project gateway instance (bot-gateway@<projectId>, env at /etc/bot-gateway-<projectId>.env)
+# when a PROJECT_ID is known; multiple projects' gateways coexist on one host. PROJECT_ID is
+# required in the multi-project world (deploy_project always passes it); guard so a misconfigured
+# call can't silently write the wrong file.
+[[ -n "$PROJECT_ID" ]] || { say err "activate_gateway: PROJECT_ID required (which project's gateway to activate)"; exit 2; }
+[[ "$PROJECT_ID" =~ ^[a-z0-9][a-z0-9-]*$ ]] || { say err "activate_gateway: invalid PROJECT_ID '$PROJECT_ID'"; exit 2; }
+GW_ENV_PATH="/etc/bot-gateway-${PROJECT_ID}.env"
+GW_UNIT="bot-gateway@${PROJECT_ID}.service"
+
 # Base64 the body so arbitrary content survives the JSON/shell trip through
 # send-command intact (no escaping games with quotes/newlines in the parameters).
 ENV_B64="$(printf '%s\n' "$ENV_BODY" | base64 | tr -d '\n')"
@@ -73,8 +84,8 @@ ENV_B64="$(printf '%s\n' "$ENV_BODY" | base64 | tr -d '\n')"
 # project-routing config, then restart the unit. `systemctl restart` re-evaluates
 # ConditionPathExists (now true) and (re)starts cleanly whether first activation or a config update.
 REMOTE_CMD="set -e
-echo '${ENV_B64}' | base64 -d > /etc/bot-gateway.env
-chmod 600 /etc/bot-gateway.env"
+echo '${ENV_B64}' | base64 -d > ${GW_ENV_PATH}
+chmod 600 ${GW_ENV_PATH}"
 if [[ -n "$PROJECTS_B64" ]]; then
   REMOTE_CMD="${REMOTE_CMD}
 echo '${PROJECTS_B64}' | base64 -d > '${HOST_PROJECTS_PATH}'
@@ -104,11 +115,12 @@ fi
 rm -f /tmp/gw.tar.gz"
 fi
 REMOTE_CMD="${REMOTE_CMD}
-systemctl restart bot-gateway.service
+systemctl enable ${GW_UNIT}
+systemctl restart ${GW_UNIT}
 sleep 2
-systemctl is-active bot-gateway.service"
+systemctl is-active ${GW_UNIT}"
 
-say info "activating bot-gateway on $IID (writing /etc/bot-gateway.env + restarting service)"
+say info "activating ${GW_UNIT} on $IID (writing ${GW_ENV_PATH} + enable/restart)"
 # Build --parameters as a JSON FILE: commands is an array where EACH element is ONE
 # command LINE (SSM joins them with newlines and runs the result as a script). Two bugs
 # this avoids: (1) json.dumps([whole_block]) → commands=[["..."]] list-of-list, rejected
@@ -143,9 +155,9 @@ while (( SECONDS < DEADLINE )); do
       # lines BEFORE it, so check the LAST non-empty line == active (not the whole blob).
       LAST="$(printf '%s' "$OUT" | grep -v '^[[:space:]]*$' | tail -1 | tr -d '[:space:]')"
       if [[ "$LAST" == "active" ]]; then
-        say ok "bot-gateway is active on $IID"; exit 0
+        say ok "${GW_UNIT} is active on $IID"; exit 0
       fi
-      say err "bot-gateway started but is not active (last line: ${LAST:-unknown}). Inspect: aws ssm start-session --target $IID ; journalctl -u bot-gateway -n 50; tail -50 /var/log/bot-gateway.log"
+      say err "${GW_UNIT} started but is not active (last line: ${LAST:-unknown}). Inspect: aws ssm start-session --target $IID ; journalctl -u ${GW_UNIT} -n 50; tail -50 /var/log/bot-gateway-${PROJECT_ID}.log"
       exit 1
       ;;
     Failed|Cancelled|TimedOut)
