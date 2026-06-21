@@ -59,5 +59,23 @@ grep -q "GIT_FETCH_FAILED: bad" "$TMP/err"; check "bad url prints GIT_FETCH_FAIL
 # --- usage guard: missing args fail loud ---
 bash "$FETCH" >/dev/null 2>/dev/null; [[ $? -ne 0 ]]; check "no args → non-zero" $?
 
+# --- graph-dir guard: the live .codegraph/.home survive a hard-reset (untracked, info/exclude) ---
+mkdir -p "$DEST/.codegraph" "$DEST/.home/.codegraph"; echo "GRAPHDATA" > "$DEST/.codegraph/graph.db"
+( cd "$WORK" && echo "def three(): pass" > c.py && git add c.py && git commit -qm three && git push -q origin main )
+bash "$FETCH" myrepo "$ORIGIN" main "$DEST" >/dev/null 2>"$TMP/err"; rc=$?
+check "pull with graph dirs present succeeds (rc 0)" "$rc"
+[[ -f "$DEST/c.py" ]]; check "pull brought new c.py" $?
+[[ -f "$DEST/.codegraph/graph.db" ]] && grep -q GRAPHDATA "$DEST/.codegraph/graph.db"; check "live graph.db SURVIVED reset --hard" $?
+grep -qxF "/.codegraph/" "$DEST/.git/info/exclude"; check ".codegraph added to .git/info/exclude" $?
+
+# --- graph-dir guard: a repo that TRACKS .codegraph fails loud (unsupported, would clobber) ---
+BAD_ORIGIN="$TMP/badorigin.git"; BAD_WORK="$TMP/badwork"
+git init -q --bare -b main "$BAD_ORIGIN"; git clone -q "$BAD_ORIGIN" "$BAD_WORK"
+( cd "$BAD_WORK" && mkdir -p .codegraph && echo x > .codegraph/tracked && echo y > a.py \
+  && git add -A && git commit -qm init && git push -q origin main )
+bash "$FETCH" badrepo "$BAD_ORIGIN" main "$TMP/repo/badrepo" >/dev/null 2>"$TMP/err"; rc=$?
+[[ "$rc" -ne 0 ]]; check "repo tracking .codegraph → non-zero (unsupported)" $?
+grep -q "GIT_FETCH_FAILED: badrepo" "$TMP/err"; check "tracked-.codegraph prints GIT_FETCH_FAILED" $?
+
 echo "  ran=$_run failed=$_fail"
 [[ "$_fail" -eq 0 ]]
