@@ -321,10 +321,13 @@ def test_multi_repo_sessions_get_distinct_per_repo_home(monkeypatch):
     assert homes["alpha"] != homes["beta"]
 
 
-def test_single_repo_session_home_is_none(monkeypatch):
-    # One repo → home=None → inherit process HOME (pre-multi-repo single-graph layout).
+def test_single_repo_session_home_is_per_repo(monkeypatch):
+    # Single repo ALSO uses per-repo HOME=<ws>/.home — it must match where bootstrap's build
+    # unit wrote the graph (the build template ALWAYS uses <ws>/.home, even for one repo). An
+    # earlier version returned None here → serve inherited HOME=/data and served an empty graph
+    # (0 nodes / 503) while the build's graph sat at <ws>/.home. Caught in the first real deploy.
     _PerRepoFake.registry.clear()
     monkeypatch.setattr(http_bridge, "CodegraphSession", lambda ws, **kw: _PerRepoFake(ws, **kw))
     monkeypatch.setattr(http_bridge, "acquire_singleton_writer_lock", lambda ws: None)
     http_bridge.build_bridge(workspaces=[("/data/repo/solo", "/data/repo/solo")], port=8957)
-    assert _PerRepoFake.registry["solo"].home is None
+    assert _PerRepoFake.registry["solo"].home == "/data/repo/solo/.home"
