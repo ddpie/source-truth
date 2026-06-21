@@ -17,7 +17,7 @@
 #   ./scripts/apply-dau-lambda.sh [--region <r>] [--log-group <g>] [--tz <zone>] [--schedule <cron>] [--dry-run]
 #   --region     AWS region (default: DEPLOY_REGION from .local/deploy-config)
 #   --log-group  gateway log group (default: /source-truth/bot-gateway)
-#   --tz         ops timezone for the day window (default: Asia/Tokyo)
+#   --tz         ops timezone for the day window (default: Asia/Shanghai = 东八区 UTC+8)
 #   --schedule   EventBridge schedule expression (default: cron(30 16 * * ? *) = 01:30 JST daily,
 #                i.e. ~90min after local midnight so the prior day's logs have settled)
 #   --dry-run    print the plan; make NO AWS calls
@@ -37,7 +37,7 @@ RULE_NAME="source-truth-dau-daily"
 RUNTIME="python3.12"
 HANDLER="dau_preaggregate.handler"
 
-REGION="" LOG_GROUP="/source-truth/bot-gateway" TZ_NAME="Asia/Tokyo"
+REGION="" LOG_GROUP="/source-truth/bot-gateway" TZ_NAME="Asia/Shanghai"
 SCHEDULE="cron(30 16 * * ? *)" DRY_RUN=0
 
 usage() {
@@ -48,7 +48,7 @@ Provisions the B-class DAU pre-aggregation Lambda + daily EventBridge schedule (
 
   --region <r>     AWS region (default: DEPLOY_REGION from .local/deploy-config)
   --log-group <g>  gateway log group (default: /source-truth/bot-gateway)
-  --tz <zone>      ops timezone for the day window (default: Asia/Tokyo)
+  --tz <zone>      ops timezone for the day window (default: Asia/Shanghai = 东八区 UTC+8)
   --schedule <c>   EventBridge schedule expr (default: cron(30 16 * * ? *) = 01:30 JST daily)
   --dry-run        print the plan; NO AWS calls
   -h, --help       this help
