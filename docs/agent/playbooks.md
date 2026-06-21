@@ -3,9 +3,9 @@
 常见改动「如何做、改哪里、如何验证、如何上线」的操作手册。每个配方都遵守
 [`invariants.md`](invariants.md) 的不变量。生效方式分三类，先区分：
 
-- **gateway 改动** → 重启网关即时生效（`bash .local/run-gateway.sh`，单实例）。
+- **gateway 改动** → 重新部署该项目网关单元 `bot-gateway@<projectId>.service`（经 `deploy-all.sh` 的 gateway 阶段，每项目一个进程、各连自己的飞书 App）。
 - **agent 改动（含 system.md / 工具 / 镜像）** → 重建镜像 + 更新 runtime；**热 microVM 仍使用旧镜像约 15 分钟**才老化。
-- **index-service 改动 / 刷新代码索引** → 蓝绿替换 index 实例（`--refresh-index`）。
+- **index-service 代码改动** → 重新部署 index-service（bootstrap + 重启 bridge）；**代码索引刷新无需部署**——定时 `git pull` + watcher 增量重建，分钟级自动新鲜（见配方 4）。
 
 每次改完都运行 `./scripts/test.sh`（离线套件，pre-push 必过）。
 
@@ -36,7 +36,7 @@
 - **只读约束**：新工具必须只读（`readOnlyHint=True`）；不得增加写/exec 能力（MVP 边界）。
 - **路径安全**：任何接受 agent 路径的工具必须经 `path_align.to_local_path`（词法 + realpath 双层 confine）。
 - **验证**：`cd index-service && python -m pytest -q`；增加路径逃逸/注入用例。
-- **上线**：蓝绿刷新 index（`--refresh-index`）+ 重建镜像（agent 侧允许清单已变更）。
+- **上线**：重新部署 index-service（重启各项目 bridge）+ 重建镜像（agent 侧允许清单已变更）。
 
 ## 配方 3：切换模型
 
@@ -48,15 +48,12 @@
 
 ## 配方 4：刷新代码索引（目标仓库更新了）
 
-- **机制**：索引是部署时快照，通过重新部署 index-service 刷新（无 webhook / 无增量，post-MVP）。
-- **操作**：
-
-  ```bash
-  ./scripts/deploy-all.sh --region ap-northeast-1 --repo /path/to/repo --refresh-index
-  ```
-
-  蓝绿替换：新实例建好图、`/health` 通过后，再终止旧实例（不影响运行中的实例）。
-- **验证**：deploy 内置 SSM `/health` 检查；之后 E2E 问一个只有新代码才有的问题。
+- **机制**：自动。每个仓库一个 systemd timer `index-refresh-<subdir>.timer`（默认 300s，`projects.json`
+  的 `refreshIntervalSec` 可配）周期性 `git pull`；常驻 codegraph（`--mcp --graph-only`）进程的
+  file-watcher 在数秒内增量重建内存图——无重启、无第二写者、无服务抖动。代码新鲜度为分钟级，**无需重新部署**。
+- **改刷新频率 / 加减仓库**：改 `.local/projects.json`，重跑该项目的部署
+  （`./scripts/deploy-all.sh ... --skip-base` 或 `install.sh` 的 redeploy 流程），脚本按清单重建 timer / bridge。
+- **验证**：`git pull` 失败会打 `GIT_FETCH_FAILED: <subdir>` 标记（可接监控）；端到端可问一个只有新提交才有的问题确认新鲜度。
 
 ## 配方 5：改卡片渲染 / 流式 / 脱敏（gateway）
 
@@ -69,7 +66,7 @@
   - 卡片正文/证据进 finalize PUT 前要 **clamp 长度**（超 Feishu 卡片体积上限会 400 → CardWriter 丢弃 → 卡片无法完成）。
   - 所有进群可见卡片的 agent/仓库派生文本都要过 `redactSensitive`；图表 spec 用 `redactDeep`（只清理 value，不修改 key）。
 - **验证**：`cd bot-gateway && npx jest`（含 ReDoS / 脱敏 / 抽取回归）。
-- **上线**：`bash .local/run-gateway.sh`（停止旧进程、单实例启动新进程）。
+- **上线**：重新部署该项目网关单元 `bot-gateway@<projectId>.service`（deploy-all 的 gateway 阶段）。
 
 ## 配方 6：全新账号 / 新区域一键部署
 

@@ -14,7 +14,7 @@
 | [`requirements_zh.md`](requirements_zh.md) | 需求与方案评审纪要：背景、MVP 边界、验收基准 |
 | [`architecture-overview_zh.md`](architecture-overview_zh.md) | POC 架构方案：系统形态、组件分工、技术选型 |
 | [`agent-container_zh.md`](agent-container_zh.md) | agent-container 组件设计概览（面向人工阅读） |
-| [`multi-repo-isolation_zh.md`](multi-repo-isolation_zh.md) | 多项目 / 多仓的索引与隔离设计（post-MVP，先写文档，不改代码） |
+| [`multi-repo-isolation_zh.md`](multi-repo-isolation_zh.md) | 多项目 / 多仓的索引与隔离设计与落地现状（单机多项目、逻辑隔离、git 刷新） |
 
 ## 与其他文档的关系
 

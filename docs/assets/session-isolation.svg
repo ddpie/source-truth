@@ -38,7 +38,7 @@
   <text x="455" y="232" text-anchor="middle" font-size="10.5" fill="#7a8493">MCP-over-HTTP（只读）</text>
 
   <!-- shared index-service (read-only, single copy) -->
-  <text x="380" y="294" text-anchor="middle" font-size="11.5" font-weight="600" fill="#3b7d4f">共享只读（所有会话 · 部署时构建一次 · 重部署刷新）</text>
+  <text x="380" y="294" text-anchor="middle" font-size="11.5" font-weight="600" fill="#3b7d4f">共享只读（所有会话 · 定时 git pull 刷新，分钟级新鲜）</text>
   <rect x="150" y="306" width="460" height="86" rx="8" fill="#eef6ef" stroke="#9cc6a8" stroke-width="1.2"/>
   <text x="380" y="332" text-anchor="middle" font-size="13.5" font-weight="600" fill="#1f2733">index-service（常驻 · 唯一一份代码副本）</text>
   <text x="380" y="354" text-anchor="middle" font-size="11.5" fill="#5b6573">CodeGraph 索引 + HTTP 读取接口 · 本地磁盘 /data/repo/&lt;subdir&gt;</text>
