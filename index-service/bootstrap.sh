@@ -198,45 +198,40 @@ if aws s3api head-object --bucket "$BUCKET" --key bot-gateway.tar.gz --region "$
   # Sanity: the compiled entrypoint must exist, else the unit would crash-loop later.
   [ -f "$GW_APP/dist/index.js" ] || { echo "BOOTSTRAP_FAILED: bot-gateway build produced no dist/index.js"; exit 1; }
 
-  cat > /etc/systemd/system/bot-gateway.service <<UNIT
+  # PER-PROJECT gateway TEMPLATE: bot-gateway@<projectId>. %i = projectId. One gateway process
+  # per project, each connected to its OWN Feishu app (long-connection, NOT an HTTP listener — so
+  # no port collision), reading its own /etc/bot-gateway-%i.env (RUNTIME_ARN + FEISHU_SECRET_ID +
+  # PROJECT_ID for that project). activate_gateway.sh writes that env file + starts the instance.
+  # Multiple projects on one host = multiple bot-gateway@<id> instances.
+  cat > /etc/systemd/system/bot-gateway@.service <<UNIT
 [Unit]
-Description=source-truth Feishu bot-gateway (long-connection event subscriber)
+Description=source-truth Feishu bot-gateway for project %i (long-connection event subscriber)
 After=network-online.target
 Wants=network-online.target
-# Only starts once /etc/bot-gateway.env exists (deploy writes it after the runtime
-# is ready). ConditionPathExists makes a premature boot a clean no-op, not a crash-
-# loop: systemd marks the unit "condition failed" and moves on; the deploy's
-# later start re-evaluates it.
-ConditionPathExists=/etc/bot-gateway.env
+# Only starts once this project's env file exists (deploy writes it after the runtime is ready).
+# ConditionPathExists makes a premature boot a clean no-op, not a crash-loop.
+ConditionPathExists=/etc/bot-gateway-%i.env
 [Service]
 WorkingDirectory=$GW_APP
-# run.sh sources /etc/bot-gateway.env (non-secret config) and fetches the Feishu
-# app credentials from Secrets Manager into the process env (never written to disk).
+# run.sh reads BOT_GATEWAY_ENV (this project's env file) and fetches the Feishu app credentials
+# from Secrets Manager into the process env (never written to disk).
+Environment=BOT_GATEWAY_ENV=/etc/bot-gateway-%i.env
 ExecStart=$GW_APP/run.sh
 Restart=always
 RestartSec=5
-# Mirror the gateway's structured JSON logs (incl. metric:true telemetry lines) to a file
-# the CloudWatch agent tails (configured below). journald keeps them too (journalctl -u
-# bot-gateway still works); the file is the CloudWatch source. append: (not truncate:) so a
-# Restart=always restart doesn't wipe the in-flight log between agent reads.
-StandardOutput=append:/var/log/bot-gateway.log
-StandardError=append:/var/log/bot-gateway.log
-# OOM ISOLATION: the gateway shares this host with the resident codegraph index
-# (the system's reason for existing). Cap the gateway's memory via cgroup so a
-# gateway leak/spike triggers ITS OWN OOM-kill (systemd restarts it) instead of
-# letting the kernel pick the codegraph writer and corrupt/empty graph.db
-# (cross-review). Tunable via CODEGRAPH_MAX_FILES-class sizing; 1G is ample for a
-# Node long-connection + bounded concurrent invokes (MAX_CONCURRENT_INVOKES).
+# Per-project log file (the CloudWatch agent tails the glob /var/log/bot-gateway*.log). append:
+# (not truncate:) so a Restart=always restart doesn't wipe the in-flight log between agent reads.
+StandardOutput=append:/var/log/bot-gateway-%i.log
+StandardError=append:/var/log/bot-gateway-%i.log
+# OOM ISOLATION: cap each gateway's memory so a gateway leak triggers ITS OWN OOM-kill (systemd
+# restarts it) instead of the kernel picking the codegraph writer and corrupting graph.db.
 MemoryHigh=768M
 MemoryMax=1G
 [Install]
 WantedBy=multi-user.target
 UNIT
   systemctl daemon-reload
-  # enable (start on future boots) but do NOT start now — the env file isn't written
-  # yet. The deploy starts it explicitly once the runtime exists.
-  systemctl enable bot-gateway.service || true
-  echo "bot-gateway installed (not started — awaiting /etc/bot-gateway.env)"
+  echo "bot-gateway@ template installed (per-project instances started by activate_gateway.sh)"
 
   # --- CloudWatch agent: ship the gateway's metric:true / health lines to CloudWatch ----
   # Telemetry plan 阶段0 gate 2/3 + the monitoring plan's §0 front gate: the gateway's
@@ -262,9 +257,9 @@ UNIT
       "files": {
         "collect_list": [
           {
-            "file_path": "/var/log/bot-gateway.log",
+            "file_path": "/var/log/bot-gateway*.log",
             "log_group_name": "/source-truth/bot-gateway",
-            "log_stream_name": "{instance_id}",
+            "log_stream_name": "{instance_id}-{file_path_basename}",
             "retention_in_days": 90
           }
         ]
@@ -276,7 +271,7 @@ CWCFG
     # fetch-config (not append-config) so a re-run replaces, not duplicates, the input.
     if /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
         -a fetch-config -m ec2 -s -c file:/opt/aws/amazon-cloudwatch-agent/etc/cw-config.json; then
-      echo "cloudwatch-agent shipping /var/log/bot-gateway.log → /source-truth/bot-gateway"
+      echo "cloudwatch-agent shipping /var/log/bot-gateway*.log → /source-truth/bot-gateway"
     else
       echo "WARN: cloudwatch-agent fetch-config failed — gateway runs, telemetry shipping degraded"
     fi

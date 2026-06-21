@@ -34,8 +34,6 @@ ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 source "$SCRIPT_DIR/lib/common.sh"
 # shellcheck source=lib/env-utils.sh
 source "$SCRIPT_DIR/lib/env-utils.sh"
-# shellcheck source=lib/resolve_repo.sh
-source "$SCRIPT_DIR/lib/resolve_repo.sh"
 
 CONFIG_DIR="$ROOT/.local"
 CONFIG_FILE="$CONFIG_DIR/deploy-config"
@@ -43,10 +41,9 @@ mkdir -p "$CONFIG_DIR"
 
 # --- defaults / flags ---
 REGION=""
-REPO_PATH=""             # --repo source: local dir | git URL | s3:// tarball/prefix (resolve_repo.sh)
-REPO_REF=""              # --repo-ref: git branch/tag/commit (git sources only)
-REPO_SUBDIR=""           # name the repo lives under on the index host (defaults to basename)
-# These three honor a persist-and-read-back contract (flag > persisted > default)
+SKIP_PROJECTS=false      # --skip-projects: provision the shared BASE host only, attach no project
+                         # (init-env). Code repos + projects come from .local/projects.json (git).
+# These honor a persist-and-read-back contract (flag > persisted > default)
 # so a flagless reconcile re-run does NOT silently revert an operator's earlier
 # choice (deploy_runtime.py updates the runtime IN PLACE, so a reverted MODEL would
 # actually flip the live runtime). Empty here = "not given on the CLI"; resolved
@@ -73,48 +70,40 @@ declare -A SKIP=()
 
 usage() {
   cat <<'EOF'
-Usage: ./scripts/deploy-all.sh --region <r> --repo <path> [options]
+Usage: ./scripts/deploy-all.sh --region <r> [options]
 
-Required (first run):
+Provisions the shared BASE host + every project declared in .local/projects.json. Code repos and
+projects are NOT passed on the CLI — they live in .local/projects.json (each project: a port, a
+Feishu secret id, and git repos). Use ./scripts/install.sh to create that file interactively.
+
+Required:
   --region <r>        AWS region (e.g. ap-northeast-1)
-  --repo <src>        Code repo to index + serve. Accepts ANY of:
-                        • local dir   /path/to/repo
-                        • git URL     https://github.com/org/repo(.git),
-                                      https://gitlab.com/org/repo.git, git@host:org/repo.git
-                        • S3 tarball  s3://bucket/key.tar.gz (or .tgz)
-                        • S3 prefix   s3://bucket/prefix/
-                      Git/S3 sources are fetched to a local temp dir, then staged
-                      exactly like a local dir (idempotency unchanged).
 
 Options:
-  --repo-ref <r>      Git branch / tag / commit to clone (git sources only; default: default branch)
-  --repo-subdir <n>   Name to place the repo under on the index host (default: derived from --repo)
-  --instance-type <t> index-service EC2 type, ARM (default: t4g.large)
-  --max-files <n>     codegraph max files to index (default: 10000)
-  --root-volume-gb <n> index-service root EBS size in GiB (default: 30). Grow for a
-                      large repo: it holds the repo copy + graph.db + tarball.
-  --model <id>        Bedrock model id for the agent runtime
+  --skip-projects     Provision the shared BASE host only (network/IAM/EC2/image), attach NO
+                      project (init-env). Add projects later via ./scripts/install.sh.
+  --instance-type <t> index host EC2 type, ARM (default: t4g.large)
+  --max-files <n>     codegraph max files to index per repo (default: 10000)
+  --root-volume-gb <n> index host root EBS size in GiB (default: 30). Grow for large repos:
+                      it holds every project's repo clones + graph.db.
+  --model <id>        default Bedrock model id (a project may override it in projects.json)
   --idle-timeout <s>  AgentCore session idle timeout, seconds (60..28800; default 900/15min).
-                      The gateway's session-reuse TTL is aligned to this. Larger = higher
-                      follow-up warm-hit rate but more idle-memory cost (idle CPU is free).
+                      The gateway's session-reuse TTL is aligned to this.
   --max-lifetime <s>  AgentCore microVM hard max age before forced recycle (60..28800; default 28800/8h)
   --skip <phase>      Skip a phase: artifacts|iam|network|index-svc|image|runtime|gateway|monitoring (repeatable)
-  --refresh-index     Replace the running index-service instance if this run staged
-                      newer index-service code / repo to S3 (reuse can't re-bootstrap).
-                      Without it, a stale reuse only WARNs (never silently serves old code).
+  --refresh-index     Replace the index host if this run staged newer BASE code (bridge/gateway).
+                      Repo code is NOT a reason to refresh — repos refresh live via git pull.
   --dry-run           Print the plan and resolved IDs, make no changes
   -h, --help
 
-First-run PREREQUISITES (not auto-provisioned — the deploy hard-fails / WARNs if missing):
-  • codegraph-server binary (ARM aarch64, glibc>=2.38, pinned 0.18.5) on PATH or
-    via CODEGRAPH_SERVER_BIN — obtain from its official release channel; the deploy
-    does NOT download it.
-  • A host that can build linux/arm64 images (arm64 host, or x86 + `docker run
-    --privileged --rm tonistiigi/binfmt --install arm64`).
-  • Bedrock model access enabled for the model, and AgentCore available in --region
-    (both are probed at preflight and WARN if missing).
-  • Feishu app secret created by hand (Secrets Manager/SSM) for the separately-run
-    bot-gateway — see the NEXT STEPS printed at the end.
+PREREQUISITES (not auto-provisioned — the deploy hard-fails / WARNs if missing):
+  • codegraph-server binary (ARM aarch64, glibc>=2.38, pinned 0.18.5) on PATH or via
+    CODEGRAPH_SERVER_BIN — the deploy does NOT download it.
+  • A host that can build linux/arm64 images (arm64 host, or x86 + binfmt).
+  • Bedrock model access for the model, and AgentCore available in --region (probed, WARN).
+  • A read-only git credential in Secrets Manager (source-truth/git-credentials) for cloning
+    private repos — install.sh's "add a project" creates it; or create it by hand.
+  • Per-project Feishu app secrets (source-truth/feishu-<projectId>) — install.sh creates these.
 EOF
 }
 
@@ -122,9 +111,7 @@ DRY_RUN=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --region) REGION="$2"; shift 2 ;;
-    --repo) REPO_PATH="$2"; shift 2 ;;
-    --repo-ref) REPO_REF="$2"; shift 2 ;;
-    --repo-subdir) REPO_SUBDIR="$2"; shift 2 ;;
+    --skip-projects) SKIP_PROJECTS=true; shift ;;
     --instance-type) INSTANCE_TYPE="$2"; shift 2 ;;
     --max-files) MAX_FILES="$2"; shift 2 ;;
     --root-volume-gb) ROOT_VOLUME_GB="$2"; shift 2 ;;
@@ -160,50 +147,11 @@ IDLE_TIMEOUT="${IDLE_TIMEOUT:-${DEPLOY_IDLE_TIMEOUT:-$DEFAULT_IDLE_TIMEOUT}}"
 MAX_LIFETIME="${MAX_LIFETIME:-${DEPLOY_MAX_LIFETIME:-$DEFAULT_MAX_LIFETIME}}"
 ACCOUNT="$(aws sts get-caller-identity --query Account --output text)"
 
-# --- resolve the --repo source (local dir | git URL | s3:// tarball/prefix) ---
-# Classify + derive the on-host subdir name here (network-free, dry-run safe). The
-# ACTUAL fetch (git clone / s3 download) is deferred to the artifacts phase so it
-# is skipped on --dry-run and `--skip artifacts`, and so a reconcile re-run with no
-# --repo (REPO_PATH empty, subdir read back from persisted config) does no network.
-REPO_KIND=""
-if [[ -n "$REPO_PATH" ]]; then
-  REPO_KIND="$(classify_repo_source "$REPO_PATH")"
-  if [[ "$REPO_KIND" == "unknown" ]]; then
-    say err "--repo '$REPO_PATH' is not a local path, git URL, or s3:// URI."
-    say err "  local dir: /path/to/repo   git: https://github.com/org/repo(.git)   s3: s3://bucket/key.tar.gz"
-    exit 2
-  fi
-  [[ -n "$REPO_SUBDIR" ]] || REPO_SUBDIR="$(repo_subdir_from_source "$REPO_PATH" "$REPO_KIND")"
-  if [[ "$REPO_KIND" == "git" ]]; then
-    require_cmd git "install git to clone a git --repo source" || exit 1
-  fi
-  # FAIL-LOUD on a subdir/source-basename mismatch for a LOCAL --repo. A local dir is staged
-  # `tar -C dirname basename`, so the tarball's TOP-LEVEL dir is the source basename — but the
-  # index host extracts to /data/repo and SERVES /data/repo/$REPO_SUBDIR. If a persisted/old
-  # --repo-subdir (e.g. code-5x) differs from the basename (e.g. source-truth), the extract
-  # lands at /data/repo/<basename> while serve reads /data/repo/<subdir> → 0-node graph, 503,
-  # with NO clear cause (burned a real deploy). git/s3 sources can't hit this (fetched INTO a
-  # dir named $REPO_SUBDIR), so guard the local case only. Override intentionally with
-  # --repo-subdir <basename>, or rename to match.
-  if [[ "$REPO_KIND" == "local" ]]; then
-    _repo_base="$(basename "${REPO_PATH%/}")"
-    if [[ "$_repo_base" != "$REPO_SUBDIR" ]]; then
-      say err "local --repo basename '$_repo_base' != --repo-subdir '$REPO_SUBDIR'."
-      say err "  The staged tarball's top dir is '$_repo_base' but the index host serves"
-      say err "  /data/repo/$REPO_SUBDIR → they'd mismatch and the bridge would serve a 0-node"
-      say err "  graph (503). Pass --repo-subdir $_repo_base (or rename the dir / clear the"
-      say err "  persisted REPO_SUBDIR in .local/deploy-config)."
-      exit 2
-    fi
-  fi
-else
-  # No --repo this run: reuse the persisted subdir (reconcile path). Keep the old
-  # basename fallback so a config that predates this resolver still works.
-  [[ -n "$REPO_SUBDIR" ]] || REPO_SUBDIR="repo"
-fi
-
+# Repos are NOT a CLI concern any more — they live in .local/projects.json and are git-cloned on
+# the index host by activate_project.sh (Phase 5). The deploy stages only the codegraph binary +
+# index-service/bot-gateway code to S3 (Phase 1); no repo tarballs.
 BUCKET="source-truth-repo-${ACCOUNT}-$(echo "$REGION" | tr -d '-')"
-say info "account=$ACCOUNT region=$REGION bucket=$BUCKET repo=${REPO_PATH:-<reuse>} kind=${REPO_KIND:-n/a} repo_subdir=$REPO_SUBDIR model=$MODEL"
+say info "account=$ACCOUNT region=$REGION bucket=$BUCKET model=$MODEL skip_projects=$SKIP_PROJECTS"
 
 # Bedrock invoke preflight. AWS no longer requires per-model "Model access" enablement,
 # so a denial here is NOT a console toggle — it's a real config problem: the deploy
@@ -330,7 +278,6 @@ if [[ "$DRY_RUN" != true ]]; then preflight_boto3; preflight_model_access; prefl
 if [[ "$DRY_RUN" != true ]]; then
   update_env "$CONFIG_FILE" DEPLOY_REGION "$REGION"
   update_env "$CONFIG_FILE" ARTIFACT_BUCKET "$BUCKET"
-  update_env "$CONFIG_FILE" REPO_SUBDIR "$REPO_SUBDIR"
   # Persist the resolved knobs so the next flagless run reads them back.
   update_env "$CONFIG_FILE" DEPLOY_MODEL "$MODEL"
   update_env "$CONFIG_FILE" DEPLOY_INSTANCE_TYPE "$INSTANCE_TYPE"
@@ -346,7 +293,7 @@ skip() { [[ -n "${SKIP[$1]:-}" ]]; }
 # ============================================================
 if skip artifacts; then say warn "skip artifacts"; elif [[ "$DRY_RUN" == true ]]; then
   say step "Phase 1: artifacts → S3"
-  say info "[dry-run] ensure bucket $BUCKET; upload codegraph-server bin + index-service.tar.gz + ${REPO_SUBDIR}.tar.gz + bot-gateway.tar.gz"
+  say info "[dry-run] ensure bucket $BUCKET; upload codegraph-server bin + index-service.tar.gz (incl. *.sh) + bot-gateway.tar.gz"
 else
   say step "Phase 1: artifacts → S3"
   # Create the bucket if absent. us-east-1 is special: the S3 API REJECTS a
@@ -398,46 +345,18 @@ else
   # ArtifactSig staleness check (provision_index_service.sh) ALWAYS report stale and
   # makes --refresh-index rebuild the instance every run for no reason (cross-review HIGH).
   IDX_STAGE="$(mktemp -d /tmp/idx-stage.XXXX)"
-  cp "$ROOT"/index-service/*.py "$ROOT"/index-service/requirements.txt "$IDX_STAGE"/
+  # Ship the top-level *.py AND *.sh (git_fetch.sh + activate_project.sh — the host runs them to
+  # clone repos + attach projects) + requirements.txt + the shared manifest parser. tests/ live in
+  # a subdir and are excluded by the top-level-only copy.
+  cp "$ROOT"/index-service/*.py "$ROOT"/index-service/*.sh "$ROOT"/index-service/requirements.txt "$IDX_STAGE"/
   cp "$ROOT"/scripts/lib/render_manifest.py "$IDX_STAGE"/
-  ( cd "$IDX_STAGE" && tar --sort=name --mtime='UTC 2020-01-01' --owner=0 --group=0 --numeric-owner -cf - ./*.py requirements.txt | gzip -n > "$TMP_IDX" )
+  ( cd "$IDX_STAGE" && tar --sort=name --mtime='UTC 2020-01-01' --owner=0 --group=0 --numeric-owner -cf - ./*.py ./*.sh requirements.txt | gzip -n > "$TMP_IDX" )
   rm -rf "$IDX_STAGE"
   run aws s3 cp "$TMP_IDX" "s3://$BUCKET/index-service.tar.gz" --region "$REGION"
 
-  # repo to index. EXCLUDE .git / vendored deps / build caches: codegraph already
-  # skips them at index time (--exclude node_modules/.venv/.git), and they're NOT
-  # served as source — but without excluding them here they'd inflate the S3 tarball
-  # AND the on-disk extract on the index host's (size-bounded) root volume, which is
-  # the most likely fresh-account hard-stop on a real repo with a multi-GB .git
-  # history. Excluding them keeps the staged artifact == what codegraph indexes.
-  if [[ -n "$REPO_PATH" ]]; then
-    # Resolve a git/s3 source into a LOCAL dir named after REPO_SUBDIR, then stage it
-    # exactly like a local dir. Done HERE (not at flag-parse) so it's skipped on
-    # --dry-run / `--skip artifacts` and a flagless reconcile re-run does no network.
-    STAGE_REPO_PATH="$REPO_PATH"
-    if [[ "$REPO_KIND" == "git" || "$REPO_KIND" == "s3" ]]; then
-      REPO_FETCH_ROOT="$(mktemp -d /tmp/st-repo-src.XXXX)"
-      # cleanup on exit: a fetched repo can be GBs — don't leak it under /tmp.
-      trap '[[ -n "${REPO_FETCH_ROOT:-}" ]] && rm -rf "$REPO_FETCH_ROOT"' EXIT
-      STAGE_REPO_PATH="$REPO_FETCH_ROOT/$REPO_SUBDIR"
-      fetch_repo_source "$REPO_PATH" "$REPO_KIND" "$REGION" "$STAGE_REPO_PATH" "$REPO_REF" \
-        || { say err "failed to fetch --repo source ($REPO_KIND): $REPO_PATH"; exit 1; }
-    elif [[ ! -d "$REPO_PATH" ]]; then
-      say err "--repo local path does not exist or is not a directory: $REPO_PATH"; exit 1
-    fi
-    TMP_REPO="$(mktemp /tmp/repo.XXXX.tar.gz)"
-    # Deterministic (see index-service tar above): a git clone / s3 fetch writes files
-    # with fresh mtimes every run, so without pinning mtime/sort/owner + `gzip -n` the
-    # ETag would change every deploy and --refresh-index would rebuild the index host
-    # on every run even when the repo content is unchanged (cross-review HIGH).
-    tar --sort=name --mtime='UTC 2020-01-01' --owner=0 --group=0 --numeric-owner \
-      --exclude='.git' --exclude='node_modules' --exclude='.venv' \
-      --exclude='*.tmp' --exclude='__pycache__' \
-      -cf - -C "$(dirname "$STAGE_REPO_PATH")" "$(basename "$STAGE_REPO_PATH")" \
-      | gzip -n > "$TMP_REPO"
-    run aws s3 cp "$TMP_REPO" "s3://$BUCKET/${REPO_SUBDIR}.tar.gz" --region "$REGION"
-    rm -f "$TMP_REPO"
-  fi
+  # NO repo staging: repos are git-cloned on the index host (R1) by activate_project.sh, not
+  # tarred from the deploy machine. The deploy stages only the codegraph binary + index-service
+  # code (above) + bot-gateway source (below).
 
   # bot-gateway source (built ON the index host, not here): ship src + the
   # package manifests + tsconfig, NOT node_modules/dist (the host runs
@@ -501,21 +420,20 @@ if skip index-svc; then say warn "skip index-svc"; elif [[ "$DRY_RUN" == true ]]
   say step "Phase 3: index-service EC2"
   say info "[dry-run] provision_index_service.sh (ARM EC2 + bootstrap, reuse if running) + /health wait"
 else
-  say step "Phase 3: index-service EC2"
+  say step "Phase 3: index-service EC2 (BASE host — no project bound)"
   INDEX_IP="$("$SCRIPT_DIR/lib/provision_index_service.sh" \
-    "$REGION" "$CONFIG_FILE" "$BUCKET" "$REPO_SUBDIR" "$MAX_FILES" "$INSTANCE_TYPE" "$REFRESH_INDEX" "$ROOT_VOLUME_GB")"
+    "$REGION" "$CONFIG_FILE" "$BUCKET" "$MAX_FILES" "$INSTANCE_TYPE" "$REFRESH_INDEX" "$ROOT_VOLUME_GB")"
   update_env "$CONFIG_FILE" INDEX_SERVICE_IP "$INDEX_IP"
   safe_source_env "$CONFIG_FILE"
-  # Wait for the bridge to become healthy before wiring the runtime to it. The
-  # instance is in a private subnet (not reachable from here), so we poll its
-  # /health via SSM. The bridge serves 200 only once the graph warmed non-empty.
+  # Wait for the BASE host bootstrap to finish before attaching any project. The base host
+  # has NO bridge yet (projects attach later via deploy_project.sh), so we wait for SSM-online
+  # + the BOOTSTRAP_DONE marker, NOT a bridge /health (per-project bridge health is gated inside
+  # deploy_project.sh after activation). The instance is private, so we poll via SSM.
   if [[ "$DRY_RUN" != true ]] && [[ -n "${INDEX_SERVICE_INSTANCE:-}" ]]; then
-    say info "waiting for index-service /health (build + warmup, ~2-7 min) ..."
-    # Hard-fail: never wire the runtime to an unconfirmed index. A timeout here
-    # means the build/warmup didn't succeed — serving on it would violate the
-    # prime directive (code is the only source of truth). Re-run after fixing.
-    "$SCRIPT_DIR/lib/wait_index_health.sh" "$REGION" "$INDEX_SERVICE_INSTANCE" || {
-      say err "index-service never became healthy — aborting before runtime wiring."
+    say info "waiting for base-host bootstrap (apt + codegraph bin + gateway build, ~3-8 min) ..."
+    # Hard-fail: never attach a project to an unconfirmed base host. Re-run after fixing.
+    "$SCRIPT_DIR/lib/wait_base_host.sh" "$REGION" "$INDEX_SERVICE_INSTANCE" || {
+      say err "index base host never finished bootstrap — aborting before attaching projects."
       say err "  inspect: aws ssm start-session --target $INDEX_SERVICE_INSTANCE ; tail /var/log/index-svc-bootstrap.log"
       # FAILED BLUE-GREEN REFRESH cleanup (cross-review P1): when this is a --refresh-index
       # run, INDEX_OLD_INSTANCE holds the still-HEALTHY old host (DNS still points at it),
@@ -633,165 +551,70 @@ else
 fi
 
 # ============================================================
-# Phase 5: AgentCore runtime (VPC + CodeGraph MCP)
+# Phase 5: per-project deploy (bridge attach + runtime + gateway), looped over .local/projects.json
 # ============================================================
-if skip runtime; then say warn "skip runtime"; elif [[ "$DRY_RUN" == true ]]; then
-  say step "Phase 5: AgentCore runtime"
-  say info "[dry-run] deploy_runtime.py (VPC + CODEGRAPH_MCP_URL → index-service; no EFS mount)"
-else
-  say step "Phase 5: AgentCore runtime"
-  # Use the image built+pushed in Phase 4b (persisted to config); fall back to
-  # the computed URI if the image phase was skipped.
-  ECR_URI="${ECR_IMAGE:-${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com/source-truth/agent:latest}"
-  # Guard required cross-phase state with actionable messages (consistent with
-  # RUNTIME_SG below) rather than a bare set -u "unbound variable".
-  ROLE_ARN="${AGENT_RUNTIME_ROLE:-arn:aws:iam::${ACCOUNT}:role/SourceTruthAgentRuntimeRole}"
-  SUBNET="${PRIVATE_SUBNET:?PRIVATE_SUBNET not set — run the network phase first}"
-  IDX_IP="${INDEX_SERVICE_IP:?INDEX_SERVICE_IP not set — run the index-svc phase first}"
-  # Use the STABLE DNS name (set by provision_index_dns.sh) so the runtime env is
-  # invariant across index-instance replacement — warm microVMs never end up on a
-  # dead IP. Fall back to the raw IP only if DNS wasn't provisioned (e.g. an old
-  # config), so a partial/legacy state still deploys.
-  IDX_ENDPOINT="${INDEX_DNS_NAME:-$IDX_IP}"
-  CODEGRAPH_URL="http://${IDX_ENDPOINT}:8080/mcp"
-  # Runtime joins the VPC with the index-service SG: it has default egress-all
-  # (reaches the bridge on :8080), and the index SG accepts inbound from the VPC
-  # CIDR — which covers this SG's members. No EFS: the agent reads all code over
-  # that HTTP bridge, so the microVM mounts no filesystem.
-  RUNTIME_SG="${INDEX_SERVICE_SG:?INDEX_SERVICE_SG not set — run the index-svc phase first}"
-  if [[ "$DRY_RUN" == true ]]; then
-    say info "[dry-run] deploy_runtime.py → AgentCore runtime (model=$MODEL, sg=$RUNTIME_SG, CODEGRAPH_MCP_URL=${CODEGRAPH_URL}, idle=${IDLE_TIMEOUT}s, maxlife=${MAX_LIFETIME}s)"
-  else
-    # Capture stdout (deploy_runtime.py prints AGENT_RUNTIME_ID/ARN to stdout, all
-    # status to stderr) so we can PERSIST the ARN. Without this the runtime deploys
-    # but the gateway (which hard-requires RUNTIME_ARN, src/index.ts) has no
-    # automated way to find it — breaking the one-click end-to-end goal.
-    RT_OUT="$(python3 "$SCRIPT_DIR/lib/deploy_runtime.py" \
-      --region "$REGION" --account "$ACCOUNT" \
-      --role-arn "$ROLE_ARN" --image "$ECR_URI" --model "$MODEL" \
-      --subnets "$SUBNET" --security-groups "$RUNTIME_SG" \
-      --codegraph-mcp-url "$CODEGRAPH_URL" \
-      --idle-timeout "$IDLE_TIMEOUT" --max-lifetime "$MAX_LIFETIME")"
-    RT_ARN="$(printf '%s\n' "$RT_OUT" | sed -n 's/^AGENT_RUNTIME_ARN=//p')"
-    RT_ID="$(printf '%s\n' "$RT_OUT" | sed -n 's/^AGENT_RUNTIME_ID=//p')"
-    if [[ -z "$RT_ARN" ]]; then
-      say err "deploy_runtime.py produced no AGENT_RUNTIME_ARN — cannot wire the gateway"
-      printf '%s\n' "$RT_OUT"
-      exit 1
-    fi
-    update_env "$CONFIG_FILE" AGENT_RUNTIME_ARN "$RT_ARN"
-    update_env "$CONFIG_FILE" RUNTIME_ARN "$RT_ARN"  # the name bot-gateway reads
-    [[ -n "$RT_ID" ]] && update_env "$CONFIG_FILE" AGENT_RUNTIME_ID "$RT_ID"
-    # Persist the lifecycle knobs: read back on a flagless rerun (so an in-place
-    # update doesn't revert them), AND consumed by the gateway phase so the gateway's
-    # session-reuse TTL is aligned to the runtime's actual idle window.
-    update_env "$CONFIG_FILE" DEPLOY_IDLE_TIMEOUT "$IDLE_TIMEOUT"
-    update_env "$CONFIG_FILE" DEPLOY_MAX_LIFETIME "$MAX_LIFETIME"
-    say ok "runtime deployed → RUNTIME_ARN persisted to ${CONFIG_FILE} (VPC sg=$RUNTIME_SG, idle=${IDLE_TIMEOUT}s, maxlife=${MAX_LIFETIME}s, CODEGRAPH_MCP_URL → ${CODEGRAPH_URL})"
-  fi
-fi
-
-# ============================================================
-# Phase 6: activate bot-gateway (co-located on the index host)
-# ============================================================
-# The gateway was BUILT + INSTALLED by bootstrap.sh but left stopped (it needs the
-# now-existing RUNTIME_ARN). Here we write /etc/bot-gateway.env + start the service
-# via SSM. Requires a Feishu secret id (FEISHU_SECRET_ID): install.sh creates the
-# secret and persists the id; a backend-only run without it SKIPS activation and
-# prints how to finish. The credentials themselves stay in Secrets Manager — only
-# the secret id is written to the host (run.sh fetches the creds at start).
-GW_RUNTIME_ARN="${RUNTIME_ARN:-${AGENT_RUNTIME_ARN:-}}"
-GW_INSTANCE="${INDEX_SERVICE_INSTANCE:-}"
-# Backfill FEISHU_SECRET_ID when it isn't in the env/config: a direct `deploy-all.sh`
-# rerun (not via install.sh, which is the only thing that persists it) would otherwise
-# skip gateway activation. If the conventional secret (created by install.sh) exists,
-# adopt it so a plain rerun still (re)activates the gateway — critical after a
-# --refresh-index swapped the index host, since the OLD gateway was just terminated
-# and the NEW one only comes up here (cross-review HIGH).
-if [[ -z "${FEISHU_SECRET_ID:-}" && "$DRY_RUN" != true ]]; then
-  if aws secretsmanager describe-secret --secret-id "source-truth/feishu-app" --region "$REGION" >/dev/null 2>&1; then
-    FEISHU_SECRET_ID="source-truth/feishu-app"
-    update_env "$CONFIG_FILE" FEISHU_SECRET_ID "$FEISHU_SECRET_ID"
-    say info "adopted existing Feishu secret source-truth/feishu-app (FEISHU_SECRET_ID backfilled)"
-  fi
-fi
-# Did this run swap the index host? If so the old gateway was terminated in Phase 3,
-# so NOT activating the new one now leaves the bot offline — escalate that case.
-GW_SWAPPED=false
-[[ -n "${INDEX_OLD_INSTANCE:-}" ]] && GW_SWAPPED=true
-if skip gateway; then
-  say warn "skip gateway"
-  [[ "$GW_SWAPPED" == true ]] && say err "WARNING: index host was just replaced AND gateway activation was skipped — the bot is now OFFLINE. Re-run without --skip gateway."
+# The shared base (network/IAM/EC2/image) is up. Each project is now deployed by deploy_project.sh:
+# it ships the project's manifest to the host + runs activate_project.sh (git-clone its repos, build
+# graphs, start its bridge on its port), deploys a per-project AgentCore runtime pointed at that
+# bridge port, and activates a per-project gateway (its own Feishu app). Idempotent + isolated:
+# one project's failure doesn't abort the others.
+PROJECTS_CFG="$ROOT/.local/projects.json"
+PROJECTS_DEPLOYED=false   # set true once ≥1 project's gateway is active (gates monitoring + footer)
+if [[ "$SKIP_PROJECTS" == true ]]; then
+  say step "Phase 5: per-project deploy"
+  say info "--skip-projects: shared BASE host is provisioned; attaching NO project (init-env)."
+  say info "  → run ./scripts/install.sh → 'add a project' to bring a bot online."
+elif skip runtime && skip gateway; then
+  say warn "skip per-project phase (runtime+gateway skipped)"
 elif [[ "$DRY_RUN" == true ]]; then
-  say step "Phase 6: activate bot-gateway"
-  say info "[dry-run] write /etc/bot-gateway.env (RUNTIME_ARN, FEISHU_SECRET_ID, LOCALE) + start bot-gateway.service via SSM"
-elif [[ -z "${FEISHU_SECRET_ID:-}" ]]; then
-  say step "Phase 6: activate bot-gateway"
-  if [[ "$GW_SWAPPED" == true ]]; then
-    say err "index host was REPLACED this run but no FEISHU_SECRET_ID is configured — the new host's gateway is NOT started, so the bot is now OFFLINE."
-    say err "  → Run ./scripts/install.sh, or set FEISHU_SECRET_ID and re-run, to bring the gateway back."
+  say step "Phase 5: per-project deploy"
+  if [[ -f "$PROJECTS_CFG" ]]; then
+    _pids="$(python3 -c 'import json,sys; print(" ".join(json.load(open(sys.argv[1]))["projects"]))' "$PROJECTS_CFG" 2>/dev/null || echo "")"
+    say info "[dry-run] for each project [${_pids}]: activate_project.sh (clone+build+bridge) + deploy_runtime.py + activate_gateway.sh"
   else
-    say warn "no FEISHU_SECRET_ID configured — skipping gateway activation (backend-only deploy)."
-    say warn "  → Run ./scripts/install.sh (interactive) to create the Feishu secret + activate the gateway,"
-    say warn "    or set FEISHU_SECRET_ID (a Secrets Manager secret holding {app_id,app_secret,bot_open_id}) and re-run."
+    say info "[dry-run] no .local/projects.json — base host only; add a project via ./scripts/install.sh"
   fi
+elif [[ ! -f "$PROJECTS_CFG" ]]; then
+  say step "Phase 5: per-project deploy"
+  say warn "no .local/projects.json — shared base is up, but NO project deployed yet."
+  say warn "  → run ./scripts/install.sh → 'add a project' (creates the Feishu/git secrets + the"
+  say warn "    projects.json entry), or copy config/projects.example.json to .local/projects.json."
 else
-  say step "Phase 6: activate bot-gateway"
-  # LOG_HASH_SALT machine-enforcement (telemetry plan 阶段0 gate 3/3): hashUserId de-
-  # identification (esp. for long-retained telemetry) is only sound if the salt is a SECRET —
-  # log.ts falls back to a PUBLIC repo constant when unset, rainbow-tableable against a known-
-  # format Feishu open_id. We ENSURE the secret source-truth/log-hash-salt EXISTS here (auto-
-  # create a random one on first deploy, so a fresh account is secured with no manual step),
-  # but the gateway's run.sh fetches the VALUE host-side from Secrets Manager at start — the
-  # salt is therefore NEVER passed through activate_gateway's SSM RunShellScript command body
-  # (which CloudTrail/SSM history records; base64 there is not secrecy). create-secret only on
-  # NOT-FOUND — never blind put-secret-value, so an existing salt is NEVER rotated (a rotation
-  # would break DAU/retention correlation) and a real perms/deletion error surfaces instead of
-  # being masked. Best-effort: if the deploy identity can't create it, run.sh still tries to
-  # read it (and warns + stamps saltWeak if absent) — the gateway never fails to start on this.
-  if ! aws secretsmanager describe-secret --region "$REGION" --secret-id source-truth/log-hash-salt >/dev/null 2>&1; then
+  say step "Phase 5: per-project deploy"
+  # LOG_HASH_SALT (host-shared, project-agnostic): ensure the secret EXISTS before any gateway
+  # starts — hashUserId de-identification is only sound if the salt is SECRET (log.ts falls back
+  # to a PUBLIC repo constant when unset). run.sh fetches the VALUE host-side, so it never crosses
+  # an SSM command body. create-secret only on NOT-FOUND (never rotate an existing salt — that
+  # would break DAU/retention correlation). Best-effort: if the deploy identity can't create it,
+  # run.sh still tries to read it (and stamps saltWeak if absent).
+  if [[ "$DRY_RUN" != true ]] && ! aws secretsmanager describe-secret --region "$REGION" --secret-id source-truth/log-hash-salt >/dev/null 2>&1; then
     GW_SALT="$(openssl rand -hex 32 2>/dev/null || head -c32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
     if err="$(aws secretsmanager create-secret --region "$REGION" --name source-truth/log-hash-salt \
          --secret-string "$GW_SALT" --description 'source-truth gateway LOG_HASH_SALT (telemetry de-identification)' 2>&1)"; then
       say ok "created a random LOG_HASH_SALT in Secrets Manager (source-truth/log-hash-salt)"
     else
-      say warn "could not create source-truth/log-hash-salt (${err%%$'\n'*}); the gateway will run with the weak public fallback (telemetry stamps saltWeak)."
-      say warn "  → grant the deploy identity secretsmanager:CreateSecret on source-truth/*, or create the secret manually, then re-run."
+      say warn "could not create source-truth/log-hash-salt (${err%%$'\n'*}); gateways run with the weak public fallback (telemetry stamps saltWeak)."
     fi
-    unset GW_SALT  # never keep the value around — run.sh fetches it host-side
+    unset GW_SALT
   fi
-  # PROJECT ROUTING (multi-repo 阶段1): if .local/projects.json exists, activate_gateway.sh
-  # ships it to the host + sets PROJECTS_CONFIG_PATH so metrics carry a projectId dimension.
-  # Absent = the gateway runs fine WITHOUT a projectId (soft path) — fine for a single-project
-  # deploy. But a multi-project operator who forgot it gets no on-screen hint otherwise, so
-  # say it explicitly here (the gateway only logs it host-side).
-  if [[ ! -f "$SCRIPT_DIR/../.local/projects.json" ]]; then
-    say info "no .local/projects.json — gateway runs single-project (no projectId metric dimension)."
-    say info "  → for multi-project routing: cp config/projects.example.json .local/projects.json, edit it, re-run."
-  else
-    # DRIFT GUARD: projects.json's `repos` is the repo set the gateway TELLS the agent to query,
-    # and the index serves /data/repo/$REPO_SUBDIR. If projects.json doesn't list the deployed
-    # REPO_SUBDIR, the agent queries a repo the bridge's scope gate rejects → 0 tools, 0 evidence,
-    # a degraded "no answer" (exactly the code-5x-vs-daggerfall-unity drift that bit a live deploy).
-    # Warn loud (not fatal: multi-project configs legitimately list OTHER projects' repos too, and
-    # this gateway may serve a different PROJECT_ID — but the deployed subdir SHOULD appear somewhere).
-    if ! python3 -c '
-import json, sys
-cfg = json.load(open(sys.argv[1])); subdir = sys.argv[2]
-repos = {r for p in cfg.get("projects", {}).values() for r in p.get("repos", [])}
-sys.exit(0 if subdir in repos else 1)
-' "$SCRIPT_DIR/../.local/projects.json" "$REPO_SUBDIR" 2>/dev/null; then
-      say warn "DRIFT: .local/projects.json does NOT list the deployed repo subdir '$REPO_SUBDIR'."
-      say warn "  The gateway will route the agent to the configured repo(s), NOT '$REPO_SUBDIR' →"
-      say warn "  the bridge's scope gate rejects the query → answers come back with no evidence."
-      say warn "  → edit .local/projects.json so the serving project's repos include '$REPO_SUBDIR'."
+  # Loop every declared project. deploy_project.sh is idempotent; collect failures but keep going
+  # (one project's broken git/Feishu must not block the others), then report at the end.
+  mapfile -t _PIDS < <(python3 -c 'import json,sys; print("\n".join(json.load(open(sys.argv[1]))["projects"]))' "$PROJECTS_CFG")
+  _failed=()
+  for _pid in "${_PIDS[@]}"; do
+    [[ -n "$_pid" ]] || continue
+    if ! bash "$SCRIPT_DIR/lib/deploy_project.sh" "$REGION" "$_pid"; then
+      say warn "project '$_pid' deploy failed — continuing with the rest; re-run after fixing"
+      _failed+=("$_pid")
     fi
+  done
+  if [[ ${#_failed[@]} -gt 0 ]]; then
+    say err "per-project deploy: ${#_failed[@]} project(s) failed: ${_failed[*]}"
+    say err "  the others are up; fix the cause and re-run ./scripts/deploy-all.sh (idempotent)"
+    exit 1
   fi
-  bash "$SCRIPT_DIR/lib/activate_gateway.sh" \
-    "$REGION" "$GW_INSTANCE" "$GW_RUNTIME_ARN" "$FEISHU_SECRET_ID" \
-    "${LOCALE:-zh}" "" "${FEISHU_API_BASE:-}" "$IDLE_TIMEOUT" "$BUCKET" \
-    || { say err "gateway activation failed — backend is up; fix and re-run (or --skip gateway)"; exit 1; }
-  say ok "bot-gateway activated on $GW_INSTANCE (salt fetched host-side by run.sh from Secrets Manager)"
+  say ok "all ${#_PIDS[@]} project(s) deployed (bridge + runtime + gateway each)"
+  PROJECTS_DEPLOYED=true
 fi
 
 # ============================================================
@@ -817,10 +640,10 @@ if skip monitoring; then
 elif [[ "$DRY_RUN" == true ]]; then
   say step "Phase 7: monitoring"
   say info "[dry-run] apply metric-filters + dashboards + alarms + DAU lambda (CloudWatch, best-effort)"
-elif [[ -z "${FEISHU_SECRET_ID:-}" ]]; then
-  # Gateway wasn't activated this run → /source-truth/bot-gateway likely doesn't exist yet.
+elif [[ "$PROJECTS_DEPLOYED" != true ]]; then
+  # No gateway activated this run → /source-truth/bot-gateway likely doesn't exist yet.
   # Dashboards/alarms would build on an empty/absent group; defer to a post-gateway re-run.
-  say warn "skip monitoring (gateway not active yet — run monitoring after the gateway logs once; see runbook)"
+  say warn "skip monitoring (no gateway active yet — add a project, then monitoring applies on re-run; see runbook)"
 else
   say step "Phase 7: monitoring (best-effort)"
   # Dashboards first (put regardless of data); then a-class metric-filters; then alarms
@@ -845,9 +668,9 @@ fi
 
 say ok "deploy-all complete"
 
-if [[ "$DRY_RUN" != true && -z "${FEISHU_SECRET_ID:-}" ]]; then
-  say warn "NEXT STEPS — backend READY, but the bot-gateway is NOT yet active:"
-  say warn "  • Run ./scripts/install.sh to create the Feishu secret in Secrets Manager and activate the gateway,"
-  say warn "  • or create the secret yourself and re-run with FEISHU_SECRET_ID set."
-  say warn "  • Until then, 策划 @机器人 → answer will NOT work even though every AWS resource is healthy."
+if [[ "$DRY_RUN" != true && "$PROJECTS_DEPLOYED" != true ]]; then
+  say warn "NEXT STEPS — shared base READY, but NO project/bot is active yet:"
+  say warn "  • Run ./scripts/install.sh → 'add a project' to create its Feishu + git secrets and"
+  say warn "    its projects.json entry, then it deploys that project's bridge + runtime + gateway."
+  say warn "  • Until then, 策划 @机器人 → answer will NOT work even though the base host is healthy."
 fi
