@@ -543,7 +543,12 @@ def build_bridge(
             """Read a source/config file's contents by its path (the path codegraph/search
             returns, e.g. `Assets/Scripts/Foo.cs` or `<repo>/Assets/Scripts/Foo.cs` —
             pass it back verbatim). Optional `offset` (0-based line) + `limit` page large
-            files. Use this instead of a shell `cat` or builtin Read."""
+            files; `offset` can point ANYWHERE in the file (not just the first ~256 KiB).
+            The result includes `total_lines` and, when `truncated` is true, `next_offset` —
+            call again with `offset=next_offset` to read the next contiguous window (repeat
+            until `truncated` is false). Prefer this for reading a long contiguous run (e.g. a
+            whole config/data table) rather than many narrow searches. Use this instead of a
+            shell `cat` or builtin Read."""
             try:
                 t = _repo_for_path(path, None)
             except RepoOutOfScope as exc:

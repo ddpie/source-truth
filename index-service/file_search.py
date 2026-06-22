@@ -32,6 +32,12 @@ logger = logging.getLogger("file-search")
 # Hard cap so a pathological pattern can't return megabytes or run unbounded.
 MAX_MATCHES = 200
 SEARCH_TIMEOUT_S = 20
+# Per-file hit ceiling (rg --max-count). Was 5, which silently dropped the 6th+ hit
+# in a SINGLE file — e.g. a config/data TABLE where one file legitimately holds dozens
+# of relevant rows (race-class tuples, loot rows). The agent saw exactly 5, assumed the
+# rest didn't exist, and fell back to many narrow re-searches to recover them. 50 covers
+# the dense-data-table case while the global MAX_MATCHES still bounds total output.
+MAX_PER_FILE = 50
 # Cap on FOLDED-DUPLICATE rows processed, independent of max_matches: heavy
 # duplication makes almost every row a fold (which never counts toward
 # max_matches), so without this the post-processing loop would iterate the entire
@@ -65,7 +71,7 @@ def build_command(pattern: str, root: str, *, glob: str | None, max_matches: int
             "--hidden",                    # include dotfiles/dirs (config, .env-like tables)
             "--glob", "!.git/",            # …but never the VCS metadata dir
             "--glob", "!node_modules/",    # nor vendored deps (huge, not the project's code)
-            "--max-count", "5",            # at most 5 hits per file (enough to locate)
+            "--max-count", str(MAX_PER_FILE),  # per-file hit ceiling (dense data tables need >5)
             "--max-filesize", "2M",        # skip huge generated blobs
             "-e", pattern,
         ]

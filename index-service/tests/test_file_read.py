@@ -142,6 +142,70 @@ def test_read_to_json_is_valid_json(repo):
     assert json.loads(s)["lines"] == 3
 
 
+def test_read_file_offset_past_256kib_is_reachable(tmp_path):
+    # CORE REGRESSION: the old code read only the first MAX_READ_BYTES (256 KiB) from
+    # byte 0 and THEN paged by offset, so any line whose byte position was beyond 256 KiB
+    # was UNREACHABLE — read returned empty with no signal (the bug that made the agent
+    # fall back to dozens of narrow searches over a data table at line ~7700 / byte ~296 KiB).
+    root = tmp_path / "repo"
+    (root / "sql").mkdir(parents=True)
+    # ~10k lines, ~40 bytes each, so the marker line (7699) sits well past the 256 KiB mark.
+    filler = ["(0,0,0,12,-8949,-132,84)" + "x" * 16] * 10000
+    filler[7699] = "MARKER_RACE_CLASS_ROW"
+    (root / "sql" / "big.sql").write_text("\n".join(filler) + "\n")
+    # Sanity: that line really is past the OLD 256 KiB read window.
+    assert len("\n".join(filler[:7699]).encode()) > 256 * 1024
+    out = file_read.read_file("sql/big.sql", local_root=str(root), mount_root="", offset=7699, limit=1)
+    assert out["content"] == "MARKER_RACE_CLASS_ROW"  # now reachable
+    assert out["start_line"] == 7699
+
+
+def test_read_file_truncation_gives_next_offset_and_total(repo):
+    # A truncated read must hand back next_offset (where to resume) + total_lines, so a
+    # cut is actionable ("call again with offset=next_offset") instead of a silent stop.
+    out = file_read.read_file("src/A.cs", local_root=str(repo), mount_root=MOUNT, offset=0, limit=2)
+    assert out["truncated"] is True
+    assert out["total_lines"] == 3
+    assert out["next_offset"] == 2
+    # Resuming at next_offset reads the remainder and is no longer truncated.
+    rest = file_read.read_file("src/A.cs", local_root=str(repo), mount_root=MOUNT, offset=out["next_offset"])
+    assert rest["content"] == "line3"
+    assert rest["truncated"] is False
+    assert "next_offset" not in rest  # nothing left to page
+
+
+def test_read_file_full_read_has_no_next_offset(repo):
+    out = file_read.read_file("src/A.cs", local_root=str(repo), mount_root=MOUNT)
+    assert out["truncated"] is False
+    assert out["total_lines"] == 3
+    assert "next_offset" not in out
+
+
+def test_read_file_offset_past_eof_returns_empty_not_error(repo):
+    # An offset beyond EOF is clamped to a clean empty window anchored at EOF — never a
+    # crash or negative slice, and not truncated (nothing follows).
+    out = file_read.read_file("src/A.cs", local_root=str(repo), mount_root=MOUNT, offset=999)
+    assert out["content"] == ""
+    assert out["lines"] == 0
+    assert out["total_lines"] == 3
+    assert out["truncated"] is False
+    assert "next_offset" not in out
+
+
+def test_read_file_output_bytecap_drops_whole_trailing_lines(tmp_path, monkeypatch):
+    # The OUTPUT byte cap must drop WHOLE trailing lines (never a half-line) and report
+    # next_offset so the agent can continue — distinct from the disk-read ceiling.
+    monkeypatch.setattr(file_read, "MAX_READ_BYTES", 12)
+    root = tmp_path / "repo"
+    (root / "s").mkdir(parents=True)
+    (root / "s" / "x.txt").write_text("aaaa\nbbbb\ncccc\ndddd\n")  # 4 lines, 5 bytes each w/ \n
+    out = file_read.read_file("s/x.txt", local_root=str(root), mount_root="")
+    assert out["truncated"] is True
+    assert out["content"] in ("aaaa", "aaaa\nbbbb")   # whole lines only, within 12 bytes
+    assert "\n".join(out["content"].splitlines())  # no dangling partial line
+    assert out["next_offset"] == out["lines"]         # resume cursor = lines returned
+
+
 # --- glob_files ------------------------------------------------------------
 def test_glob_files_recursive(repo):
     out = file_read.glob_files("**/*.cs", local_root=str(repo), mount_root=MOUNT)
