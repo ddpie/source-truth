@@ -28,11 +28,26 @@ from text_decode import decode_bytes
 
 logger = logging.getLogger("file-read")
 
-# Caps so one read can't return megabytes (would blow the agent's context / the
-# card) or run unbounded. A source file far over this is almost certainly a
-# generated/minified blob the agent shouldn't be slurping whole anyway.
-MAX_READ_BYTES = 256 * 1024          # 256 KiB hard ceiling on a single read
-MAX_READ_LINES = 4000                # …and a line ceiling (whichever hits first)
+# Two SEPARATE budgets — the distinction matters (see the bug they fix below):
+#
+#   MAX_FILE_BYTES  bounds how much we READ from disk (an OOM guard against a
+#                   pathological multi-GB blob). It does NOT gate reachability:
+#                   `offset` can land anywhere within this window.
+#   MAX_READ_BYTES  bounds the size of the RETURNED slice (context guard).
+#   MAX_READ_LINES  bounds the number of lines in the returned slice.
+#
+# REGRESSION THIS FIXES: the old code did `fh.read(MAX_READ_BYTES+1)` from byte 0
+# and THEN paged by line offset. So a file larger than 256 KiB could only ever be
+# read up to its first 256 KiB — an `offset` pointing past that (e.g. a data table
+# at line 7699 / byte 296 023 of a 508 KiB sql dump) silently returned EMPTY, with
+# no signal. The agent couldn't tell "no such lines" from "cut off before here",
+# so it fell back to dozens of narrow searches. Now we read up to MAX_FILE_BYTES
+# (so any line within a normal file is reachable) and apply the size/line caps to
+# the OUTPUT window only — and we surface total_lines + next_offset so a genuinely
+# truncated read tells the agent exactly how to continue.
+MAX_FILE_BYTES = 16 * 1024 * 1024    # 16 MiB read ceiling (OOM guard; reachability, not output)
+MAX_READ_BYTES = 256 * 1024          # 256 KiB ceiling on the RETURNED slice (context guard)
+MAX_READ_LINES = 4000                # …and a line ceiling on the returned slice (whichever hits first)
 MAX_GLOB_RESULTS = 1000              # cap glob fan-out
 
 
@@ -94,24 +109,25 @@ def read_file(
     if not os.path.isfile(local_path):
         raise ValueError(f"not a readable file: {requested!r}")
 
-    # Read defensively: cap bytes first (so a giant minified file can't OOM the
-    # service), then split into lines and page. decode_bytes detects BOM / UTF-8 /
-    # GB18030 (the common Chinese-game-repo legacy encoding) before any lossy fallback,
-    # so a GBK source is read FAITHFULLY rather than as mojibake (cross-review HIGH —
-    # the prior hardcoded utf-8+replace silently corrupted Chinese names/comments/config).
+    # Read up to the OOM-guard ceiling (NOT the output cap) so any line within a normal
+    # file is reachable by offset — the read window must not silently truncate the file
+    # before the requested offset (the regression documented at MAX_FILE_BYTES). decode_bytes
+    # detects BOM / UTF-8 / GB18030 (the common Chinese-game-repo legacy encoding) before any
+    # lossy fallback, so a GBK source is read FAITHFULLY rather than as mojibake (cross-review
+    # HIGH — the prior hardcoded utf-8+replace silently corrupted Chinese names/comments/config).
     raw = b""
     with open(local_path, "rb") as fh:
-        raw = fh.read(MAX_READ_BYTES + 1)
-    byte_truncated = len(raw) > MAX_READ_BYTES
-    if byte_truncated:
-        raw = raw[:MAX_READ_BYTES]
+        raw = fh.read(MAX_FILE_BYTES + 1)
+    file_byte_truncated = len(raw) > MAX_FILE_BYTES
+    if file_byte_truncated:
+        raw = raw[:MAX_FILE_BYTES]
         # A byte cap can slice mid-multibyte-char. If we hand that dangling partial char
         # to decode_bytes, strict-UTF-8 would FAIL on the trailing 1-2 bytes and the whole
         # (otherwise-valid-UTF-8) buffer would fall through to GB18030 and be mis-decoded
         # as Chinese (cross-review P1). Drop up to 3 trailing bytes that look like an
         # incomplete UTF-8 continuation so the cut lands on a char boundary — then strict
         # UTF-8 succeeds on the clean prefix. (≤3 dropped bytes is invisible next to a
-        # 256 KiB truncation the flag already signals.)
+        # 16 MiB truncation the flag already signals.)
         raw = _trim_partial_utf8_tail(raw)
     text, encoding = decode_bytes(raw)
 
@@ -129,16 +145,35 @@ def read_file(
     # \r in their match text, so this keeps read_file's content consistent with search's
     # (cross-review P2). Only the line-ending \r is removed — an intra-line \r is untouched.
     all_lines = [ln[:-1] if ln.endswith("\r") else ln for ln in all_lines]
-    start = max(0, offset)
+    total_lines = len(all_lines)
+    # Clamp start INTO the file: an offset past EOF returns an empty (but honest) window
+    # anchored at EOF, never a negative slice. (offset beyond total_lines → start=total_lines.)
+    start = min(max(0, offset), total_lines)
     # A non-positive limit means "no caller line cap" (treat like None) — NOT "read
     # zero lines". The old min(..., start + max(0, limit)) made limit<=0 collapse
     # end→start: it returned an empty slice AND truncated=True on any non-empty file,
     # so the agent thought the file was cut off and needlessly paged (cross-review).
-    end = len(all_lines) if (limit is None or limit <= 0) else min(len(all_lines), start + limit)
+    end = total_lines if (limit is None or limit <= 0) else min(total_lines, start + limit)
     # Independent line ceiling on top of any caller limit.
     end = min(end, start + MAX_READ_LINES)
     sliced = all_lines[start:end]
-    line_truncated = end < len(all_lines)
+
+    # Enforce the OUTPUT byte cap on the returned slice (context guard) by dropping whole
+    # trailing lines until the joined content fits — never return a half-line, and keep the
+    # reported line count honest. Independent of the disk-read ceiling above.
+    char_byte_truncated = False
+    while sliced and len("\n".join(sliced).encode("utf-8")) > MAX_READ_BYTES:
+        sliced.pop()
+        end -= 1
+        char_byte_truncated = True
+
+    # `truncated` = the returned window does NOT reach EOF (more lines follow), for ANY
+    # reason: caller limit, line ceiling, output-byte cap, or the disk-read ceiling. When
+    # true, next_offset tells the agent exactly where to resume — turning a silent cut into
+    # an actionable "call again with this offset" (the signal whose absence drove the agent
+    # to fall back to dozens of narrow searches).
+    line_truncated = end < total_lines
+    truncated = line_truncated or file_byte_truncated or char_byte_truncated
 
     # Align the RETURNED path against the realpath'd root: to_local_path already
     # realpath'd local_path (symlinks followed), so re-rooting it against a raw
@@ -149,15 +184,26 @@ def read_file(
         local_path, index_root=os.path.realpath(local_root), mount_root=mount_root, repo=repo)
     elapsed_ms = (perf_counter() - t0) * 1000
     logger.info(perf_entry("file_read", elapsed_ms, path=mount_path[:120],
-                           lines=len(sliced), truncated=byte_truncated or line_truncated,
+                           lines=len(sliced), start=start, total=total_lines,
+                           truncated=truncated, file_capped=file_byte_truncated,
                            encoding=encoding))
     result: dict[str, Any] = {
         "path": mount_path,
         "content": "\n".join(sliced),
         "lines": len(sliced),
         "start_line": start,
-        "truncated": byte_truncated or line_truncated,
+        # total_lines reachable in this file (within the 16 MiB read ceiling) so the agent
+        # can size its paging instead of guessing whether more remains.
+        "total_lines": total_lines,
+        "truncated": truncated,
     }
+    # When truncated, hand the agent the EXACT next offset to resume from — a contiguous,
+    # 0-based line cursor. Its absence is what turned "the table continues below" into a
+    # guessing game last time. Only set when there's genuinely more AHEAD in this window's
+    # direction (end < total_lines); a file-byte-capped read that still ends at EOF won't
+    # set it (nothing reachable beyond the 16 MiB ceiling to point at).
+    if end < total_lines:
+        result["next_offset"] = end
     # Surface a NON-UTF-8 decode so the agent knows the source was legacy-encoded (a
     # GB18030 hit confirms a GBK/GB2312 Chinese file decoded faithfully; utf-8-replace
     # warns the content may be partly garbled and shouldn't be over-trusted).
