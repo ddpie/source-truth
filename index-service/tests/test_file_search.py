@@ -244,6 +244,26 @@ def test_build_command_does_not_skip_gitignored_or_hidden():
         assert "--hidden" in cmd, "rg must include dotfiles"
 
 
+def test_build_command_per_file_cap_allows_dense_tables():
+    # REGRESSION: --max-count was 5, which silently dropped the 6th+ hit in ONE file
+    # (e.g. a config/data table holding many relevant rows). It must now be >5 so a
+    # dense single-file table isn't truncated mid-data.
+    cmd = file_search.build_command("foo", "/data/repo/x", glob=None, max_matches=200)
+    if cmd[0] == "rg":
+        i = cmd.index("--max-count")
+        assert int(cmd[i + 1]) == file_search.MAX_PER_FILE
+        assert file_search.MAX_PER_FILE >= 50
+
+
+def test_search_returns_many_hits_in_one_file(tmp_path):
+    # A single file with 30 matching rows (like a race-class table) must return all of
+    # them (capped only by MAX_PER_FILE=50), not the old 5.
+    rows = "\n".join(f"(1,{c},0,12,-8949,-132,84)," for c in range(30))
+    (tmp_path / "data.sql").write_text("INSERT INTO playercreateinfo VALUES\n" + rows + "\n")
+    out = file_search.run_search(r"^\(1,", local_root=str(tmp_path), mount_root="")
+    assert out["count"] == 30, out["count"]  # all rows, not truncated to 5
+
+
 def test_build_command_scopes_to_root_and_glob():
     cmd = file_search.build_command("foo", "/data/repo/x", glob="*.cs", max_matches=50)
     assert cmd[0] in ("rg", "grep")
