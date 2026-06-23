@@ -32,7 +32,12 @@ import glossary
 
 # cc model/env on the index host (Bedrock). Kept here so the build path is explicit.
 CC_BIN = "claude"
-DEFAULT_TIMEOUT_S = 1200  # a full scan of a big repo can be slow; incremental is fast
+DEFAULT_TIMEOUT_S = 1200  # one cc batch; a full scan loops MANY batches under this per-batch limit
+# Files per cc invocation. The whole file list goes into the `claude -p "<prompt>"` ARGV, so a
+# large set (e.g. a tens-of-thousands-of-file full build) blows the OS arg limit (Errno 7 "Argument list too
+# long"). build() chunks `files` into batches of this size, one cc call each, and concatenates the
+# outputs — keeping every argv well under the limit and bounding each call's runtime/cost.
+CC_BATCH_FILES = 300
 
 # LOCKDOWN for the build-time engine. Unlike the microVM answering agent (which mounts no
 # filesystem and runs with tools=[]), the build engine HAS the repo on disk and legitimately
@@ -249,10 +254,24 @@ def build(files: list[str] | None, *, project: str, cwd: str, model: str, region
     Passes a source ``reader`` confined to ``cwd`` to extract_entries, so every Chinese alias
     is grounding-checked against the real file (drops cc's invented translations)."""
     import os
-    prompt = build_prompt(files, project=project)
     run = runner if runner is not None else run_cc
-    raw = run(prompt, cwd=cwd, model=model, region=region, timeout=timeout)
     root = os.path.realpath(cwd)
+
+    # Run cc in batches: the file list rides in the ARGV of `claude -p`, so passing thousands of
+    # paths at once overflows the OS arg limit. A full scan (files is the whole candidate set) thus
+    # loops many cc calls; a small incremental set is a single batch. files is None => full-repo
+    # prompt with no list (a single call, no arg-limit risk).
+    if files is None:
+        batches: list[list[str] | None] = [None]
+    else:
+        batches = [files[i:i + CC_BATCH_FILES] for i in range(0, len(files), CC_BATCH_FILES)] or [[]]
+    raw_parts: list[str] = []
+    for batch in batches:
+        if batch == []:
+            continue
+        prompt = build_prompt(batch, project=project)
+        raw_parts.append(run(prompt, cwd=cwd, model=model, region=region, timeout=timeout))
+    raw = "\n".join(raw_parts)
 
     repo_base = os.path.basename(root)
 
