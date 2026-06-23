@@ -24,6 +24,11 @@ index-service/          常驻 CodeGraph 索引服务 + MCP-over-HTTP 接口
   file_search.py        本地副本 ripgrep/grep 检索工具（在本地副本上检索，禁用内置 Grep，改走本地副本；命中按内容去重；MCP 暴露）
   file_read.py          本地副本按行 / 按位置读取文件的工具（read_file，路径对齐为仓库相对；MCP 暴露）
   file_table.py         结构化配置表读取（Excel/CSV/TSV/SQLite → 文本，read_table；只读、带 DoS 上限；MCP 暴露）
+  glossary.py           术语表数据层：concept 为中心的 Entry/聚合/增量原语/JSONL 读写/轻量层投影
+  glossary_read.py      术语表只读查询（glossary_index/glossary_lookup MCP 工具；per-repo slice 聚合 + 项目隔离）
+  glossary_build.py     构建期：本地 cc 扫码产出 concept JSONL（prompt/容错解析/中文别名 grounding 校验/增量合并）
+  glossary_gen.py       术语表生成 CLI：按 git diff 增量 vs 全量、候选文件限界、原子写入（刷新 timer 调用）
+  glossary_refresh.sh   刷新单元包装：git_fetch 后按 old..new 增量重建本仓术语表 slice（best-effort，不阻塞拉取）
   path_align.py         索引路径 ↔ 仓库相对路径词法对齐（拒越界；mount_root 默认空）
   codegraph_client.py   codegraph-server 客户端封装（休眠：仅测试用，独占写入 tripwire 守护，绝不进常驻服务路径）
   perf.py               结构化耗时日志

@@ -30,6 +30,9 @@ structure）描述系统*是什么*；本文描述*一次提问如何在系统�
           · Claude Code Agent SDK（claude_agent_sdk.query / ClaudeAgentOptions），
             CLAUDE_CODE_USE_BEDROCK=1 走 Bedrock 计费
           · 取证只读通道（全部经 index-service 的 MCP-over-HTTP 接口；microVM 不挂任何文件系统）：
+              (0) 术语桥（中文提问）→ 中文业务词（战力/爆率…）先经 codegraph_glossary_index /
+                  codegraph_glossary_lookup 映射到英文代码符号，再喂给下面的检索（项目已知时才注册；
+                  派生提示，结论仍须实读代码取证）
               (1) CodeGraph 定位 → 先查「哪个工程 / 哪些文件」（symbol_search / get_callers / analyze_impact）
               (2) 文件读取 → 按定位结果精准读取最新主分支源码与工程内配置表（Excel/JSON/CSV）：
                   codegraph_read_file / codegraph_glob_files / codegraph_search_files（仓库相对路径）
@@ -59,6 +62,12 @@ codegraph 的 file-watcher 增量重建内存图。
 可经 `projects.json` 的 `refreshIntervalSec` 配置）周期性 `git pull`；常驻 codegraph（`--mcp --graph-only`）
 进程的 file-watcher 在数秒内对内存图做增量重建——无须重启、无第二个写者、无服务抖动。代码新鲜度因此是
 分钟级，无需重新部署。
+
+**术语表（构建期引擎，离线）**：同一刷新链上，index 主机用本地 `claude` (cc) CLI 扫自有代码副本，产出
+「中文词→英文符号」术语表（per-repo slice `/data/glossary/<项目>/<subdir>.jsonl`），供上面取证通道第 (0)
+步用。这是对「不在 microVM 外跑引擎」的**明确例外**：构建期、无用户输入、无会话、不在请求路径上；cc 被锁定
+（无写/执行/网络工具、不加载 repo 的 `.claude`），臆造中文别名由 grounding 校验丢弃。首建全量、刷新按
+git diff 增量。详见 `docs/agent/invariants.md` §6 与 AGENTS.md「构建期引擎」。
 
 ## 会话隔离模型（README 未展开）
 
