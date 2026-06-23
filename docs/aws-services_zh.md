@@ -9,9 +9,9 @@
 
 | 服务 | 规格 | 数量 | 用途 |
 |------|------|------|------|
-| **EC2**（index-service 主机） | ARM Graviton `t4g.large`（2 vCPU / 8 GiB）默认；可选到 `m7g.2xlarge`（8 vCPU / 32 GiB） | 1（所有项目共用一台） | 常驻 CodeGraph 索引 + MCP-over-HTTP 接口、各项目 bot-gateway 进程；持有唯一一份代码本地副本 |
+| **EC2**（index-service 主机） | ARM Graviton `t4g.large`（2 vCPU / 8 GiB）默认；可选到 `m7g.2xlarge`（8 vCPU / 32 GiB） | 1（所有项目共用一台） | 常驻 CodeGraph 索引 + MCP-over-HTTP 接口、各项目 bot-gateway 进程；持有唯一一份代码本地副本；并跑构建期术语表引擎（本地 `claude` CLI 离线扫码生成术语表，见 `docs/agent/glossary.md`） |
 | **Bedrock AgentCore Runtime** | Firecracker microVM；VPC 模式；空闲回收 900s、硬上限 8h（均可调 60–28800s） | **N**（`source_truth_agent_<projectId>`，每项目一套） | 会话隔离的 Agent 执行环境，按会话独立 microVM |
-| **Bedrock**（模型推理） | 默认 `global.anthropic.claude-opus-4-8`（可按项目覆盖） | 共享 | Claude Code Agent 的 LLM 推理（`CLAUDE_CODE_USE_BEDROCK=1` 计费） |
+| **Bedrock**（模型推理） | 默认 `global.anthropic.claude-opus-4-8`（可按项目覆盖） | 共享 | ① 会话 microVM 内 Agent 的 LLM 推理；② index 主机构建期术语表引擎的 `InvokeModel`（index 实例角色带受限 `bedrock-invoke` 策略）。均 `CLAUDE_CODE_USE_BEDROCK=1` 计费 |
 
 ## 2. 存储与镜像（放代码、产物、镜像）
 

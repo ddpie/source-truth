@@ -11,9 +11,9 @@ project count); the rest are globally shared.
 
 | Service | Specs | Count | Purpose |
 |---------|-------|-------|---------|
-| **EC2** (index-service host) | ARM Graviton `t4g.large` (2 vCPU / 8 GiB) default; up to `m7g.2xlarge` (8 vCPU / 32 GiB) | 1 (shared by all projects) | Resident CodeGraph index + MCP-over-HTTP interface, per-project bot-gateway processes; holds the single local code copy |
+| **EC2** (index-service host) | ARM Graviton `t4g.large` (2 vCPU / 8 GiB) default; up to `m7g.2xlarge` (8 vCPU / 32 GiB) | 1 (shared by all projects) | Resident CodeGraph index + MCP-over-HTTP interface, per-project bot-gateway processes; holds the single local code copy; also runs the build-time glossary engine (a local `claude` CLI scans code offline to generate the term table, see `docs/agent/glossary.md`) |
 | **Bedrock AgentCore Runtime** | Firecracker microVM; VPC mode; idle reclaim 900s, hard cap 8h (both tunable 60–28800s) | **N** (`source_truth_agent_<projectId>`, one per project) | Session-isolated agent execution environment, one microVM per session |
-| **Bedrock** (model inference) | Default `global.anthropic.claude-opus-4-8` (overridable per project) | shared | Claude Code Agent LLM inference (`CLAUDE_CODE_USE_BEDROCK=1` billing) |
+| **Bedrock** (model inference) | Default `global.anthropic.claude-opus-4-8` (overridable per project) | shared | (1) LLM inference for the in-microVM agent; (2) `InvokeModel` by the index-host build-time glossary engine (the index instance role carries a scoped `bedrock-invoke` policy). Both billed via `CLAUDE_CODE_USE_BEDROCK=1` |
 
 ## 2. Storage & images (code, artifacts, images)
 
