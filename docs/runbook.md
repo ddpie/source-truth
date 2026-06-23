@@ -228,7 +228,7 @@ aws ssm start-session --region <r> --target <INDEX_SERVICE_INSTANCE>
 
 关键告警：`ToolcallLeakDetected`（工具调用指令文本漏进卡片）、`FinalizeFailed`（卡片未正常结束、停在「分析中」）、
 `AnswerFailedBurst`（回答失败率激增）、`LogPipelineStalled`（日志管道存活兜底——监控网关每 60s 的
-`gateway_heartbeat` 心跳；只有心跳停止，即管道中断或网关异常时才告警，空闲夜晚仍发送心跳，不误报）。
+`gateway_heartbeat` 心跳；只有当心跳停止（即管道中断或网关异常）时才告警，空闲夜晚仍发送心跳，不误报）。
 
 **拆除整套资源（停止计费）**：试用完、或某次部署中途失败留下计费资源（NAT ~$32/月、EIP、EC2）时，一条命令按反依赖顺序清理：
 
