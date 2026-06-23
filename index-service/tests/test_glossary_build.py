@@ -325,3 +325,29 @@ def test_code_source_classification():
     assert not glossary.is_code_source("docs/README.md")
     assert not glossary.is_code_source("design.txt")
     assert not glossary.is_code_source("NOTES")
+
+
+# --- batching: large file sets are chunked into multiple cc calls (arg-limit fix) ---
+def test_build_batches_large_file_set(monkeypatch):
+    # 750 files with CC_BATCH_FILES=300 → 3 cc calls; outputs concatenated, all entries returned.
+    monkeypatch.setattr(glossary_build, "CC_BATCH_FILES", 300)
+    calls = {"n": 0, "sizes": []}
+    def fake_run(prompt, *, cwd, model, region, timeout):
+        calls["n"] += 1
+        # each batch's prompt lists only its files; emit one entry per call so we can count
+        return f'{{"concept_id":"c{calls["n"]}","kind":"symbol","value":"sym{calls["n"]}","source":"f.cpp","line":1,"confidence":"high"}}'
+    monkeypatch.setattr(glossary_build, "run_cc", fake_run)
+    files = [f"f{i}.cpp" for i in range(750)]
+    entries = glossary_build.build(files, project="p", cwd="/tmp", model="m", region="r")
+    assert calls["n"] == 3                       # 750 / 300 → 3 batches
+    assert len(entries) == 3                      # one entry per batch, concatenated
+    assert {e.value for e in entries} == {"sym1", "sym2", "sym3"}
+
+
+def test_build_single_batch_when_small(monkeypatch):
+    monkeypatch.setattr(glossary_build, "CC_BATCH_FILES", 300)
+    calls = {"n": 0}
+    monkeypatch.setattr(glossary_build, "run_cc",
+                        lambda *a, **k: calls.__setitem__("n", calls["n"] + 1) or "")
+    glossary_build.build(["a.cpp", "b.cpp"], project="p", cwd="/tmp", model="m", region="r")
+    assert calls["n"] == 1                        # under batch size → one call
