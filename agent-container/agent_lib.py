@@ -103,6 +103,12 @@ CODEGRAPH_TOOLS: tuple[str, ...] = (
     # Read STRUCTURED/binary config tables (Excel/CSV/TSV/SQLite) that read_file
     # (UTF-8 decode) can't — parsed server-side to text. Game numeric tables.
     "mcp__codegraph__codegraph_read_table",
+    # Glossary: map a Chinese/colloquial term the user asked (战力/爆率/体力) to the
+    # English code symbols it appears as. glossary_index = lightweight list pulled once at
+    # session start; glossary_lookup = full record for one concept on demand. A derived HINT
+    # (turns a Chinese question into search seeds) — answers still verify against real code.
+    "mcp__codegraph__codegraph_glossary_index",
+    "mcp__codegraph__codegraph_glossary_lookup",
 )
 
 # CodeGraph MCP tools with write/state side effects. MCP tools are admitted via

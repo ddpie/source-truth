@@ -75,6 +75,9 @@ def test_build_options_dict_read_glob_replaced_by_mcp_file_tools():
     assert "mcp__codegraph__codegraph_glob_files" in opts["allowed_tools"]
     # read_table (Excel/CSV/SQLite config tables) is also allow-listed.
     assert "mcp__codegraph__codegraph_read_table" in opts["allowed_tools"]
+    # glossary tools (Chinese-term -> code-symbol bridge) are allow-listed.
+    assert "mcp__codegraph__codegraph_glossary_index" in opts["allowed_tools"]
+    assert "mcp__codegraph__codegraph_glossary_lookup" in opts["allowed_tools"]
     assert "Read" in opts["disallowed_tools"] and "Glob" in opts["disallowed_tools"]
 
 

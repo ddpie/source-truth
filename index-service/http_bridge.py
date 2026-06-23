@@ -228,6 +228,7 @@ def build_bridge(
     port: int = 8080,
     mount_root: str = path_align.DEFAULT_MOUNT_ROOT,
     local_workspace: str | None = None,
+    project: str | None = None,
 ) -> FastMCP:
     """Build (but don't run) the FastMCP HTTP bridge for one or more CodeGraph repos.
 
@@ -632,6 +633,7 @@ def build_bridge(
         app.add_tool(codegraph_read_table, name="codegraph_read_table",
                      description=(codegraph_read_table.__doc__ or "").strip(),
                      annotations=READONLY_ANNOT)
+
         logger.info(json.dumps({"event": "search_tool_enabled", "repos": [r.name for r in repos],
                                 "file_tools": ["codegraph_search_files", "codegraph_read_file",
                                                "codegraph_glob_files", "codegraph_read_table"]}))
@@ -639,6 +641,58 @@ def build_bridge(
         logger.warning(json.dumps({"event": "search_tool_disabled",
                                    "reason": "a served repo has no local copy on disk",
                                    "repos": [{"name": r.name, "local": r.local} for r in repos]}))
+
+    # --- glossary (Chinese-term -> code-symbol bridge) -------------------------------
+    # TOP-LEVEL (not nested under file_repos_ok): the glossary is per-project data at
+    # /data/glossary/<project>/, a path INDEPENDENT of the repo code copies — so a missing repo
+    # copy (which disables the file tools above) must NOT also disable the glossary. Registered
+    # only when a project id is known. Both tools are READ-ONLY and confined inside glossary_read
+    # (project-name whitelist + realpath); they belong in this closed allowlist like the file tools.
+    if project:
+        import glossary_read
+
+        async def glossary_index() -> str:
+            """List this project's term index: Chinese/colloquial terms planners use
+            (e.g. 战力, 爆率, 体力) mapped to the ENGLISH code symbols they appear as
+            (combatPower, loot_chance, maxStamina). When the user asks in Chinese and you're
+            unsure which symbol to search, look up their wording here to get the code symbols
+            to search for. Each row is {concept_id, aliases, symbols}; for a concept's full
+            symbol set + source anchors (file:line), call glossary_lookup. The index is a
+            derived hint built from the code — always confirm against real code."""
+            try:
+                return glossary_read.index_to_json(project)
+            except ValueError as exc:
+                return json.dumps({"error": "glossary unavailable", "detail": str(exc)})
+            except Exception as exc:  # noqa: BLE001 - never break the bridge
+                logger.error(json.dumps({"event": "glossary_index_error", "error": str(exc)}))
+                return json.dumps({"concepts": []})
+
+        async def glossary_lookup(query: str) -> str:
+            """Look up a concept in the term index — by `concept_id` (from glossary_index)
+            OR directly by a Chinese/colloquial word the user said (e.g. "战力", "爆率").
+            Returns code symbols, aliases, confidence, and source anchors (file:line) for
+            verification — including lower-confidence concepts glossary_index omits.
+            RETURN SHAPE (three cases): exactly ONE match -> a flat record
+            {concept_id, symbols, aliases, confidence, anchors[, repo]}; SEVERAL matches ->
+            {"matches": [ ...those records... ]}; NONE / empty query -> {"error": ...}. In a
+            multi-repo project concept_id is namespaced "<repo>/<id>" and each record carries
+            `repo`. Read symbols from the record (single) or from each matches[] entry, then
+            search them in real code."""
+            try:
+                return glossary_read.lookup_to_json(project, query)
+            except ValueError as exc:
+                return json.dumps({"error": "glossary unavailable", "detail": str(exc)})
+            except Exception as exc:  # noqa: BLE001
+                logger.error(json.dumps({"event": "glossary_lookup_error", "error": str(exc)}))
+                return json.dumps({"error": "glossary lookup failed"})
+
+        app.add_tool(glossary_index, name="codegraph_glossary_index",
+                     description=(glossary_index.__doc__ or "").strip(),
+                     annotations=READONLY_ANNOT)
+        app.add_tool(glossary_lookup, name="codegraph_glossary_lookup",
+                     description=(glossary_lookup.__doc__ or "").strip(),
+                     annotations=READONLY_ANNOT)
+        logger.info(json.dumps({"event": "glossary_tools_enabled", "project": project}))
 
     # Plain HTTP /health so deploy orchestration (and load balancers) can poll
     # readiness: 200 only once the graph warmed up non-empty, 503 otherwise.
@@ -778,6 +832,9 @@ def main() -> int:
     p.add_argument("--local-workspace", action="append", default=[],
                    help="local-disk copy for fast file search; pairs with --workspace by position "
                         "(grep over EFS is ~225x slower). Repeat for multi-repo.")
+    p.add_argument("--project", default=None,
+                   help="project id (^[a-z0-9-]+$); enables the per-project glossary tools "
+                        "reading /data/glossary/<project>/. Omit to disable the glossary.")
     args = p.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -803,6 +860,7 @@ def main() -> int:
     # build_bridge starts each repo's resident worker (warming in background).
     app = build_bridge(
         workspaces=pairs, host=args.host, port=args.port, mount_root=args.mount_root,
+        project=args.project,
     )
     app.run(transport="streamable-http")
     return 0

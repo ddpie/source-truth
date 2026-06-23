@@ -24,6 +24,11 @@ index-service/          Standalone CodeGraph index service + MCP-over-HTTP bridg
   file_search.py        Local-copy ripgrep/grep search tool (searches the local copy; builtin Grep disabled in favor of the local copy; content-dedups hits; MCP-exposed)
   file_read.py          Local-copy by-line/by-point file reader (read_file, paths aligned to repo-relative; MCP-exposed)
   file_table.py         Structured config-table reader (Excel/CSV/TSV/SQLite → text, read_table; read-only, DoS-bounded; MCP-exposed)
+  glossary.py           Glossary data layer: concept-centric Entry/aggregate/incremental primitives/JSONL IO/lightweight projection
+  glossary_read.py      Glossary read-only queries (glossary_index/glossary_lookup MCP tools; per-repo slice aggregation + project isolation)
+  glossary_build.py     Build-time: local cc scans code → concept JSONL (prompt/tolerant parse/Chinese-alias grounding guard/incremental merge)
+  glossary_gen.py       Glossary generator CLI: git-diff incremental vs full, candidate-file bounding, atomic write (called by the refresh timer)
+  glossary_refresh.sh   Refresh-unit wrapper: after git_fetch, incrementally rebuild this repo's glossary slice over old..new (best-effort, never blocks the pull)
   path_align.py         Index path ↔ repo-relative lexical alignment (rejects escapes; mount_root defaults to "")
   codegraph_client.py   codegraph-server client wrapper (dormant: tests only, single-writer tripwire-guarded, never on the resident serving path)
   perf.py               Structured latency logging

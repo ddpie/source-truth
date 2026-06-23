@@ -79,6 +79,25 @@ aws iam put-role-policy --role-name "$INDEX_ROLE" --policy-name agentcore-invoke
     {\"Effect\":\"Allow\",\"Action\":[\"bedrock-agentcore:InvokeAgentRuntime\"],
      \"Resource\":[\"arn:aws:bedrock-agentcore:${REGION}:${ACCOUNT}:runtime/source_truth_agent*\",
                    \"arn:aws:bedrock-agentcore:${REGION}:${ACCOUNT}:runtime/source_truth_agent*/*\"]}]}" >/dev/null
+# Inline policy: the BUILD-TIME engine. The index host runs a local `claude` (cc) CLI against
+# its local repo copy to build the per-project glossary (Chinese-term -> code-symbol map). This
+# is a deliberate, scoped exception to the MVP "no engine outside the microVM" rule: it is an
+# OFFLINE, no-user-input build step over code the host already holds, distinct from the per-query
+# answering engine (which stays in the microVM). cc on Bedrock needs InvokeModel(WithResponseStream)
+# on the model + its inference profile. Cross-region inference profiles (global.* / <geo>.*) fan out
+# to regional foundation-model ARNs, so allow the foundation-model family too, scoped to anthropic
+# models in this account/region. Idempotent upsert; remove the policy to disable the build engine.
+aws iam put-role-policy --role-name "$INDEX_ROLE" --policy-name bedrock-invoke --policy-document "{
+  \"Version\":\"2012-10-17\",\"Statement\":[
+    {\"Effect\":\"Allow\",
+     \"Action\":[\"bedrock:InvokeModel\",\"bedrock:InvokeModelWithResponseStream\"],
+     \"Resource\":[\"arn:aws:bedrock:*::foundation-model/anthropic.*\",
+                   \"arn:aws:bedrock:${REGION}:${ACCOUNT}:inference-profile/*anthropic.*\"]}]}" >/dev/null
+# NOTE on the foundation-model region wildcard ('*' not pinned to $REGION): a cross-region
+# inference profile (global.*/<geo>.*) routes to a REGION-LESS, ACCOUNT-LESS foundation-model ARN
+# (arn:aws:bedrock:::foundation-model/anthropic.<model>). Pinning the region was TESTED and
+# AccessDenied'd the global profile (the resolved ARN has empty region). The model family
+# (anthropic.*) is the real scope; the inference-profile arm above IS region+account pinned.
 if ! aws iam get-instance-profile --instance-profile-name "$INDEX_PROFILE" >/dev/null 2>&1; then
   aws iam create-instance-profile --instance-profile-name "$INDEX_PROFILE" >/dev/null
   aws iam add-role-to-instance-profile --instance-profile-name "$INDEX_PROFILE" --role-name "$INDEX_ROLE" >/dev/null

@@ -215,3 +215,22 @@ CSV（纯文本，便于 diff 和评审）：
 
 > 配置表读取工具有截断上限（每表 500 行 / 每格 200 字符）。术语表超限会被静默截断，导致漏映射。对策：按系统
 > 拆成多张 CSV（每张 < 500 行），或调高上限。
+
+### 9.5 实现实况（2026-06-22，实现已偏离上面的 9.1/9.3/9.4 设计，以本节为准）
+
+上面 9.1–9.4 是初始设计；落地时在几处**有意改进**，实现现状如下（代码见 `index-service/glossary*.py`）：
+
+- **存储**：每个仓一份 slice `/data/glossary/<项目>/<subdir>.jsonl`（单仓项目就一份），不是单张表；
+  `glossary_read` 把项目目录下所有 `*.jsonl` 聚合，多仓时 concept_id 命名空间化为 `<repo>/<id>`、防跨仓串味。
+- **格式**：**JSONL**（非 CSV），concept 为中心的 Entry：`{concept_id, kind(symbol|alias), value, source, line, confidence}`。
+  没有「解释（业务含义）」列——9.4 自己指出该自由文本列是注入通道，实现改用确定性 grounding 替代。
+- **生成**：**全自动、无人工**。构建期在 index 主机用本地 `claude` (cc) CLI 扫代码产出（不是「中文名/解释由人补」）。
+  cc 锁定（`run_cc`：`--disallowed-tools` + `--setting-sources ""`）；cc 臆造的中文别名由 `extract_entries` 的
+  **grounding 校验**（中文必须真实出现在 cited 源文件）丢弃——以此替代人工填写的可信度。
+- **更新**：**in-place 增量**。刷新 timer 跑 `git_fetch` 后按 `old..new` diff 只重建变更文件的条目（`glossary_gen`），
+  per-slice `flock` 防与首建争用；不是「S3/独立来源 + .new rename」。空 diff / 仅 docs 改动则跳过、不调 cc。
+- **读取**：**专用** `glossary_index`（轻量层，med+ 置信、每概念≥1 符号、head 截断、按 slice 均分预算）+
+  `glossary_lookup`（按 concept_id 或中文词查，含 index 省略的低置信概念）。不再走 read_table，故 9.4 的 500 行
+  截断注意事项不适用。9.2 的读取隔离（独立只读工具、沙箱根钉在 `/data/glossary/<项目>/`、项目名白名单、realpath）
+  **与实现一致**。
+- **边界**：构建期引擎是对「不跑引擎」MVP 约束的明确例外，见 AGENTS.md「构建期引擎」与 `docs/agent/invariants.md` §6。
