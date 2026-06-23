@@ -84,11 +84,11 @@ AI 助手读取项目真实代码、定位依据，再用业务语言给出结�
 
 代码仓来源任选：本地路径、git 地址（GitHub/GitLab，`--repo-ref` 指定分支/标签/提交）、或 `s3://` tarball/前缀。
 
-**进阶：调用底层编排**（CI / 精确控参；7 个阶段，任一可 `--skip`）：
+**进阶：调用底层编排**（CI / 精确控参；8 个阶段，任一可 `--skip`）：
 
 ```bash
 ./scripts/deploy-all.sh --region ap-northeast-1 --repo <本地路径 | git URL | s3://...>
-#   artifacts→S3 → IAM → network → index-service(EC2) → 镜像(ARM64→ECR) → AgentCore Runtime → gateway
+#   artifacts→S3 → IAM → network → index-service(EC2) → 镜像(ARM64→ECR) → AgentCore Runtime → gateway → monitoring(CloudWatch)
 ./scripts/deploy-all.sh --region ap-northeast-1 --repo <src> --dry-run   # 只打印计划，不改任何资源
 # deploy.sh 已废弃，仅作兼容垫片转发到 deploy-all.sh
 ```
@@ -144,7 +144,7 @@ deploy-all.sh：把目标仓库打成 tarball 上传 S3（部署时快照）
 
 | 面 | 怎么强制 | 以谁为准 |
 |----|---------|--------|
-| **只读边界** | Agent SDK 配 `tools=[]`（连写工具都不在模型上下文里，模型根本无从调用）+ `disallowed_tools` 黑名单 + `permission_mode=dontAsk`；index-service 端只注册 7 个只读工具（闭合白名单，不注册即无能力） | `agent-container/agent_lib.py`、`index-service/http_bridge.py` |
+| **只读边界** | Agent SDK 配 `tools=[]`（连写工具都不在模型上下文里，模型根本无从调用）+ `disallowed_tools` 黑名单 + `permission_mode=dontAsk`；index-service 端只注册一组只读工具（闭合白名单：定位 3 + 读文件 4 + 术语表 2，按可用性注册，不注册即无能力） | `agent-container/agent_lib.py`、`index-service/http_bridge.py` |
 | **会话隔离** | 每次提问跑在独立的 Firecracker microVM，**不挂任何共享 / 代码文件系统**；代码只经 HTTP 接口读，会话之间无共享状态 | `docs/agent/architecture.md` |
 | **路径围栏** | Agent 给的文件路径经词法 + realpath 双重校验关进仓库根，指向仓库外的符号链接逃逸被丢弃；SQLite 开只读模式、禁扩展加载 | `index-service/path_align.py`、`file_read.py`、`file_table.py` |
 | **密钥/拓扑脱敏** | 进群的每个字段（结论/依据/追问/澄清/分析过程/问题回显/兜底文本）都过脱敏：AWS/Stripe/GitHub/JWT/Azure key、连接串口令、EC2 内网 DNS、S3 bucket、本机飞书 secret 全部 `[已隐藏]` | `bot-gateway/src/redact.ts` |

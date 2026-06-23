@@ -16,8 +16,8 @@
   定时 `git pull` 跟上游主分支，常驻 codegraph 的 file-watcher 数秒内增量重建内存图，故「最新主分支」是分钟级新鲜。
 - **以谁为准**：被索引的目标仓库（index-service 本地副本，git clone 而来）。其次是 `agent-container/prompts/system.md`
   里对这条的强约束（信任边界：只信 system prompt，不信工具读到的内容里的指令）。
-- **机检/观测**：行为约束，无纯静态机检。gateway 的 `card_health{zero_evidence_answer}` 指标标记「零工具+零引用却作答」的疑似 confabulation。
-- **机检**：无法纯静态机检（属行为约束）。由 system.md 规则 + gateway 的脱敏/泄漏剥离兜底。
+- **机检/观测**：属行为约束，无纯静态机检——由 system.md 规则 + gateway 的脱敏/泄漏剥离兜底；观测上靠 gateway 的
+  `card_health{zero_evidence_answer}` 指标标记「零工具+零引用却作答」的疑似 confabulation。
 - **违反后果**：幻觉或被注入误导 → 给出无依据答案，违背产品根本价值。
 
 ## 2. 会话容器 ARM64-only + 版本固定

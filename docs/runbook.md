@@ -110,14 +110,15 @@ codegraph 索引吃内存、随仓库增大而增长，按仓库规模选机型�
 
 ## 四、网关运行位置
 
-走 `install.sh`（或 `deploy-all.sh` 的 gateway 阶段）后，网关已作为 **`bot-gateway.service`** 在
-index-service 那台 EC2 上长驻运行——无需单独启动进程。常用运维：
+走 `install.sh`（或 `deploy-all.sh` 的 gateway 阶段）后，每个项目的网关都作为 **`bot-gateway@<项目>.service`**
+（systemd 模板单元，如 `bot-gateway@mangos.service`）在 index-service 那台 EC2 上长驻运行——无需单独启动进程。
+常用运维（把 `<项目>` 换成实际 projectId）：
 
 ```bash
 # 查看网关状态 / 日志（经 SSM 进实例）：
 aws ssm start-session --region <r> --target <INDEX_SERVICE_INSTANCE>
-#   sudo systemctl status bot-gateway
-#   sudo journalctl -u bot-gateway -f     # 期望日志：sdk_wsclient_started → sdk_wsclient_connected
+#   sudo systemctl status 'bot-gateway@*'              # 所有项目网关
+#   sudo journalctl -u bot-gateway@<项目> -f           # 期望日志：sdk_wsclient_started → sdk_wsclient_connected
 ```
 
 > **只能有一个网关实例连接同一个飞书应用**：飞书长连接是集群模式，每个事件只投给一个 client，
@@ -164,11 +165,11 @@ aws ssm start-session --region <r> --target <INDEX_SERVICE_INSTANCE>
 但需承担这段空闲期的内存开销；多数会话在一次问答后即结束，故默认 15 分钟。追问密集的场景可调大，需要压缩成本则调小。
 详见 [`agent/architecture.md`](agent/architecture.md)「Runtime 调参与成本权衡」。
 
-**查看网关日志**（网关是 index 主机上的 `bot-gateway.service`，结构化 JSON 日志进 journald）：
+**查看网关日志**（每项目一个 `bot-gateway@<项目>.service`，结构化 JSON 日志进 journald）：
 
 ```bash
 aws ssm start-session --region <r> --target <INDEX_SERVICE_INSTANCE>
-# 实例内：sudo journalctl -u bot-gateway -f
+# 实例内：sudo journalctl -u bot-gateway@<项目> -f
 ```
 
 关键事件（网关侧）：`invoke_start`（开始调用 runtime）、`card_sent`（卡片已发出）、
@@ -195,11 +196,11 @@ cache_read）。后端 403/超时这类「卡片失败但不知卡在哪一段�
 
 ```bash
 aws ssm start-session --region <r> --target <INDEX_SERVICE_INSTANCE>
-# 实例内：journalctl -u index-bridge -f   （建图日志：index-build 单元）
+# 实例内：journalctl -u index-bridge-<项目> -f   （建图日志：index-build@<仓> 单元）
 ```
 
-**重启网关**（实例内）：`sudo systemctl restart bot-gateway`。改了飞书凭证后，重跑
-`install.sh`（或 deploy 的 gateway 阶段）会重写 `/etc/bot-gateway.env` 并重启服务。
+**重启网关**（实例内）：`sudo systemctl restart bot-gateway@<项目>`。改了飞书凭证后，重跑
+`install.sh`（或 deploy 的 gateway 阶段）会重写 `/etc/bot-gateway-<项目>.env` 并重启服务。
 
 **监控：指标 / 看板 / 告警**（CloudWatch 侧，部署期身份需 `logs:PutMetricFilter` /
 `cloudwatch:PutDashboard,PutMetricAlarm` / `sns:CreateTopic`；不是运行时角色）。
@@ -281,11 +282,11 @@ refreshIntervalSec?}`，**git-only**）。顶层 `refreshIntervalSec` 是全局�
 |------|----------|------|
 | 卡片一直「正在分析…」不结束 | 后端流被中断 / finalize 异常 | 查看网关日志 `finalize_error` / `card_closed failed:true`；偶发则重问；持续则查 runtime/index 健康 |
 | 答案里出现原始 `<invoke>` XML 等标记 | 冷 microVM 首次 invoke 时 MCP 工具未注册（冷启动竞速） | 网关会自动重试一次；暖机后消失。查看日志 `num_turns`/`cache_read` 确认是否冷启动 |
-| 机器人在群里**完全无响应** | 网关未启动 / 未 @ 到机器人 / 同一 app 运行了两个网关争抢事件 | 进实例 `systemctl status bot-gateway` 确认 active + 日志 `sdk_wsclient_connected`；确认 @ 的是 `FEISHU_BOT_OPEN_ID`；停止多余网关，只保留一个 |
-| 网关 `condition failed` 未启动 | `/etc/bot-gateway.env` 尚未写入（runtime 未就绪 / gateway 阶段被跳过） | 重跑 `install.sh` 或 `deploy-all.sh`（不跳 gateway）；确认 `FEISHU_SECRET_ID` 已配 |
+| 机器人在群里**完全无响应** | 网关未启动 / 未 @ 到机器人 / 同一 app 运行了两个网关争抢事件 | 进实例 `systemctl status 'bot-gateway@*'` 确认 active + 日志 `sdk_wsclient_connected`；确认 @ 的是 `FEISHU_BOT_OPEN_ID`；停止多余网关，只保留一个 |
+| 网关 `condition failed` 未启动 | `/etc/bot-gateway-<项目>.env` 尚未写入（runtime 未就绪 / gateway 阶段被跳过） | 重跑 `install.sh` 或 `deploy-all.sh`（不跳 gateway）；确认 `FEISHU_SECRET_ID` 已配 |
 | 卡片回「查询失败」/ 日志 `AccessDenied` | Bedrock 模型未在该区域开通 | 到 Bedrock 控制台开通模型访问；跨区域改用区域级推理档（见前置条件 2） |
-| 部署在 index-service 阶段超时 | 全新账号 NAT 路由未收敛 / 实例仍在冷启动建索引 | 多等一轮（bootstrap 对网络操作有重试）；查看 `/var/log/` 与 `journalctl -u index-build` |
-| `/health` 长期非 200 | 索引损坏 / graph.db 空 / worker 反复重启 | 进实例查看 index-bridge 日志；必要时 `--refresh-index` 重建（蓝绿，不破坏运行中实例） |
+| 部署在 index-service 阶段超时 | 全新账号 NAT 路由未收敛 / 实例仍在冷启动建索引 | 多等一轮（bootstrap 对网络操作有重试）；查看 `/var/log/` 与 `journalctl -u 'index-build@*'` |
+| `/health` 长期非 200 | 索引损坏 / graph.db 空 / worker 反复重启 | 进实例查看 index-bridge-<项目> 日志；必要时 `--refresh-index` 重建（蓝绿，不破坏运行中实例） |
 | 重新部署后行为仍是旧版本 | 热 microVM 仍持旧镜像（约 15 分钟）/ 网关未重启 | 等待热 VM 回收；重启网关确保运行新代码 |
 
 > 独占写入约束：index-service 的 graph.db 同一时刻只能有一个进程写入，并发写会导致 0 节点损坏。
@@ -344,5 +345,5 @@ export FEISHU_BOT_OPEN_ID=ou_xxx
 node_modules/.bin/ts-node --transpile-only src/index.ts
 ```
 
-> 注意：同一飞书 app 只能有一个网关连接。本地启动前，先停掉 index 主机上的服务
-> （`sudo systemctl stop bot-gateway`），否则两个网关会争抢同一批事件。
+> 注意：同一飞书 app 只能有一个网关连接。本地启动前，先停掉 index 主机上对应项目的服务
+> （`sudo systemctl stop bot-gateway@<项目>`），否则两个网关会争抢同一批事件。

@@ -229,8 +229,9 @@ CSV（纯文本，便于 diff 和评审）：
   **grounding 校验**（中文必须真实出现在 cited 源文件）丢弃——以此替代人工填写的可信度。
 - **更新**：**in-place 增量**。刷新 timer 跑 `git_fetch` 后按 `old..new` diff 只重建变更文件的条目（`glossary_gen`），
   per-slice `flock` 防与首建争用；不是「S3/独立来源 + .new rename」。空 diff / 仅 docs 改动则跳过、不调 cc。
-- **读取**：**专用** `glossary_index`（轻量层，med+ 置信、每概念≥1 符号、head 截断、按 slice 均分预算）+
-  `glossary_lookup`（按 concept_id 或中文词查，含 index 省略的低置信概念）。不再走 read_table，故 9.4 的 500 行
+- **读取**：**专用**两个只读工具（注册名带 `codegraph_` 前缀）`codegraph_glossary_index`（轻量层，med+ 置信、
+  每概念≥1 符号、head 截断、按 slice 均分预算）+ `codegraph_glossary_lookup`（按 concept_id 或中文词查，含 index
+  省略的低置信概念）。不再走 read_table，故 9.4 的 500 行
   截断注意事项不适用。9.2 的读取隔离（独立只读工具、沙箱根钉在 `/data/glossary/<项目>/`、项目名白名单、realpath）
   **与实现一致**。
 - **边界**：构建期引擎是对「不跑引擎」MVP 约束的明确例外，见 AGENTS.md「构建期引擎」与 `docs/agent/invariants.md` §6。

@@ -83,9 +83,10 @@ docs/
   agent/                AI-facing docs
     architecture.md     Mental model: how one question crosses the system
     glossary.md         Term bridge: Chinese question → English code symbol (build/query time, grounding, value boundary)
-    invariants.md       source → generated map + change-X-must-change-Y couplings (7 invariants)
+    invariants.md       source → generated map + change-X-must-change-Y couplings (8 invariants)
     playbooks.md        ordered change recipes (7 recipes)
     *-spike.md          Research notes (cardkit streaming / indexing perf / storage selection / perf comparison / template)
+  assets/               Doc diagrams (hand-authored SVG: architecture / data-plane / session-isolation / glossary)
 .local/                 (gitignored) account-specific deploy state: deploy-config, projects.json (project routing), deploy-output.md
 ```
 

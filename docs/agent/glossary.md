@@ -8,7 +8,7 @@
 
 它是**派生提示，不是答案**——只负责「该搜哪个英文词」，结论仍以实读代码为准。
 
-![术语表：构建期 cc 扫码产出「中文→英文符号」对照（grounding 把关），查询期 glossary_lookup 按中文词给符号再实读代码](../assets/glossary.svg)
+![术语表：构建期 cc 扫码产出「中文→英文符号」对照（grounding 把关），查询期 codegraph_glossary_lookup 按中文词给符号再实读代码](../assets/glossary.svg)
 
 ## 怎么工作
 
@@ -22,16 +22,16 @@
    挡掉 cc 自己「翻译/臆造」出来的词。文档来源的词置信度降一档（见下「代码为准」）。
 4. 写到 `/data/glossary/<项目>/<仓>.jsonl`，按项目、按仓隔离。
 
-**查询期（会话 microVM）**——两个只读工具：
-- `glossary_index`：会话开始时取一份轻量对照（高置信概念）。
-- `glossary_lookup`：按**中文词**或概念 id 查完整符号集（含低置信的）。
-- 拿到英文符号后，照常走 `search_files` / `symbol_search` / `read_file` 实读代码取证。
+**查询期（会话 microVM）**——两个只读工具（注册名带 `codegraph_` 前缀）：
+- `codegraph_glossary_index`：会话开始时取一份轻量对照（中等及以上置信度的概念）。
+- `codegraph_glossary_lookup`：按**中文词**或概念 id 查完整符号集（含低置信的）。
+- 拿到英文符号后，照常走 `codegraph_search_files` / `codegraph_symbol_search` / `codegraph_read_file` 实读代码取证。
 
 ## 三条硬规则
 
 - **代码为唯一依据**：扫描不限文件类型（代码 + 文档/README/设计案都扫，中文常在文档里），
   但**文档与代码冲突时以代码为准**——文档来源的条目置信度降一档，同概念下代码恒高于文档，
-  文档词因此落到按需 `glossary_lookup` 层、不进显眼的 index。
+  文档词因此落到按需 `codegraph_glossary_lookup` 层、不进显眼的 index。
 - **不臆造**：grounding 校验保证中文别名都是源文件里真有的，cc 翻译出来的一律丢。
 - **不破只读边界**：构建期引擎是「不跑引擎」MVP 约束的明确例外（离线、无会话、无用户输入），
   受 cc 锁定 + 产物只读服务 + 代码不出机器三重约束。详见 `invariants.md` §6 与 `AGENTS.md`「构建期引擎」。
@@ -45,7 +45,7 @@
 
 **价值边界（诚实）**：
 - 中文与符号相邻（注释、配置表表头——中文游戏项目的代码风格）时价值最高。
-- 纯英文代码、无中文：术语表为空，但**无害**——`glossary_index` 返回空，agent 自动跳过，
+- 纯英文代码、无中文：术语表为空，但**无害**——`codegraph_glossary_index` 返回空，agent 自动跳过，
   不影响现有问答。
 - 覆盖率与构建文件上限 `MAX_BUILD_FILES` 正相关（`GLOSSARY_MAX_FILES` env / `--max-files`
   可配，0 = 不限）。大项目首次全量是一次性开销（约 1.4 万文件 ≈ a measured amount / 2 小时，cc 自主探索是
