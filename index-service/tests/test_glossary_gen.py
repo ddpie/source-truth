@@ -293,3 +293,34 @@ def test_write_failure_preserves_old_slice(repo, tmp_path, monkeypatch):
                             "--out", str(out), "--model", "m", "--region", "r", "--full"])
     assert rc == 0   # clean SKIP, not a traceback
     assert [e.value for e in glossary.read_entries(str(out))] == ["keepMe"]  # old slice intact
+
+
+# --- configurable cap: --max-files flag + no-cap ---
+def test_max_files_flag_overrides_default(repo, tmp_path, monkeypatch):
+    out = tmp_path / "gloss" / "p" / "s.jsonl"
+    monkeypatch.setattr(glossary_gen, "MAX_BUILD_FILES", 100)  # default high
+    for i in range(6):
+        (repo / f"m{i}.cpp").write_text(f"int v{i};\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "many")
+    seen = {}
+    monkeypatch.setattr(glossary_build, "build", lambda files, **k: seen.__setitem__("n", len(files)) or [])
+    glossary_gen.main(["--project", "p", "--repo-root", str(repo),
+                       "--out", str(out), "--model", "m", "--region", "r", "--full",
+                       "--max-files", "3"])   # flag wins over the default 100
+    assert seen["n"] == 3
+
+
+def test_max_files_zero_means_no_cap(repo, tmp_path, monkeypatch):
+    out = tmp_path / "gloss" / "p" / "s.jsonl"
+    monkeypatch.setattr(glossary_gen, "MAX_BUILD_FILES", 2)  # low default
+    for i in range(8):
+        (repo / f"n{i}.cpp").write_text(f"int v{i};\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "many")
+    seen = {}
+    monkeypatch.setattr(glossary_build, "build", lambda files, **k: seen.__setitem__("n", len(files)) or [])
+    glossary_gen.main(["--project", "p", "--repo-root", str(repo),
+                       "--out", str(out), "--model", "m", "--region", "r", "--full",
+                       "--max-files", "0"])   # 0 = no cap → all candidate files
+    assert seen["n"] >= 8   # a.cpp seed + 8 new = all scanned, not capped to 2

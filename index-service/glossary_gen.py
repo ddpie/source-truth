@@ -54,7 +54,10 @@ _BINARY_EXTS = (
 )
 # Hard cap on files handed to cc in ONE build, so even a huge repo (or a giant commit) can't
 # launch an unbounded scan. Beyond this we log a dropped-count (never silently truncate).
-MAX_BUILD_FILES = 400
+# Default 400 (a full build of a large repo at ~$0.005/file ≈ $2 and ~12 min — measured on the test repo).
+# Overridable per project: env GLOSSARY_MAX_FILES, or --max-files (flag wins). Raise it to trade
+# Bedrock cost for coverage on a big repo; 0/negative means "no cap" (whole candidate set).
+MAX_BUILD_FILES = int(os.environ.get("GLOSSARY_MAX_FILES", "400") or "400")
 
 
 def _is_term_file(path: str) -> bool:
@@ -138,6 +141,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--full", action="store_true", help="force a full scan")
     p.add_argument("--strict", action="store_true", help="treat a cc build failure as fatal")
     p.add_argument("--timeout", type=int, default=glossary_build.DEFAULT_TIMEOUT_S)
+    p.add_argument("--max-files", type=int, default=None,
+                   help="per-build file cap (wins over GLOSSARY_MAX_FILES env / default 400); "
+                        "0 or negative = no cap (scan the whole candidate set)")
     args = p.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -148,6 +154,11 @@ def main(argv: list[str] | None = None) -> int:
     if not os.path.isdir(args.repo_root):
         logger.error(json.dumps({"event": "glossary_gen_no_repo", "repo_root": args.repo_root}))
         return 2
+
+    # Resolve the per-build file cap: --max-files flag wins, else the module default
+    # (GLOSSARY_MAX_FILES env or 400). <=0 means "no cap" (whole candidate set).
+    cap = args.max_files if args.max_files is not None else MAX_BUILD_FILES
+    uncapped = cap <= 0
 
     incremental = bool(args.old) and not args.full
     files: list[str] | None = None
@@ -180,20 +191,19 @@ def main(argv: list[str] | None = None) -> int:
         # FULL scan: bound it to candidate term-bearing files instead of letting cc roam the
         # whole repo (the previously-uncapped cost). Cap at MAX_BUILD_FILES; log any drop.
         cands = candidate_files(args.repo_root)
-        if len(cands) > MAX_BUILD_FILES:
+        if not uncapped and len(cands) > cap:
             logger.warning(json.dumps({"event": "glossary_gen_full_capped",
                                        "project": args.project, "candidates": len(cands),
-                                       "cap": MAX_BUILD_FILES,
-                                       "dropped": len(cands) - MAX_BUILD_FILES}))
-            cands = cands[:MAX_BUILD_FILES]
+                                       "cap": cap, "dropped": len(cands) - cap}))
+            cands = cands[:cap]
         files = cands
 
     # Cap the incremental build set too (a giant single commit shouldn't launch an unbounded scan).
-    if incremental and files and len(files) > MAX_BUILD_FILES:
+    if incremental and files and not uncapped and len(files) > cap:
         logger.warning(json.dumps({"event": "glossary_gen_incremental_capped",
                                    "project": args.project, "changed_term_files": len(files),
-                                   "cap": MAX_BUILD_FILES, "dropped": len(files) - MAX_BUILD_FILES}))
-        files = files[:MAX_BUILD_FILES]
+                                   "cap": cap, "dropped": len(files) - cap}))
+        files = files[:cap]
 
     # Build the slice with cc. `files` is now ALWAYS a concrete list (full=candidates,
     # incremental=changed term files) — never None — so cc always gets a bounded file scope.
