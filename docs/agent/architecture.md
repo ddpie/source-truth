@@ -67,7 +67,8 @@ codegraph 的 file-watcher 增量重建内存图。
 「中文词→英文符号」术语表（per-repo slice `/data/glossary/<项目>/<subdir>.jsonl`），供上面取证通道第 (0)
 步用。这是对「不在 microVM 外跑引擎」的**明确例外**：构建期、无用户输入、无会话、不在请求路径上；cc 被锁定
 （无写/执行/网络工具、不加载 repo 的 `.claude`），臆造中文别名由 grounding 校验丢弃。首建全量、刷新按
-git diff 增量。详见 `docs/agent/invariants.md` §6 与 AGENTS.md「构建期引擎」。
+git diff 增量。完整工作原理、grounding 把关与价值边界见 `docs/agent/glossary.md`；边界约束见
+`docs/agent/invariants.md` §6 与 AGENTS.md「构建期引擎」。
 
 ## 会话隔离模型（README 未展开）
 
