@@ -118,6 +118,7 @@ pre-push 跑离线套件。结构自检 `./scripts/check-invariants.sh` 由 lint
 ## Key resources
 
 - 架构工作原理：`docs/agent/architecture.md`
+- 术语表（中文提问→英文代码符号的桥）：`docs/agent/glossary.md`
 - CardKit「会生长的答案卡」调研（`bot-gateway` 核心能力）：`docs/agent/cardkit-streaming-spike.md`
 - 不变量与权威依据映射：`docs/agent/invariants.md`
 - 变更配方：`docs/agent/playbooks.md`
