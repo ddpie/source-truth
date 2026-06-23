@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # check-invariants.sh — 快速无网络结构 lint（pre-commit / test.sh --lint 调用）。
-# 校验 AGENTS.md 约定中可机检的子集：单一真相源、双语配对、顶层目录存在性
+# 校验 AGENTS.md 约定中可机检的子集：唯一依据、双语配对、顶层目录存在性
 # （注：只校验顶层组件目录存在，不做结构文档树逐项 diff）。
 # 失败即非零退出，逐条打印问题。
 set -euo pipefail
@@ -15,7 +15,7 @@ ok()  { printf '  ✓ %s\n' "$1"; }
 echo "check-invariants: $ROOT"
 
 # 1. AGENTS.md 存在，CLAUDE.md 仅 import @AGENTS.md
-if [[ -f AGENTS.md ]]; then ok "AGENTS.md 存在"; else err "缺少 AGENTS.md（AI 约定单一真相源）"; fi
+if [[ -f AGENTS.md ]]; then ok "AGENTS.md 存在"; else err "缺少 AGENTS.md（AI 约定的唯一依据）"; fi
 if [[ -f CLAUDE.md ]]; then
   if grep -qx '@AGENTS.md' CLAUDE.md; then ok "CLAUDE.md import @AGENTS.md"
   else err "CLAUDE.md 应仅含一行 '@AGENTS.md'"; fi
@@ -46,10 +46,10 @@ for d in agent-container bot-gateway index-service infra config scripts docs; do
   [[ -d "$d" ]] && ok "顶层目录存在: $d" || err "structure 引用的顶层目录缺失: $d"
 done
 
-# 6. 设计真相源已导入（structure_*.md 收录的 design/ 权威依据；改名/删除须同步两处）
+# 6. 设计权威依据已导入（structure_*.md 收录的 design/ 权威依据；改名/删除须同步两处）
 for f in docs/design/requirements_zh.md docs/design/architecture-overview_zh.md \
          docs/design/agent-container_zh.md docs/design/multi-repo-isolation_zh.md; do
-  [[ -f "$f" ]] && ok "设计真相源: $f" || err "缺少设计真相源: $f"
+  [[ -f "$f" ]] && ok "设计权威依据: $f" || err "缺少设计权威依据: $f"
 done
 
 if [[ $fail -ne 0 ]]; then

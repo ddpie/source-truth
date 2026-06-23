@@ -56,8 +56,8 @@ agent 会话（注入本项目服务地址）
 
 ### 4.1 隔离由服务端强制，不靠模型自觉
 
-如果仓库名只是模型可填参数，一次提示词注入或冷启动工具竞态就能越权。可见范围固定在**服务地址 +
-服务端校验**上，运行期模型无法修改：
+如果仓库名只是模型可填参数，一次提示词注入或冷启动工具竞态就能越权。可见范围由**服务地址 +
+服务端校验**锁定，运行期模型改不了：
 
 - **白名单默认拒绝**：服务进程能看哪些仓库以启动参数 `--workspace` 为准；不在列表里直接 403/404。
   默认空列表。
@@ -133,7 +133,7 @@ agent 会话（注入本项目服务地址）
 落地形态：**单机多项目，逻辑隔离（进程 + 端口 + 服务端 scope gate）**，机器人（独立飞书 App）1:1 项目、
 项目 1:N 仓库，全部共用一台 index EC2。
 
-- **配置真相源**：`.local/projects.json`（不进 git，模板 `config/projects.example.json`），每个项目一条：
+- **配置权威来源**：`.local/projects.json`（不进 git，模板 `config/projects.example.json`），每个项目一条：
   `port`（该项目 bridge 端口，全机唯一）、`feishuSecretId`、`repos`（每仓 `{subdir, git, ref?,
   refreshIntervalSec?}`，git-only）。网关启动时校验，配置错即启动失败。
 - **网关路由**（`bot-gateway/src/project-routing.ts`）：网关服务哪个项目由 `PROJECT_ID` 绑定（唯一项目零配置
@@ -221,7 +221,7 @@ CSV（纯文本，便于 diff 和评审）：
 上面 9.1–9.4 是初始设计；落地时在几处**有意改进**，实现现状如下（代码见 `index-service/glossary*.py`）：
 
 - **存储**：每个仓一份 slice `/data/glossary/<项目>/<subdir>.jsonl`（单仓项目就一份），不是单张表；
-  `glossary_read` 把项目目录下所有 `*.jsonl` 聚合，多仓时 concept_id 命名空间化为 `<repo>/<id>`、防跨仓串味。
+  `glossary_read` 把项目目录下所有 `*.jsonl` 聚合，多仓时给 concept_id 加上 `<repo>/` 命名空间前缀、防跨仓串味。
 - **格式**：**JSONL**（非 CSV），concept 为中心的 Entry：`{concept_id, kind(symbol|alias), value, source, line, confidence}`。
   没有「解释（业务含义）」列——9.4 自己指出该自由文本列是注入通道，实现改用确定性 grounding 替代。
 - **生成**：**全自动、无人工**。构建期在 index 主机用本地 `claude` (cc) CLI 扫代码产出（不是「中文名/解释由人补」）。

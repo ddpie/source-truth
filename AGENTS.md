@@ -14,8 +14,8 @@ source-truth 是「代码为唯一依据」的飞书游戏研发代码问答助�
 （仓库副本只在 index-service 本地磁盘，会话 microVM 不挂任何文件系统）→ **CardKit 流式卡片**回传。
 
 核心架构特征：AI 引擎在 microVM **内**自主运行（不是容器外的远程 MCP 客户端），并新增飞书 Bot 网关与
-独立 CodeGraph 索引服务两个有状态组件——后者既持有唯一一份代码仓本地副本、又把定位 + 读文件全部经
-HTTP 接口暴露（不挂任何共享文件系统）。架构工作原理见 `docs/agent/architecture.md`。
+独立 CodeGraph 索引服务两个有状态组件——后者持有唯一一份代码仓本地副本，定位代码和读文件也全部走
+HTTP 接口（不挂任何共享文件系统）。架构工作原理见 `docs/agent/architecture.md`。
 
 语言：Python（`agent-container/`）、TypeScript / Node 20（`bot-gateway/`、未来 `infra/` CDK）、
 Bash（`scripts/`）。会话容器 ARM64-only。
@@ -85,8 +85,8 @@ pre-push 跑离线套件。结构自检 `./scripts/check-invariants.sh` 由 lint
   上用本地 `claude` (cc) CLI 离线扫自己已持有的代码副本、产出「中文词→英文符号」对照表（`/data/glossary/<项目>/`），
   **无用户输入、无会话、不在请求路径上**。这是有意纳入的构建期引擎，受三重约束：① cc 被锁定（`--disallowed-tools`
   去掉 Bash/Write/WebFetch/Task 等、`--setting-sources ""` 不加载 repo 的 `.claude`，见 `glossary_build.run_cc`）；
-  ② 产物只读服务、写盘在 index 主机本地、代码不出机器；③ cc 臆造的中文别名由 `extract_entries` 的 grounding
-  校验（中文必须真实出现在源文件）丢弃。扫描**不限文件类型**（代码 + 文档/README/设计案等任意文本，只排除二进制/
+  ② 产物仅供只读服务，写盘在 index 主机本地，代码不出机器；③ cc 臆造的中文别名，会被 `extract_entries` 的 grounding
+  校验拦下丢弃（要求中文必须真实出现在源文件里）。扫描**不限文件类型**（代码 + 文档/README/设计案等任意文本，只排除二进制/
   资源），因为中文术语常在文档里；但**文档与代码冲突时以代码为准**——文档来源的条目置信度降一档
   （`glossary.is_code_source` / `demote_confidence`），同概念下代码来源恒高于文档来源，文档术语因此落到按需
   `glossary_lookup` 层而非显眼的 index，且结论仍须实读代码取证。问答引擎仍只在 microVM 内。需 index 主机

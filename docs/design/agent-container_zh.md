@@ -6,9 +6,9 @@
 
 ## 是什么
 
-会话 microVM 内运行的 **Claude Code Agent（Python）**——source-truth 的推理与编排核心。收到飞书来的问题后，
-在 AgentCore Firecracker microVM 内运行一个**只读问答**的 agent 循环：经远程 index-service 定位并读取
-最新主分支源码 → 流式产出答案。microVM 本身不挂任何文件系统，全部取证经 index-service 的 MCP-over-HTTP 接口。
+会话 microVM 内运行的 **Claude Code Agent（Python）**——source-truth 的推理与编排核心。收到飞书转来的问题后，
+在 AgentCore Firecracker microVM 内跑一轮**只读问答**：经远程 index-service 定位并读取
+最新主分支源码，流式产出答案。microVM 本身不挂任何文件系统，取证一律走 index-service 的 MCP-over-HTTP 接口。
 
 ```
 bot-gateway ──InvokeAgentRuntime──▶ agent-container（本组件，microVM 内）
@@ -21,16 +21,16 @@ bot-gateway ──InvokeAgentRuntime──▶ agent-container（本组件，micr
 
 ## 关键决策
 
-- **AI 在容器内**：用 `claude_agent_sdk`（`query` + `ClaudeAgentOptions`）运行 agent 循环，是推理主体也是 MCP
-  消费端，不是容器外的远程客户端。宿主是 `bedrock_agentcore.runtime.BedrockAgentCoreApp`，`@app.entrypoint`
+- **AI 在容器内**：用 `claude_agent_sdk`（`query` + `ClaudeAgentOptions`）运行 agent 循环，它既是推理主体，也是 MCP
+  消费端，而不是容器外的远程客户端。宿主是 `bedrock_agentcore.runtime.BedrockAgentCoreApp`，`@app.entrypoint`
   异步流式 handler。
 - **模型使用 Bedrock**：`CLAUDE_CODE_USE_BEDROCK=1`，microVM 内用 IAM role 鉴权（不传 bearer token）。模型 id
   固定为 `global.anthropic.claude-*:0`（具体版本待定）。
 - **只读边界由工具白名单保证**：agent 内建 `Read`/`Glob`/`Grep` 全部禁用（`tools=[]`、不设 `cwd`），不开放
   `Bash`/`Write`/`Edit`；读文件只能经 index-service 的 `codegraph_*` 工具（`read_file`/`glob_files`/`search_files`
   + 定位类）。落实「不运行引擎、不写回、不提交」。
-- **代码为唯一依据**：系统 prompt（`prompts/system.md`）规定答案必经真实代码 + CodeGraph 取证；与文档冲突
-  以代码为准并标注差异与时间；低置信度转研发。
+- **代码为唯一依据**：系统 prompt（`prompts/system.md`）规定答案必须靠真实代码 + CodeGraph 取证；结论与文档冲突
+  时以代码为准，并标注差异和时间；置信度低则转研发。
 - **语言 Python，容器 ARM64-only**，依赖与基础镜像精确固定，漂移由 `scripts/check-versions.sh`（p1）守卫。
 
 ## 对外契约

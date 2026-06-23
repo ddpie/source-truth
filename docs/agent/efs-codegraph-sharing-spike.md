@@ -22,15 +22,15 @@
 ## 1. Executive Summary（执行摘要）
 
 本方案要回答两问：会话容器能否**只读挂载客户 EFS**读最新源码；CodeGraph 索引能否被各会话**共享并实时同步**。
-本 spike 用 API 模型核验 + 本机实测 + 源码取证 + 对抗式交叉验证逐一定性。
+本 spike 用 API 模型核验 + 本机实测 + 源码取证 + 对抗式交叉验证，对这两问逐一下结论。
 
-> **结论一分为二：唯一已实测验证的是「容器各自打开同一份只读索引文件」不可行；正面方向（EFS 只读挂源码 + 远程引擎共享索引）由 API/文档支持但尚未端到端验证。**
+> **结论一分为二：唯一已实测验证的是「容器各自打开同一份只读索引文件」不可行；另一条路（EFS 只读挂源码 + 远程引擎共享索引）有 API/文档支持，但尚未端到端验证。**
 > CodeGraph(v0.18.5) 用 RocksDB、**open 即写**，只读挂载会直接失败并退化为空索引（✅实测，证据最充分）。客户 EFS **可**被会话容器
 > 只读挂载（AgentCore 2026-05 GA 的 bring-your-own file system 能力，📄文档，未部署实测），承载源码；索引复用改为
 > **「索引常驻 index-service、会话经网络查询」**的远程引擎模型（Model B）——实时同步由常驻引擎自带的 file-watcher 增量提供（✅实测），
 > 唯一一份索引、无副本、无多进程并发写入损坏；但会话经桥远程查询的**完整通路尚未在本机完成端到端验证**（见 §6），属架构推断。
 
-这把 [`architecture.md`](architecture.md) 的「EFS 同时放代码+索引、会话只读挂同一卷本地查」修正为：**EFS 只放源码；
+据此，把 [`architecture.md`](architecture.md) 原方案「EFS 同时放代码+索引、会话只读挂同一卷本地查」修正为：**EFS 只放源码；
 索引留 index-service 本机盘，经一层 stdio→HTTP 桥对会话暴露**。
 
 ---
@@ -88,7 +88,7 @@
 "EfsAccessPointArn": { "pattern": "arn:aws[-a-z]*:elasticfilesystem:...:access-point/fsap-[0-9a-f]{8,40}" }
 ```
 
-`MountPath` 正则 `/mnt/[a-zA-Z0-9._-]+/?`（单层）。`ContainerConfiguration` 仅 `containerUri`（无 volume/privileged 透传位）。
+`MountPath` 正则 `/mnt/[a-zA-Z0-9._-]+/?`（单层）。`ContainerConfiguration` 仅 `containerUri`（没有透传 volume/privileged 的字段）。
 
 ### 4.2 AWS 官方文档要点 📄文档（WebFetch 于 2026-06-16 抓取核验）
 
@@ -134,9 +134,9 @@
 
 ## 5. Discussion（分析）
 
-### 5.1 源码方案成立，且与 AWS 模型同构
-客户 EFS 只读挂载是 AgentCore 2026-05 GA 的一等能力，其「共享只读 BYO-FS vs 每会话独占的 managed session storage」
-二分恰好对应 source-truth「`/mnt/repo` 共享只读源码 vs `/mnt/workspace` 每会话独占临时盘」。源码是普通文件 + 独占写入
+### 5.1 源码方案成立，且与 AWS 模型结构吻合
+客户 EFS 只读挂载是 AgentCore 2026-05 GA 的一等能力，它这套二分——「共享只读 BYO-FS」对「每会话独占的 managed session storage」——
+恰好对应 source-truth 的两类存储：`/mnt/repo` 共享只读源码、`/mnt/workspace` 每会话独占临时盘。源码是普通文件 + 独占写入
 （仅 index-service 的 git pull 写、会话只读），NFS 对此安全。**问题 1 = 可行**。
 
 ### 5.2 索引只读复用为何失败：RocksDB open 即写
@@ -154,11 +154,11 @@ file-watcher 提供实时增量；会话容器不持有索引、经网络查询�
 
 但有一道**硬约束**：v0.18.5 的 `--connect` 走本地 Unix socket（`--help` 确证 `--socket` 仅 UDS），**跨不出 Firecracker microVM**。
 故会话容器无法直接 `--connect`，传输层**须加一层 stdio→streamable-HTTP 桥**——这正是 [`architecture.md`](architecture.md) 标注的主要风险，
-本方案把它显式化为独立常驻组件。VPC 模式（4.2 已确认 EFS 挂载本就要求 VPC）同时提供 microVM 到 index-service 的 TCP 可达性。
+本方案把它显式化为独立常驻组件。VPC 模式（4.2 已确认 EFS 挂载本就要求 VPC）也让 microVM 能经 TCP 连到 index-service。
 （注：「须加桥」是 v0.18.5 现状所迫——若未来 `--connect` 支持 TCP/streamable-HTTP，可绕过自建桥；属版本敏感面，见 §6。）
 
 ### 5.4 路径对齐风险在 Model B 中收敛为单进程内部约束
-project slug 由 workspace 路径 hash 派生（§4.4 实测 `ws-9543` 等），曾是「容器与 index-service 挂载点须一致」的跨进程阻塞项。
+project slug 由 workspace 路径 hash 派生（§4.4 实测 `ws-9543` 等）；过去它会卡在跨进程上——要求容器与 index-service 的挂载点完全一致。
 Model B 下只有 index-service 打开 graph.db、会话从不碰，故该风险**收敛为 index-service 单进程内部约束**（其 `-w` 路径须与建库时一致，
 否则 slug 不匹配会另起空图），不再跨 microVM 暴露——更可控，但并未消失。
 

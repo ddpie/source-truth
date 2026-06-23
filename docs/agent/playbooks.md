@@ -26,7 +26,7 @@
   ```
 
   等热 VM 老化（~15min）后再复测，否则读取到的可能仍是旧 prompt 的输出。
-- **注意**：preamble/marker 类「读取卡片发现没生效」多数是热 VM 仍在使用旧 prompt——先看 deploy 时间，不要急于改 gateway 正则兜底。
+- **注意**：preamble/marker 类「读取卡片发现没生效」，多半是因为热 VM 还在用旧 prompt——先看 deploy 时间，别急着改 gateway 正则兜底。
 
 ## 配方 2：新增 / 修改一个 MCP 工具（index-service 暴露给 agent）
 
