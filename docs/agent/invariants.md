@@ -80,13 +80,21 @@
 
 ## 6. MVP 只读边界
 
-- **不变量**：仅主分支、仅只读问答、不运行引擎、不写回/提交/改文件。
+- **不变量**：仅主分支、仅只读问答、不写回/提交/改文件；**回答引擎只在 microVM 内运行**。
 - **以谁为准**：`agent-container/agent_lib.py` 的 SDK 配置——`tools=[]`（工具不进入模型上下文）+ `disallowed_tools`
   黑名单 + `permission_mode="dontAsk"` + `strict_mcp_config=True` + `setting_sources=[]`；
-  server 端 `http_bridge.py` 只注册 7 个只读工具（闭合白名单）。
+  server 端 `http_bridge.py` 是**闭合白名单**——注册 7 个只读检索/文件工具（symbol_search / get_callers /
+  analyze_impact / search_files / read_file / glob_files / read_table），**项目已知时再加 2 个只读术语表工具**
+  （`codegraph_glossary_index` / `codegraph_glossary_lookup`，共 ≤9），均 `READONLY_ANNOT`、无写副作用。
+- **构建期引擎例外（术语表生成，2026-06-22）**：「不运行引擎」约束的是**按用户提问实时回答的引擎**（必须在
+  microVM 内）。**术语表生成**是离线构建期引擎——在 index 主机用本地 `claude` (cc) CLI 扫自有代码副本产出
+  「中文词→英文符号」表，无用户输入、无会话、不在请求路径上。受锁定：`glossary_build.run_cc` 用
+  `--disallowed-tools`（去 Bash/Write/WebFetch/Task）+ `--setting-sources ""`（不加载 repo 的 `.claude`），
+  产物只读服务、代码不出机器，臆造中文别名由 `extract_entries` grounding 校验丢弃。需 index 主机
+  `bedrock-invoke` IAM 权限（`scripts/lib/provision_iam.sh`）。详见 AGENTS.md「构建期引擎」。
 - **机检**：无专门脚本；依赖 SDK 多层强制 + server 端白名单（不注册即无能力）。
-- **违反后果**：越界写/提交/运行引擎——突破产品安全承诺。越界能力（设计文档读取、多分支、共享记忆、
-  审计护栏、Codex、数值模拟）一律 post-MVP。
+- **违反后果**：越界写/提交/在 microVM 外跑回答引擎——突破产品安全承诺。其余越界能力（设计文档读取、多分支、
+  共享记忆、审计护栏、Codex、数值模拟）一律 post-MVP。
 
 ## 7. 密钥不得入库
 

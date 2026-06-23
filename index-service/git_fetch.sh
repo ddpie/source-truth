@@ -48,7 +48,12 @@ guard_graph_dirs() {  # $1 = repo dir (must contain .git)
   fi
 }
 
+# Record the HEAD BEFORE the reset so the caller can diff old..new and rebuild only the
+# changed files (the glossary's incremental path). Empty on a fresh clone → caller does a
+# full build. Full sha (not --short) so `git diff old..new` is unambiguous.
+OLD_SHA=""
 if [ -d "$DEST/.git" ]; then
+  OLD_SHA="$(git -C "$DEST" rev-parse HEAD 2>/dev/null || echo '')"
   git -C "$DEST" fetch --quiet --prune origin || fail "fetch failed"
   guard_graph_dirs "$DEST"
   if [ -n "$REF" ]; then
@@ -82,3 +87,7 @@ fi
 
 HEAD_SHA="$(git -C "$DEST" rev-parse --short HEAD 2>/dev/null || echo '?')"
 echo "git_fetch ok: $SUBDIR @ $HEAD_SHA"
+# Machine-parseable line for the refresh unit: old (pre-reset) + new (post-reset) full shas.
+# OLD empty => fresh clone => caller should do a FULL glossary build; OLD==NEW => no-op.
+NEW_SHA="$(git -C "$DEST" rev-parse HEAD 2>/dev/null || echo '')"
+echo "git_fetch_shas: $SUBDIR OLD=$OLD_SHA NEW=$NEW_SHA"

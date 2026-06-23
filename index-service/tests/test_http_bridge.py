@@ -84,6 +84,60 @@ async def _list_full_tools(port: int):
         await app.codegraph_session.stop()  # type: ignore[attr-defined]
 
 
+async def _list_tools_with_project(port: int, project: str, glossary_root: str):
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamablehttp_client
+
+    # Point glossary_read at the temp root for this in-process build.
+    import glossary_read
+    orig = glossary_read.DEFAULT_GLOSSARY_ROOT
+    glossary_read.DEFAULT_GLOSSARY_ROOT = glossary_root
+    app = http_bridge.build_bridge(workspace=REPO_ROOT, host="127.0.0.1", port=port,
+                                   local_workspace=REPO_ROOT, project=project)
+    server = asyncio.create_task(app.run_streamable_http_async())
+    try:
+        await asyncio.sleep(3)
+        async with streamablehttp_client(f"http://127.0.0.1:{port}/mcp") as (r, w, _):
+            async with ClientSession(r, w) as session:
+                await session.initialize()
+                tools = (await session.list_tools()).tools
+                idx = await session.call_tool("codegraph_glossary_index", {})
+                idx_text = idx.content[0].text if idx.content else ""
+                return tools, idx_text
+    finally:
+        server.cancel()
+        await app.codegraph_session.stop()  # type: ignore[attr-defined]
+        glossary_read.DEFAULT_GLOSSARY_ROOT = orig
+
+
+def test_glossary_tools_register_and_serve_when_project_set(tmp_path):
+    # The two glossary tools must appear in the closed read-only allowlist when a project
+    # id is set, be read-only-annotated, and serve the project's term index over HTTP.
+    import glossary
+    proj_dir = tmp_path / "gloss" / "mangos"
+    proj_dir.mkdir(parents=True)
+    glossary.write_entries(str(proj_dir / "entries.jsonl"), [
+        glossary.Entry("combat_power", "symbol", "combatPower", "src/Player.cpp", 42, "high"),
+        glossary.Entry("combat_power", "alias", "战力", "src/Player.cpp", 40, "high"),
+    ])
+    tools, idx_text = asyncio.run(
+        _list_tools_with_project(8917, "mangos", str(tmp_path / "gloss")))
+    by_name = {t.name: t for t in tools}
+    for name in ("codegraph_glossary_index", "codegraph_glossary_lookup"):
+        assert name in by_name, f"missing {name}"
+        ann = by_name[name].annotations
+        assert ann is not None and ann.readOnlyHint is True, f"{name}: not read-only"
+    assert "combat_power" in idx_text and "战力" in idx_text
+
+
+def test_glossary_tools_absent_when_no_project():
+    # Without a project id the glossary tools must NOT be registered (no per-project data).
+    tools = asyncio.run(_list_full_tools(8918))
+    names = {t.name for t in tools}
+    assert "codegraph_glossary_index" not in names
+    assert "codegraph_glossary_lookup" not in names
+
+
 def test_tools_carry_readonly_annotations_and_rich_descriptions():
     # MCP best practice (spec tool annotations + Anthropic "writing tools for agents"):
     # read-only tools should declare readOnlyHint/idempotentHint/openWorldHint (else

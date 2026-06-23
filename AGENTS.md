@@ -80,6 +80,17 @@ pre-push 跑离线套件。结构自检 `./scripts/check-invariants.sh` 由 lint
 - **改顶层目录 ⇒ 同步 `docs/structure_zh.md`（及 `_en.md`）**；**新增 `docs/*_en.md` ⇒ 补 `_zh.md`**（反之亦然）。
 - **MVP 边界**：仅主分支、仅只读问答、不跑引擎、不写回 / 提交。越界能力（设计文档读取、多分支、
   共享记忆、审计护栏、Codex、数值模拟）一律后置。
+- **「不跑引擎」的一处明确例外——构建期引擎（术语表生成，2026-06-22）**：「不跑引擎」约束的是**按用户提问
+  实时回答的引擎**（处理用户输入、需会话隔离，必须在 microVM 内）。**术语表生成**是另一类：在 **index 主机**
+  上用本地 `claude` (cc) CLI 离线扫自己已持有的代码副本、产出「中文词→英文符号」对照表（`/data/glossary/<项目>/`），
+  **无用户输入、无会话、不在请求路径上**。这是有意纳入的构建期引擎，受三重约束：① cc 被锁定（`--disallowed-tools`
+  去掉 Bash/Write/WebFetch/Task 等、`--setting-sources ""` 不加载 repo 的 `.claude`，见 `glossary_build.run_cc`）；
+  ② 产物只读服务、写盘在 index 主机本地、代码不出机器；③ cc 臆造的中文别名由 `extract_entries` 的 grounding
+  校验（中文必须真实出现在源文件）丢弃。扫描**不限文件类型**（代码 + 文档/README/设计案等任意文本，只排除二进制/
+  资源），因为中文术语常在文档里；但**文档与代码冲突时以代码为准**——文档来源的条目置信度降一档
+  （`glossary.is_code_source` / `demote_confidence`），同概念下代码来源恒高于文档来源，文档术语因此落到按需
+  `glossary_lookup` 层而非显眼的 index，且结论仍须实读代码取证。问答引擎仍只在 microVM 内。需 index 主机
+  `bedrock-invoke` IAM 权限。
 
 `scripts/check-invariants.sh`（已实现；将在 p1 接入 pre-commit）强制其中可自动检查的子集。
 

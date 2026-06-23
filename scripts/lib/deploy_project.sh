@@ -73,10 +73,10 @@ MANIFEST_B64="$(printf '%s' "$REPO_MANIFEST_JSON" | base64 | tr -d '\n')"
 REMOTE_CMD="set -e
 aws s3 cp s3://${ARTIFACT_BUCKET}/index-service.tar.gz /tmp/idx-refresh.tar.gz --region ${REGION}
 tar xzf /tmp/idx-refresh.tar.gz -C /opt/idx/app && rm -f /tmp/idx-refresh.tar.gz
-chmod +x /opt/idx/app/activate_project.sh /opt/idx/app/git_fetch.sh
+chmod +x /opt/idx/app/activate_project.sh /opt/idx/app/git_fetch.sh /opt/idx/app/glossary_refresh.sh
 mkdir -p /etc/index-projects
 echo '${MANIFEST_B64}' | base64 -d > /tmp/manifest-${PID}.json
-PROJECT_ID='${PID}' GIT_SECRET_ID='${GIT_SECRET_ID}' REPO_MANIFEST_JSON=\"\$(cat /tmp/manifest-${PID}.json)\" bash /opt/idx/app/activate_project.sh
+PROJECT_ID='${PID}' GIT_SECRET_ID='${GIT_SECRET_ID}' MODEL='${MODEL}' REPO_MANIFEST_JSON=\"\$(cat /tmp/manifest-${PID}.json)\" bash /opt/idx/app/activate_project.sh
 rm -f /tmp/manifest-${PID}.json"
 
 PARAM_FILE="$(mktemp /tmp/ap-ssm.XXXX.json)"
