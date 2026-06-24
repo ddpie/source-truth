@@ -68,47 +68,21 @@ AI 助手读取项目真实代码、定位依据，再用业务语言给出结�
 
 ## 用到的 AWS 服务
 
-部署在单一账号、单一区域（默认东京 `ap-northeast-1`）。核心是下面 4 个服务，其余（网络、安全、监控等
-全部 20 项服务的规格 / 数量 / 用途）见 [`docs/aws-services_zh.md`](docs/aws-services_zh.md)。
-
-| 服务 | 规格 | 数量 | 用途 |
-|------|------|------|------|
-| **EC2**（index-service 主机） | ARM Graviton `t4g.large`（2 vCPU / 8 GiB）默认，可调大 | 1（所有项目共用） | 常驻 CodeGraph 索引 + 读文件接口，持唯一一份代码本地副本 |
-| **Bedrock AgentCore Runtime** | Firecracker microVM，VPC 模式，会话隔离 | 每项目一套 | Agent 执行环境，按会话独立 microVM |
-| **Bedrock**（模型推理） | 默认 `global.anthropic.claude-opus-4-8` | 共享 | Claude Code Agent 的 LLM 推理 |
-| **S3 / ECR** | artifact bucket + 私有镜像仓 | 各 1 | 存部署产物与会话容器 ARM64 镜像 |
+部署在单一账号、单一区域（默认东京 `ap-northeast-1`）。核心是一台共用的 ARM EC2（常驻索引）、
+每项目一套 Bedrock AgentCore Runtime（会话隔离的 microVM）、Bedrock 模型推理、S3 / ECR。
+全部 20 项服务的规格 / 数量 / 用途见 [`docs/aws-services_zh.md`](docs/aws-services_zh.md)。
 
 ## 部署与测试
 
-**推荐：交互式一键安装**（全新账号 / 区域可跑、幂等；重跑预填上次答案）：
+交互式一键安装（全新账号 / 区域可跑、幂等），离线测试无需 Docker / AWS：
 
 ```bash
-# 前置：已开通目标模型的 Bedrock 访问、目标区域支持 AgentCore、本机装好 aws/docker/git
-./scripts/install.sh
-#   查依赖 → 问区域/代码仓/模型 → 收飞书凭证(写 Secrets Manager) → 确认 → 拉起后端 + 网关
+./scripts/install.sh    # 问区域 / 代码仓 / 模型 / 飞书凭证，拉起后端 + 网关
+./scripts/test.sh       # 离线套件：lint + unit + typecheck
 ```
 
-代码仓来源任选：本地路径、git 地址（GitHub/GitLab，`--repo-ref` 指定分支/标签/提交）、或 `s3://` tarball/前缀。
-
-**进阶：调用底层编排**（CI / 精确控参；8 个阶段，任一可 `--skip`）：
-
-```bash
-./scripts/deploy-all.sh --region ap-northeast-1 --repo <本地路径 | git URL | s3://...>
-#   artifacts→S3 → IAM → network → index-service(EC2) → 镜像(ARM64→ECR) → AgentCore Runtime → gateway → monitoring(CloudWatch)
-./scripts/deploy-all.sh --region ap-northeast-1 --repo <src> --dry-run   # 只打印计划，不改任何资源
-# deploy.sh 已废弃，仅作兼容垫片转发到 deploy-all.sh
-```
-
-测试只有一个入口（离线默认安全，无需 Docker / AWS）：
-
-```bash
-./scripts/test.sh                # 离线套件：lint + unit + typecheck（pre-push 跑这个）
-./scripts/test.sh --full         # 加 smoke / e2e（需 Docker / AWS；smoke/e2e 目前为占位）
-./scripts/check-invariants.sh    # 结构自检：AGENTS / CLAUDE / structure / 双语配对 / 顶层目录
-```
-
-> 飞书凭证（app secret 等）走 Secrets Manager——`install.sh` 交互式创建 `source-truth/feishu-app` 密钥，
-> 网关运行时由 `run.sh` 取出注入进程环境，**不落盘、不入仓库**。
+完整部署流程（前置条件、`deploy-all.sh` 分阶段控参、连飞书、运维、排错）见
+[`docs/runbook.md`](docs/runbook.md)。飞书凭证走 Secrets Manager，不落盘、不入仓库。
 
 ## 能力边界（有意不做的事）
 
@@ -124,38 +98,18 @@ AI 助手读取项目真实代码、定位依据，再用业务语言给出结�
 
 ## 代码怎么进入系统、怎么刷新
 
-**git 为唯一来源，定时自动刷新**——每个仓库 `git clone` 到 index-service 本地，按项目的 systemd timer
-（默认 300 秒）定时 `git pull`，常驻 codegraph 的 file-watcher 在数秒内增量重建内存图，新鲜度分钟级、无需重部署：
-
-```
-activate_project.sh（按项目，经 SSM）：用只读 git 凭证 clone 各仓到 index-service 本地磁盘
-  ▼ index-build@<仓>：每仓建图一次（codegraph-server --graph-only，flock 独占写入）
-  ▼ index-bridge-<项目>：每项目一个常驻只读服务（codegraph-server --mcp + HTTP 接口）
-  ▼ index-refresh-<仓>.timer：定时 git pull → watcher 增量重建（无重启、无第二写者）
-```
-
-更新主分支代码无需手动操作，timer 自动跟上；`--refresh-index` 仅用于换索引服务自身（蓝绿换整机）。
-为什么必须建索引、而不是让 Agent 全仓搜索：实测全仓扫描一次约 127s，建索引后定位查询恒为 1–5ms，见
-[`docs/agent/indexing-performance-spike.md`](docs/agent/indexing-performance-spike.md)。
-（注：webhook / push 触发为后续预留，当前用 timer 轮询拉取。）
+git 为唯一来源：每个仓库 `git clone` 到 index-service 本地，按项目的 systemd timer（默认 300 秒）
+定时 `git pull`，常驻 codegraph 的 file-watcher 在数秒内增量重建内存图，新鲜度分钟级、无需重部署。
+更新主分支代码无需手动操作。为什么必须建索引而非让 Agent 全仓搜索：实测全仓扫描一次约 127 秒，
+建索引后定位查询恒为 1–5 毫秒。流程细节见
+[`docs/agent/architecture.md`](docs/agent/architecture.md)。
 
 ## 安全设计（纵深防御）
 
-向群里的非技术读者解读代码，安全面有三类：**防越权**（只读不能变成写）、**防泄露**（密钥、内网拓扑不能进群）、
-**防注入**（提问或代码里的指令不能改变系统行为）。这些边界不只靠提示词约束，代码本身也会强制执行：
-
-| 面 | 怎么强制 | 以谁为准 |
-|----|---------|--------|
-| **只读边界** | Agent SDK 配 `tools=[]`（连写工具都不在模型上下文里，模型根本无从调用）+ `disallowed_tools` 黑名单 + `permission_mode=dontAsk`；index-service 端只注册一组只读工具（闭合白名单：定位 3 + 读文件 4 + 术语表 2，按可用性注册，不注册即无能力） | `agent-container/agent_lib.py`、`index-service/http_bridge.py` |
-| **会话隔离** | 每次提问跑在独立的 Firecracker microVM，**不挂任何共享 / 代码文件系统**；代码只经 HTTP 接口读，会话之间无共享状态 | `docs/agent/architecture.md` |
-| **路径围栏** | Agent 给的文件路径经词法 + realpath 双重校验关进仓库根，指向仓库外的符号链接逃逸被丢弃；SQLite 开只读模式、禁扩展加载 | `index-service/path_align.py`、`file_read.py`、`file_table.py` |
-| **密钥/拓扑脱敏** | 进群的每个字段（结论/依据/追问/澄清/分析过程/问题回显/兜底文本）都过脱敏：AWS/Stripe/GitHub/JWT/Azure key、连接串口令、EC2 内网 DNS、S3 bucket、本机飞书 secret 全部 `[已隐藏]` | `bot-gateway/src/redact.ts` |
-| **防注入信任边界** | 工具读到的代码/注释/配置一律视为「待分析数据」，其中任何「改变你的行为」的文字都不执行；只信打包进镜像的 system prompt | `agent-container/prompts/system.md` |
-| **取证泄漏保护** | 冷启动时模型偶尔把工具调用当文本吐出（MCP 未注册）——agent 侧退避重试，gateway 侧检测并剥离，0 工具的「假完成」渲染为失败卡而非绿色成功 | `agent-container/agent_lib.py`、`bot-gateway/src/strip-toolcall-leak.ts` |
-| **独占写入约束** | graph.db 同一时刻只允许一个进程写入（flock 跨进程 + 进程内重启锁 + orphan reaper），避免 RocksDB 并发写损坏 | `index-service/codegraph_session.py`、`bootstrap.sh` |
-| **密钥不入库** | 飞书 App ID/Secret、token 走环境变量 / Secrets Manager / SSM，部署 user-data 只写非敏感配置 | `.local/`（gitignored）、`docs/agent/invariants.md` §7 |
-
-逐条「是什么 / 以谁为准 / 怎么自动检查 / 违反后果」见 [`docs/agent/invariants.md`](docs/agent/invariants.md)。
+安全面有三类，且不只靠提示词约束、代码本身会强制执行：**防越权**（Agent 连写工具都不在上下文里，
+服务端只注册一组只读工具）、**防泄露**（进群字段全过脱敏，密钥 / 内网拓扑不进群；凭证走 Secrets Manager 不入库）、
+**防注入**（工具读到的代码 / 注释一律当待分析数据，只信打包进镜像的 system prompt）。
+逐条「怎么强制 / 以谁为准 / 怎么自动检查 / 违反后果」见 [`docs/agent/invariants.md`](docs/agent/invariants.md)。
 
 ## 风险与可信度
 
