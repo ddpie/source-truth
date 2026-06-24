@@ -54,7 +54,8 @@ _BINARY_EXTS = (
 )
 # Hard cap on files handed to cc in ONE build, so even a huge repo (or a giant commit) can't
 # launch an unbounded scan. Beyond this we log a dropped-count (never silently truncate).
-# Default 400 (a full build of a large repo at ~$0.005/file ≈ $2 and ~12 min — measured on the test repo).
+# Default 400 (a one-time full build; cost scales with file count — order of $10 at 400 files on
+# a large Chinese game codebase used for testing, more for larger caps).
 # Overridable per project: env GLOSSARY_MAX_FILES, or --max-files (flag wins). Raise it to trade
 # Bedrock cost for coverage on a big repo; 0/negative means "no cap" (whole candidate set).
 MAX_BUILD_FILES = int(os.environ.get("GLOSSARY_MAX_FILES", "400") or "400")

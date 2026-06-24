@@ -52,7 +52,7 @@
   <text x="629" y="306" text-anchor="middle" font-size="9.5" fill="#7a8493">Claude Code Agent</text>
 
   <!-- bridge A (per-project, multi-repo) -->
-  <text x="205" y="352" text-anchor="middle" font-size="10" fill="#3b7d4f" font-weight="600">只读取证（先定位，再读文件）</text>
+  <text x="205" y="352" text-anchor="middle" font-size="10" fill="#3b7d4f" font-weight="600">只读取证（先定位、再读文件；术语表补检索线索）</text>
   <rect x="64" y="360" width="282" height="82" rx="8" fill="#eef6ef" stroke="#9cc6a8" stroke-width="1.2"/>
   <text x="205" y="380" text-anchor="middle" font-size="12" font-weight="600" fill="#1f2733">index-bridge-项目A（独立端口）</text>
   <rect x="78" y="392" width="120" height="38" rx="6" fill="#ffffff" stroke="#9cc6a8" stroke-width="1.1"/>
@@ -82,9 +82,9 @@
   <!-- shared index host band -->
   <rect x="40" y="474" width="680" height="58" rx="9" fill="#f4f7f4" stroke="#bcd6c2" stroke-width="1.2" stroke-dasharray="6,4"/>
   <text x="380" y="497" text-anchor="middle" font-size="12.5" font-weight="700" fill="#3b7d4f">同一台 index-service 主机（所有项目的 bridge 同机共存，按项目 scope 隔离）</text>
-  <text x="380" y="517" text-anchor="middle" font-size="10.5" fill="#5b6573">唯一一份代码副本只在本地磁盘 /data/repo/&lt;subdir&gt; · 定时 git pull 刷新 · 会话 microVM 不挂任何文件系统</text>
+  <text x="380" y="517" text-anchor="middle" font-size="10.5" fill="#5b6573">唯一一份代码副本只在本地磁盘 /data/repo/&lt;subdir&gt; · 定时 git pull 刷新 · 离线建索引与术语表 · 会话 microVM 不挂任何文件系统</text>
 
   <!-- isolation note -->
-  <text x="380" y="560" text-anchor="middle" font-size="10.5" fill="#aab2bd">项目间彻底隔离（进程 + 端口 + 服务端 scope gate）：bridge 进程里没有别项目的图，模型无法越权访问</text>
+  <text x="380" y="560" text-anchor="middle" font-size="10.5" fill="#aab2bd">项目间彻底隔离（进程 + 端口 + 服务端按项目范围校验）：bridge 进程里没有别项目的图，模型无法越权访问</text>
   <text x="380" y="578" text-anchor="middle" font-size="10.5" fill="#aab2bd">项目内多仓联合检索：指定仓库只查该仓，不指定则各仓分头查、按相关度合并</text>
 </svg>

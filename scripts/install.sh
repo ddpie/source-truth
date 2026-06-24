@@ -198,6 +198,17 @@ DISK_OPTIONS=(
   "$MANUAL_SENTINEL"
 )
 
+# Term-glossary build file cap (per repo). cc scans this many files to build the
+# 中文→英文符号 map; higher = more coverage but more $ (a full scan of a large repo
+# can run into the hundreds of USD, one-time). 0 = no cap (whole repo).
+GLOSSARY_OPTIONS=(
+  "400    控成本·默认 (cap cost)"
+  "1000   更广覆盖 (more coverage)"
+  "4000   大仓深覆盖 (deep, larger \$)"
+  "0      不限·全量 (no cap, highest \$)"
+  "$MANUAL_SENTINEL"
+)
+
 echo
 say step "source-truth installer"
 echo "  把项目最新主分支的真实代码，变成飞书里能问的 AI 助手。"
@@ -251,7 +262,7 @@ except Exception: pass' "$PROJECTS_CFG"
 # ============================================================
 flow_init_env() {
   echo; say step "初始化环境（不挂项目）/ init environment only"
-  local REGION INSTANCE_TYPE ROOT_VOLUME_GB
+  local REGION INSTANCE_TYPE ROOT_VOLUME_GB GLOSSARY_MAX_FILES
   ask_region REGION
   pick_field INSTANCE_TYPE "索引主机机型 (ARM·决定 CPU/内存) / index host type" \
     "${DEPLOY_INSTANCE_TYPE:-t4g.large}" "EC2 机型 (ARM)" "${INSTANCE_OPTIONS[@]}"
@@ -262,11 +273,19 @@ flow_init_env() {
     say warn "磁盘大小需为 ≥8 的整数 GiB / disk must be an integer GiB ≥ 8."
     ask ROOT_VOLUME_GB "磁盘大小 GiB" "30"
   done
+  pick_field GLOSSARY_MAX_FILES "术语表构建文件上限 (中文→代码符号·控成本) / glossary build cap" \
+    "${DEPLOY_GLOSSARY_MAX_FILES:-400}" "文件数 (0=不限)" "${GLOSSARY_OPTIONS[@]}"
+  while ! [[ "$GLOSSARY_MAX_FILES" =~ ^[0-9]+$ ]]; do
+    [[ "$ASSUME_YES" == true ]] && { say err "术语表上限无效 / invalid glossary cap '$GLOSSARY_MAX_FILES'"; exit 1; }
+    say warn "需为非负整数 (0=不限) / must be a non-negative integer (0 = no cap)."
+    ask GLOSSARY_MAX_FILES "文件数 (0=不限)" "400"
+  done
   echo; say info "将只起共享底座（VPC/NAT/EC2/镜像），不挂任何项目。之后用「添加项目」上线机器人。"
   confirm "开始初始化环境？/ Initialize the base environment now?" || { say info "已取消"; exit 0; }
   say step "部署底座 / Deploying base host (several minutes)"
   exec "$SCRIPT_DIR/deploy-all.sh" --region "$REGION" \
-    --instance-type "$INSTANCE_TYPE" --root-volume-gb "$ROOT_VOLUME_GB" --skip-projects
+    --instance-type "$INSTANCE_TYPE" --root-volume-gb "$ROOT_VOLUME_GB" \
+    --glossary-max-files "$GLOSSARY_MAX_FILES" --skip-projects
 }
 
 # ============================================================
