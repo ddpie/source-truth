@@ -245,7 +245,11 @@ else
     # lock), so the initial full build and the first scheduled incremental can't write the slice
     # concurrently (last-writer-wins corruption). nohup-detached so activation doesn't block; the
     # log + the glossary_gen_done/cc_failed JSON line in it are the success/failure signal.
+    # GLOSSARY_MAX_FILES: `source`d from /etc/index-service.env is NOT exported, and this build
+    # uses an explicit env prefix — so pass it through explicitly or glossary_gen falls back to its
+    # own default (400). The refresh timer gets it differently (systemd EnvironmentFile exports it).
     ( cd "$APP" && GLOSSARY_ROOT="$GLOSSARY_ROOT" AWS_REGION="$REGION" \
+        ${GLOSSARY_MAX_FILES:+GLOSSARY_MAX_FILES="$GLOSSARY_MAX_FILES"} \
         nohup flock "$GLOSSARY_ROOT/${PROJECT_ID}/.${SUBDIR}.lock" \
           python3 -m glossary_gen --project "${PROJECT_ID}" --repo-root "$WS" \
             --out "$GLOSSARY_ROOT/${PROJECT_ID}/${SUBDIR}.jsonl" \

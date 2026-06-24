@@ -131,6 +131,33 @@ python3 -m pip check >/dev/null 2>&1 || { echo "BOOTSTRAP_FAILED: pip dependency
 # silently drops a contradictory transaction on reboot; the flock is the real guard).
 ripgrep_install() { command -v rg >/dev/null || apt-get install -y ripgrep || true; }
 ripgrep_install   # fast, .gitignore-aware search the bridge's file tools use
+
+# --- Node + claude (cc) CLI: the build-time glossary engine -----------------------------
+# The glossary builder (glossary_build.run_cc) shells out to a LOCAL `claude` CLI on THIS host
+# to produce the Chinese-term -> code-symbol map (see docs/agent/glossary.md). Without it,
+# glossary_refresh.sh / the initial full build fail with `claude: command not found` and the
+# glossary SILENTLY stays empty (glossary_index degrades to [] — answering still works, the
+# bridge never errors), so the gap is easy to miss. Install it here so a fresh host builds
+# glossaries with zero manual setup. BEST-EFFORT: a failure here must NOT abort bootstrap —
+# the index/bridge/gateway don't need cc, only the glossary does, and an empty glossary is a
+# graceful degrade, not an outage. (Node is also installed by the gateway block below; this
+# ensures it independently, since glossary needs cc even on a host with no gateway.)
+ensure_node() {
+  command -v node >/dev/null 2>&1 && return 0
+  # Node 24 — same MAJOR as the agent container's CLI subprocess. Pin major only
+  # (setup_24.x): NodeSource GCs old patch debs, so an exact patch pin breaks later.
+  retry_net curl -fsSL https://deb.nodesource.com/setup_24.x -o /tmp/nodesetup.sh \
+    && bash /tmp/nodesetup.sh && retry_net apt-get install -y nodejs
+}
+# @latest (NOT pinned), matching agent-container/Dockerfile + the 2026-06-19 ops decision
+# (AGENTS.md): take upstream fixes faster, trade reproducibility; check-versions.sh allows it.
+if ensure_node && command -v npm >/dev/null 2>&1; then
+  retry_net npm install -g @anthropic-ai/claude-code@latest \
+    && echo "bootstrap: claude (cc) CLI installed for glossary build: $(claude --version 2>/dev/null || echo '?')" \
+    || echo "bootstrap: WARN claude (cc) install failed — glossary will stay empty until cc is present (answering unaffected)"
+else
+  echo "bootstrap: WARN node/npm unavailable — skipping claude (cc) install; glossary will stay empty (answering unaffected)"
+fi
 cat > /etc/systemd/system/index-build@.service <<UNIT
 [Unit]
 Description=CodeGraph index build for repo %i (single-writer per graph)
@@ -169,14 +196,7 @@ echo "base host ready (build template installed; no project bound yet — attach
 GW_APP=/opt/bot-gateway
 if aws s3api head-object --bucket "$BUCKET" --key bot-gateway.tar.gz --region "$REGION" >/dev/null 2>&1; then
   echo "setting up bot-gateway (build now, start later when runtime env is written)"
-  # Node 24 — same major as the agent container's CLI subprocess. Pin the MAJOR
-  # only (setup_24.x): NodeSource GCs old patch debs, so an exact patch pin would
-  # break the build later. Skip if a compatible node is already present (reboot/rerun).
-  if ! command -v node >/dev/null 2>&1; then
-    retry_net curl -fsSL https://deb.nodesource.com/setup_24.x -o /tmp/nodesetup.sh
-    bash /tmp/nodesetup.sh
-    retry_net apt-get install -y nodejs
-  fi
+  ensure_node   # Node 24 (defined above for the cc install); no-op if already present
   mkdir -p "$GW_APP"
   retry_net aws s3 cp "s3://$BUCKET/bot-gateway.tar.gz" /tmp/gw.tar.gz --region "$REGION"
   tar xzf /tmp/gw.tar.gz -C "$GW_APP"

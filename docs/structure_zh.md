@@ -32,7 +32,7 @@ index-service/          常驻 CodeGraph 索引服务 + MCP-over-HTTP 接口
   path_align.py         索引路径 ↔ 仓库相对路径词法对齐（拒越界；mount_root 默认空）
   codegraph_client.py   codegraph-server 客户端封装（休眠：仅测试用，独占写入 tripwire 守护，绝不进常驻服务路径）
   perf.py               结构化耗时日志
-  bootstrap.sh          EC2 user-data：装依赖 + codegraph 二进制 + 网关构建 + systemd 模板（base host，不挂项目）
+  bootstrap.sh          EC2 user-data：装依赖 + codegraph 二进制 + 术语表构建用的 claude(cc) CLI + 网关构建 + systemd 模板（base host，不挂项目）
   activate_project.sh   按项目挂载（SSM 调用）：写清单 / git clone 各仓 / 建图 / 起 index-bridge-<项目> + 刷新 timer
   git_fetch.sh          单仓 git clone/pull（凭证 + ref + 失败 GIT_FETCH_FAILED 告警；bootstrap 与刷新 timer 共用）
   tests/                pytest（由 scripts/test.sh 调用）

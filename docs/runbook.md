@@ -65,6 +65,24 @@ codegraph 索引吃内存、随仓库增大而增长，按仓库规模选机型�
 
 磁盘默认 30 GiB，可选 50 / 100 / 200 GiB 或自定义容量。
 
+**术语表构建上限**（初始化环境时会问一次「术语表构建文件上限」）：术语表把中文业务词对应到代码里
+真实出现的英文符号，让策划用中文也能命中英文代码——它在 index 主机后台离线构建（首启会自动装一个
+本地 `claude` CLI 作为构建引擎），不在问答路径上。这个上限控制每次构建扫多少文件：
+
+| 选项 | 适用 | 成本量级（一次性） |
+|---|---|---|
+| `400`（默认） | 日常够用，覆盖高频概念 | 约 $10 量级 |
+| `1000` / `4000` | 想要更广 / 大仓深覆盖 | 随文件数线性增长 |
+| `0`（不限） | 全量、最高覆盖 | 大仓可达数百美元 |
+
+成本随文件数线性增长（首次全量是一次性，之后只扫代码变更的增量、花费很小）。**纯英文 / 无中文项目
+保持默认即可**——术语表会自动为空、零开销、不影响问答。改这个上限需重新初始化主机才生效（见第六节
+「改术语表构建上限」），日常无需调整。
+
+> 术语表是**后台异步**构建：部署完成后问答立即可用；大仓首次全量可能要几十分钟，**这段时间问答正常**，
+> 只是中文冷僻词可能还没对应上。构建进度/结果在主机日志里（`journalctl` 找 `glossary_gen_done` /
+> `cc_failed`）。构建失败（如 cc 没装上）只让术语表暂时为空，**不影响问答**。
+
 成功后应看到：
 
 - 底座各阶段完成，每个项目打印 `index-bridge-<项目>` 健康 + `bot-gateway@<项目> is active`，整体 `deploy-all complete`；
@@ -155,6 +173,10 @@ aws ssm start-session --region <r> --target <INDEX_SERVICE_INSTANCE>
 定时 `git pull`，常驻 codegraph 的 file-watcher 在几秒内增量重建该仓的内存图——不重启、无中断。改频率就改
 `.local/projects.json` 里该仓/该项目的 `refreshIntervalSec`，再「重新部署该项目」。`--refresh-index` 现在只
 用于**换索引服务自身的代码/机型**（蓝绿换整机），不再用于刷新业务代码。多项目部署见第 6.5 节。
+
+**改术语表构建上限（`GLOSSARY_MAX_FILES`）**：该值在主机首次启动时写入 `/etc/index-service.env`，**对已在
+运行的主机改了重跑不会生效**（复用实例不重写该文件）。要让新上限生效，用 `--refresh-index` 蓝绿换整机；或
+临时进实例手改 `/etc/index-service.env` 的 `GLOSSARY_MAX_FILES`，等下一轮刷新构建按新值跑。日常无需调整。
 
 **只重部署 runtime**（改了 agent 镜像 / system prompt 后）：重跑 `deploy-all.sh`（镜像与 runtime 阶段幂等）。
 注意热 microVM 会使用旧镜像约 15 分钟，直到被回收。
@@ -288,6 +310,7 @@ refreshIntervalSec?}`，**git-only**）。顶层 `refreshIntervalSec` 是全局�
 | 部署在 index-service 阶段超时 | 全新账号 NAT 路由未收敛 / 实例仍在冷启动建索引 | 多等一轮（bootstrap 对网络操作有重试）；查看 `/var/log/` 与 `journalctl -u 'index-build@*'` |
 | `/health` 长期非 200 | 索引损坏 / graph.db 空 / worker 反复重启 | 进实例查看 index-bridge-<项目> 日志；必要时 `--refresh-index` 重建（蓝绿，不破坏运行中实例） |
 | 重新部署后行为仍是旧版本 | 热 microVM 仍持旧镜像（约 15 分钟）/ 网关未重启 | 等待热 VM 回收；重启网关确保运行新代码 |
+| 中文问答没用上项目专属命名 / 术语表像是空的 | 术语表后台构建未完成或失败（cc 没装上 / Bedrock 不可invoke） | 进实例看 `journalctl` 与 `/var/log/glossary-*`，找 `glossary_gen_done`（成功）/ `cc_failed` / `claude (cc) install failed`；不影响问答，问答会自动退回常规检索 |
 
 > 独占写入约束：index-service 的 graph.db 同一时刻只能有一个进程写入，并发写会导致 0 节点损坏。
 > 服务层已用 flock + 进程内锁 + orphan reaper 守护；**不要**在实例上手动再跑一个 codegraph-server 写同一份图。

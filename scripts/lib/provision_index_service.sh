@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# provision_index_service.sh <region> <config> <bucket> <max_files> <instance_type> [refresh] [root_volume_gb]
+# provision_index_service.sh <region> <config> <bucket> <max_files> <instance_type> [refresh] [root_volume_gb] [model] [glossary_max_files]
 # Provisions the BASE index host only — an idempotent ARM EC2 (Ubuntu 24.04, glibc 2.39 for
 # codegraph-server) in the private subnet running index-service/bootstrap.sh as user-data. Binds
 # NO project (projects are attached later by activate_project.sh over SSM). Prints the instance's
@@ -17,7 +17,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 source "$SCRIPT_DIR/common.sh"; source "$SCRIPT_DIR/env-utils.sh"
-REGION="$1"; CONFIG="$2"; BUCKET="$3"; MAX_FILES="$4"; ITYPE="$5"; REFRESH="${6:-false}"; ROOT_VOLUME_GB="${7:-30}"; MODEL="${8:-global.anthropic.claude-opus-4-8}"
+REGION="$1"; CONFIG="$2"; BUCKET="$3"; MAX_FILES="$4"; ITYPE="$5"; REFRESH="${6:-false}"; ROOT_VOLUME_GB="${7:-30}"; MODEL="${8:-global.anthropic.claude-opus-4-8}"; GLOSSARY_MAX_FILES="${9:-400}"
 safe_source_env "$CONFIG"
 Q() { aws ec2 "$@" --region "$REGION"; }
 QS() { aws s3api "$@" --region "$REGION"; }
@@ -238,6 +238,7 @@ BUCKET='$BUCKET'
 REGION='$REGION'
 MAX_FILES='$MAX_FILES'
 MODEL='$MODEL'
+GLOSSARY_MAX_FILES='$GLOSSARY_MAX_FILES'
 ENV
 for i in 1 2 3 4 5 6; do curl -fsSL "$BOOT_URL" -o /opt/bootstrap.sh && break || sleep 10; done
 bash /opt/bootstrap.sh

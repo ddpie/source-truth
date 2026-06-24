@@ -37,7 +37,7 @@ logger = logging.getLogger("glossary-build")
 CC_BIN = "claude"
 DEFAULT_TIMEOUT_S = 1200  # one cc batch; a full scan loops MANY batches under this per-batch limit
 # Files per cc invocation. The whole file list goes into the `claude -p "<prompt>"` ARGV, so a
-# large set (e.g. a tens-of-thousands-of-file full build) blows the OS arg limit (Errno 7 "Argument list too
+# large set (e.g. a full build of a repo with tens of thousands of files) blows the OS arg limit (Errno 7 "Argument list too
 # long"). build() chunks `files` into batches of this size, one cc call each, and concatenates the
 # outputs — keeping every argv well under the limit and bounding each call's runtime/cost.
 CC_BATCH_FILES = 300

@@ -50,12 +50,14 @@ SKIP_PROJECTS=false      # --skip-projects: provision the shared BASE host only,
 # against the persisted config + defaults after safe_source_env below.
 INSTANCE_TYPE=""
 MAX_FILES=""
+GLOSSARY_MAX_FILES=""    # term-glossary build file cap (cc scan); separate from codegraph MAX_FILES
 MODEL=""
 ROOT_VOLUME_GB=""
 IDLE_TIMEOUT=""          # AgentCore session idle timeout (s); gateway session TTL is aligned to this
 MAX_LIFETIME=""          # AgentCore microVM hard max age (s) before forced recycle
 DEFAULT_INSTANCE_TYPE="t4g.large"
 DEFAULT_MAX_FILES="10000"
+DEFAULT_GLOSSARY_MAX_FILES="400"   # cc scans this many files per glossary build; 0 = no cap (whole repo)
 DEFAULT_MODEL="global.anthropic.claude-opus-4-8"
 DEFAULT_ROOT_VOLUME_GB="30"
 # Idle timeout default = AWS's own default (900s/15min). The gateway derives its
@@ -84,6 +86,7 @@ Options:
                       project (init-env). Add projects later via ./scripts/install.sh.
   --instance-type <t> index host EC2 type, ARM (default: t4g.large)
   --max-files <n>     codegraph max files to index per repo (default: 10000)
+  --glossary-max-files <n>  term-glossary build file cap per repo (default: 400; 0 = no cap)
   --root-volume-gb <n> index host root EBS size in GiB (default: 30). Grow for large repos:
                       it holds every project's repo clones + graph.db.
   --model <id>        default Bedrock model id (a project may override it in projects.json)
@@ -114,6 +117,7 @@ while [[ $# -gt 0 ]]; do
     --skip-projects) SKIP_PROJECTS=true; shift ;;
     --instance-type) INSTANCE_TYPE="$2"; shift 2 ;;
     --max-files) MAX_FILES="$2"; shift 2 ;;
+    --glossary-max-files) GLOSSARY_MAX_FILES="$2"; shift 2 ;;
     --root-volume-gb) ROOT_VOLUME_GB="$2"; shift 2 ;;
     --model) MODEL="$2"; shift 2 ;;
     --idle-timeout) IDLE_TIMEOUT="$2"; shift 2 ;;
@@ -142,6 +146,7 @@ INSTANCE_TYPE="${INSTANCE_TYPE:-${DEPLOY_INSTANCE_TYPE:-$DEFAULT_INSTANCE_TYPE}}
 # (Graviton isn't in every AZ of every region) instead of a blind AvailabilityZones[0].
 export DEPLOY_INSTANCE_TYPE="$INSTANCE_TYPE"
 MAX_FILES="${MAX_FILES:-${DEPLOY_MAX_FILES:-$DEFAULT_MAX_FILES}}"
+GLOSSARY_MAX_FILES="${GLOSSARY_MAX_FILES:-${DEPLOY_GLOSSARY_MAX_FILES:-$DEFAULT_GLOSSARY_MAX_FILES}}"
 ROOT_VOLUME_GB="${ROOT_VOLUME_GB:-${DEPLOY_ROOT_VOLUME_GB:-$DEFAULT_ROOT_VOLUME_GB}}"
 IDLE_TIMEOUT="${IDLE_TIMEOUT:-${DEPLOY_IDLE_TIMEOUT:-$DEFAULT_IDLE_TIMEOUT}}"
 MAX_LIFETIME="${MAX_LIFETIME:-${DEPLOY_MAX_LIFETIME:-$DEFAULT_MAX_LIFETIME}}"
@@ -282,6 +287,7 @@ if [[ "$DRY_RUN" != true ]]; then
   update_env "$CONFIG_FILE" DEPLOY_MODEL "$MODEL"
   update_env "$CONFIG_FILE" DEPLOY_INSTANCE_TYPE "$INSTANCE_TYPE"
   update_env "$CONFIG_FILE" DEPLOY_MAX_FILES "$MAX_FILES"
+  update_env "$CONFIG_FILE" DEPLOY_GLOSSARY_MAX_FILES "$GLOSSARY_MAX_FILES"
   update_env "$CONFIG_FILE" DEPLOY_ROOT_VOLUME_GB "$ROOT_VOLUME_GB"
 fi
 
@@ -422,7 +428,7 @@ if skip index-svc; then say warn "skip index-svc"; elif [[ "$DRY_RUN" == true ]]
 else
   say step "Phase 3: index-service EC2 (BASE host — no project bound)"
   INDEX_IP="$("$SCRIPT_DIR/lib/provision_index_service.sh" \
-    "$REGION" "$CONFIG_FILE" "$BUCKET" "$MAX_FILES" "$INSTANCE_TYPE" "$REFRESH_INDEX" "$ROOT_VOLUME_GB" "$MODEL")"
+    "$REGION" "$CONFIG_FILE" "$BUCKET" "$MAX_FILES" "$INSTANCE_TYPE" "$REFRESH_INDEX" "$ROOT_VOLUME_GB" "$MODEL" "$GLOSSARY_MAX_FILES")"
   update_env "$CONFIG_FILE" INDEX_SERVICE_IP "$INDEX_IP"
   safe_source_env "$CONFIG_FILE"
   # Wait for the BASE host bootstrap to finish before attaching any project. The base host

@@ -30,9 +30,9 @@ structure）描述系统*是什么*；本文描述*一次提问如何在系统�
           · Claude Code Agent SDK（claude_agent_sdk.query / ClaudeAgentOptions），
             CLAUDE_CODE_USE_BEDROCK=1 走 Bedrock 计费
           · 取证只读通道（全部经 index-service 的 MCP-over-HTTP 接口；microVM 不挂任何文件系统）：
-              (0) 术语桥（中文提问）→ 中文业务词（战力/爆率…）先经 codegraph_glossary_index /
-                  codegraph_glossary_lookup 映射到英文代码符号，再喂给下面的检索（项目已知时才注册；
-                  派生提示，结论仍须实读代码取证）
+              · 术语桥（旁路辅助，非前置步骤）：中文业务词（战力/爆率…）可经 codegraph_glossary_index /
+                  codegraph_glossary_lookup 对应到英文代码符号，与 agent 自身想到的检索词**并用**——
+                  不是「先查术语表再搜」的串行关卡（项目已知时才注册；辅助线索，结论仍须实际查看代码取证）
               (1) CodeGraph 定位 → 先查「哪个工程 / 哪些文件」（symbol_search / get_callers / analyze_impact）
               (2) 文件读取 → 按定位结果精准读取最新主分支源码与工程内配置表（Excel/JSON/CSV）：
                   codegraph_read_file / codegraph_glob_files / codegraph_search_files（仓库相对路径）

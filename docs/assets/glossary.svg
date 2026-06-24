@@ -10,7 +10,7 @@
 
   <rect x="0" y="0" width="780" height="500" fill="#ffffff"/>
   <text x="390" y="34" text-anchor="middle" font-size="18" font-weight="700" fill="#1f2733">术语表：让中文提问命中英文代码</text>
-  <text x="390" y="56" text-anchor="middle" font-size="12.5" fill="#7a8493">中文词 → 代码里真实出现的英文符号 · 派生提示，结论仍以实读代码为准</text>
+  <text x="390" y="56" text-anchor="middle" font-size="12.5" fill="#7a8493">中文词 → 代码里真实出现的英文符号 · 辅助检索线索，结论仍以实际查看代码为准</text>
 
   <!-- ===== 构建期（左半，离线）===== -->
   <rect x="24" y="80" width="360" height="300" rx="10" fill="#fbfbfc" stroke="#d7dde6" stroke-width="1.2"/>
@@ -50,7 +50,7 @@
   <text x="444" y="238" font-size="10.5" fill="#5b6573">成就 → Achievement / Status / Points …</text>
 
   <rect x="428" y="268" width="308" height="52" rx="8" fill="#eef3fb" stroke="#b9c9e6" stroke-width="1.1"/>
-  <text x="444" y="289" font-size="12.5" font-weight="600" fill="#1f2733">用英文符号检索 + 实读代码取证</text>
+  <text x="444" y="289" font-size="12.5" font-weight="600" fill="#1f2733">用英文符号检索 + 实际查看代码取证</text>
   <text x="444" y="306" font-size="10.5" fill="#5b6573">search_files / symbol_search / read_file</text>
 
   <rect x="428" y="336" width="308" height="34" rx="8" fill="#eef6ef" stroke="#9cc6a8" stroke-width="1.1"/>
