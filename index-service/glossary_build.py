@@ -24,11 +24,14 @@ without shelling out; run_cc() is the default subprocess runner.
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
 from dataclasses import replace
 from typing import Callable
 
 import glossary
+
+logger = logging.getLogger("glossary-build")
 
 # cc model/env on the index host (Bedrock). Kept here so the build path is explicit.
 CC_BIN = "claude"
@@ -265,10 +268,18 @@ def build(files: list[str] | None, *, project: str, cwd: str, model: str, region
         batches: list[list[str] | None] = [None]
     else:
         batches = [files[i:i + CC_BATCH_FILES] for i in range(0, len(files), CC_BATCH_FILES)] or [[]]
+    # Progress visibility: a full scan loops dozens of cc batches over 2-3 hours with NO output
+    # until the very end (the slice is written atomically once, on completion). Without a per-batch
+    # heartbeat there is no way to tell "still working" from "hung" except reverse-engineering the
+    # process tree. Emit one structured line per batch (to logging => stderr) so the build is
+    # observable; cc's JSONL product still goes only to the runner's captured stdout, unpolluted.
+    real_batches = [b for b in batches if b != []]
+    total = len(real_batches)
     raw_parts: list[str] = []
-    for batch in batches:
-        if batch == []:
-            continue
+    for idx, batch in enumerate(real_batches, start=1):
+        nfiles = "full-repo" if batch is None else len(batch)
+        logger.info(json.dumps({"event": "glossary_build_batch", "project": project,
+                                 "batch": idx, "batches": total, "files": nfiles}))
         prompt = build_prompt(batch, project=project)
         raw_parts.append(run(prompt, cwd=cwd, model=model, region=region, timeout=timeout))
     raw = "\n".join(raw_parts)
