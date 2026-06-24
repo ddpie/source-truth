@@ -13,6 +13,7 @@ these tests never shell out.
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -351,3 +352,18 @@ def test_build_single_batch_when_small(monkeypatch):
                         lambda *a, **k: calls.__setitem__("n", calls["n"] + 1) or "")
     glossary_build.build(["a.cpp", "b.cpp"], project="p", cwd="/tmp", model="m", region="r")
     assert calls["n"] == 1                        # under batch size → one call
+
+
+def test_build_emits_per_batch_progress(monkeypatch, caplog):
+    # A full scan loops dozens of batches with no slice write until the end; a per-batch
+    # heartbeat is the only way to tell "working" from "hung". Assert one log line per batch,
+    # carrying batch/batches so progress is computable from the log alone.
+    monkeypatch.setattr(glossary_build, "CC_BATCH_FILES", 300)
+    monkeypatch.setattr(glossary_build, "run_cc", lambda *a, **k: "")
+    files = [f"f{i}.cpp" for i in range(750)]      # → 3 batches
+    with caplog.at_level("INFO", logger="glossary-build"):
+        glossary_build.build(files, project="p", cwd="/tmp", model="m", region="r")
+    events = [json.loads(r.message) for r in caplog.records
+              if r.name == "glossary-build" and "glossary_build_batch" in r.message]
+    assert [e["batch"] for e in events] == [1, 2, 3]
+    assert all(e["batches"] == 3 and e["project"] == "p" for e in events)
