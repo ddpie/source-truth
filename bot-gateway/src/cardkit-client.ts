@@ -445,6 +445,65 @@ export async function updateEvidencePanel(cardId: string, evidence: string, sequ
   }));
 }
 
+export interface FinalizeCardOpts {
+  followUp?: boolean;
+  aborted?: boolean;
+  failed?: boolean;
+  evidence?: string;
+  question?: string;
+  elapsedLabel?: string;
+  turnCapped?: boolean;
+  clarify?: boolean;
+  timedOut?: boolean;
+  traceId?: string;
+}
+
+/** Build the schema-2.0 card object for the finalized (terminal) card. Pure — no
+ *  I/O — so the request shape is unit-testable.
+ *
+ *  config carries `streaming_mode:false` so the full-PUT itself closes the stream.
+ *  The separate closeStreaming PATCH still runs first (it's the documented order),
+ *  but it talks to a DIFFERENT endpoint (/settings) that intermittently returns
+ *  300308 (Server Internal Error) — when it does, the stream would stay open and the
+ *  card looks frozen ("正在输入…") even though the answer is complete. Carrying the
+ *  flag here makes finalize self-sufficient: as long as THIS PUT lands, streaming is
+ *  off regardless of whether the PATCH succeeded (observed live: trace
+ *  st-c374b31a2b9d4bbf9e5f166c678a6417). */
+export function buildFinalizeCard(conclusion: string, steps: string[], opts: FinalizeCardOpts = {}): Record<string, unknown> {
+  const { followUp, aborted, failed, evidence, question, elapsedLabel, turnCapped, clarify, timedOut, traceId } = opts;
+  const panel = buildReasoningPanel(steps, false);
+  const evidencePanel = buildEvidencePanel(evidence ?? "");
+  // Re-include the trace line + echoed question at the top (the full-PUT rebuilds the
+  // whole body, so they'd be wiped otherwise — must match the streaming layout).
+  const traceEls = traceId ? [buildTraceElement(traceId)] : [];
+  const q = (question ?? "").trim();
+  const questionEls = q
+    ? [buildQuestionElement(q), { tag: "hr" }]
+    : [];
+  return {
+    schema: "2.0",
+    // streaming_mode:false makes the full-PUT close the stream by itself — see the
+    // docstring above (300308 backstop). update_multi keeps partial element updates.
+    config: { update_multi: true, streaming_mode: false },
+    header: {
+      title: { tag: "plain_text", content: finalizeTitle(followUp, aborted, failed, elapsedLabel, turnCapped, clarify, timedOut) },
+      template: failed ? "red" : aborted ? "grey" : turnCapped ? "orange" : timedOut ? "orange" : clarify ? "blue" : "green",
+    },
+    body: {
+      // Order MUST match the live-stream append order so the full-PUT doesn't visibly
+      // reorder panels at finalize: conclusion, then reasoning (appended first, during
+      // tool calls), then evidence (appended later, when the 供研发复核 section streams).
+      elements: [
+        ...traceEls,
+        ...questionEls,
+        { tag: "markdown", content: conclusion, element_id: "conclusion" },
+        ...(panel ? [panel] : []),
+        ...(evidencePanel ? [evidencePanel] : []),
+      ],
+    },
+  };
+}
+
 /** After close streaming: update header to "完成" (green) via full card PUT.
  *  PUT body = { card: { type, data }, sequence } — full replace, must carry body.
  *  `evidence` (optional) renders as a folded "供研发复核" panel below the answer. */
@@ -464,35 +523,9 @@ export async function finalizeCard(
   timedOut?: boolean,
   traceId?: string,
 ): Promise<void> {
-  const panel = buildReasoningPanel(steps, false);
-  const evidencePanel = buildEvidencePanel(evidence ?? "");
-  // Re-include the trace line + echoed question at the top (the full-PUT rebuilds the
-  // whole body, so they'd be wiped otherwise — must match the streaming layout).
-  const traceEls = traceId ? [buildTraceElement(traceId)] : [];
-  const q = (question ?? "").trim();
-  const questionEls = q
-    ? [buildQuestionElement(q), { tag: "hr" }]
-    : [];
-  const card = {
-    schema: "2.0",
-    config: { update_multi: true },
-    header: {
-      title: { tag: "plain_text", content: finalizeTitle(followUp, aborted, failed, elapsedLabel, turnCapped, clarify, timedOut) },
-      template: failed ? "red" : aborted ? "grey" : turnCapped ? "orange" : timedOut ? "orange" : clarify ? "blue" : "green",
-    },
-    body: {
-      // Order MUST match the live-stream append order so the full-PUT doesn't visibly
-      // reorder panels at finalize: conclusion, then reasoning (appended first, during
-      // tool calls), then evidence (appended later, when the 供研发复核 section streams).
-      elements: [
-        ...traceEls,
-        ...questionEls,
-        { tag: "markdown", content: conclusion, element_id: "conclusion" },
-        ...(panel ? [panel] : []),
-        ...(evidencePanel ? [evidencePanel] : []),
-      ],
-    },
-  };
+  const card = buildFinalizeCard(conclusion, steps, {
+    followUp, aborted, failed, evidence, question, elapsedLabel, turnCapped, clarify, timedOut, traceId,
+  });
   const body = JSON.stringify({ card: { type: "card_json", data: JSON.stringify(card) }, sequence });
   await larkApi("PUT", `/open-apis/cardkit/v1/cards/${cardId}`, body);
 }
