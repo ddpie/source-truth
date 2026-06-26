@@ -9,6 +9,7 @@
   },
   "zh": {
     "card.question.prefix": "问：",
+    "card.asker.prefix": "提问人：",
     "card.trace.prefix": "TraceID：",
     "card.summary.default": "source-truth 正在回答…",
     "card.title.thinking": "正在分析…",
@@ -62,6 +63,7 @@
   },
   "en": {
     "card.question.prefix": "Q: ",
+    "card.asker.prefix": "Asked by: ",
     "card.trace.prefix": "TraceID: ",
     "card.summary.default": "source-truth is answering…",
     "card.title.thinking": "Analyzing…",
