@@ -340,7 +340,7 @@ async function sendStreamingCard(
   traceId: string,
   parentMessageId?: string,
   askerOpenId?: string,
-): Promise<{ cardId: string; abort: AbortController; startSeq: number; isFollowUp: boolean; sentMessageId?: string; question: string; statusSeeded: boolean; stopButtonSeeded: boolean; traceId: string }> {
+): Promise<{ cardId: string; abort: AbortController; startSeq: number; isFollowUp: boolean; sentMessageId?: string; question: string; statusSeeded: boolean; stopButtonSeeded: boolean; traceId: string; askerOpenId?: string }> {
   const targetKey = "messageId" in target ? target.messageId : target.chatId;
   // REDACT the user's question before it touches any group-visible / persisted /
   // replayed surface. The question is user-typed and a 策划 could paste a secret
@@ -358,7 +358,7 @@ async function sendStreamingCard(
   // Echo the question in the card body (esp. for follow-ups, so the card shows
   // WHAT was asked without scrolling). Pass it to createCard as the "question"
   // element; finalizeCard re-includes it so the full-PUT doesn't wipe it.
-  const cardId = await createCard(summary, isFollowUp, safeQuestion, traceId);
+  const cardId = await createCard(summary, isFollowUp, safeQuestion, traceId, askerOpenId);
   // Send the card in-process (HTTP), not via `spawn lark-cli` (~800ms): this is
   // on the first-render path, so the spawn cost delayed every answer's first
   // paint. Returns the sent message_id for the follow-up registry.
@@ -442,14 +442,14 @@ async function sendStreamingCard(
   const startSeq = nextSeq - 1;
   // Return the REDACTED question so finalizeCard re-renders the safe echo (a raw
   // value here would re-leak a secret into the finalized full-PUT card).
-  return { cardId, abort, startSeq, isFollowUp, sentMessageId, question: safeQuestion, statusSeeded, stopButtonSeeded, traceId };
+  return { cardId, abort, startSeq, isFollowUp, sentMessageId, question: safeQuestion, statusSeeded, stopButtonSeeded, traceId, askerOpenId };
 }
 
 /** Streaming invoke body: streams the agent's answer onto the pre-created card
  *  and finalizes it. Runs inside the per-session serializer, so at most one body
  *  per runtimeSessionId is live at a time. */
 async function runStreamingInvoke(
-  card: { cardId: string; abort: AbortController; startSeq: number; isFollowUp: boolean; sentMessageId?: string; question: string; statusSeeded: boolean; stopButtonSeeded: boolean; traceId: string; coldStart?: boolean },
+  card: { cardId: string; abort: AbortController; startSeq: number; isFollowUp: boolean; sentMessageId?: string; question: string; statusSeeded: boolean; stopButtonSeeded: boolean; traceId: string; askerOpenId?: string; coldStart?: boolean },
   sessionId: string,
   prompt: string,
   // A credential PROVIDER, not a snapshot: SignatureV4 re-resolves it on every
@@ -457,7 +457,7 @@ async function runStreamingInvoke(
   // going stale and 403-ing every invoke after a few hours of uptime.
   credentials: () => Promise<AwsCredentials>,
 ): Promise<void> {
-  const { cardId, abort, isFollowUp, sentMessageId, question, traceId, coldStart = false } = card;
+  const { cardId, abort, isFollowUp, sentMessageId, question, traceId, askerOpenId, coldStart = false } = card;
   // Trace-bound logger: every line for THIS invoke carries the same `trace` id shown
   // on the card, so an operator can grep all logs for a user-reported request.
   const tlog = traceLogger(traceId);
@@ -1085,7 +1085,7 @@ async function runStreamingInvoke(
   const elapsedLabel = formatElapsed(performance.now() - monoStart);
   // panelSteps is already cleaned (redactSteps above); finalizeCard re-redacts which
   // is idempotent (no markup/secret left to strip).
-  await writer.write((seq) => finalizeCard(cardId, finalText, redactSteps(panelSteps), seq, isFollowUp, aborted, hardFailed, finalEvidence, question, elapsedLabel, turnCapped, !!clarify, timedOut, traceId));
+  await writer.write((seq) => finalizeCard(cardId, finalText, redactSteps(panelSteps), seq, isFollowUp, aborted, hardFailed, finalEvidence, question, elapsedLabel, turnCapped, !!clarify, timedOut, traceId, askerOpenId));
   // Store the (redacted) answer in the registry BEFORE rendering the follow-up
   // buttons. rememberAnswer is pure in-memory (no card I/O), and the follow-up
   // suggestion buttons are written just below — if a user clicks one in the window
@@ -1214,7 +1214,7 @@ async function runStreamingInvoke(
     emitMetric("card_health", { kind: "finalize_failed" }, { traceId, sessionId, projectId: activeRoute?.projectId });
     try { writer.dropLanes("status", "content", "evidence"); } catch { /* best-effort */ }
     await writer.write((seq) =>
-      finalizeCard(cardId, t("msg.serviceError"), [], seq, isFollowUp, false, true, "", question, "", false, false, false, traceId),
+      finalizeCard(cardId, t("msg.serviceError"), [], seq, isFollowUp, false, true, "", question, "", false, false, false, traceId, askerOpenId),
     ).catch(() => {});
     await writer.write((seq) => closeStreaming(cardId, seq)).catch(() => {});
   }

@@ -31,6 +31,23 @@ import { t } from "./i18n";
  *  which is NOT CommonMark, so escaping would make the common case worse). A
  *  newline collapse keeps a multi-line paste on one line. element_id="question"
  *  so it survives streaming/finalize. */
+/** "提问人：@某人" as a markdown element with a clickable Feishu @-mention. The
+ *  at-mention (`<at id="ou_…"></at>`) ONLY renders as a real mention in markdown,
+ *  not in plain_text — so the asker lives in its OWN element, leaving the question
+ *  echo as plain_text (injection-safe). Returns null when the asker is unknown
+ *  (some events/callbacks carry no sender open_id — see index.ts), so the caller
+ *  simply omits the line rather than rendering an empty/broken mention. The id is
+ *  a Feishu open_id (ou_…), not user-typed, so it needs no escaping. */
+export function buildAskerElement(askerOpenId?: string): Record<string, unknown> | null {
+  const id = (askerOpenId ?? "").trim();
+  if (!id) return null;
+  return {
+    tag: "markdown",
+    element_id: "asker",
+    content: `${t("card.asker.prefix")}<at id="${id}"></at>`,
+  };
+}
+
 export function buildQuestionElement(question: string): Record<string, unknown> {
   const oneLine = question.replace(/\s*[\r\n]+\s*/g, " ");
   return {
@@ -57,7 +74,7 @@ export function buildTraceElement(traceId: string): Record<string, unknown> {
   };
 }
 
-export function buildCreateCardBody(opts?: { summary?: string; followUp?: boolean; question?: string; traceId?: string }): string {
+export function buildCreateCardBody(opts?: { summary?: string; followUp?: boolean; question?: string; traceId?: string; askerOpenId?: string }): string {
   // summary.content customizes the chat-list preview (default would be "[生成中...]").
   const summary = opts?.summary ? opts.summary.slice(0, 40) : t("card.summary.default");
   // Follow-up cards (from a clicked button) get a distinct header so the chat
@@ -72,6 +89,11 @@ export function buildCreateCardBody(opts?: { summary?: string; followUp?: boolea
   // traceId line at the very top (above the echoed question) so it's the first thing
   // visible + survives streaming (element_id="trace"). finalizeCard re-includes it.
   if (opts?.traceId) elements.push(buildTraceElement(opts.traceId));
+  // "提问人：@某人" above the echoed question, so a group reader sees WHO asked (in a
+  // shared chat many people @ the bot / tap each other's 继续追问). Omitted when the
+  // asker is unknown (buildAskerElement returns null).
+  const asker = buildAskerElement(opts?.askerOpenId);
+  if (asker) elements.push(asker);
   const q = (opts?.question ?? "").trim();
   if (q) {
     elements.push(buildQuestionElement(q));
@@ -183,8 +205,8 @@ function larkApi(method: string, path: string, data: string): Promise<unknown> {
 }
 
 /** Create a streaming card; returns its card_id. summary = chat-list preview. */
-export async function createCard(summary?: string, followUp?: boolean, question?: string, traceId?: string): Promise<string> {
-  const resp = await larkApi("POST", "/open-apis/cardkit/v1/cards", buildCreateCardBody({ summary, followUp, question, traceId }));
+export async function createCard(summary?: string, followUp?: boolean, question?: string, traceId?: string, askerOpenId?: string): Promise<string> {
+  const resp = await larkApi("POST", "/open-apis/cardkit/v1/cards", buildCreateCardBody({ summary, followUp, question, traceId, askerOpenId }));
   // feishuApi only guarantees code===0 + a parsed object, NOT a `data.card_id`.
   // Fail LOUD with a self-describing message (this is the first call on the answer
   // hot path) instead of an opaque "Cannot read properties of undefined" TypeError,
@@ -456,6 +478,7 @@ export interface FinalizeCardOpts {
   clarify?: boolean;
   timedOut?: boolean;
   traceId?: string;
+  askerOpenId?: string;
 }
 
 /** Build the schema-2.0 card object for the finalized (terminal) card. Pure — no
@@ -470,12 +493,15 @@ export interface FinalizeCardOpts {
  *  off regardless of whether the PATCH succeeded (observed live: trace
  *  st-c374b31a2b9d4bbf9e5f166c678a6417). */
 export function buildFinalizeCard(conclusion: string, steps: string[], opts: FinalizeCardOpts = {}): Record<string, unknown> {
-  const { followUp, aborted, failed, evidence, question, elapsedLabel, turnCapped, clarify, timedOut, traceId } = opts;
+  const { followUp, aborted, failed, evidence, question, elapsedLabel, turnCapped, clarify, timedOut, traceId, askerOpenId } = opts;
   const panel = buildReasoningPanel(steps, false);
   const evidencePanel = buildEvidencePanel(evidence ?? "");
-  // Re-include the trace line + echoed question at the top (the full-PUT rebuilds the
-  // whole body, so they'd be wiped otherwise — must match the streaming layout).
+  // Re-include the trace line + asker + echoed question at the top (the full-PUT
+  // rebuilds the whole body, so they'd be wiped otherwise — must match the streaming
+  // layout, which is trace → asker → question).
   const traceEls = traceId ? [buildTraceElement(traceId)] : [];
+  const askerEl = buildAskerElement(askerOpenId);
+  const askerEls = askerEl ? [askerEl] : [];
   const q = (question ?? "").trim();
   const questionEls = q
     ? [buildQuestionElement(q), { tag: "hr" }]
@@ -495,6 +521,7 @@ export function buildFinalizeCard(conclusion: string, steps: string[], opts: Fin
       // tool calls), then evidence (appended later, when the 供研发复核 section streams).
       elements: [
         ...traceEls,
+        ...askerEls,
         ...questionEls,
         { tag: "markdown", content: conclusion, element_id: "conclusion" },
         ...(panel ? [panel] : []),
@@ -522,9 +549,10 @@ export async function finalizeCard(
   clarify?: boolean,
   timedOut?: boolean,
   traceId?: string,
+  askerOpenId?: string,
 ): Promise<void> {
   const card = buildFinalizeCard(conclusion, steps, {
-    followUp, aborted, failed, evidence, question, elapsedLabel, turnCapped, clarify, timedOut, traceId,
+    followUp, aborted, failed, evidence, question, elapsedLabel, turnCapped, clarify, timedOut, traceId, askerOpenId,
   });
   const body = JSON.stringify({ card: { type: "card_json", data: JSON.stringify(card) }, sequence });
   await larkApi("PUT", `/open-apis/cardkit/v1/cards/${cardId}`, body);
