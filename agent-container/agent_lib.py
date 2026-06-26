@@ -445,7 +445,8 @@ async def run_agent(
     # The only thing not streamed live is the brief pre-first-tool narration, which is
     # tiny; the leak attempt is at most ~1 turn so its buffer is small.
     async def _drive(p: str, *, suppress_on_leak: bool) -> AsyncIterator[Any]:
-        nonlocal first_emitted, saw_tool_use, saw_markup_text, last_num_turns, saw_error_result
+        nonlocal first_emitted, saw_tool_use, saw_markup_text, saw_bare_toolname_text
+        nonlocal last_num_turns, saw_error_result
         nonlocal zero_result_retrievals
         buf: list[Any] = []
         committed = not suppress_on_leak  # retry attempt streams immediately
@@ -459,6 +460,8 @@ async def run_agent(
                 saw_tool_use = True
             if _message_text_has_toolcall_markup(message):
                 saw_markup_text = True
+            if _message_text_names_internal_tool(message):
+                saw_bare_toolname_text = True
             # An ERRORED terminal result (is_error=True) with no tool use is the OTHER
             # cold-start failure: the SDK/CLI errored before producing an answer (e.g.
             # MCP server unreachable on a cold microVM) → out=0, turns<=1. Track it so
@@ -490,18 +493,29 @@ async def run_agent(
                 yield m
 
     def _is_leak_shape() -> bool:
-        # Retry the cold-start failure class (≤1 turn, no real tool use) when EITHER:
+        # Retry the cold-start failure class (≤1 turn, no real tool use) when ANY of:
         #  - the model emitted tool-call markup as text (tools weren't registered), OR
         #  - the run ended in an ERRORED empty result (SDK/MCP errored before any
-        #    answer). Both usually clear on a warm retry.
+        #    answer), OR
+        #  - the 0-tool answer merely NAMES an internal tool (codegraph_*/mcp__) without
+        #    markup or a call-cue. The narrow _TOOLCALL_MARKUP_RE excludes that shape to
+        #    avoid flagging legit dev-review citations — but here we are already inside the
+        #    cold-start gate (no tool_use AND ≤1 turn), where NO retrieval actually
+        #    happened, so a bare internal-tool mention can ONLY be a leak. Without this the
+        #    agent committed it and the GATEWAY rejected it as `invalid` (zeroToolLeak),
+        #    burning the turn (live trace st-d0baab3f5f734692ac3f9e0738ce3c96). Mirroring
+        #    the gateway here turns that wasted turn into a warm retry.
+        # All clauses share the saw_tool_use / ≤1-turn guard, so an answer that DID
+        # retrieve (the only place the citation false-positive matters) is never reached.
         if saw_tool_use:
             return False
         if not (last_num_turns is None or last_num_turns <= 1):
             return False
-        return saw_markup_text or saw_error_result
+        return saw_markup_text or saw_error_result or saw_bare_toolname_text
 
     saw_tool_use = False
     saw_markup_text = False
+    saw_bare_toolname_text = False
     saw_error_result = False
     last_num_turns: int | None = None
 
@@ -566,6 +580,7 @@ async def run_agent(
             # Reset the per-attempt signals for the next run.
             saw_tool_use = False
             saw_markup_text = False
+            saw_bare_toolname_text = False
             saw_error_result = False
             last_num_turns = None
             # Re-arm first_emitted so agent_first_message measures the RETRY's (real)
@@ -665,12 +680,42 @@ def _message_text_has_toolcall_markup(message: Any) -> bool:
     covered for the cold-start race. If a future SDK ever stops emitting the per-turn
     AssistantMessage (pure-delta streaming), this detector would go blind — guard that
     assumption if the SDK contract changes."""
+    return _any_text_block_matches(message, _TOOLCALL_MARKUP_RE)
+
+
+# A bare internal-tool NAME (codegraph_*/mcp__codegraph__*) or a "Tool call" label line,
+# WITHOUT the call-cues _TOOLCALL_MARKUP_RE requires. This mirrors the gateway's
+# `zeroToolLeak` backstop (bot-gateway/src/index.ts) so the two leak detectors agree:
+# the gateway treats a 0-tool answer naming an internal tool as a failure, so the agent
+# must too (and retry) instead of committing a turn the gateway will reject. Only consulted
+# inside the cold-start gate (no tool_use + ≤1 turn) — see `_is_leak_shape` — where naming
+# a tool can ONLY be a leak (no retrieval happened), so the dev-review-citation
+# false-positive that made _TOOLCALL_MARKUP_RE narrow cannot occur.
+_BARE_TOOLNAME_RE = re.compile(
+    r"\b(?:mcp__)?codegraph_[a-z_]+\b"
+    r"|^\s*\**tool[ _]call\b",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def _message_text_names_internal_tool(message: Any) -> bool:
+    """True if the message's TEXT names an internal codegraph_/mcp__ tool (or carries a
+    'Tool call' label) without the markup/cue _TOOLCALL_MARKUP_RE needs. Cold-start-only
+    leak tell — see `_BARE_TOOLNAME_RE`."""
+    return _any_text_block_matches(message, _BARE_TOOLNAME_RE)
+
+
+def _any_text_block_matches(message: Any, pattern: "re.Pattern[str]") -> bool:
+    """Duck-typed scan of a message's text blocks against `pattern`. Tolerates a
+    content-block list (AssistantMessage) or a bare ``.text`` (TextBlock); a token-delta
+    StreamEvent has neither and is skipped (see _message_text_has_toolcall_markup's note).
+    Never raises — detection must not break the stream."""
     try:
         content = getattr(message, "content", None)
         blocks = content if isinstance(content, (list, tuple)) else [message]
         for block in blocks:
             text = getattr(block, "text", None)
-            if isinstance(text, str) and _TOOLCALL_MARKUP_RE.search(text):
+            if isinstance(text, str) and pattern.search(text):
                 return True
     except Exception:  # noqa: BLE001 - detection must never break the stream
         return False
