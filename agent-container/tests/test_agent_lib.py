@@ -509,6 +509,52 @@ def test_run_agent_retries_on_haiku_attempt_leak():
     assert not any("attempt_" in s for s in texts), "failed haiku attempt must be discarded"
 
 
+def test_run_agent_retries_on_bare_toolname_mention_cold_attempt():
+    # The gap behind live trace st-d0baab3f5f734692ac3f9e0738ce3c96: a COLD attempt
+    # ends at num_turns<=1 with NO tool_use, and its 0-tool answer NAMES an internal
+    # tool (codegraph_*/mcp__) but WITHOUT XML markup or a call-cue. The narrow
+    # _TOOLCALL_MARKUP_RE deliberately excludes that shape (false-positive guard for
+    # dev-review citations), so the agent committed the leak and the GATEWAY then
+    # rejected it as `invalid` (zeroToolLeak) — a wasted turn the user saw as a failure.
+    # In the cold-start gate (no tool_use, <=1 turn) a bare internal-tool mention can
+    # only be a leak (no retrieval happened), so it MUST retry, mirroring the gateway.
+    calls = {"n": 0}
+
+    async def fake_query(prompt, options):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            # 0 tool_use, 1 turn, names codegraph_search_files with no markup/cue.
+            yield _MsgWith([_TextBlock("我需要使用 codegraph_search_files 查找负重相关代码。")])
+            yield _ResultMsg(num_turns=1)
+        else:
+            yield _MsgWith([_ToolUseBlock("t1", "codegraph_symbol_search")])
+            yield _MsgWith([_TextBlock("负重上限 = 力量 × 1.5。")])
+            yield _ResultMsg(num_turns=3)
+
+    msgs = _collect(agent_lib.run_agent({"prompt": "负重上限"}, query_fn=fake_query))
+    assert calls["n"] == 2, "bare-toolname cold attempt must retry once"
+    texts = [getattr(b, "text", "") for m in msgs for b in getattr(m, "content", []) or [] if hasattr(b, "text")]
+    assert any(s.startswith("负重上限 =") for s in texts)
+    assert not any("codegraph_search_files" in s for s in texts), "leaked cold attempt must be discarded"
+
+
+def test_run_agent_keeps_clean_zero_tool_answer_that_names_no_tool():
+    # GUARD against over-eager retry: an honest 0-tool, 1-turn answer that does NOT
+    # name any internal tool (e.g. "超出范围 / 查不到") is legitimate and must be kept,
+    # NOT retried — otherwise honest no-answers get wastefully re-run.
+    calls = {"n": 0}
+
+    async def fake_query(prompt, options):
+        calls["n"] += 1
+        yield _MsgWith([_TextBlock("这个问题超出了我能查到的代码范围，建议转研发确认。")])
+        yield _ResultMsg(num_turns=1)
+
+    msgs = _collect(agent_lib.run_agent({"prompt": "随便问问"}, query_fn=fake_query))
+    assert calls["n"] == 1, "a clean tool-free answer must NOT trigger a retry"
+    texts = [getattr(b, "text", "") for m in msgs for b in getattr(m, "content", []) or [] if hasattr(b, "text")]
+    assert any("超出了我能查到" in s for s in texts)
+
+
 def _collect(agen):
     import asyncio
 

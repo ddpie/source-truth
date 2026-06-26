@@ -10,6 +10,7 @@ import {
   buildContentUpdateBody,
   settingsPath,
   buildCloseStreamingBody,
+  buildFinalizeCard,
   buildSendCardContent,
   buildReasoningPanel,
   buildEvidencePanel,
@@ -229,6 +230,35 @@ describe("close streaming", () => {
     const body = JSON.parse(buildCloseStreamingBody(9));
     expect(body.sequence).toBe(9);
     expect(JSON.parse(body.settings).config.streaming_mode).toBe(false);
+  });
+});
+
+describe("buildFinalizeCard", () => {
+  it("carries streaming_mode:false so the full-PUT closes the stream by itself", () => {
+    // Regression: the separate closeStreaming PATCH (/settings) intermittently 300308s
+    // (Server Internal Error). If finalize's full-PUT does not ALSO turn streaming off,
+    // the card stays in "正在输入…" forever even though the answer is complete (live
+    // trace st-c374b31a2b9d4bbf9e5f166c678a6417). The flag here is the backstop.
+    const card = buildFinalizeCard("答案正文", ["步骤一"], { traceId: "abc12345" });
+    expect(card.config).toMatchObject({ update_multi: true, streaming_mode: false });
+  });
+
+  it("keeps the finalized header green + conclusion element for a clean answer", () => {
+    const card = buildFinalizeCard("结论", [], {}) as {
+      header: { template: string; title: { content: string } };
+      body: { elements: Array<{ element_id?: string }> };
+    };
+    expect(card.header.template).toBe("green");
+    expect(card.body.elements.some((e) => e.element_id === "conclusion")).toBe(true);
+  });
+
+  it("turns the header red on a hard failure but still closes streaming", () => {
+    const card = buildFinalizeCard("查询失败", [], { failed: true }) as {
+      header: { template: string };
+      config: Record<string, unknown>;
+    };
+    expect(card.header.template).toBe("red");
+    expect(card.config.streaming_mode).toBe(false);
   });
 });
 
