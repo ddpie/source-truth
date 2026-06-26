@@ -11,6 +11,7 @@ import {
   settingsPath,
   buildCloseStreamingBody,
   buildFinalizeCard,
+  buildAskerElement,
   buildSendCardContent,
   buildReasoningPanel,
   buildEvidencePanel,
@@ -160,6 +161,30 @@ describe("buildQuestionElement", () => {
   });
 });
 
+describe("buildAskerElement (谁问的)", () => {
+  it("renders the asker as a clickable @-mention (markdown <at id=…>)", () => {
+    const el = buildAskerElement("ou_abc123") as { tag: string; element_id: string; content: string };
+    expect(el.tag).toBe("markdown"); // at-mention only renders in markdown, not plain_text
+    expect(el.element_id).toBe("asker");
+    expect(el.content).toContain("<at id=\"ou_abc123\"></at>"); // Feishu clickable mention
+  });
+  it("returns null when the asker is unknown (some events carry no open_id)", () => {
+    expect(buildAskerElement("")).toBeNull();
+    expect(buildAskerElement(undefined)).toBeNull();
+  });
+  it("appears above the question in the created card body (element_id=asker)", () => {
+    const card = JSON.parse(JSON.parse(buildCreateCardBody({ question: "Q", askerOpenId: "ou_xyz" })).data);
+    const ids = card.body.elements.map((e: { element_id?: string }) => e.element_id);
+    expect(ids).toContain("asker");
+    // asker sits just before the echoed question
+    expect(ids.indexOf("asker")).toBeLessThan(ids.indexOf("question"));
+  });
+  it("omits the asker element when no open_id is given", () => {
+    const card = JSON.parse(JSON.parse(buildCreateCardBody({ question: "Q" })).data);
+    expect(card.body.elements.some((e: { element_id?: string }) => e.element_id === "asker")).toBe(false);
+  });
+});
+
 describe("formatElapsed", () => {
   it("shows bare seconds under a minute", () => {
     expect(formatElapsed(0)).toBe("0s");
@@ -241,6 +266,14 @@ describe("buildFinalizeCard", () => {
     // trace st-c374b31a2b9d4bbf9e5f166c678a6417). The flag here is the backstop.
     const card = buildFinalizeCard("答案正文", ["步骤一"], { traceId: "abc12345" });
     expect(card.config).toMatchObject({ update_multi: true, streaming_mode: false });
+  });
+
+  it("re-includes the asker @-mention so the full-PUT doesn't wipe who-asked", () => {
+    const card = buildFinalizeCard("结论", [], { question: "Q", askerOpenId: "ou_kept" }) as {
+      body: { elements: Array<{ element_id?: string; content?: string }> };
+    };
+    const asker = card.body.elements.find((e) => e.element_id === "asker");
+    expect(asker?.content).toContain("<at id=\"ou_kept\"></at>");
   });
 
   it("keeps the finalized header green + conclusion element for a clean answer", () => {
