@@ -248,9 +248,14 @@ else
     # GLOSSARY_MAX_FILES: `source`d from /etc/index-service.env is NOT exported, and this build
     # uses an explicit env prefix — so pass it through explicitly or glossary_gen falls back to its
     # own default (400). The refresh timer gets it differently (systemd EnvironmentFile exports it).
-    ( cd "$APP" && GLOSSARY_ROOT="$GLOSSARY_ROOT" AWS_REGION="$REGION" \
+    # All vars are carried by `env` (KEY=VAL args), NOT a bare command prefix: a conditional
+    # `${VAR:+KEY=VAL}` prefix expands AFTER the shell has already decided which words are
+    # assignments, so the expanded `KEY=VAL` lands in command position and bash tries to run it
+    # ("GLOSSARY_MAX_FILES=0: command not found", killing the build). `env` parses KEY=VAL at
+    # runtime, so the conditional works for any value (0 / 400 / empty).
+    ( cd "$APP" && nohup env GLOSSARY_ROOT="$GLOSSARY_ROOT" AWS_REGION="$REGION" \
         ${GLOSSARY_MAX_FILES:+GLOSSARY_MAX_FILES="$GLOSSARY_MAX_FILES"} \
-        nohup flock "$GLOSSARY_ROOT/${PROJECT_ID}/.${SUBDIR}.lock" \
+        flock "$GLOSSARY_ROOT/${PROJECT_ID}/.${SUBDIR}.lock" \
           python3 -m glossary_gen --project "${PROJECT_ID}" --repo-root "$WS" \
             --out "$GLOSSARY_ROOT/${PROJECT_ID}/${SUBDIR}.jsonl" \
             --model "$MODEL" --region "$REGION" --full \
