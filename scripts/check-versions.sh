@@ -57,7 +57,7 @@ if [[ -f "$LOCK" ]]; then
     done < <(grep -vE '^\s*#' "$REQ" | grep -E '==')
     [[ "$fail" -eq 0 ]] && ok "requirements.txt 直接依赖均与 lock 一致"
   fi
-else err "缺少 $LOCK（应由 docker build + pip freeze 生成的全传递依赖锁）"; fi
+else err "缺少 ${LOCK}（应由 docker build + pip freeze 生成的全传递依赖锁）"; fi
 
 # 4. Node 主版本钉死（非浮动 lts）
 if [[ -f "$DOCKERFILE" ]]; then

@@ -86,7 +86,7 @@ run_unit() {
   # 3) TypeScript 单元测试（jest）；有 jest.config + node_modules 才跑。
   for d in bot-gateway; do
     if [[ -f "$ROOT/$d/jest.config.cjs" && -x "$ROOT/$d/node_modules/.bin/jest" ]]; then
-      say step "unit：TypeScript 单元测试（jest $d）"
+      say step "unit：TypeScript 单元测试（jest ${d}）"
       ran=$((ran + 1))
       ( cd "$ROOT/$d" && npx jest -c jest.config.cjs --no-coverage --passWithNoTests ) || rc=1
     fi
@@ -183,9 +183,9 @@ main() {
   local rc=$?
 
   if [[ "$rc" -eq 0 ]]; then
-    say ok "test.sh（$mode）：全绿"
+    say ok "test.sh（${mode}）：全绿"
   else
-    say err "test.sh（$mode）：有失败"
+    say err "test.sh（${mode}）：有失败"
   fi
   return "$rc"
 }
