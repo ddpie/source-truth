@@ -34,6 +34,8 @@ ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 source "$SCRIPT_DIR/lib/common.sh"
 # shellcheck source=lib/env-utils.sh
 source "$SCRIPT_DIR/lib/env-utils.sh"
+# shellcheck source=lib/resolve_model.sh
+source "$SCRIPT_DIR/lib/resolve_model.sh"
 
 CONFIG_DIR="$ROOT/.local"
 CONFIG_FILE="$CONFIG_DIR/deploy-config"
@@ -96,7 +98,10 @@ Options:
   --glossary-max-files <n>  term-glossary build file cap per repo (default: 400; 0 = no cap)
   --root-volume-gb <n> index host root EBS size in GiB (default: 30). Grow for large repos:
                       it holds every project's repo clones + graph.db.
-  --model <id>        default Bedrock model id (a project may override it in projects.json)
+  --model <id>        default Bedrock model id (a project may override it in projects.json).
+                      The inference-profile prefix is auto-corrected to the --region's geo
+                      (us./eu./apac.); a global.* id is kept but WARNed if the region
+                      doesn't carry it. Pass a full id here to pin it explicitly.
   --idle-timeout <s>  AgentCore session idle timeout, seconds (60..28800; default 900/15min).
                       The gateway's session-reuse TTL is aligned to this.
   --max-lifetime <s>  AgentCore microVM hard max age before forced recycle (60..28800; default 28800/8h)
@@ -149,6 +154,22 @@ REGION="${REGION:-${DEPLOY_REGION:-}}"
 # reconcile re-run keeps the earlier choice instead of reverting to the default
 # (which would flip the live runtime's model via the in-place update).
 MODEL="${MODEL:-${DEPLOY_MODEL:-$DEFAULT_MODEL}}"
+# Region-correct the Bedrock inference-profile prefix. The default model carries a
+# `global.` prefix, which is only available from a SUBSET of source regions (us-west-2,
+# us-east-1/2, eu-west-1, ap-northeast-1) — deploying it to e.g. ap-southeast-1 fails.
+# resolve_model_profile rewrites a geo prefix (us./eu./apac.) to match the region and
+# leaves an explicit `global.` as-is; we only WARN when global. is used outside its
+# known source regions. An operator can still pin any id via --model / DEPLOY_MODEL.
+if [[ "$MODEL" == global.anthropic.* ]] && ! region_carries_global "$REGION"; then
+  resolved="$(resolve_model_profile "$MODEL" "$REGION")"
+  # global. stays global. (operator opt-in), so resolved == MODEL here — warn, don't rewrite.
+  say warn "model '$MODEL' uses the GLOBAL inference profile, which $REGION does not carry"
+  say warn "  (global source regions: us-west-2, us-east-1/2, eu-west-1, ap-northeast-1)."
+  say warn "  → answers will fail until you pass a region-scoped model, e.g."
+  say warn "    --model $(resolve_model_profile anthropic."${MODEL#global.anthropic.}" "$REGION")"
+else
+  MODEL="$(resolve_model_profile "$MODEL" "$REGION")"
+fi
 INSTANCE_TYPE="${INSTANCE_TYPE:-${DEPLOY_INSTANCE_TYPE:-$DEFAULT_INSTANCE_TYPE}}"
 # Export so provision_network.sh can pick an AZ that actually offers this type
 # (Graviton isn't in every AZ of every region) instead of a blind AvailabilityZones[0].

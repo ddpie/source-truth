@@ -22,8 +22,12 @@
 
 1. **AWS 账号 + 目标区域**：区域须支持 AgentCore（如 `ap-northeast-1` 东京）。本机配好可部署的 AWS 凭证。
 2. **Bedrock 模型访问**：在 Bedrock 控制台 → Model access 开通目标模型（默认 `global.anthropic.claude-opus-4-8`）。
-   跨区域注意：`global.*` 推理档只在部分区域承载，不支持的区域改用区域级档（`apac.*` / `us.*` / `eu.*`）；
-   `deploy-all.sh` 的 preflight 会就此 WARN 并给出可操作提示。
+   跨区域：模型 ID 是 Bedrock 的跨区域推理档 `<地域前缀>.anthropic.<模型>`，前缀须与区域匹配
+   （`us.` / `eu.` / `apac.`，分别对应 `us-*` / `eu-*` / `ap-*`）。`deploy-all.sh` 会按 `--region`
+   自动选对前缀：区域级前缀（`us./eu./apac.`）和裸 `anthropic.` ID 会被改写成该区域正确的档；
+   `global.*` 只在部分源区域承载（`us-west-2` / `us-east-1` / `us-east-2` / `eu-west-1` / `ap-northeast-1`），
+   在不承载的区域（如 `ap-southeast-1` 新加坡）部署默认模型时，preflight 会 WARN 并给出可粘贴的
+   `--model apac.anthropic.…` 修复命令——照提示重跑即可，无需手算前缀。
 3. **目标代码仓**：要被问答的游戏代码仓，可以是以下任一来源（index-service 会快照、建索引）：
    - 本地路径：`/path/to/your-game-repo`
    - git 地址：`https://github.com/org/repo.git`、`https://gitlab.com/org/repo.git`、`git@host:org/repo.git`
