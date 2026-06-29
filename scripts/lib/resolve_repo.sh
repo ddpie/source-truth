@@ -108,14 +108,15 @@ fetch_repo_source() {
       if [[ "$v" == *.tar.gz || "$v" == *.tgz || "$v" == *.tar ]]; then
         say info "downloading S3 tarball: $v" >&2
         local tb scratch
-        tb="$(mktemp /tmp/repo-src.XXXX.tar.gz)"
+        tb="$(mktemp /tmp/repo-src.XXXXXX)"  # X's at end (BSD/macOS-safe); extraction uses `tar xzf`, not the name
         scratch="$(mktemp -d)"
         aws s3 cp "$v" "$tb" --region "$region" >&2 || { say err "s3 cp failed: $v"; rm -rf "$tb" "$scratch"; return 1; }
         tar xzf "$tb" -C "$scratch" >&2 2>&1 || { say err "extract failed: $v (not a gzip tar?)"; rm -rf "$tb" "$scratch"; return 1; }
         rm -f "$tb"
         # Flatten a single wrapper dir so <target> is the repo root either way.
         local entries
-        mapfile -t entries < <(find "$scratch" -mindepth 1 -maxdepth 1 -printf '%f\n')
+        # -printf is GNU-only (BSD/macOS find rejects it); basename the paths instead.
+        mapfile -t entries < <(find "$scratch" -mindepth 1 -maxdepth 1 -exec basename {} \;)
         if [[ "${#entries[@]}" -eq 1 && -d "$scratch/${entries[0]}" ]]; then
           mv "$scratch/${entries[0]}"/* "$scratch/${entries[0]}"/.[!.]* "$target"/ 2>/dev/null || true
         else

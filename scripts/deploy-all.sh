@@ -198,7 +198,7 @@ preflight_model_access() {
   # through to the inconclusive→continue branch, never blocks. `timeout` exits 124
   # on expiry; aws cli connect/read timeouts add a second belt. Probe stays best-
   # effort: only a clear AccessDenied WARNs; everything else just continues.
-  if err="$(timeout 30 aws bedrock-runtime invoke-model --region "$REGION" --model-id "$MODEL" \
+  if err="$(run_timeout 30 aws bedrock-runtime invoke-model --region "$REGION" --model-id "$MODEL" \
         --cli-connect-timeout 8 --cli-read-timeout 20 \
         --body "$body" --content-type application/json --accept application/json \
         "$resp" 2>&1)"; then
@@ -244,7 +244,7 @@ preflight_model_access() {
 # so the operator learns the region/enablement gap before the long index/build phases.
 preflight_agentcore() {
   command -v aws >/dev/null || return 0
-  if timeout 20 aws bedrock-agentcore-control list-agent-runtimes --region "$REGION" --max-results 1 >/dev/null 2>&1; then
+  if run_timeout 20 aws bedrock-agentcore-control list-agent-runtimes --region "$REGION" --max-results 1 >/dev/null 2>&1; then
     say ok "AgentCore reachable in $REGION"
   else
     say warn "AgentCore (bedrock-agentcore-control) not reachable in $REGION via this identity."
@@ -432,7 +432,10 @@ else
   # module would crash the bridge on import on a fresh instance (health gate then
   # times out). Globbing every .py makes new modules ship automatically; tests/
   # live in a subdir and are excluded by the top-level-only glob.
-  TMP_IDX="$(mktemp /tmp/index-service.XXXX.tar.gz)"
+  # mktemp template: the X's must be at the END (BSD/macOS mktemp rejects a suffix
+  # after them — GNU tolerates it). The local temp name is cosmetic (content goes to a
+  # fixed S3 key), so no .tar.gz suffix is needed on it.
+  TMP_IDX="$(mktemp /tmp/index-service.XXXXXX)"
   # Stage the index-service top-level .py + requirements.txt PLUS the shared manifest
   # parser (scripts/lib/render_manifest.py) into one dir, so bootstrap.sh on the instance
   # can validate + iterate REPO_MANIFEST_JSON with the SAME parser the deploy/tests use
@@ -466,7 +469,7 @@ else
     say err "bot-gateway/package-lock.json missing — required for reproducible 'npm ci' on the index host."
     [[ "$DRY_RUN" == true ]] || exit 1
   fi
-  TMP_GW="$(mktemp /tmp/bot-gateway.XXXX.tar.gz)"
+  TMP_GW="$(mktemp /tmp/bot-gateway.XXXXXX)"  # X's at end (BSD-safe); name is cosmetic
   # Deterministic (see above): keeps the gateway tarball's ETag stable across reruns
   # when its source is unchanged, so the ArtifactSig staleness check is meaningful.
   # Bundle the repo's config/ INTO the tarball under a top-level `config/`: the gateway
