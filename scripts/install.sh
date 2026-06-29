@@ -63,12 +63,40 @@ ask() {
   fi
 }
 
-# ask_secret <var> <prompt> : read WITHOUT echo (credentials never on screen).
+# ask_secret <var> <prompt> : read a secret, echoing one '*' per char (the real
+# value never appears on screen, but the operator gets typed feedback + length).
+# Handles backspace/DEL. Falls back to silent read where there's no TTY (CI).
 ask_secret() {
-  local __var="$1" __prompt="$2" __reply
-  read -rsp "$(printf '%s: ' "$__prompt")" __reply || true
-  echo >&2
+  local __var="$1" __prompt="$2" __reply="" __ch
+  printf '%s: ' "$__prompt" >&2
+  if [[ ! -t 0 ]]; then           # no interactive stdin (CI / piped): silent read
+    read -r __reply || true
+    printf -v "$__var" '%s' "$__reply"; return
+  fi
+  # Read char-by-char; mask with '*'. IFS= + -N1 keeps spaces; -r keeps backslashes.
+  while IFS= read -rsN1 __ch; do
+    [[ -z "$__ch" || "$__ch" == $'\n' || "$__ch" == $'\r' ]] && break
+    if [[ "$__ch" == $'\177' || "$__ch" == $'\b' ]]; then   # backspace / DEL
+      if [[ -n "$__reply" ]]; then __reply="${__reply%?}"; printf '\b \b' >&2; fi
+      continue
+    fi
+    __reply+="$__ch"; printf '*' >&2
+  done
+  printf '\n' >&2
   printf -v "$__var" '%s' "$__reply"
+}
+
+# ask_valid <var> <prompt> <regex> <errmsg> [allow_empty] : ask until the reply
+# matches <regex> (or is empty when allow_empty=1). Keeps the value the operator
+# already typed in scope — re-prompts only this field, not the whole flow.
+ask_valid() {
+  local __var="$1" __prompt="$2" __re="$3" __err="$4" __empty="${5:-}" __val
+  while true; do
+    ask __val "$__prompt" ""
+    if [[ -z "$__val" && -n "$__empty" ]]; then printf -v "$__var" '%s' ""; return; fi
+    if [[ "$__val" =~ $__re ]]; then printf -v "$__var" '%s' "$__val"; return; fi
+    say warn "$__err"
+  done
 }
 
 # confirm <prompt> : y/N. --yes mode auto-confirms.
@@ -378,11 +406,20 @@ print(free[0] if free else "")' "$PROJECTS_CFG")"
   fi
 
   # Feishu app credentials → source-truth/feishu-<pid> (auto secret id).
+  # Validate at the prompt (re-ask the bad field only) so a typo'd App ID / secret
+  # is caught here, not 10 minutes later when the bot silently fails to start.
   local FEISHU_APP_ID FEISHU_APP_SECRET FEISHU_BOT_OPEN_ID SECRET_ID
-  ask        FEISHU_APP_ID      "飞书 App ID" ""
-  ask_secret FEISHU_APP_SECRET  "飞书 App Secret（输入不回显）/ (hidden)"
-  ask        FEISHU_BOT_OPEN_ID "机器人 open_id（可留空）/ bot open_id (optional)" ""
-  [[ -n "$FEISHU_APP_ID" && -n "$FEISHU_APP_SECRET" ]] || { say err "App ID 和 App Secret 必填"; exit 1; }
+  ask_valid FEISHU_APP_ID "飞书 App ID（cli_…）" '^cli_[A-Za-z0-9]+$' \
+    "App ID 应形如 cli_xxxxxxxx / App ID must look like cli_..."
+  while true; do
+    ask_secret FEISHU_APP_SECRET "飞书 App Secret（输入以 * 回显）/ (echoed as *)"
+    [[ -n "$FEISHU_APP_SECRET" ]] && break
+    say warn "App Secret 必填 / App Secret is required"
+  done
+  # open_id is optional, but if given it must look like ou_… (a wrong value breaks the
+  # group @-gate). Empty is allowed (FEISHU_BOT_OPEN_ID unset → 'any mention triggers').
+  ask_valid FEISHU_BOT_OPEN_ID "机器人 open_id（ou_…，可留空）/ bot open_id (optional)" \
+    '^ou_[A-Za-z0-9]+$' "open_id 应形如 ou_xxxxxxxx，或留空 / must look like ou_... or be blank" allow_empty
   SECRET_ID="source-truth/feishu-${PID}"
   local SJSON
   SJSON="$(_AID="$FEISHU_APP_ID" _AS="$FEISHU_APP_SECRET" _BO="${FEISHU_BOT_OPEN_ID:-}" python3 -c '
@@ -413,7 +450,7 @@ cfg.setdefault("projects",{})[os.environ["PID"]]={"port":int(os.environ["PORT"])
 json.dump(cfg,open(sys.argv[1],"w"),ensure_ascii=False,indent=2)' "$PROJECTS_CFG"
   say ok "已写入清单 / wrote projects.json: $PID (port=$PORT, secret=$SECRET_ID)"
 
-  echo; confirm "现在部署项目 $PID？/ Deploy project $PID now?" || { say info "清单已保存，稍后可用「重新部署」/ saved; deploy later via redeploy"; exit 0; }
+  echo; confirm "现在部署项目 ${PID}？/ Deploy project $PID now?" || { say info "清单已保存，稍后可用「重新部署」/ saved; deploy later via redeploy"; exit 0; }
   # Ensure the shared base exists (idempotent no-op if already up), then deploy this project.
   say step "确保底座就绪 / ensuring shared base (idempotent)"
   "$SCRIPT_DIR/deploy-all.sh" --region "$REGION" --skip-projects \
@@ -489,7 +526,7 @@ json.dump(cfg,open(sys.argv[1],"w"),ensure_ascii=False,indent=2)' "$PROJECTS_CFG
   update_env "$CONFIG_FILE" "RUNTIME_ARN_${SEL//-/_}" ""
   say ok "项目 '$SEL' 已从清单移除 / removed from projects.json"
   # Feishu secret: keep by default; offer to delete. git credential is GLOBAL — never touched.
-  if confirm "同时删除该项目飞书密钥 source-truth/feishu-$SEL？(默认否) / also delete its Feishu secret? (default no)"; then
+  if confirm "同时删除该项目飞书密钥 source-truth/feishu-${SEL}？(默认否) / also delete its Feishu secret? (default no)"; then
     aws secretsmanager delete-secret --secret-id "source-truth/feishu-$SEL" --region "$REGION" \
       --force-delete-without-recovery >/dev/null 2>&1 \
       && say ok "飞书密钥已删除 / Feishu secret deleted" || say warn "  飞书密钥删除失败 / delete failed"
