@@ -129,7 +129,9 @@ pick() {
   _pick_draw() {
     for ((i = 0; i < __n; i++)); do
       if (( i == __sel )); then
-        printf '\033[36m  ❯ %s\033[0m\n' "${__it[$i]}" >/dev/tty
+        # highlight via common.sh's bg-aware cyan (bright on dark bg, standard on light) so the
+        # selected row stays readable on both themes; _C_CYAN is '' under NO_COLOR / non-TTY.
+        printf '%s  ❯ %s%s\n' "$_C_CYAN" "${__it[$i]}" "$_C_RESET" >/dev/tty
       else
         printf '    %s\n'               "${__it[$i]}" >/dev/tty
       fi
@@ -352,11 +354,13 @@ flow_add_project() {
     say err "项目 '$PID' 已存在 / already exists — use 'redeploy' to update it."; exit 1
   fi
 
-  # repos: loop git URL + subdir + ref until blank.
-  local REPOS_JSON="[]" RGIT RSUB RREF
+  # repos: loop git URL + subdir + ref until blank. N counts repos ALREADY added, so the
+  # prompt announces which repo you're entering ("第 1 个仓库" first, then 2, 3, …) — without
+  # it a multi-repo project gives no signal of how many are in or which one you're on.
+  local REPOS_JSON="[]" RGIT RSUB RREF N=0
   say info "逐个添加该项目的代码仓库（git 地址留空结束）/ add repos (blank git URL = done):"
   while true; do
-    ask RGIT "  仓库 git 地址 / repo git URL (blank=done)" ""
+    ask RGIT "  第 $((N + 1)) 个仓库 · git 地址 / repo #$((N + 1)) git URL (blank=done)" ""
     [[ -z "$RGIT" ]] && break
     ask RSUB "    on-host 子目录名 / subdir (^[a-z0-9-]+$)" ""
     [[ "$RSUB" =~ ^[a-z0-9][a-z0-9-]*$ ]] || { say warn "subdir 非法，跳过该仓 / invalid subdir, skipped"; continue; }
@@ -364,6 +368,8 @@ flow_add_project() {
     REPOS_JSON="$(RGIT="$RGIT" RSUB="$RSUB" RREF="$RREF" python3 -c '
 import json,os,sys
 a=json.loads(sys.argv[1]); a.append({"subdir":os.environ["RSUB"],"git":os.environ["RGIT"],"ref":os.environ["RREF"]}); print(json.dumps(a))' "$REPOS_JSON")"
+    N=$((N + 1))
+    say ok "    已加入第 $N 个仓库 / repo #$N added: $RSUB ← $RGIT${RREF:+ @$RREF}"
   done
   [[ "$REPOS_JSON" != "[]" ]] || { say err "至少要一个仓库 / need at least one repo"; exit 1; }
 
@@ -430,15 +436,44 @@ import os,json; print(json.dumps({"app_id":os.environ["_AID"],"app_secret":os.en
   unset FEISHU_APP_SECRET SJSON
   say ok "飞书凭证已写入 / stored: $SECRET_ID"
 
-  # first-run git read-only credential (R-cred-1, global, reused by later projects).
-  if ! aws secretsmanager describe-secret --secret-id source-truth/git-credentials --region "$REGION" >/dev/null 2>&1; then
-    local GIT_TOKEN
-    ask_secret GIT_TOKEN "git 只读凭证（PAT/token，首次配置，后续项目复用；公开仓可留空）/ git read-only token (blank for public repos)"
-    if [[ -n "$GIT_TOKEN" ]]; then
+  # git read-only credential (R-cred-1, global, reused by later projects).
+  # EARLY VALIDATION: a private https repo with no credential fails 10 minutes later, host-side,
+  # with an opaque "could not read Username for 'https://github.com'". Instead, probe each https
+  # repo for ANONYMOUS access right here (git ls-remote, prompts disabled): a public repo answers
+  # instantly, a private one fails — telling us a token is needed BEFORE we write the manifest and
+  # kick off the deploy. ssh remotes (git@…) use host keys, not this token, so they're skipped.
+  local HAVE_CRED=false
+  if aws secretsmanager describe-secret --secret-id source-truth/git-credentials --region "$REGION" >/dev/null 2>&1; then
+    HAVE_CRED=true
+  fi
+  if [[ "$HAVE_CRED" == false ]] && have_cmd git; then
+    local NEED_AUTH=false RURL
+    while IFS= read -r RURL; do
+      [[ -n "$RURL" ]] || continue
+      is_https_git_url "$RURL" || continue
+      # Anonymous probe: public repo → rc 0; private/needs-auth → non-zero (prompts disabled so it
+      # fails fast instead of hanging). 15s wall-clock cap (run_timeout: timeout/gtimeout/direct).
+      if ! GIT_TERMINAL_PROMPT=0 run_timeout 15 git ls-remote "$RURL" >/dev/null 2>&1; then
+        say warn "  仓库需要认证（非公开）/ repo needs auth (not public): $RURL"
+        NEED_AUTH=true
+      fi
+    done < <(printf '%s' "$REPOS_JSON" | python3 -c 'import json,sys
+for r in json.load(sys.stdin): print(r.get("git",""))' 2>/dev/null)
+
+    if [[ "$NEED_AUTH" == true ]]; then
+      say warn "上面的私有仓需要一个只读 git 令牌，否则部署会在克隆阶段失败 / private repos above need a read-only git token, or deploy fails at clone"
+      local GIT_TOKEN
+      while true; do
+        ask_secret GIT_TOKEN "git 只读凭证（PAT/token，后续项目复用）/ git read-only token"
+        [[ -n "$GIT_TOKEN" ]] && break
+        say warn "检测到私有仓，令牌必填（公开仓才能留空）/ private repo detected — token required (only public repos may be blank)"
+      done
       aws secretsmanager create-secret --name source-truth/git-credentials --secret-string "$GIT_TOKEN" --region "$REGION" \
         --description "source-truth read-only git credential (R-cred-1)" >/dev/null \
-        && say ok "git 凭证已写入 / stored: source-truth/git-credentials"
+        && { say ok "git 凭证已写入 / stored: source-truth/git-credentials"; HAVE_CRED=true; }
       unset GIT_TOKEN
+    else
+      say ok "所有仓库可匿名克隆，无需 git 令牌 / all repos clone anonymously — no git token needed"
     fi
   fi
 

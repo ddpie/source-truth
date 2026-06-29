@@ -75,5 +75,34 @@ assert_rc 3 "run_timeout 透传命令退出码" run_timeout 5 bash -c 'exit 3'
 assert_rc 0 "run_timeout 缺 timeout 时回退直跑" bash -c \
   'source "'"$ROOT"'/scripts/lib/common.sh"; have_cmd() { [[ "$1" != timeout && "$1" != gtimeout ]]; }; run_timeout 5 true'
 
+# assert_eq <expected> <name> <actual>
+assert_eq() {
+  local want="$1" name="$2" got="$3"
+  _run=$((_run + 1))
+  if [[ "$got" == "$want" ]]; then
+    printf '  ok   %s\n' "$name"
+  else
+    printf '  FAIL %s (want %q, got %q)\n' "$name" "$want" "$got"
+    _fail=$((_fail + 1))
+  fi
+}
+
+# term_bg_class: 末段背景色号 7/9-15 = light，其余（含 0-6/8/空/非数字）= dark
+assert_eq dark  "term_bg_class 空回退 dark"        "$(term_bg_class "")"
+assert_eq dark  "term_bg_class 默认黑底 (15;0)"     "$(term_bg_class "15;0")"
+assert_eq light "term_bg_class 白底 (0;15)"         "$(term_bg_class "0;15")"
+assert_eq light "term_bg_class 浅灰底 (0;7)"        "$(term_bg_class "0;7")"
+assert_eq dark  "term_bg_class 深色 6"              "$(term_bg_class "7;6")"
+assert_eq dark  "term_bg_class 亮黑 8"              "$(term_bg_class "7;8")"
+assert_eq light "term_bg_class 三段式取末段 (1;default;15)" "$(term_bg_class "1;default;15")"
+assert_eq dark  "term_bg_class 非数字回退 dark"     "$(term_bg_class "fg;bg")"
+
+# is_https_git_url: 仅 https:// 返回 0；ssh/git@/其他返回 1
+assert_rc 0 "is_https_git_url 认 https"        is_https_git_url "https://github.com/o/r.git"
+assert_rc 1 "is_https_git_url 拒 git@ ssh"      is_https_git_url "git@github.com:o/r.git"
+assert_rc 1 "is_https_git_url 拒 ssh://"        is_https_git_url "ssh://git@host/o/r.git"
+assert_rc 1 "is_https_git_url 拒 http (非 s)"   is_https_git_url "http://github.com/o/r.git"
+assert_rc 1 "is_https_git_url 拒空"             is_https_git_url ""
+
 echo "  ran=$_run failed=$_fail"
 [[ "$_fail" -eq 0 ]]
