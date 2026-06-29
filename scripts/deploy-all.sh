@@ -214,7 +214,9 @@ preflight_model_access() {
         # Bedrock (not a hardcoded prefix — the geo prefixes are us./eu./jp./au., and
         # many regions only carry global.). resolve_model_for_region already ran before
         # this probe, so if MODEL still doesn't work, surface the region's real options.
-        avail="$(list_region_profiles "$REGION" 2>/dev/null | grep -F "$(model_basename "$MODEL")" | paste -sd' ' -)"
+        # `|| true`: grep exits 1 on no-match, which under set -e + pipefail would
+        # otherwise abort the deploy right where this HELPFUL hint should print.
+        avail="$(list_region_profiles "$REGION" 2>/dev/null | grep -F "$(model_basename "$MODEL")" | paste -sd' ' - || true)"
         if [[ -n "$avail" ]]; then
           say warn "  → inference profiles for this model that ARE offered in $REGION:"
           say warn "    $avail"

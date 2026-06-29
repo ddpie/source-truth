@@ -12,7 +12,7 @@
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-source "$SCRIPT_DIR/common.sh"; source "$SCRIPT_DIR/env-utils.sh"
+source "$SCRIPT_DIR/common.sh"; source "$SCRIPT_DIR/env-utils.sh"; source "$SCRIPT_DIR/resolve_model.sh"
 
 REGION="${1:?usage: deploy_project.sh <region> <project_id>}"
 PID="${2:?usage: deploy_project.sh <region> <project_id>}"
@@ -115,7 +115,15 @@ SUBNET="${PRIVATE_SUBNET:?PRIVATE_SUBNET not set — run the network phase first
 RUNTIME_SG="${INDEX_SERVICE_SG:?INDEX_SERVICE_SG not set — run the index-svc phase first}"
 IDX_ENDPOINT="${INDEX_DNS_NAME:-${INDEX_SERVICE_IP:?INDEX_SERVICE_IP not set}}"
 CODEGRAPH_URL="http://${IDX_ENDPOINT}:${PORT}/mcp"
-RT_MODEL="${MODEL:-${DEPLOY_MODEL:-global.anthropic.claude-opus-4-8}}"
+# The model this project's runtime actually uses: per-project override (projects.json)
+# > persisted default > built-in default. This is the value that reaches Bedrock, so it
+# must be region-correct — resolve it here (deploy-all.sh runs deploy_project.sh in a
+# fresh subshell, and install.sh's add/redeploy flows call this directly, so resolving
+# at THIS single point covers every path). resolve_model_for_region asks Bedrock what's
+# offered in $REGION and returns the id unchanged if it can't tell. See lib/resolve_model.sh.
+RT_MODEL_DECLARED="${MODEL:-${DEPLOY_MODEL:-global.anthropic.claude-opus-4-8}}"
+RT_MODEL="$(resolve_model_for_region "$RT_MODEL_DECLARED" "$REGION")"
+[[ "$RT_MODEL" == "$RT_MODEL_DECLARED" ]] || say info "[$PID] resolved model for $REGION: $RT_MODEL_DECLARED → $RT_MODEL"
 # Per-project runtime name (AgentCore names must be [a-zA-Z0-9_]); pid uses '-' → '_'.
 RT_NAME="source_truth_agent_${PID//-/_}"
 
