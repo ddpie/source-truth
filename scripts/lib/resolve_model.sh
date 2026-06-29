@@ -67,12 +67,24 @@ list_region_profiles() {
 # reached, the model can't be matched, or anything is uncertain, echoes the ORIGINAL
 # id unchanged — we never invent an id, and the downstream invoke-probe still WARNs if
 # the kept id turns out to be unavailable. Non-fatal by construction.
+#
+# Return code lets the caller tell apart WHY the id was kept unchanged:
+#   0 — resolved to a real region profile, OR the input was already region-correct
+#       (nothing to do).
+#   2 — could NOT consult Bedrock (no aws / ListInferenceProfiles failed / empty list).
+#       The id is echoed unchanged but is UNVERIFIED for this region — the caller
+#       should warn so a multi-project deploy can't silently leave one project on an
+#       unverified id while its siblings resolved.
 resolve_model_for_region() {
   local model="$1" region="$2"
   local base; base="$(model_basename "$model")"
   [[ -n "$base" ]] || { echo "$model"; return 0; }
-  local profiles; profiles="$(list_region_profiles "$region")" || { echo "$model"; return 0; }
-  [[ -n "$profiles" ]] || { echo "$model"; return 0; }
+  local profiles; profiles="$(list_region_profiles "$region")" || { echo "$model"; return 2; }
+  [[ -n "$profiles" ]] || { echo "$model"; return 2; }
   local best; best="$(rank_profiles "$base" $profiles)"
-  if [[ -n "$best" ]]; then echo "$best"; else echo "$model"; fi
+  if [[ -n "$best" ]]; then echo "$best"; return 0; fi
+  # Queried successfully but no profile matched this model in this region — that's a
+  # real "not offered here" answer, not a query failure; keep the id, caller's
+  # invoke-probe surfaces it. rc 0 (we DID consult Bedrock).
+  echo "$model"; return 0
 }

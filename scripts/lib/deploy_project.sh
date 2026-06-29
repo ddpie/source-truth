@@ -122,8 +122,18 @@ CODEGRAPH_URL="http://${IDX_ENDPOINT}:${PORT}/mcp"
 # at THIS single point covers every path). resolve_model_for_region asks Bedrock what's
 # offered in $REGION and returns the id unchanged if it can't tell. See lib/resolve_model.sh.
 RT_MODEL_DECLARED="${MODEL:-${DEPLOY_MODEL:-global.anthropic.claude-opus-4-8}}"
-RT_MODEL="$(resolve_model_for_region "$RT_MODEL_DECLARED" "$REGION")"
-[[ "$RT_MODEL" == "$RT_MODEL_DECLARED" ]] || say info "[$PID] resolved model for $REGION: $RT_MODEL_DECLARED → $RT_MODEL"
+# One call captures both the resolved id (stdout) and the status (rc): rc=2 means
+# Bedrock couldn't be consulted (no aws / no perm / transient), so the id is kept
+# UNVERIFIED — WARN so a multi-project deploy doesn't silently leave one project on an
+# unverified id while siblings resolved. `|| RT_RC=$?` keeps set -e from aborting.
+RT_RC=0
+RT_MODEL="$(resolve_model_for_region "$RT_MODEL_DECLARED" "$REGION")" || RT_RC=$?
+if [[ "$RT_RC" == 2 ]]; then
+  say warn "[$PID] couldn't query Bedrock inference profiles for $REGION — using '$RT_MODEL' unverified"
+  say warn "  (check the deploy identity's bedrock:ListInferenceProfiles perm; the invoke-probe rechecks it)."
+elif [[ "$RT_MODEL" != "$RT_MODEL_DECLARED" ]]; then
+  say info "[$PID] resolved model for $REGION: $RT_MODEL_DECLARED → $RT_MODEL"
+fi
 # Per-project runtime name (AgentCore names must be [a-zA-Z0-9_]); pid uses '-' → '_'.
 RT_NAME="source_truth_agent_${PID//-/_}"
 

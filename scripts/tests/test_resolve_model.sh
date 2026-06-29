@@ -65,5 +65,26 @@ assert_eq "AU geo preferred" \
   "au.anthropic.claude-opus-4-8" \
   "$(rank_profiles claude-opus-4-8 au.anthropic.claude-opus-4-8 global.anthropic.claude-opus-4-8)"
 
+# resolve_model_for_region return-code contract: rc=2 when Bedrock can't be consulted.
+# Stub list_region_profiles to simulate each case without touching the network.
+list_region_profiles() { return 1; }   # AWS call fails
+out="$(resolve_model_for_region global.anthropic.claude-opus-4-8 any-region)"; rc=$?
+assert_eq "query-fail keeps id"  "global.anthropic.claude-opus-4-8" "$out"
+assert_eq "query-fail rc=2"      "2" "$rc"
+
+list_region_profiles() { echo ""; }    # AWS call ok but empty list
+out="$(resolve_model_for_region global.anthropic.claude-opus-4-8 any-region)"; rc=$?
+assert_eq "empty-list rc=2"      "2" "$rc"
+
+list_region_profiles() { printf 'jp.anthropic.claude-opus-4-8\nglobal.anthropic.claude-opus-4-8\n'; }
+out="$(resolve_model_for_region global.anthropic.claude-opus-4-8 any-region)"; rc=$?
+assert_eq "resolved picks geo"   "jp.anthropic.claude-opus-4-8" "$out"
+assert_eq "resolved rc=0"        "0" "$rc"
+
+list_region_profiles() { printf 'us.anthropic.claude-sonnet-4-6\n'; }  # ok, no match for opus
+out="$(resolve_model_for_region global.anthropic.claude-opus-4-8 any-region)"; rc=$?
+assert_eq "queried,no-match keeps id" "global.anthropic.claude-opus-4-8" "$out"
+assert_eq "queried,no-match rc=0 (not a query failure)" "0" "$rc"
+
 echo "  ran=$_run failed=$_fail"
 [[ "$_fail" -eq 0 ]]
