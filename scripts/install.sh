@@ -231,6 +231,16 @@ if [[ "$DEPS_OK" != true ]]; then
   say info "  aws CLI v2, python3, docker (ARM64-capable buildx), git"
   exit 1
 fi
+# docker EXISTS isn't enough — the daemon must be RUNNING, or the build phase (after
+# VPC/NAT/EC2 are already created) fails with a docker.sock connect error. Catch it
+# here so the operator isn't billed for half a deploy before hitting it. `docker info`
+# is the standard daemon-liveness check; run_timeout guards a hung daemon.
+if have_cmd docker && ! run_timeout 20 docker info >/dev/null 2>&1; then
+  say err "Docker 已安装但守护进程未运行 / docker is installed but its daemon isn't running."
+  say info "  启动 Docker Desktop（或 dockerd），等它就绪后重试。验证：docker info"
+  say info "  start Docker Desktop (or dockerd), wait until ready, then re-run. Verify with: docker info"
+  exit 1
+fi
 # gh is OPTIONAL — only needed to auto-download codegraph-server from a PRIVATE repo's
 # Release (gh carries auth). Not required if the repo is public, or if you already have
 # the binary locally (CODEGRAPH_SERVER_BIN / PATH / ~/.local/bin). Warn, don't block.
