@@ -111,7 +111,13 @@ fi
 #  - GetQueryResults authorizes only on "*" (keyed by queryId, no log-group resource) — it
 #    genuinely cannot be log-group-scoped, so "*" is required, not over-broad.
 #  - PutMetricData has no resource ARN; constrain by the namespace condition (the only lever).
-LG_ARN="arn:aws:logs:${REGION}:${ACCOUNT}:log-group:${LOG_GROUP}:*"
+# REGION WILDCARD (not pinned to $REGION): this role (source-truth-dau-lambda-role) is account-
+# global and shared across regions, but put-role-policy OVERWRITES — pinning the region means a
+# second-region deploy rewrites this to region-B-only and silently revokes region A's DAU Lambda
+# its StartQuery on its own log group (DAU then AccessDenies → dashboard DAU stalls). Same trap
+# that took Tokyo's gateway down on 2026-06-29; same fix as provision_iam.sh's region='*' policies.
+# The log-group name (${LOG_GROUP}, under /source-truth/) is the real scope, not the region.
+LG_ARN="arn:aws:logs:*:${ACCOUNT}:log-group:${LOG_GROUP}:*"
 aws iam put-role-policy --role-name "$ROLE_NAME" --policy-name dau-insights --policy-document "{
   \"Version\":\"2012-10-17\",\"Statement\":[
     {\"Effect\":\"Allow\",\"Action\":[\"logs:StartQuery\",\"logs:StopQuery\"],\"Resource\":\"${LG_ARN}\"},
