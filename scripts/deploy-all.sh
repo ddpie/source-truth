@@ -348,6 +348,10 @@ else
     # Either way the bytes land in $CG_TMP, then go to S3. set -e + the -s check catch a
     # failed/partial download.
     CG_TMP="$(mktemp /tmp/codegraph-server.XXXX)"
+    # Clean the temp binary on ANY exit from here on (set -e could kill us mid-chmod/cp
+    # before the explicit rm below). The trap is cleared right after the rm so it doesn't
+    # outlive this block.
+    trap 'rm -f "$CG_TMP"' EXIT
     cg_got=false
     if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
       say info "codegraph-server not local or in S3 — downloading via gh from $CODEGRAPH_SERVER_REPO ($CODEGRAPH_SERVER_TAG)"
@@ -366,9 +370,9 @@ else
     if [[ "$cg_got" == true ]]; then
       chmod +x "$CG_TMP"
       run aws s3 cp "$CG_TMP" "s3://$BUCKET/bin/codegraph-server" --region "$REGION"
-      rm -f "$CG_TMP"
+      rm -f "$CG_TMP"; trap - EXIT
     else
-      rm -f "$CG_TMP"
+      rm -f "$CG_TMP"; trap - EXIT
       say err "codegraph-server not found locally / in S3, and download failed (gh + curl both)."
       say err "  → If the repo is private, run 'gh auth login' so 'gh release download' can reach the asset;"
       say err "    or set CODEGRAPH_SERVER_BIN=/path/to/codegraph-server (ARM aarch64, glibc>=2.38) and re-run."

@@ -29,8 +29,9 @@ CodeGraph 引擎是一个独立的原生二进制 `codegraph-server`，**不在�
 - **版本**：当前固定为 **0.18.5**（`requirements.txt` 的 `mcp==1.23.3` 客户端按此版本验证过协议）。
 - **取得方式**：从 CodeGraph 官方发布渠道下载对应版本的 aarch64 二进制，放到部署机 `PATH`
   或 `~/.local/bin/codegraph-server`，或用环境变量 `CODEGRAPH_SERVER_BIN=/path/to/codegraph-server`
-  指定。`deploy-all.sh` Phase 1 会优先用本地二进制暂存到 `s3://<bucket>/bin/codegraph-server`；
-  若本地与 S3 都没有则**在 Phase 1 直接报错并给出可操作提示**。
+  指定。`deploy-all.sh` Phase 1 的获取顺序：本地二进制 → S3 已有 → 从 `CODEGRAPH_SERVER_URL`
+  下载（默认指向本仓 Release 资产；私有仓经 `gh release download` 带认证，公开仓经直链），
+  暂存到 `s3://<bucket>/bin/codegraph-server`；**全都拿不到时才在 Phase 1 报错并给出可操作提示**。
 
 ## 模块构成
 

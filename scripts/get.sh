@@ -47,7 +47,11 @@ do_clone() {
 # Refresh an existing checkout, else clone fresh.
 if [[ -d "$DIR/.git" ]]; then
   bold "• reusing existing checkout $DIR (git pull)"
-  git -C "$DIR" pull --ff-only origin "$REF" || err "pull failed — using the existing checkout as-is"
+  if ! git -C "$DIR" pull --ff-only origin "$REF"; then
+    err "pull failed (local commits / dirty tree / detached HEAD?) — continuing with the EXISTING"
+    err "  checkout, which may be STALE. Ctrl-C now if you need the latest; else it proceeds in 3s."
+    sleep 3
+  fi
 elif [[ -e "$DIR" ]]; then
   err "$DIR exists but is not a git checkout — move it aside or set SOURCE_TRUTH_DIR, then re-run."
   exit 1
