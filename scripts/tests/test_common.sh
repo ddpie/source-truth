@@ -67,5 +67,13 @@ say_out="$(NO_COLOR=1 say ok "hello-world" 2>&1)"
 assert_contains "hello-world" "say 输出含消息体" "$say_out"
 assert_not_contains $'\e[' "say 在 NO_COLOR 下无 ANSI 转义" "$say_out"
 
+# run_timeout: 命令照常跑、退出码透传；无 timeout/gtimeout 时直接执行（mac 无 coreutils）
+rt_out="$(run_timeout 5 echo "rt-ok" 2>&1)"
+assert_contains "rt-ok" "run_timeout 正常透传输出" "$rt_out"
+assert_rc 3 "run_timeout 透传命令退出码" run_timeout 5 bash -c 'exit 3'
+# 模拟 mac（无 timeout/gtimeout）：仍应直接跑命令、成功
+assert_rc 0 "run_timeout 缺 timeout 时回退直跑" bash -c \
+  'source "'"$ROOT"'/scripts/lib/common.sh"; have_cmd() { [[ "$1" != timeout && "$1" != gtimeout ]]; }; run_timeout 5 true'
+
 echo "  ran=$_run failed=$_fail"
 [[ "$_fail" -eq 0 ]]

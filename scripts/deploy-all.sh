@@ -198,7 +198,7 @@ preflight_model_access() {
   # through to the inconclusive→continue branch, never blocks. `timeout` exits 124
   # on expiry; aws cli connect/read timeouts add a second belt. Probe stays best-
   # effort: only a clear AccessDenied WARNs; everything else just continues.
-  if err="$(timeout 30 aws bedrock-runtime invoke-model --region "$REGION" --model-id "$MODEL" \
+  if err="$(run_timeout 30 aws bedrock-runtime invoke-model --region "$REGION" --model-id "$MODEL" \
         --cli-connect-timeout 8 --cli-read-timeout 20 \
         --body "$body" --content-type application/json --accept application/json \
         "$resp" 2>&1)"; then
@@ -244,7 +244,7 @@ preflight_model_access() {
 # so the operator learns the region/enablement gap before the long index/build phases.
 preflight_agentcore() {
   command -v aws >/dev/null || return 0
-  if timeout 20 aws bedrock-agentcore-control list-agent-runtimes --region "$REGION" --max-results 1 >/dev/null 2>&1; then
+  if run_timeout 20 aws bedrock-agentcore-control list-agent-runtimes --region "$REGION" --max-results 1 >/dev/null 2>&1; then
     say ok "AgentCore reachable in $REGION"
   else
     say warn "AgentCore (bedrock-agentcore-control) not reachable in $REGION via this identity."
