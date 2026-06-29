@@ -487,6 +487,19 @@ flow_remove_project() {
   safe_source_env "$CONFIG_FILE"
   local IID="${INDEX_SERVICE_INSTANCE:-}"
   # Stop + disable this project's host units and drop its repo copies (best-effort, via SSM).
+  # Fallback subdir list from THIS host's view is the manifest; but if the manifest is already
+  # gone (a half-finished prior removal, or it was never written), the host-side `SUBS` query
+  # returns empty and the whole repo/unit cleanup loop silently no-ops — leaking /data/repo copies
+  # and zombie refresh units. So compute the subdirs from the CLIENT-side projects.json too and
+  # pass them as a fallback; the host uses its manifest when present, else this list.
+  local FALLBACK_SUBS
+  FALLBACK_SUBS="$(SEL="$SEL" python3 -c 'import json,os,sys
+try:
+    cfg=json.load(open(sys.argv[1]))
+    p=cfg.get("projects",{}).get(os.environ["SEL"],{})
+    print(" ".join(r.get("subdir","") for r in p.get("repos",[]) if r.get("subdir")))
+except Exception:
+    pass' "$PROJECTS_CFG" 2>/dev/null || true)"
   if [[ -n "$IID" ]]; then
     say info "停用主机上的 bridge/gateway/refresh 单元并清理代码副本 / cleaning host units + repo copies"
     # IMPORTANT ordering: read this project's subdirs from its manifest FIRST (into SUBS), then
@@ -494,15 +507,25 @@ flow_remove_project() {
     # rm the manifest. (Deleting the manifest before reading it would leave the refresh timers
     # git-pull-ing deleted repos forever and leak /data/repo copies.) The bridge is a CONCRETE
     # unit index-bridge-<projectId> (already disabled above) — NOT a per-subdir template.
+    # SUBS falls back to the client-supplied list when the manifest is missing (see above).
+    # Every disable is followed by reset-failed: a unit left in `failed` state is NOT removed
+    # from `systemctl --all` by disable+rm+daemon-reload alone — it lingers as a not-found/failed
+    # zombie until reset-failed clears it. Repo cleanup also drops the sibling
+    # /data/repo/<subdir>.bridge.lock (http_bridge's singleton lock lives NEXT to the repo dir,
+    # not inside it) and the per-project glossary dir /data/glossary/<projectId> (the slices +
+    # build lock), which the old loop never touched → leaked glossary copies on every removal.
     local RM_CMD="set +e
-systemctl disable --now bot-gateway@${SEL}.service 2>/dev/null
-systemctl disable --now index-bridge-${SEL}.service 2>/dev/null
+systemctl disable --now bot-gateway@${SEL}.service index-bridge-${SEL}.service 2>/dev/null
+systemctl reset-failed bot-gateway@${SEL}.service index-bridge-${SEL}.service 2>/dev/null
 SUBS=\$(python3 -c \"import json;print(' '.join(r['subdir'] for r in json.load(open('/etc/index-projects/${SEL}.json'))['repos']))\" 2>/dev/null)
+[ -z \"\$SUBS\" ] && SUBS='${FALLBACK_SUBS}'
 for d in \$SUBS; do
   systemctl disable --now index-refresh-\$d.timer index-refresh-\$d.service index-build@\$d.service 2>/dev/null
+  systemctl reset-failed index-refresh-\$d.timer index-refresh-\$d.service index-build@\$d.service 2>/dev/null
   rm -f /etc/systemd/system/index-refresh-\$d.service /etc/systemd/system/index-refresh-\$d.timer
-  rm -rf /data/repo/\$d
+  rm -rf /data/repo/\$d /data/repo/\$d.bridge.lock
 done
+rm -rf /data/glossary/${SEL}
 rm -f /etc/bot-gateway-${SEL}.env /etc/index-projects/${SEL}.json /etc/systemd/system/index-bridge-${SEL}.service
 systemctl daemon-reload
 echo removed-${SEL}"
