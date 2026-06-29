@@ -13,7 +13,8 @@
 # with SOURCE_TRUTH_REF.
 set -euo pipefail
 
-REPO="${SOURCE_TRUTH_REPO:-https://github.com/ddpie/source-truth.git}"
+SLUG="${SOURCE_TRUTH_SLUG:-ddpie/source-truth}"      # owner/repo, for `gh repo clone`
+REPO="${SOURCE_TRUTH_REPO:-https://github.com/$SLUG.git}"
 REF="${SOURCE_TRUTH_REF:-main}"
 DIR="${SOURCE_TRUTH_DIR:-source-truth}"
 
@@ -29,8 +30,21 @@ if ! command -v git >/dev/null 2>&1; then
   exit 1
 fi
 
-# Clone (or refresh an existing checkout). Shallow clone keeps the one-liner fast; the
-# installer never needs history.
+# Clone helper. Prefer `gh repo clone` when gh is installed + authenticated: it carries the
+# operator's token, so a PRIVATE repo clones without an interactive password prompt. Fall back
+# to plain `git clone` (works for a public repo, or when the user has git credentials cached).
+# Shallow clone keeps the one-liner fast; the installer never needs history.
+do_clone() {
+  if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+    bold "• cloning $SLUG ($REF) via gh → $DIR"
+    gh repo clone "$SLUG" "$DIR" -- --depth 1 --branch "$REF"
+  else
+    bold "• cloning $REPO ($REF) → $DIR"
+    git clone --depth 1 --branch "$REF" "$REPO" "$DIR"
+  fi
+}
+
+# Refresh an existing checkout, else clone fresh.
 if [[ -d "$DIR/.git" ]]; then
   bold "• reusing existing checkout $DIR (git pull)"
   git -C "$DIR" pull --ff-only origin "$REF" || err "pull failed — using the existing checkout as-is"
@@ -38,8 +52,7 @@ elif [[ -e "$DIR" ]]; then
   err "$DIR exists but is not a git checkout — move it aside or set SOURCE_TRUTH_DIR, then re-run."
   exit 1
 else
-  bold "• cloning $REPO ($REF) → $DIR"
-  git clone --depth 1 --branch "$REF" "$REPO" "$DIR"
+  do_clone
 fi
 
 # Hand off to the interactive installer. exec so signals (Ctrl-C) go straight to it and

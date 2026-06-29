@@ -69,9 +69,11 @@ DEFAULT_IDLE_TIMEOUT="900"
 DEFAULT_MAX_LIFETIME="28800"
 # Where to fetch codegraph-server when it's neither local nor already in S3 (the
 # fresh-machine / one-line-installer path). Must serve the ARM aarch64 / glibc>=2.38
-# 0.18.5 build. Published as a Release asset on this repo; override with
-# CODEGRAPH_SERVER_URL for a private mirror.
-CODEGRAPH_SERVER_URL_DEFAULT="https://github.com/ddpie/source-truth/releases/download/codegraph-server-v0.18.5/codegraph-server"
+# 0.18.5 build. Two routes: `gh release download` (works for a PRIVATE repo via the
+# operator's gh auth — preferred) then a plain-curl URL (works once public / a mirror).
+CODEGRAPH_SERVER_REPO="${CODEGRAPH_SERVER_REPO:-ddpie/source-truth}"
+CODEGRAPH_SERVER_TAG="${CODEGRAPH_SERVER_TAG:-codegraph-server-v0.18.5}"
+CODEGRAPH_SERVER_URL_DEFAULT="https://github.com/${CODEGRAPH_SERVER_REPO}/releases/download/${CODEGRAPH_SERVER_TAG}/codegraph-server"
 REFRESH_INDEX=false       # --refresh-index: replace a running index instance if its artifacts are stale
 declare -A SKIP=()
 
@@ -336,28 +338,42 @@ else
     run aws s3 cp "$CG_BIN" "s3://$BUCKET/bin/codegraph-server" --region "$REGION"
   elif aws s3api head-object --bucket "$BUCKET" --key bin/codegraph-server --region "$REGION" >/dev/null 2>&1; then
     say info "codegraph-server not local, but already staged at s3://$BUCKET/bin/codegraph-server (reuse)"
-  elif [[ -n "${CODEGRAPH_SERVER_URL:-$CODEGRAPH_SERVER_URL_DEFAULT}" ]]; then
+  else
     # Download once to a temp file, then stage to S3 (same path the local-binary tier uses).
-    # The URL must serve the ARM aarch64 / glibc>=2.38 0.18.5 build — the host can't run a
-    # mismatched arch. set -e + the -x recheck below catch a failed/partial download.
-    local_url="${CODEGRAPH_SERVER_URL:-$CODEGRAPH_SERVER_URL_DEFAULT}"
-    say info "codegraph-server not local or in S3 — downloading from $local_url"
+    # The asset must be the ARM aarch64 / glibc>=2.38 0.18.5 build — the host can't run a
+    # mismatched arch. Two ways, tried in order so a PRIVATE repo works without going public:
+    #   1) `gh release download` — uses the operator's authenticated gh token, so it reaches a
+    #      private repo's Release asset. Preferred whenever gh is installed + logged in.
+    #   2) plain `curl` from $CODEGRAPH_SERVER_URL — works once the repo (or mirror) is public.
+    # Either way the bytes land in $CG_TMP, then go to S3. set -e + the -s check catch a
+    # failed/partial download.
     CG_TMP="$(mktemp /tmp/codegraph-server.XXXX)"
-    if run curl -fsSL "$local_url" -o "$CG_TMP" && [[ -s "$CG_TMP" ]]; then
+    cg_got=false
+    if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+      say info "codegraph-server not local or in S3 — downloading via gh from $CODEGRAPH_SERVER_REPO ($CODEGRAPH_SERVER_TAG)"
+      if run gh release download "$CODEGRAPH_SERVER_TAG" --repo "$CODEGRAPH_SERVER_REPO" \
+           --pattern codegraph-server --output "$CG_TMP" --clobber && [[ -s "$CG_TMP" ]]; then
+        cg_got=true
+      fi
+    fi
+    if [[ "$cg_got" != true ]]; then
+      local_url="${CODEGRAPH_SERVER_URL:-$CODEGRAPH_SERVER_URL_DEFAULT}"
+      say info "codegraph-server not local or in S3 — downloading from $local_url"
+      if run curl -fsSL "$local_url" -o "$CG_TMP" && [[ -s "$CG_TMP" ]]; then
+        cg_got=true
+      fi
+    fi
+    if [[ "$cg_got" == true ]]; then
       chmod +x "$CG_TMP"
       run aws s3 cp "$CG_TMP" "s3://$BUCKET/bin/codegraph-server" --region "$REGION"
       rm -f "$CG_TMP"
     else
       rm -f "$CG_TMP"
-      say err "codegraph-server download failed from $local_url"
-      say err "  → Check the URL, or set CODEGRAPH_SERVER_BIN=/path/to/codegraph-server (ARM aarch64, glibc>=2.38) and re-run."
+      say err "codegraph-server not found locally / in S3, and download failed (gh + curl both)."
+      say err "  → If the repo is private, run 'gh auth login' so 'gh release download' can reach the asset;"
+      say err "    or set CODEGRAPH_SERVER_BIN=/path/to/codegraph-server (ARM aarch64, glibc>=2.38) and re-run."
       [[ "$DRY_RUN" == true ]] || exit 1
     fi
-  else
-    say err "codegraph-server binary not found: not at '\$CODEGRAPH_SERVER_BIN'/PATH/~/.local/bin, not staged in S3, and no \$CODEGRAPH_SERVER_URL."
-    say err "  → Download the ARM aarch64 codegraph-server (glibc>=2.38) per index-service/README.md,"
-    say err "    put it on PATH or set CODEGRAPH_SERVER_BIN=/path/to/codegraph-server, then re-run."
-    [[ "$DRY_RUN" == true ]] || exit 1
   fi
 
   # index-service code (bridge + persistent session + path align + perf, etc).
