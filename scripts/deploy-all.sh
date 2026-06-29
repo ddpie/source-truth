@@ -34,6 +34,8 @@ ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 source "$SCRIPT_DIR/lib/common.sh"
 # shellcheck source=lib/env-utils.sh
 source "$SCRIPT_DIR/lib/env-utils.sh"
+# shellcheck source=lib/resolve_model.sh
+source "$SCRIPT_DIR/lib/resolve_model.sh"
 
 CONFIG_DIR="$ROOT/.local"
 CONFIG_FILE="$CONFIG_DIR/deploy-config"
@@ -149,6 +151,19 @@ REGION="${REGION:-${DEPLOY_REGION:-}}"
 # reconcile re-run keeps the earlier choice instead of reverting to the default
 # (which would flip the live runtime's model via the in-place update).
 MODEL="${MODEL:-${DEPLOY_MODEL:-$DEFAULT_MODEL}}"
+# Keep the operator's declared choice for persistence (DEPLOY_MODEL should record what
+# they asked for, not a per-region derivative), but the RUNTIME needs a profile that
+# actually exists in THIS region. The default is a global.* profile; many regions
+# (e.g. ap-southeast-1) don't carry a geo profile and some don't carry global the same
+# way, and the geo prefixes are us./eu./jp./au. (NOT apac.) — too fiddly to hardcode.
+# resolve_model_for_region asks Bedrock what's offered here and picks the best match
+# (geo > global), or returns MODEL unchanged if it can't tell (the invoke-probe below
+# then WARNs). Skipped in dry-run (it makes an AWS call). See lib/resolve_model.sh.
+MODEL_DECLARED="$MODEL"
+if [[ "$DRY_RUN" != true ]]; then
+  MODEL="$(resolve_model_for_region "$MODEL" "$REGION")"
+  [[ "$MODEL" == "$MODEL_DECLARED" ]] || say info "resolved model for $REGION: $MODEL_DECLARED → $MODEL"
+fi
 INSTANCE_TYPE="${INSTANCE_TYPE:-${DEPLOY_INSTANCE_TYPE:-$DEFAULT_INSTANCE_TYPE}}"
 # Export so provision_network.sh can pick an AZ that actually offers this type
 # (Graviton isn't in every AZ of every region) instead of a blind AvailabilityZones[0].
@@ -195,13 +210,21 @@ preflight_model_access() {
         say warn "Bedrock model '$MODEL' couldn't be invoked in $REGION (an IAM/region/"
         say warn "  inference-profile-form issue — note: AWS no longer requires per-model"
         say warn "  'Model access' enablement, so this is a config problem, not a console toggle)."
-        case "$MODEL" in
-          global.*)
-            say warn "  → '$MODEL' is a GLOBAL inference profile, only carried in a SUBSET of"
-            say warn "    regions. For a region outside that set, pass a REGION-SCOPED profile"
-            say warn "    instead, e.g. --model apac.anthropic.claude-opus-4-8 (APAC) or the"
-            say warn "    us.anthropic.* / eu.anthropic.* form for your region." ;;
-        esac
+        # Suggest a profile that actually exists in THIS region, derived live from
+        # Bedrock (not a hardcoded prefix — the geo prefixes are us./eu./jp./au., and
+        # many regions only carry global.). resolve_model_for_region already ran before
+        # this probe, so if MODEL still doesn't work, surface the region's real options.
+        # `|| true`: grep exits 1 on no-match, which under set -e + pipefail would
+        # otherwise abort the deploy right where this HELPFUL hint should print.
+        avail="$(list_region_profiles "$REGION" 2>/dev/null | grep -F "$(model_basename "$MODEL")" | paste -sd' ' - || true)"
+        if [[ -n "$avail" ]]; then
+          say warn "  → inference profiles for this model that ARE offered in $REGION:"
+          say warn "    $avail"
+          say warn "    pass one via --model <id> (or check the deploy identity's bedrock:InvokeModel perms)."
+        else
+          say warn "  → no inference profile for '$(model_basename "$MODEL")' is offered in $REGION;"
+          say warn "    pick a supported region, or verify the model/IAM in this one."
+        fi
         say warn "  (Deploy continues; the runtime reaches READY but answers fail with"
         say warn "   AccessDenied/ValidationException until the model is available.)" ;;
       *)
@@ -291,8 +314,11 @@ if [[ "$DRY_RUN" != true ]]; then preflight_boto3; preflight_model_access; prefl
 if [[ "$DRY_RUN" != true ]]; then
   update_env "$CONFIG_FILE" DEPLOY_REGION "$REGION"
   update_env "$CONFIG_FILE" ARTIFACT_BUCKET "$BUCKET"
-  # Persist the resolved knobs so the next flagless run reads them back.
-  update_env "$CONFIG_FILE" DEPLOY_MODEL "$MODEL"
+  # Persist the resolved knobs so the next flagless run reads them back. For the model
+  # we persist the operator's DECLARED choice, not the region-resolved profile — so a
+  # re-run (possibly in a different region) re-resolves from intent rather than from a
+  # prior region's derivative. resolve_model_for_region runs again on every deploy.
+  update_env "$CONFIG_FILE" DEPLOY_MODEL "$MODEL_DECLARED"
   update_env "$CONFIG_FILE" DEPLOY_INSTANCE_TYPE "$INSTANCE_TYPE"
   update_env "$CONFIG_FILE" DEPLOY_MAX_FILES "$MAX_FILES"
   update_env "$CONFIG_FILE" DEPLOY_GLOSSARY_MAX_FILES "$GLOSSARY_MAX_FILES"
