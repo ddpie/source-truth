@@ -67,6 +67,13 @@ DEFAULT_ROOT_VOLUME_GB="30"
 # follow-up warm-hit rate for idle-memory spend — tune per workload.
 DEFAULT_IDLE_TIMEOUT="900"
 DEFAULT_MAX_LIFETIME="28800"
+# Where to fetch codegraph-server when it's neither local nor already in S3 (the
+# fresh-machine / one-line-installer path). Must serve the ARM aarch64 / glibc>=2.38
+# 0.18.5 build. Two routes: `gh release download` (works for a PRIVATE repo via the
+# operator's gh auth — preferred) then a plain-curl URL (works once public / a mirror).
+CODEGRAPH_SERVER_REPO="${CODEGRAPH_SERVER_REPO:-ddpie/source-truth}"
+CODEGRAPH_SERVER_TAG="${CODEGRAPH_SERVER_TAG:-codegraph-server-v0.18.5}"
+CODEGRAPH_SERVER_URL_DEFAULT="https://github.com/${CODEGRAPH_SERVER_REPO}/releases/download/${CODEGRAPH_SERVER_TAG}/codegraph-server"
 REFRESH_INDEX=false       # --refresh-index: replace a running index instance if its artifacts are stale
 declare -A SKIP=()
 
@@ -101,7 +108,8 @@ Options:
 
 PREREQUISITES (not auto-provisioned — the deploy hard-fails / WARNs if missing):
   • codegraph-server binary (ARM aarch64, glibc>=2.38, pinned 0.18.5) on PATH or via
-    CODEGRAPH_SERVER_BIN — the deploy does NOT download it.
+    CODEGRAPH_SERVER_BIN. If absent locally and not yet in S3, it is downloaded from
+    CODEGRAPH_SERVER_URL (default: this repo's Release asset) — so a fresh machine works.
   • A host that can build linux/arm64 images (arm64 host, or x86 + binfmt).
   • Bedrock model access for the model, and AgentCore available in --region (probed, WARN).
   • A read-only git credential in Secrets Manager (source-truth/git-credentials) for cloning
@@ -321,16 +329,55 @@ else
   # FAIL here with an actionable message — do NOT warn-green and let the missing
   # binary surface minutes later as an opaque Phase-4 health timeout (bootstrap
   # `aws s3 cp` of the missing key dies under set -e → index never builds).
+  # Resolve order: explicit $CODEGRAPH_SERVER_BIN → on PATH → ~/.local/bin → already
+  # in S3 (prior run) → download from $CODEGRAPH_SERVER_URL (the published Release asset,
+  # so a fresh machine with no local binary still works — this is what the one-line
+  # installer relies on). Only the URL tier is new; the local/S3 tiers are unchanged.
   CG_BIN="${CODEGRAPH_SERVER_BIN:-$(command -v codegraph-server || echo "$HOME/.local/bin/codegraph-server")}"
   if [[ -x "$CG_BIN" ]]; then
     run aws s3 cp "$CG_BIN" "s3://$BUCKET/bin/codegraph-server" --region "$REGION"
   elif aws s3api head-object --bucket "$BUCKET" --key bin/codegraph-server --region "$REGION" >/dev/null 2>&1; then
     say info "codegraph-server not local, but already staged at s3://$BUCKET/bin/codegraph-server (reuse)"
   else
-    say err "codegraph-server binary not found: not at '\$CODEGRAPH_SERVER_BIN'/PATH/~/.local/bin, and not staged in S3."
-    say err "  → Download the ARM aarch64 codegraph-server (glibc>=2.38) per index-service/README.md,"
-    say err "    put it on PATH or set CODEGRAPH_SERVER_BIN=/path/to/codegraph-server, then re-run."
-    [[ "$DRY_RUN" == true ]] || exit 1
+    # Download once to a temp file, then stage to S3 (same path the local-binary tier uses).
+    # The asset must be the ARM aarch64 / glibc>=2.38 0.18.5 build — the host can't run a
+    # mismatched arch. Two ways, tried in order so a PRIVATE repo works without going public:
+    #   1) `gh release download` — uses the operator's authenticated gh token, so it reaches a
+    #      private repo's Release asset. Preferred whenever gh is installed + logged in.
+    #   2) plain `curl` from $CODEGRAPH_SERVER_URL — works once the repo (or mirror) is public.
+    # Either way the bytes land in $CG_TMP, then go to S3. set -e + the -s check catch a
+    # failed/partial download.
+    CG_TMP="$(mktemp /tmp/codegraph-server.XXXX)"
+    # Clean the temp binary on ANY exit from here on (set -e could kill us mid-chmod/cp
+    # before the explicit rm below). The trap is cleared right after the rm so it doesn't
+    # outlive this block.
+    trap 'rm -f "$CG_TMP"' EXIT
+    cg_got=false
+    if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+      say info "codegraph-server not local or in S3 — downloading via gh from $CODEGRAPH_SERVER_REPO ($CODEGRAPH_SERVER_TAG)"
+      if run gh release download "$CODEGRAPH_SERVER_TAG" --repo "$CODEGRAPH_SERVER_REPO" \
+           --pattern codegraph-server --output "$CG_TMP" --clobber && [[ -s "$CG_TMP" ]]; then
+        cg_got=true
+      fi
+    fi
+    if [[ "$cg_got" != true ]]; then
+      local_url="${CODEGRAPH_SERVER_URL:-$CODEGRAPH_SERVER_URL_DEFAULT}"
+      say info "codegraph-server not local or in S3 — downloading from $local_url"
+      if run curl -fsSL "$local_url" -o "$CG_TMP" && [[ -s "$CG_TMP" ]]; then
+        cg_got=true
+      fi
+    fi
+    if [[ "$cg_got" == true ]]; then
+      chmod +x "$CG_TMP"
+      run aws s3 cp "$CG_TMP" "s3://$BUCKET/bin/codegraph-server" --region "$REGION"
+      rm -f "$CG_TMP"; trap - EXIT
+    else
+      rm -f "$CG_TMP"; trap - EXIT
+      say err "codegraph-server not found locally / in S3, and download failed (gh + curl both)."
+      say err "  → If the repo is private, run 'gh auth login' so 'gh release download' can reach the asset;"
+      say err "    or set CODEGRAPH_SERVER_BIN=/path/to/codegraph-server (ARM aarch64, glibc>=2.38) and re-run."
+      [[ "$DRY_RUN" == true ]] || exit 1
+    fi
   fi
 
   # index-service code (bridge + persistent session + path align + perf, etc).
