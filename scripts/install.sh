@@ -208,8 +208,15 @@ REGION_OPTIONS=(
   "us-west-2        Oregon 俄勒冈"
   "$MANUAL_SENTINEL"
 )
-# (Model is a per-project concern — set per project in .local/projects.json; the deploy uses the
-# global default otherwise. So install.sh no longer prompts for it, and there's no MODEL menu.)
+# Bedrock model per project (written to projects.json's `model`; deploy_project resolves it to the
+# region's actual inference profile, so a region-agnostic `global.…` id is the right thing to store
+# — see resolve_model_for_region). Leading token IS the value; trailing text is help.
+MODEL_OPTIONS=(
+  "global.anthropic.claude-opus-4-8     Opus 4.8 · 默认"
+  "global.anthropic.claude-opus-4-6     Opus 4.6"
+  "global.anthropic.claude-sonnet-4-6   Sonnet 4.6"
+  "$MANUAL_SENTINEL"
+)
 # index-service host (ARM Graviton). codegraph indexing is memory-bound and scales
 # with repo size; t4g = burstable/cheap, m7g = sustained memory-optimized for big repos.
 INSTANCE_OPTIONS=(
@@ -411,6 +418,11 @@ print(free[0] if free else "")' "$PROJECTS_CFG")"
     say err "端口 $PORT 已被占用 / port already used by another project"; exit 1
   fi
 
+  # Model for this project's runtime (stored in projects.json; empty = global default at deploy).
+  local MODEL
+  pick_field MODEL "回答模型 / answer model (↑/↓ 选择，回车确认)" \
+    "global.anthropic.claude-opus-4-8" "Bedrock 模型 id / model id" "${MODEL_OPTIONS[@]}"
+
   # Feishu app credentials → source-truth/feishu-<pid> (auto secret id).
   # Validate at the prompt (re-ask the bad field only) so a typo'd App ID / secret
   # is caught here, not 10 minutes later when the bot silently fails to start.
@@ -477,13 +489,16 @@ for r in json.load(sys.stdin): print(r.get("git",""))' 2>/dev/null)
     fi
   fi
 
-  # Write the project entry into projects.json.
-  PID="$PID" PORT="$PORT" SECRET_ID="$SECRET_ID" REPOS_JSON="$REPOS_JSON" python3 -c '
+  # Write the project entry into projects.json. `model` is recorded so the choice persists
+  # (deploy_project resolves it per region); a redeploy without re-running install keeps it.
+  PID="$PID" PORT="$PORT" SECRET_ID="$SECRET_ID" REPOS_JSON="$REPOS_JSON" MODEL="$MODEL" python3 -c '
 import json,os,sys
 cfg=json.load(open(sys.argv[1]))
-cfg.setdefault("projects",{})[os.environ["PID"]]={"port":int(os.environ["PORT"]),"feishuSecretId":os.environ["SECRET_ID"],"repos":json.loads(os.environ["REPOS_JSON"])}
+entry={"port":int(os.environ["PORT"]),"feishuSecretId":os.environ["SECRET_ID"],"repos":json.loads(os.environ["REPOS_JSON"])}
+if os.environ.get("MODEL"): entry["model"]=os.environ["MODEL"]
+cfg.setdefault("projects",{})[os.environ["PID"]]=entry
 json.dump(cfg,open(sys.argv[1],"w"),ensure_ascii=False,indent=2)' "$PROJECTS_CFG"
-  say ok "已写入清单 / wrote projects.json: $PID (port=$PORT, secret=$SECRET_ID)"
+  say ok "已写入清单 / wrote projects.json: $PID (port=$PORT, secret=$SECRET_ID, model=${MODEL:-默认/default})"
 
   echo; confirm "现在部署项目 ${PID}？/ Deploy project $PID now?" || { say info "清单已保存，稍后可用「重新部署」/ saved; deploy later via redeploy"; exit 0; }
   # Ensure the shared base exists (idempotent no-op if already up), then deploy this project.
