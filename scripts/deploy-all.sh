@@ -67,6 +67,11 @@ DEFAULT_ROOT_VOLUME_GB="30"
 # follow-up warm-hit rate for idle-memory spend — tune per workload.
 DEFAULT_IDLE_TIMEOUT="900"
 DEFAULT_MAX_LIFETIME="28800"
+# Where to fetch codegraph-server when it's neither local nor already in S3 (the
+# fresh-machine / one-line-installer path). Must serve the ARM aarch64 / glibc>=2.38
+# 0.18.5 build. Published as a Release asset on this repo; override with
+# CODEGRAPH_SERVER_URL for a private mirror.
+CODEGRAPH_SERVER_URL_DEFAULT="https://github.com/ddpie/source-truth/releases/download/codegraph-server-v0.18.5/codegraph-server"
 REFRESH_INDEX=false       # --refresh-index: replace a running index instance if its artifacts are stale
 declare -A SKIP=()
 
@@ -101,7 +106,8 @@ Options:
 
 PREREQUISITES (not auto-provisioned — the deploy hard-fails / WARNs if missing):
   • codegraph-server binary (ARM aarch64, glibc>=2.38, pinned 0.18.5) on PATH or via
-    CODEGRAPH_SERVER_BIN — the deploy does NOT download it.
+    CODEGRAPH_SERVER_BIN. If absent locally and not yet in S3, it is downloaded from
+    CODEGRAPH_SERVER_URL (default: this repo's Release asset) — so a fresh machine works.
   • A host that can build linux/arm64 images (arm64 host, or x86 + binfmt).
   • Bedrock model access for the model, and AgentCore available in --region (probed, WARN).
   • A read-only git credential in Secrets Manager (source-truth/git-credentials) for cloning
@@ -321,13 +327,34 @@ else
   # FAIL here with an actionable message — do NOT warn-green and let the missing
   # binary surface minutes later as an opaque Phase-4 health timeout (bootstrap
   # `aws s3 cp` of the missing key dies under set -e → index never builds).
+  # Resolve order: explicit $CODEGRAPH_SERVER_BIN → on PATH → ~/.local/bin → already
+  # in S3 (prior run) → download from $CODEGRAPH_SERVER_URL (the published Release asset,
+  # so a fresh machine with no local binary still works — this is what the one-line
+  # installer relies on). Only the URL tier is new; the local/S3 tiers are unchanged.
   CG_BIN="${CODEGRAPH_SERVER_BIN:-$(command -v codegraph-server || echo "$HOME/.local/bin/codegraph-server")}"
   if [[ -x "$CG_BIN" ]]; then
     run aws s3 cp "$CG_BIN" "s3://$BUCKET/bin/codegraph-server" --region "$REGION"
   elif aws s3api head-object --bucket "$BUCKET" --key bin/codegraph-server --region "$REGION" >/dev/null 2>&1; then
     say info "codegraph-server not local, but already staged at s3://$BUCKET/bin/codegraph-server (reuse)"
+  elif [[ -n "${CODEGRAPH_SERVER_URL:-$CODEGRAPH_SERVER_URL_DEFAULT}" ]]; then
+    # Download once to a temp file, then stage to S3 (same path the local-binary tier uses).
+    # The URL must serve the ARM aarch64 / glibc>=2.38 0.18.5 build — the host can't run a
+    # mismatched arch. set -e + the -x recheck below catch a failed/partial download.
+    local_url="${CODEGRAPH_SERVER_URL:-$CODEGRAPH_SERVER_URL_DEFAULT}"
+    say info "codegraph-server not local or in S3 — downloading from $local_url"
+    CG_TMP="$(mktemp /tmp/codegraph-server.XXXX)"
+    if run curl -fsSL "$local_url" -o "$CG_TMP" && [[ -s "$CG_TMP" ]]; then
+      chmod +x "$CG_TMP"
+      run aws s3 cp "$CG_TMP" "s3://$BUCKET/bin/codegraph-server" --region "$REGION"
+      rm -f "$CG_TMP"
+    else
+      rm -f "$CG_TMP"
+      say err "codegraph-server download failed from $local_url"
+      say err "  → Check the URL, or set CODEGRAPH_SERVER_BIN=/path/to/codegraph-server (ARM aarch64, glibc>=2.38) and re-run."
+      [[ "$DRY_RUN" == true ]] || exit 1
+    fi
   else
-    say err "codegraph-server binary not found: not at '\$CODEGRAPH_SERVER_BIN'/PATH/~/.local/bin, and not staged in S3."
+    say err "codegraph-server binary not found: not at '\$CODEGRAPH_SERVER_BIN'/PATH/~/.local/bin, not staged in S3, and no \$CODEGRAPH_SERVER_URL."
     say err "  → Download the ARM aarch64 codegraph-server (glibc>=2.38) per index-service/README.md,"
     say err "    put it on PATH or set CODEGRAPH_SERVER_BIN=/path/to/codegraph-server, then re-run."
     [[ "$DRY_RUN" == true ]] || exit 1
