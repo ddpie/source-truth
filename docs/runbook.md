@@ -114,34 +114,34 @@ codegraph 索引吃内存、随仓库增大而增长，按仓库规模选机型�
 
 ## 三、接入飞书（connect 清单）
 
-在[飞书开放平台](https://open.feishu.cn)创建并配置应用：
+在[飞书开放平台](https://open.feishu.cn)按顺序配置应用（后面的步骤依赖前面的：先有机器人才能开
+发消息权限，权限/事件/机器人都配好后才发布生效）：
 
-1. **创建企业自建应用**：开放平台 →「开发者后台」→「创建应用」→「企业自建应用」。建好后在
-   「凭证与基础信息」页记下 `App ID`（`cli_...`）和 `App Secret`。
-2. **权限（scope）**：在「权限管理」开通以下（少一个都会让对应功能静默失败）：
-   - `im:message`、`im:message.group_at_msg`（读群里 @ 机器人的消息）；
-   - `im:message:send_as_bot`（以机器人身份发消息 / 回复 / 加「处理中」表情，调 `im/v1/messages`
-     及其 `reactions` 子接口——表情回应由消息收发权限覆盖，无需单独的资源 scope）；
-   - **CardKit 卡片**：开通卡片相关权限（在「权限管理」搜「卡片」，按 `cardkit/v1/cards` 接口的实际依赖项勾选；
-     缺它则卡片建不出来）。
-3. **事件订阅**：启用**长连接**模式（不是 webhook——本系统是长驻订阅，不暴露公网回调）。订阅这两个事件：
-   - `im.message.receive_v1`（收到群消息）
-   - `card.action.trigger`（卡片按钮点击：停止 / 追问 / 澄清）
-4. **机器人**：在「机器人」页启用机器人能力；把它的 `open_id`（`ou_...`）记为 `FEISHU_BOT_OPEN_ID`
-   （用于判断群里 @ 的对象）。
-5. **发布生效**：以上权限 / 事件 / 机器人改动需「创建版本并发布」（企业内部可走自助审批）后才对线上生效；
-   只保存草稿不发布，机器人不会响应。
-6. **存密钥**：`App Secret` 属敏感信息，**绝不提交进仓库**。`install.sh` 在「添加项目」时会问你
-   `App ID` / `App Secret` / 机器人 `open_id`，并替你写进 **Secrets Manager**，密钥名按项目区分：
-   `source-truth/feishu-<projectId>`（如 `source-truth/feishu-mygame`）——按提示粘贴即可，无需手动建密钥。
-   网关运行时由 `run.sh` 从 Secrets Manager 取出注入进程环境（不落盘）。
+1. **创建企业自建应用**：「开发者后台」→「创建应用」→「企业自建应用」。建好后在「凭证与基础信息」页
+   记下 `App ID`（`cli_...`）和 `App Secret`。
+2. **启用机器人**：在「机器人」页打开机器人能力，记下它的 `open_id`（`ou_...`）——即 `FEISHU_BOT_OPEN_ID`
+   （用于判断群里 @ 的是不是它）。**先有机器人，下一步的发消息权限才有意义。**
+3. **权限（scope）**：在「权限管理」开通以下（少一个，对应功能就静默失效）：
+   - `im:message`、`im:message.group_at_msg`：读群里 @ 机器人的消息；
+   - `im:message:send_as_bot`：以机器人身份发消息 / 回复 / 加「处理中」表情（调 `im/v1/messages` 及其
+     `reactions` 子接口——表情回应由消息收发权限覆盖，无需单独的资源 scope）；
+   - **CardKit 卡片**：在「权限管理」搜「卡片」，按 `cardkit/v1/cards` 接口的依赖项勾选；缺它卡片建不出来。
+4. **事件订阅**：选**长连接**模式（不是 webhook——本系统是长驻订阅，不暴露公网回调），订阅两个事件：
+   - `im.message.receive_v1`：收到群消息；
+   - `card.action.trigger`：卡片按钮点击（停止 / 追问 / 澄清）。
+5. **创建版本并发布**：第 2–4 步的改动都要发布后才对线上生效（企业内部可走自助审批）。只存草稿不发布，
+   机器人不响应。
 
-   > 若手动管理（不走 install.sh）：自行建一个 Secrets Manager 密钥，内容为 JSON
-   > `{"app_id":"...","app_secret":"...","bot_open_id":"..."}`，密钥名以 `source-truth/` 开头（IAM 已按此前缀授权），
-   > 再把它填进 `.local/projects.json` 对应项目的 `feishuSecretId`（或部署时设 `FEISHU_SECRET_ID=<密钥名>`），
-   > 让 gateway 阶段激活。
+发布之后，还有两件事（与飞书后台无关，顺序不限）：
 
-7. 把机器人**拉进目标群**，记下群 `chat_id`（`oc_...`）。
+- **把机器人拉进目标群**，记下群 `chat_id`（`oc_...`）。
+- **凭证交给安装器**：`App Secret` 是敏感信息，**绝不入库**。第二节的 `install.sh`「添加项目」会问
+  `App ID` / `App Secret` / 机器人 `open_id`，替你写进 **Secrets Manager**（密钥名按项目区分
+  `source-truth/feishu-<projectId>`）；网关启动时由 `run.sh` 取出注入进程环境，不落盘。按提示粘贴即可，无需手建密钥。
+
+  > 手动管理（不走 install.sh）：自建一个 Secrets Manager 密钥，内容为 JSON
+  > `{"app_id":"...","app_secret":"...","bot_open_id":"..."}`，名字以 `source-truth/` 开头（IAM 已按此前缀授权），
+  > 再填进 `.local/projects.json` 对应项目的 `feishuSecretId`（或部署时设 `FEISHU_SECRET_ID=<密钥名>`）。
 
 ---
 
