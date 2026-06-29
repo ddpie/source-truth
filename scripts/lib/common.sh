@@ -37,6 +37,18 @@ have_cmd() {
   command -v "$1" >/dev/null 2>&1
 }
 
+# run_timeout <secs> <cmd...> — 跑命令并限定墙钟时长，跨平台。
+# GNU coreutils 的 `timeout` 在 Linux 自带；macOS 没有（brew 装了叫 `gtimeout`）。
+# 有 timeout/gtimeout 就用（超时退 124），都没有就直接跑命令（不加墙钟限制）——
+# 调用方本就把它当尽力而为的预检（AWS CLI 自身的 --cli-*-timeout 已能兜住挂起），
+# 所以缺 timeout 只是少一层保险，而不是让 mac 上报 "command not found"。
+run_timeout() {
+  local secs="$1"; shift
+  if have_cmd timeout; then timeout "$secs" "$@"
+  elif have_cmd gtimeout; then gtimeout "$secs" "$@"
+  else "$@"; fi
+}
+
 # require_cmd <name> [hint] — 命令缺失则报错（含命令名）并返回 1。
 require_cmd() {
   local name="$1" hint="${2:-}"

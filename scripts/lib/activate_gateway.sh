@@ -127,7 +127,7 @@ say info "activating ${GW_UNIT} on $IID (writing ${GW_ENV_PATH} + enable/restart
 # by AWS; (2) json.dumps(whole_block_with_\n) → a single element whose literal "\n" is NOT
 # a shell newline, so lines ran glued ("...envnecho", "set: Illegal option -c"). Splitting
 # on real newlines into separate array elements is the shape SSM actually expects.
-PARAM_FILE="$(mktemp /tmp/gw-ssm-params.XXXX.json)"
+PARAM_FILE="$(mktemp /tmp/gw-ssm-params.XXXXXX)"  # X's at end (BSD/macOS-safe); .json suffix cosmetic (passed as file://)
 printf '%s' "$REMOTE_CMD" | python3 -c 'import sys,json; print(json.dumps({"commands": sys.stdin.read().split("\n")}))' > "$PARAM_FILE"
 CID="$(aws ssm send-command --region "$REGION" --instance-ids "$IID" \
   --document-name AWS-RunShellScript \
