@@ -253,6 +253,21 @@ preflight_agentcore() {
     say warn "    doesn't support AgentCore, pick a supported one. Phase 5 will fail until then."
   fi
 }
+
+# Phase 4 builds the agent image, which needs a RUNNING docker daemon (not just the
+# `docker` binary). Checking it in preflight — before any VPC/EC2/NAT is created —
+# means a stopped Docker Desktop fails the deploy in seconds instead of after billable
+# resources are provisioned. HARD-FAIL (unlike the WARN-only AWS probes): the build
+# cannot proceed without it. Skipped when the image phase is skipped (docker not needed).
+preflight_docker() {
+  skip image && return 0
+  command -v docker >/dev/null || return 0   # missing binary handled at Phase 4's require_cmd
+  if ! run_timeout 20 docker info >/dev/null 2>&1; then
+    say err "docker is installed but its daemon isn't running — Phase 4 (image build) needs it."
+    say err "  → start Docker Desktop (or dockerd), wait until ready, then re-run. Verify: docker info"
+    [[ "$DRY_RUN" == true ]] || exit 1
+  fi
+}
 # Phase 5 configures the AgentCore Runtime via boto3 (lib/deploy_runtime.py), NOT the
 # aws CLI — so the CLI-based preflight_agentcore above does NOT cover it. A fresh box
 # can have a recent aws CLI (green above) but a stale pip boto3 that lacks the
@@ -307,7 +322,7 @@ preflight_quota() {
   fi
   return 0
 }
-if [[ "$DRY_RUN" != true ]]; then preflight_boto3; preflight_model_access; preflight_agentcore; preflight_quota; fi
+if [[ "$DRY_RUN" != true ]]; then preflight_boto3; preflight_docker; preflight_model_access; preflight_agentcore; preflight_quota; fi
 
 # Persist resolved config — but NOT on --dry-run (dry-run must make no changes,
 # including no writes to deploy-config).
