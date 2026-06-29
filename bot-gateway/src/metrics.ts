@@ -53,7 +53,8 @@ export type CardHealthKind =
   | "finalize_failed"
   | "heartbeat_stall"
   | "dedup_hit"
-  | "idempotent_resend";
+  | "idempotent_resend"
+  | "zero_evidence_answer";
 
 const FAIL_REASONS: ReadonlySet<string> = new Set<FailReason>([
   "cold_start_mcp_race", "coldstart_retry_exhausted", "turn_capped", "aborted",
@@ -103,6 +104,7 @@ const FEEDBACK_REASON_CODES: ReadonlySet<string> = new Set<FeedbackReasonCode>([
 ]);
 const CARD_HEALTH_KINDS: ReadonlySet<string> = new Set<CardHealthKind>([
   "toolcall_leak_detected", "finalize_failed", "heartbeat_stall", "dedup_hit", "idempotent_resend",
+  "zero_evidence_answer",
 ]);
 
 // Runtime whitelist per enum field-name. A value not in the set is replaced (not logged
