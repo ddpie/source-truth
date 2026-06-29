@@ -56,7 +56,7 @@ require_cmd() {
     return 0
   fi
   if [[ -n "$hint" ]]; then
-    say err "缺少依赖命令：$name（$hint）"
+    say err "缺少依赖命令：${name}（${hint}）"
   else
     say err "缺少依赖命令：$name"
   fi
