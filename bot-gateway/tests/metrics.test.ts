@@ -86,6 +86,14 @@ describe("emitMetric — enum whitelist (no free-text / PII leak)", () => {
     expect(records[1].kind).toBe("toolcall_leak_detected");
   });
 
+  it("keeps the zero_evidence_answer card_health kind (was falling back to 'invalid')", () => {
+    // index.ts emits this kind on a clean success with 0 tool calls AND 0 citations — the
+    // metric whose whole point is to MEASURE the uncited-confident-answer rate. It was missing
+    // from the allowlist, so it got scrubbed to 'invalid' and the dashboard couldn't count it.
+    emitMetric("card_health", { kind: "zero_evidence_answer" }, { traceId: "st-1" });
+    expect(records[0].kind).toBe("zero_evidence_answer");
+  });
+
   it("accepts the new non-technical-audience reason codes (too_slow / hard_to_understand / too_shallow)", () => {
     for (const code of ["too_slow", "hard_to_understand", "too_shallow"]) {
       records = [];
