@@ -62,6 +62,24 @@ PY
 IID="${INDEX_SERVICE_INSTANCE:?INDEX_SERVICE_INSTANCE not set — provision the base host first (deploy-all)}"
 say step "deploy project $PID (port=$PORT) on index host $IID"
 
+# The model for this project: per-project override (projects.json) > persisted default >
+# built-in default. Resolve to THIS region's actual inference profile ONCE here, because BOTH
+# consumers need the region-correct id: the runtime (below) AND the host-side glossary engine
+# (activate_project's Bedrock converse precheck + cc build). Resolving only for the runtime, but
+# passing the raw region-agnostic `global.…` to activate_project, made the glossary precheck fail
+# in regions that carry no `global.` profile (e.g. Tokyo, jp.-only) → glossary silently skipped
+# while the runtime worked. resolve_model_for_region returns the id unchanged if it can't ask
+# Bedrock (rc=2 = unverified → WARN, so a multi-project deploy doesn't silently diverge).
+RT_MODEL_DECLARED="${MODEL:-${DEPLOY_MODEL:-global.anthropic.claude-opus-4-8}}"
+RT_RC=0
+RT_MODEL="$(resolve_model_for_region "$RT_MODEL_DECLARED" "$REGION")" || RT_RC=$?
+if [[ "$RT_RC" == 2 ]]; then
+  say warn "[$PID] couldn't query Bedrock inference profiles for $REGION — using '$RT_MODEL' unverified"
+  say warn "  (check the deploy identity's bedrock:ListInferenceProfiles perm; the invoke-probe rechecks it)."
+elif [[ "$RT_MODEL" != "$RT_MODEL_DECLARED" ]]; then
+  say info "[$PID] resolved model for $REGION: $RT_MODEL_DECLARED → $RT_MODEL"
+fi
+
 # ============================================================
 # 1) Attach the project to the index host: ship its manifest + run activate_project.sh via SSM.
 # ============================================================
@@ -76,7 +94,7 @@ tar xzf /tmp/idx-refresh.tar.gz -C /opt/idx/app && rm -f /tmp/idx-refresh.tar.gz
 chmod +x /opt/idx/app/activate_project.sh /opt/idx/app/git_fetch.sh /opt/idx/app/glossary_refresh.sh
 mkdir -p /etc/index-projects
 echo '${MANIFEST_B64}' | base64 -d > /tmp/manifest-${PID}.json
-PROJECT_ID='${PID}' GIT_SECRET_ID='${GIT_SECRET_ID}' MODEL='${MODEL}' REPO_MANIFEST_JSON=\"\$(cat /tmp/manifest-${PID}.json)\" bash /opt/idx/app/activate_project.sh
+PROJECT_ID='${PID}' GIT_SECRET_ID='${GIT_SECRET_ID}' MODEL='${RT_MODEL}' REPO_MANIFEST_JSON=\"\$(cat /tmp/manifest-${PID}.json)\" bash /opt/idx/app/activate_project.sh
 rm -f /tmp/manifest-${PID}.json"
 
 PARAM_FILE="$(mktemp /tmp/ap-ssm.XXXXXX)"  # X's at end (BSD/macOS-safe); .json suffix cosmetic (passed as file://)
@@ -115,25 +133,7 @@ SUBNET="${PRIVATE_SUBNET:?PRIVATE_SUBNET not set — run the network phase first
 RUNTIME_SG="${INDEX_SERVICE_SG:?INDEX_SERVICE_SG not set — run the index-svc phase first}"
 IDX_ENDPOINT="${INDEX_DNS_NAME:-${INDEX_SERVICE_IP:?INDEX_SERVICE_IP not set}}"
 CODEGRAPH_URL="http://${IDX_ENDPOINT}:${PORT}/mcp"
-# The model this project's runtime actually uses: per-project override (projects.json)
-# > persisted default > built-in default. This is the value that reaches Bedrock, so it
-# must be region-correct — resolve it here (deploy-all.sh runs deploy_project.sh in a
-# fresh subshell, and install.sh's add/redeploy flows call this directly, so resolving
-# at THIS single point covers every path). resolve_model_for_region asks Bedrock what's
-# offered in $REGION and returns the id unchanged if it can't tell. See lib/resolve_model.sh.
-RT_MODEL_DECLARED="${MODEL:-${DEPLOY_MODEL:-global.anthropic.claude-opus-4-8}}"
-# One call captures both the resolved id (stdout) and the status (rc): rc=2 means
-# Bedrock couldn't be consulted (no aws / no perm / transient), so the id is kept
-# UNVERIFIED — WARN so a multi-project deploy doesn't silently leave one project on an
-# unverified id while siblings resolved. `|| RT_RC=$?` keeps set -e from aborting.
-RT_RC=0
-RT_MODEL="$(resolve_model_for_region "$RT_MODEL_DECLARED" "$REGION")" || RT_RC=$?
-if [[ "$RT_RC" == 2 ]]; then
-  say warn "[$PID] couldn't query Bedrock inference profiles for $REGION — using '$RT_MODEL' unverified"
-  say warn "  (check the deploy identity's bedrock:ListInferenceProfiles perm; the invoke-probe rechecks it)."
-elif [[ "$RT_MODEL" != "$RT_MODEL_DECLARED" ]]; then
-  say info "[$PID] resolved model for $REGION: $RT_MODEL_DECLARED → $RT_MODEL"
-fi
+# RT_MODEL was resolved once near the top (shared with the host-side glossary engine); reuse it.
 # Per-project runtime name (AgentCore names must be [a-zA-Z0-9_]); pid uses '-' → '_'.
 RT_NAME="source_truth_agent_${PID//-/_}"
 

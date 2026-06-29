@@ -463,17 +463,21 @@ import os,json; print(json.dumps({"app_id":os.environ["_AID"],"app_secret":os.en
     while IFS= read -r RURL; do
       [[ -n "$RURL" ]] || continue
       is_https_git_url "$RURL" || continue
-      # Anonymous probe: public repo → rc 0; private/needs-auth → non-zero (prompts disabled so it
-      # fails fast instead of hanging). 15s wall-clock cap (run_timeout: timeout/gtimeout/direct).
-      if ! GIT_TERMINAL_PROMPT=0 run_timeout 15 git ls-remote "$RURL" >/dev/null 2>&1; then
-        say warn "  仓库需要认证（非公开）/ repo needs auth (not public): $RURL"
+      # Anonymous probe: public repo → rc 0; private/needs-auth (or unreachable) → non-zero
+      # (GIT_TERMINAL_PROMPT=0 + `-c credential.helper=` so neither git's own prompt nor a global
+      # credential helper — e.g. macOS osxkeychain / Git Credential Manager — can pop a GUI and
+      # hang; the probe stays purely anonymous). 15s wall-clock cap (run_timeout). A non-zero here
+      # could also be a transient network/DNS failure, not truly private — the wording stays soft
+      # and the remedy (asking for a token) is harmless for a public repo (the token goes unused).
+      if ! GIT_TERMINAL_PROMPT=0 run_timeout 15 git -c credential.helper= ls-remote "$RURL" >/dev/null 2>&1; then
+        say warn "  无法匿名访问（可能是私有仓，或网络不通）/ no anonymous access (private repo, or network issue): $RURL"
         NEED_AUTH=true
       fi
     done < <(printf '%s' "$REPOS_JSON" | python3 -c 'import json,sys
 for r in json.load(sys.stdin): print(r.get("git",""))' 2>/dev/null)
 
     if [[ "$NEED_AUTH" == true ]]; then
-      say warn "上面的私有仓需要一个只读 git 令牌，否则部署会在克隆阶段失败 / private repos above need a read-only git token, or deploy fails at clone"
+      say warn "上面的仓库需要只读 git 令牌，否则部署会在克隆阶段失败 / repos above need a read-only git token, or deploy fails at clone"
       local GIT_TOKEN
       while true; do
         ask_secret GIT_TOKEN "git 只读凭证（PAT/token，后续项目复用）/ git read-only token"

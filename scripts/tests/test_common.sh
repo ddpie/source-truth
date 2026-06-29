@@ -96,6 +96,7 @@ assert_eq dark  "term_bg_class 深色 6"              "$(term_bg_class "7;6")"
 assert_eq dark  "term_bg_class 亮黑 8"              "$(term_bg_class "7;8")"
 assert_eq light "term_bg_class 三段式取末段 (1;default;15)" "$(term_bg_class "1;default;15")"
 assert_eq dark  "term_bg_class 非数字回退 dark"     "$(term_bg_class "fg;bg")"
+assert_eq dark  "term_bg_class default 末段回退 dark" "$(term_bg_class "15;default")"
 
 # is_https_git_url: 仅 https:// 返回 0；ssh/git@/其他返回 1
 assert_rc 0 "is_https_git_url 认 https"        is_https_git_url "https://github.com/o/r.git"
