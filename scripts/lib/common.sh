@@ -3,6 +3,11 @@
 # 用法：在脚本顶部 `source "$(dirname "${BASH_SOURCE[0]}")/lib/common.sh"`。
 # 设计为可被单测 source（无副作用、不自动执行），见 scripts/tests/test_common.sh。
 
+# AWS CLI v2 默认把多行输出送进 pager（less），交互式终端里要按 q 才继续——会卡住
+# install.sh / deploy-all.sh 这类无人值守/半交互脚本。统一在这里清空 AWS_PAGER，
+# 覆盖所有 source 本文件的脚本里的每一次 aws 调用（比逐条加 --no-cli-pager 干净）。
+export AWS_PAGER=""
+
 # 颜色：仅当 stdout 是 TTY 且未设 NO_COLOR 时启用 ANSI。
 if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
   _C_RED=$'\e[31m'; _C_GREEN=$'\e[32m'; _C_YELLOW=$'\e[33m'

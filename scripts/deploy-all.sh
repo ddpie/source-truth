@@ -300,6 +300,26 @@ if [[ "$DRY_RUN" != true ]]; then
 fi
 
 run() { if [[ "$DRY_RUN" == true ]]; then say info "[dry-run] $*"; else "$@"; fi; }
+
+# det_tar — archive the given paths to stdout, deterministically WHEN POSSIBLE. GNU tar
+# (or `gtar`) supports --sort/--mtime/--owner, which pin byte order so the gzipped tarball
+# (hence its S3 ETag) is identical across runs with identical content — that's what keeps
+# the index-host ArtifactSig staleness check from reporting "stale" every deploy.
+# macOS ships BSD tar, which REJECTS those flags (`Option --sort=name is not supported`),
+# so we fall back to a plain archive there. Determinism is an OPTIMIZATION, not correctness:
+# the fallback works fine, it just may re-stage a byte-different (but content-identical)
+# tarball, at worst causing an extra upload / a stale-WARN on reuse. `gzip -n` (no name/
+# timestamp in the gzip header) is portable and applied by the caller either way.
+# `brew install gnu-tar` on macOS restores full determinism.
+det_tar() {  # caller sets cwd; args = files/dirs to include
+  if tar --version 2>/dev/null | grep -qi 'gnu tar'; then
+    tar --sort=name --mtime='UTC 2020-01-01' --owner=0 --group=0 --numeric-owner -cf - "$@"
+  elif command -v gtar >/dev/null 2>&1; then
+    gtar --sort=name --mtime='UTC 2020-01-01' --owner=0 --group=0 --numeric-owner -cf - "$@"
+  else
+    tar -cf - "$@"
+  fi
+}
 skip() { [[ -n "${SKIP[$1]:-}" ]]; }
 
 # ============================================================
@@ -403,7 +423,7 @@ else
   # a subdir and are excluded by the top-level-only copy.
   cp "$ROOT"/index-service/*.py "$ROOT"/index-service/*.sh "$ROOT"/index-service/requirements.txt "$IDX_STAGE"/
   cp "$ROOT"/scripts/lib/render_manifest.py "$IDX_STAGE"/
-  ( cd "$IDX_STAGE" && tar --sort=name --mtime='UTC 2020-01-01' --owner=0 --group=0 --numeric-owner -cf - ./*.py ./*.sh requirements.txt | gzip -n > "$TMP_IDX" )
+  ( cd "$IDX_STAGE" && det_tar ./*.py ./*.sh requirements.txt | gzip -n > "$TMP_IDX" )
   rm -rf "$IDX_STAGE"
   run aws s3 cp "$TMP_IDX" "s3://$BUCKET/index-service.tar.gz" --region "$REGION"
 
@@ -431,7 +451,7 @@ else
   cp -r "$ROOT/bot-gateway/src" "$ROOT/bot-gateway/tsconfig.json" "$ROOT/bot-gateway/package.json" \
         "$ROOT/bot-gateway/package-lock.json" "$ROOT/bot-gateway/run.sh" "$GW_STAGE"/
   cp -r "$ROOT/config" "$GW_STAGE/config"
-  ( cd "$GW_STAGE" && tar --sort=name --mtime='UTC 2020-01-01' --owner=0 --group=0 --numeric-owner -cf - src tsconfig.json package.json package-lock.json run.sh config | gzip -n > "$TMP_GW" )
+  ( cd "$GW_STAGE" && det_tar src tsconfig.json package.json package-lock.json run.sh config | gzip -n > "$TMP_GW" )
   rm -rf "$GW_STAGE"
   run aws s3 cp "$TMP_GW" "s3://$BUCKET/bot-gateway.tar.gz" --region "$REGION"
   say ok "artifacts staged"
