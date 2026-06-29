@@ -61,7 +61,7 @@ codegraph 侧本地查询近乎免费（cc 每问 ~$1）。这一批两问都不
 ## 2. Opus 4.8 vs Sonnet 4.6（均在 source-truth 内、同仓同 prompt）
 
 **严格多轮测法（排除干扰）**：每个问题先发 1 次**预热**（丢弃，用于排除冷 microVM / 首次索引成本），
-再连发 **3 次计时**，**全程串行**（同一个热 microVM，排除冷启动 + 排队 + 并发污染），取**中位数**
+再连发 **3 次计时**，**全程串行**（同一个已预热的 microVM，排除冷启动 + 排队 + 并发污染），取**中位数**
 （单次抽样噪声大——同一问题用时能从 40s 跳到 120s，取决于模型当轮执行了几个工具回合）。仅切换 Runtime
 的 `ANTHROPIC_MODEL`，其余完全一致。
 
@@ -176,7 +176,7 @@ claude -p --model global.anthropic.claude-opus-4-8 \
 ./scripts/deploy-all.sh --region ap-northeast-1 --repo-subdir code-5x \
   --skip artifacts --skip iam --skip network --skip index-svc --skip image \
   --model global.anthropic.claude-opus-4-8
-# 注意：热 microVM 持旧 env 直到老化，切换后早期 invoke 可能还是旧模型，重复发送几条或等待一段时间。
+# 注意：仍存活的 microVM 持旧 env 直到老化，切换后早期 invoke 可能还是旧模型，重复发送几条或等待一段时间。
 # 模型 id：opus=global.anthropic.claude-opus-4-8、sonnet=global.anthropic.claude-sonnet-4-6、
 #         haiku=global.anthropic.claude-haiku-4-5-20251001-v1:0（已排除）。
 ```

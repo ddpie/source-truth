@@ -16,14 +16,17 @@ agent-container/        会话 microVM 内运行的 Claude Code Agent（Python�
 bot-gateway/            飞书 Bot 长连接事件网关 + CardKit 流式渲染（TypeScript 长驻服务）
   README.md             长连接 / 事件去重 / 会话→runtimeSessionId 映射 / 卡片更新频控
   src/                  事件消费入口、SigV4 调 AgentCore、会话映射、CardKit 渲染、SSE 解析、脱敏日志
-  run.sh                服务启动器：source /etc/bot-gateway.env + 从 Secrets Manager 取飞书凭证（不落盘）→ node dist
+  run.sh                服务启动器：source systemd 注入的 per-project env（/etc/bot-gateway-<项目>.env）+ 从 Secrets Manager 取飞书凭证（不落盘）→ node dist
 index-service/          常驻 CodeGraph 索引服务 + MCP-over-HTTP 接口
   README.md             常驻会话（独占写入 graph.db） / CodeGraph / HTTP 接口（定位 + 读文件） / 本地仓库副本 / bootstrap
   http_bridge.py        FastMCP HTTP 接口（包根，非 src/）：暴露 codegraph 定位 + 读文件工具，路径对齐为仓库相对
   codegraph_session.py  常驻 codegraph-server 会话，独占写入 graph.db（worker 线程 + 私有 loop，健康自愈，带超时）
+  repo_router.py        服务端多仓路由 + 范围强制（多仓隔离不变量1：白名单默认拒绝，越界 repo 参数永不路由；纯决策核，可单测）
+  repo_fanout.py        多仓查询结果合并（未指定 repo 时对每个仓的会话各查一遍再并结果；纯合并核，无 I/O，可单测）
   file_search.py        本地副本 ripgrep/grep 检索工具（在本地副本上检索，禁用内置 Grep，改走本地副本；命中按内容去重；MCP 暴露）
   file_read.py          本地副本按行 / 按位置读取文件的工具（read_file，路径对齐为仓库相对；MCP 暴露）
   file_table.py         结构化配置表读取（Excel/CSV/TSV/SQLite → 文本，read_table；只读、带 DoS 上限；MCP 暴露）
+  text_decode.py        稳健文本解码（仅标准库）：中文游戏仓常为 GBK/GB2312、配置表可能 UTF-16，按编码探测避免乱码
   glossary.py           术语表数据层：concept 为中心的 Entry/聚合/增量原语/JSONL 读写/轻量层投影
   glossary_read.py      术语表只读查询（glossary_index/glossary_lookup MCP 工具；per-repo slice 聚合 + 项目隔离）
   glossary_build.py     构建期：本地 cc 扫码产出 concept JSONL（prompt/容错解析/中文别名 grounding 校验/增量合并）
@@ -56,12 +59,14 @@ scripts/                运维生命周期
   apply-dau-lambda.sh   部署 B 类 DAU 预聚合 Lambda + 每日 EventBridge 调度（角色/打包/触发，幂等；--dry-run）
   test.sh               单一分层测试入口（离线默认 / --full）
   check-versions.sh     版本固定防漂移守卫（base digest / requirements pin / Node / claude-code npm）
+  get.sh                一行引导脚本（curl/gh 取来跑）：把仓库 clone 到 ./source-truth 再交给 install.sh；可重跑（已存在则 git pull）
   install.sh            交互式一键安装（查依赖→飞书凭证→配置→确认→调 deploy-all；重跑预填）
   deploy-all.sh         一键部署 canonical（artifacts→IAM→network→index-service→镜像→Runtime→gateway；幂等）
   lib/provision_*.sh + deploy_runtime.py + wait_index_health.sh  deploy-all.sh 的各阶段实现
   lib/deploy_project.sh + wait_base_host.sh + delete_runtime.py  多项目编排：建底座 / 等底座就绪 / 删 per-project runtime
+  lib/resolve_model.sh  查 Bedrock list-inference-profiles 选区域真实存在的推理配置（不猜前缀；geo profile 因区域而异）
   lib/resolve_repo.sh   多来源 repo 解析（本地 / git / s3）；现仅单测引用，主链路已改 git-only
-  lib/activate_gateway.sh  经 SSM 写 /etc/bot-gateway.env + 启动 bot-gateway.service（gateway 与索引同主机）
+  lib/activate_gateway.sh  经 SSM 写 /etc/bot-gateway-<项目>.env + 启动 bot-gateway@<项目>（gateway 与索引同主机）
   lib/stop_gateway.sh   经 SSM 停止旧实例 gateway（蓝绿换实例 break-before-make，避免双网关抢占飞书长连接）
   deploy.sh             已废弃兼容垫片（转发到 deploy-all.sh）
   (p2) ops.sh           运维工具（status / logs / reindex）
@@ -82,11 +87,11 @@ docs/
     multi-repo-isolation_zh.md  多仓隔离方案（每仓独立 CodeGraph + 服务端 scope gate + fan-out）
   agent/                AI 面向文档
     architecture.md     工作原理：一次提问如何在系统里流转
-    glossary.md         术语表：中文提问→英文代码符号的桥（构建期/查询期、grounding、价值边界）
-    invariants.md       源 → 生成物映射 + 改 X 必改 Y 的耦合（8 条不变量）
+    glossary.md         术语表：把中文提问映射到英文代码符号（构建期/查询期、grounding、价值边界）
+    invariants.md       源 → 生成物映射 + 改 X 必改 Y 的耦合（9 条不变量）
     playbooks.md        有序变更配方（7 个配方）
     *-spike.md          调研记录（cardkit 流式 / 索引性能 / 存储选型 / 性能对比 / 模板）
-  assets/               文档配图（手写 SVG：架构 / 数据面 / 会话隔离 / 术语表）
+  assets/               文档配图（手写 SVG：架构 / 数据面 / 会话隔离 / 术语表 / 安全纵深 / 时序；及一次真实问答录屏 demo-qa.gif）
 .local/                 （已 gitignore）账号特定部署状态：deploy-config、projects.json（项目路由）、deploy-output.md
 ```
 

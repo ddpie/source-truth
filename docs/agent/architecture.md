@@ -17,7 +17,7 @@ structure）描述系统*是什么*；本文描述*一次提问如何在系统�
       · 项目路由：本进程的 `PROJECT_ID` → 该项目的仓库集合 + 该项目 bridge 端口
         （src/project-routing.ts）；据此设定取证用的 `CODEGRAPH_MCP_URL` 指向本项目 bridge
       · 会话路由：(chat_id / thread_id) → runtimeSessionId（src/session-map.ts，DDB+TTL）
-        —— 同一问答链复用同一暖 microVM；不同用户/会话绝不共用会话，否则上下文串扰
+        —— 同一问答链复用同一个仍存活的 microVM；不同用户/会话绝不共用会话，否则上下文串扰
       · 先创建一张 CardKit 卡片（「正在思考…」），拿到 card_id 供后续流式更新
       · SigV4 签名调 AgentCore InvokeAgentRuntime（src/sigv4.ts），目标为**本项目专属的
         Runtime**（`source_truth_agent_<projectId>`），
@@ -30,7 +30,7 @@ structure）描述系统*是什么*；本文描述*一次提问如何在系统�
           · Claude Code Agent SDK（claude_agent_sdk.query / ClaudeAgentOptions），
             CLAUDE_CODE_USE_BEDROCK=1 走 Bedrock 计费
           · 取证只读通道（全部经 index-service 的 MCP-over-HTTP 接口；microVM 不挂任何文件系统）：
-              · 术语桥（旁路辅助，非前置步骤）：中文业务词（战力/爆率…）可经 codegraph_glossary_index /
+              · 术语表（旁路辅助，非前置步骤）：中文业务词（战力/爆率…）可经 codegraph_glossary_index /
                   codegraph_glossary_lookup 对应到英文代码符号，与 agent 自身想到的检索词**并用**——
                   不是「先查术语表再搜」的串行关卡（项目已知时才注册；辅助线索，结论仍须实际查看代码取证）
               (1) CodeGraph 定位 → 先查「哪个工程 / 哪些文件」（symbol_search / get_callers / analyze_impact）
@@ -106,22 +106,22 @@ Secrets Manager / SSM，**当前需手动在 CDK 外创建**（编排脚本尚�
 
 Runtime 按无状态使用：每次 invoke 都是一次全新的 SDK 会话，多轮追问由网关把历史问答重新拼进 prompt 续接
 （external history replay，见 `bot-gateway/src/followup-context.ts`），不依赖 microVM 内残留的对话状态。
-复用 `runtimeSessionId` 只为把同一问答链路由到同一个暖 microVM、省去冷启动，本身不承载任何语义。
+复用 `runtimeSessionId` 只为把同一问答链路由到同一个仍存活的 microVM、省去冷启动，本身不承载任何语义。
 
-这带来一条必须对齐的约束：**网关判定「会话可复用」的时间窗，不应超过 AgentCore 保留暖 microVM 的时间窗。**
+于是有一条硬性要求：**网关判定「会话可复用」的时间窗，不应超过 AgentCore 保留该 microVM 的时间窗。**
 若网关的窗口更长，落在两者之间的追问会复用一个已被回收的会话 id，触发一次冷启动——功能不受影响（历史通过
 replay 保留），但响应慢几秒。为此两个值由同一参数驱动：
 
-- `idleRuntimeSessionTimeout`：暖 microVM 空闲多久后回收。在 `deploy_runtime.py` 的 `lifecycleConfiguration`
+- `idleRuntimeSessionTimeout`：microVM 空闲多久后回收。在 `deploy_runtime.py` 的 `lifecycleConfiguration`
   中设置，由 `deploy-all.sh --idle-timeout` 传入，默认 900 秒（15 分钟，与 AWS 默认一致）。
 - 网关的 session 复用 TTL（`session-map.ts`）：部署时将上述值写入网关环境变量 `RUNTIME_IDLE_TIMEOUT_SECS`，
   TTL 据此派生，默认同为 15 分钟。调整时改动 `--idle-timeout` 一处即可，两侧随之联动。
 
 **成本权衡。** AgentCore 的计费规则是：CPU 仅在活跃处理时计费（空闲时免费），内存则按整个 session 生命周期计费。
-因此调大 idle 会延长暖 microVM 存活、增加这段空闲期的内存开销，仅当该时间窗内确有追问发生时才划算。多数会话
-在一次问答后即结束，调大 idle 主要覆盖「问答十余分钟后才追问」这类低频场景，收益通常不抵成本，故默认保持
-15 分钟。仅在追问密集的场景（如客服式高频问答）才建议用 `--idle-timeout` 调大并接受相应的内存开销；如需进一步
-压缩成本，可调小（最低 60 秒）。`maxLifetime`（默认 8 小时）是暖 microVM 的最长存活时间，到期强制重建，通常无需调整。
+调大 idle 会延长 microVM 存活、增加这段空闲期的内存开销，只有该时间窗内确有追问发生时才划算。多数会话
+在一次问答后即结束，调大 idle 主要覆盖「问答十余分钟后才追问」这类低频场景，收益通常不抵成本，所以默认
+15 分钟。追问密集的场景（如客服式高频问答）才建议用 `--idle-timeout` 调大、接受相应的内存开销；要进一步
+压缩成本则调小（最低 60 秒）。`maxLifetime`（默认 8 小时）是 microVM 的最长存活时间，到期强制重建，通常无需调整。
 
 ## 四个核心架构选择
 
@@ -131,9 +131,9 @@ source-truth 不同于「在容器外把 AI 当远程 MCP 客户端」的常见�
 1. **AI 在容器内运行**——会话 microVM 内直接运行 Claude Code Agent SDK（`agent-container/agent.py` 的
    agent 循环），AI 既是推理主体也是 MCP 消费端，而非外部 MCP 客户端。
 2. **飞书 Bot 网关**——机器人身份 + 长连接事件流 + 会话→runtimeSessionId 映射。MVP 不引入每用户
-   OAuth 体系；上下文挂在飞书对话上、按需拉取。**部署形态**：网关与 index-service **同主机**（那台 EC2 上
-   的第二个 systemd 服务 `bot-gateway.service`），由 deploy 的 gateway 阶段经 SSM 写 `/etc/bot-gateway.env`
-   + 启动；飞书凭证运行时从 Secrets Manager 取（不落盘）。注意飞书长连接是**全局单例**（同 app 只能一个
+   OAuth 体系；上下文挂在飞书对话上、按需拉取。**部署形态**：网关与 index-service **同主机**（每个项目一个
+   systemd 实例 `bot-gateway@<projectId>.service`），由 deploy 的 gateway 阶段经 SSM 写
+   `/etc/bot-gateway-<projectId>.env` + 启动；飞书凭证运行时从 Secrets Manager 取（不落盘）。注意飞书长连接是**全局单例**（同 app 只能一个
    client，否则争抢事件）——故蓝绿换 index 实例时，gateway 走 **break-before-make**（先停旧实例网关、确认长连接断开，
    再启动新实例网关），与 index/codegraph 的 make-before-break 相反。
 3. **独立 CodeGraph 索引服务**——常驻服务，单写者独占 graph.db、stdio→streamable-HTTP 接口，对会话容器

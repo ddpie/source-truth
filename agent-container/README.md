@@ -6,9 +6,8 @@
 
 在 AgentCore Runtime 的 Firecracker microVM 内，用 **Claude Code Agent SDK**（`claude_agent_sdk`）+
 **bedrock-agentcore** runtime（`@app.entrypoint` 异步流式 handler）执行 agent 循环：理解策划的问题 →
-调远程 CodeGraph MCP 定位代码 → 经 index-service 的文件工具（`codegraph_read_file` / `codegraph_glob_files` /
-`codegraph_search_files` / `codegraph_read_table`）读最新主分支源码与配置表（含 Excel/CSV/SQLite 数值表）→
-生成结构化答案并流式 `yield`。microVM 本身不挂任何文件系统，所有代码都经 index-service 的 MCP-over-HTTP 接口读取。
+调远程 CodeGraph MCP 定位代码 → 经 index-service 的文件工具读最新主分支源码与配置表（含 Excel/CSV/SQLite 数值表）→
+生成结构化答案并流式 `yield`。
 
 模型走 Bedrock 计费（`CLAUDE_CODE_USE_BEDROCK=1`）。MVP 单引擎 Claude Code（Codex 第二引擎后置）。
 
@@ -57,10 +56,9 @@
 - `requirements.txt`（写明依赖意图，`claude-agent-sdk==0.2.103` 固定）+ `requirements.lock`（完整传递依赖锁，
   Dockerfile 按它 `uv pip install --no-deps` 安装）。
 
-## 关键设计决策
+CodeGraph 接入直接用 `ClaudeAgentOptions.mcp_servers` 原生支持的 `McpHttpServerConfig`
+（`{type:"http", url, headers?}`，对照 SDK 0.2.103 核实），不需 streamable-http 转换层。
 
-- **CodeGraph MCP 接入＝方案 A**：`ClaudeAgentOptions.mcp_servers` 原生支持 `McpHttpServerConfig`
-  （`{type:"http", url, headers?}`，对照 SDK 0.2.103 核实），不需 streamablehttp 转换层。
-- **走 Bedrock 计费**：`CLAUDE_CODE_USE_BEDROCK=1`，默认模型 `global.anthropic.claude-opus-4-8`。
-- **取证全经 index-service 文件工具**：microVM 不挂任何文件系统。
-- 部署见 `scripts/deploy-all.sh`（canonical）+ `.local/deploy-config`。
+## 测试
+
+单测见 `agent-container/tests/`，经 `./scripts/test.sh`（离线套件）运行。部署见 `scripts/deploy-all.sh` + `.local/deploy-config`。

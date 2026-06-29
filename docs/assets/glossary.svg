@@ -39,7 +39,7 @@
   <!-- ===== 查询期（右半，请求路径）===== -->
   <rect x="408" y="80" width="348" height="300" rx="10" fill="#fbfbfc" stroke="#d7dde6" stroke-width="1.2"/>
   <text x="424" y="104" font-size="13" font-weight="700" fill="#1f2733">查询期（会话 microVM）</text>
-  <text x="424" y="122" font-size="10.5" fill="#7a8493">两个只读工具 · 项目隔离 · 经 index-service HTTP</text>
+  <text x="424" y="122" font-size="10.5" fill="#7a8493">只读工具 · 项目隔离 · 经 index-service HTTP</text>
 
   <rect x="428" y="138" width="308" height="46" rx="8" fill="#f4f0fa" stroke="#c9b8e6" stroke-width="1.1"/>
   <text x="444" y="159" font-size="12.5" font-weight="600" fill="#1f2733">策划提问：「成就怎么算」</text>

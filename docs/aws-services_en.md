@@ -46,7 +46,7 @@ project count); the rest are globally shared.
 | Service | Specs | Count | Purpose |
 |---------|-------|-------|---------|
 | **CloudWatch Logs** | log group `/source-truth/bot-gateway` | 1 (all project gateways feed in, separated by `projectId` dimension) | Gateway structured logs, the source for metrics |
-| **CloudWatch Metric Filters** | 16 KPIs + 4 alarm-backing + per-project companion metrics | 20+ | Extract usage / latency / health / failure-rate metrics from logs |
+| **CloudWatch Metric Filters** | 17 KPIs + 4 alarm-backing + per-project companion metrics | 20+ | Extract usage / latency / health / failure-rate metrics from logs |
 | **CloudWatch Dashboards** | product usage / SRE health / per-project | 3 | Dashboard visualization |
 | **CloudWatch Alarms** | ToolcallLeakDetected / FinalizeFailed / AnswerFailedBurst / LogPipelineStalled | 4 | Alarms on key health events, notified via SNS |
 | **SNS** | topic `source-truth-alarms` | 1 | Alarm fan-out (manually subscribe email / webhook) |

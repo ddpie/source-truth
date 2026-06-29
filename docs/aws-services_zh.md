@@ -29,7 +29,7 @@
 | **NAT Gateway**（+ 弹性 IP） | 置于公有子网 | 1 | 私有子网出站（拉取 S3 产物、调用 Bedrock） |
 | **Internet Gateway** | — | 1 | 公有子网入口 |
 | **Security Group** | 入站仅 `8080-8099`、限同 SG 成员 | 1（AgentCore Runtime 的 ENI 也加入此 SG） | 限制各项目 bridge 端口仅本 VPC 内可达 |
-| **Route 53**（私有托管区） | 私有域 `source-truth.internal`，A 记录 TTL 30s | 1 | 给 index 主机稳定 DNS 名（蓝绿换实例时暖 microVM 缓存仍有效） |
+| **Route 53**（私有托管区） | 私有域 `source-truth.internal`，A 记录 TTL 30s | 1 | 给 index 主机稳定 DNS 名（蓝绿换实例时存活中的 microVM 缓存仍有效） |
 
 ## 4. 安全与运维（凭证、权限、远程管理）
 
@@ -44,7 +44,7 @@
 | 服务 | 规格 | 数量 | 用途 |
 |------|------|------|------|
 | **CloudWatch Logs** | 日志组 `/source-truth/bot-gateway` | 1（各项目网关汇入，按 `projectId` 维度区分） | 网关结构化日志，指标的数据源 |
-| **CloudWatch Metric Filters** | KPI 16 项 + 告警 4 项 + 按项目维度伴生指标 | 20+ | 从日志提取用量 / 延迟 / 健康 / 失败率等指标 |
+| **CloudWatch Metric Filters** | KPI 17 项 + 告警 4 项 + 按项目维度伴生指标 | 20+ | 从日志提取用量 / 延迟 / 健康 / 失败率等指标 |
 | **CloudWatch Dashboards** | 产品用量 / SRE 健康 / 分项目 | 3 | 看板可视化 |
 | **CloudWatch Alarms** | ToolcallLeakDetected / FinalizeFailed / AnswerFailedBurst / LogPipelineStalled | 4 | 关键健康事件告警，经 SNS 通知 |
 | **SNS** | 主题 `source-truth-alarms` | 1 | 告警分发（手动订阅邮件 / webhook） |
