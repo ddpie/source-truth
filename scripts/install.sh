@@ -459,7 +459,7 @@ done
 rm -f /etc/bot-gateway-${SEL}.env /etc/index-projects/${SEL}.json /etc/systemd/system/index-bridge-${SEL}.service
 systemctl daemon-reload
 echo removed-${SEL}"
-    local PF; PF="$(mktemp /tmp/rm-ssm.XXXX.json)"
+    local PF; PF="$(mktemp /tmp/rm-ssm.XXXXXX)"  # X's at end (BSD/macOS-safe); .json cosmetic (passed as file://)
     printf '%s' "$RM_CMD" | python3 -c 'import sys,json; print(json.dumps({"commands": sys.stdin.read().split("\n")}))' > "$PF"
     aws ssm send-command --region "$REGION" --instance-ids "$IID" --document-name AWS-RunShellScript \
       --parameters "file://$PF" >/dev/null 2>&1 || say warn "  SSM cleanup command failed (host units may remain; clean manually)"

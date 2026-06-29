@@ -79,7 +79,7 @@ echo '${MANIFEST_B64}' | base64 -d > /tmp/manifest-${PID}.json
 PROJECT_ID='${PID}' GIT_SECRET_ID='${GIT_SECRET_ID}' MODEL='${MODEL}' REPO_MANIFEST_JSON=\"\$(cat /tmp/manifest-${PID}.json)\" bash /opt/idx/app/activate_project.sh
 rm -f /tmp/manifest-${PID}.json"
 
-PARAM_FILE="$(mktemp /tmp/ap-ssm.XXXX.json)"
+PARAM_FILE="$(mktemp /tmp/ap-ssm.XXXXXX)"  # X's at end (BSD/macOS-safe); .json suffix cosmetic (passed as file://)
 printf '%s' "$REMOTE_CMD" | python3 -c 'import sys,json; print(json.dumps({"commands": sys.stdin.read().split("\n")}))' > "$PARAM_FILE"
 CID="$(aws ssm send-command --region "$REGION" --instance-ids "$IID" \
   --document-name AWS-RunShellScript --parameters "file://$PARAM_FILE" \

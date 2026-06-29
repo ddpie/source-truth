@@ -432,7 +432,10 @@ else
   # module would crash the bridge on import on a fresh instance (health gate then
   # times out). Globbing every .py makes new modules ship automatically; tests/
   # live in a subdir and are excluded by the top-level-only glob.
-  TMP_IDX="$(mktemp /tmp/index-service.XXXX.tar.gz)"
+  # mktemp template: the X's must be at the END (BSD/macOS mktemp rejects a suffix
+  # after them — GNU tolerates it). The local temp name is cosmetic (content goes to a
+  # fixed S3 key), so no .tar.gz suffix is needed on it.
+  TMP_IDX="$(mktemp /tmp/index-service.XXXXXX)"
   # Stage the index-service top-level .py + requirements.txt PLUS the shared manifest
   # parser (scripts/lib/render_manifest.py) into one dir, so bootstrap.sh on the instance
   # can validate + iterate REPO_MANIFEST_JSON with the SAME parser the deploy/tests use
@@ -466,7 +469,7 @@ else
     say err "bot-gateway/package-lock.json missing — required for reproducible 'npm ci' on the index host."
     [[ "$DRY_RUN" == true ]] || exit 1
   fi
-  TMP_GW="$(mktemp /tmp/bot-gateway.XXXX.tar.gz)"
+  TMP_GW="$(mktemp /tmp/bot-gateway.XXXXXX)"  # X's at end (BSD-safe); name is cosmetic
   # Deterministic (see above): keeps the gateway tarball's ETag stable across reruns
   # when its source is unchanged, so the ArtifactSig staleness check is meaningful.
   # Bundle the repo's config/ INTO the tarball under a top-level `config/`: the gateway
