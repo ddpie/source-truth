@@ -52,6 +52,21 @@ for f in docs/design/requirements_zh.md docs/design/architecture-overview_zh.md 
   [[ -f "$f" ]] && ok "设计权威依据: $f" || err "缺少设计权威依据: $f"
 done
 
+# 7. 全局共享 IAM 角色的策略 Resource 不得钉死 ${REGION}
+#    source-truth-index-role / source-truth-dau-lambda-role 是账号级全局角色，被多区域共用，
+#    而 put-role-policy 是覆盖写：策略 Resource ARN 若钉单区 ${REGION}，第二区域部署会改写它、
+#    静默撤销第一区域的权限（2026-06-29 新加坡部署据此打挂东京）。这些资源型 ARN 的 region 段
+#    必须用 '*'，靠 account + 资源名前缀兜底。只查易越权的服务面（lambda/events 的 ARN 是按区
+#    构造的合法用法，不在此列）。
+guard_hits="$(grep -nE 'arn:aws:(logs|bedrock|bedrock-agentcore|secretsmanager|s3[a-z-]*):[a-z0-9-]*\$\{REGION\}:' \
+  scripts/lib/provision_iam.sh scripts/apply-dau-lambda.sh 2>/dev/null || true)"
+if [[ -n "$guard_hits" ]]; then
+  err "全局共享角色策略 Resource 钉死了 \${REGION}（多区部署会互相覆盖，改用 '*'）："
+  printf '      %s\n' "$guard_hits" >&2
+else
+  ok "全局共享角色策略 Resource 未钉死 \${REGION}（多区域安全）"
+fi
+
 if [[ $fail -ne 0 ]]; then
   echo "check-invariants: FAILED" >&2
   exit 1

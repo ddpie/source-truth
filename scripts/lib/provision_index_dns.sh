@@ -10,9 +10,9 @@
 # questions hitting a warm VM pointed at the (now-terminated) old IP get a
 # connection failure → empty codegraph results → the agent correctly refuses
 # ("index not ready"), producing intermittent empty answer cards. Pinning the
-# agent to a STABLE name (index.source-truth.internal) that we just re-point at
-# the new IP means the runtime env NEVER changes on a refresh, so warm VMs stay
-# valid — the empty-card class is eliminated.
+# agent to a STABLE per-region name (index.<region>.source-truth.internal) that we
+# just re-point at the new IP means the runtime env NEVER changes on a refresh, so
+# warm VMs stay valid — the empty-card class is eliminated.
 #
 # Prints INDEX_DNS_NAME=<fqdn> on stdout; persists INDEX_DNS_ZONE_ID + the name.
 set -euo pipefail
@@ -20,7 +20,16 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/common.sh"; source "$SCRIPT_DIR/env-utils.sh"
 REGION="$1"; CONFIG="$2"; VPC_ID="$3"; INDEX_IP="$4"
 ZONE_NAME="source-truth.internal"
-RECORD="index.${ZONE_NAME}"
+# PER-REGION record name (NOT a bare `index.${ZONE_NAME}`). The zone is account-global and we
+# associate every region's VPC to it, so a single shared `index.source-truth.internal` record is
+# ONE row: whichever region deploys last UPSERTs it to ITS index IP, silently re-pointing every
+# OTHER region's agents at a cross-region IP they can't reach → codegraph MCP never connects →
+# mcp_init_race / empty answers (this exactly took Tokyo down on 2026-06-29 when an ap-southeast-1
+# deploy repointed the shared record at the Singapore host). Folding $REGION into the name gives
+# each region its OWN row (index.ap-northeast-1… vs index.ap-southeast-1…) that no other region's
+# deploy can overwrite. Within a VPC, agents only ever query their own region's name, so the names
+# coexisting in one shared zone is harmless — no zone re-association needed (that stays as-is).
+RECORD="index.${REGION}.${ZONE_NAME}"
 # A-record TTL (seconds). The blue-green terminate-last drain in deploy-all.sh MUST
 # wait longer than this before killing the old instance, or a warm VM's resolver
 # cache still points at the dead IP. Persisted to config (INDEX_DNS_TTL) so the
@@ -37,6 +46,9 @@ R() { aws route53 "$@"; }  # route53 is global; no --region
 # list-hosted-zones-by-vpc returns zones already associated with the VPC, so a
 # re-run reuses the same zone rather than creating a duplicate (Route53 allows
 # multiple private zones with the same name, which would be ambiguous).
+# NOTE: ONE shared zone serving multiple regions' VPCs is fine — each region writes its OWN
+# per-region record name (see RECORD above), so they coexist without overwriting each other.
+# This block only ensures THIS VPC is associated to the zone; it does NOT touch records.
 ZONE_ID="$(aws route53 list-hosted-zones-by-vpc --vpc-id "$VPC_ID" --vpc-region "$REGION" \
   --query "HostedZoneSummaries[?Name=='${ZONE_NAME}.'].HostedZoneId | [0]" --output text 2>/dev/null || echo "")"
 if [[ -z "$ZONE_ID" || "$ZONE_ID" == "None" ]]; then
