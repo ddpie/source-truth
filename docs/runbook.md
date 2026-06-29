@@ -21,24 +21,40 @@
 ## 一、前置条件（一次性）
 
 1. **AWS 账号 + 目标区域**：区域须支持 AgentCore（如 `ap-northeast-1` 东京）。本机配好可部署的 AWS 凭证。
-2. **Bedrock 模型访问**：确保部署身份有 `bedrock:InvokeModel`（AWS 已不再需要逐模型在控制台「Model access」开通）。
+2. **部署机（Linux 或 macOS）**：装好 `aws` CLI v2、`python3`、`git`，以及 **Docker 且守护进程在运行**
+   （Phase 4 要构建 ARM64 镜像；只装不启动会在依赖检查就被拦下，提示 `docker info` 验证）。私有仓部署还需
+   `gh` 并已 `gh auth login`（用于克隆仓库 + 拉取 `codegraph-server`）。`codegraph-server` 二进制无需手动准备——
+   本地与 S3 都没有时，部署会从本仓 Release 自动下载（私有仓经 `gh`，公开仓经直链）。
+3. **Bedrock 模型访问**：确保部署身份有 `bedrock:InvokeModel`（AWS 已不再需要逐模型在控制台「Model access」开通）。
    模型 ID 是 Bedrock 的跨区域推理档；同一模型在不同区域的可用档不同——地域档是 `us.` / `eu.` / `jp.`（东京/大阪）/
    `au.`（悉尼/墨尔本），不少区域（如新加坡 `ap-southeast-1`、孟买）**没有地域档、只有 `global.`**。
    `deploy-all.sh` 不再靠猜前缀：部署时按 `--region` 调 `bedrock list-inference-profiles` 查该区域**实际提供**的档，
    自动挑最优（地域档优先，没有就用 `global.`）。所以默认 `global.anthropic.claude-opus-4-8` 在东京会被解析为
    `jp.…`、在新加坡保留 `global.…`，都无需手动指定。仅当查不到匹配档时 preflight 会 WARN 并列出该区域可用的档。
-3. **目标代码仓**：要被问答的游戏代码仓，可以是以下任一来源（index-service 会快照、建索引）：
+4. **目标代码仓**：要被问答的游戏代码仓，可以是以下任一来源（index-service 会快照、建索引）：
    - 本地路径：`/path/to/your-game-repo`
    - git 地址：`https://github.com/org/repo.git`、`https://gitlab.com/org/repo.git`、`git@host:org/repo.git`
      （可选 `--repo-ref <分支/标签/提交>`；git 源需本机有 `git` 与对私有仓的访问凭证）
    - S3：`s3://bucket/code.tar.gz`（tarball）或 `s3://bucket/prefix/`（前缀同步）
-4. **飞书应用**（见第三节，可与部署并行准备）。
+5. **飞书应用**（见第三节，可与部署并行准备）。
 
 ---
 
 ## 二、一键安装（交互式，推荐）
 
-先准备好飞书应用（第三节），拿到 `App ID` / `App Secret` / 机器人 `open_id`，然后：
+先准备好飞书应用（第三节），拿到 `App ID` / `App Secret` / 机器人 `open_id`。
+
+**一行命令拉起**（克隆仓库后进入交互式安装）：
+
+```bash
+# 仓库公开时
+bash <(curl -fsSL https://raw.githubusercontent.com/ddpie/source-truth/main/scripts/get.sh)
+
+# 仓库私有时（先 gh auth login 一次，再用 gh 取脚本，带认证）
+bash <(gh api repos/ddpie/source-truth/contents/scripts/get.sh --jq '.content' | base64 -d)
+```
+
+已克隆仓库则直接：
 
 ```bash
 ./scripts/install.sh
@@ -47,7 +63,7 @@
 它是一个**箭头菜单**（↑/↓ 选、回车确认），四个流程见 [6.5 多项目](#65多项目一台机器多个机器人)。
 首次部署的典型顺序：
 
-1. **查依赖**：`aws` / `python3` / `docker` / `git`，并校验 AWS 凭证可用；
+1. **查依赖**：`aws` / `python3` / `docker`（含守护进程在运行）/ `git`，可选 `gh`（私有仓部署需要），并校验 AWS 凭证可用；
 2. **选「添加项目」**（底座不存在会自动先建）：填 projectId → 逐个加仓库（**git 地址** + 子目录 + 分支）→
    bridge 端口（自动建议）→ 飞书 App 凭证（自动写入 `source-truth/feishu-<项目>`）→ 首次再给一个只读 git
    凭证（写入全局 `source-truth/git-credentials`，后续项目复用）；
@@ -230,7 +246,7 @@ aws ssm start-session --region <r> --target <INDEX_SERVICE_INSTANCE>
 **监控：指标 / 看板 / 告警**（CloudWatch 侧，部署期身份需 `logs:PutMetricFilter` /
 `cloudwatch:PutDashboard,PutMetricAlarm` / `sns:CreateTopic`；不是运行时角色）。
 
-> **`deploy-all.sh` 的 Phase 8（monitoring）已自动执行这四步**（best-effort：网关日志组尚未创建时只告警，
+> **`deploy-all.sh` 的 Phase 7（monitoring）已自动执行这四步**（best-effort：网关日志组尚未创建时只告警，
 > 不中断部署；重跑 deploy 即可补齐）。**正常一键部署无需手动执行**；下面的手动命令用于：单独刷新看板/阈值、
 > deploy 时 monitoring 被 `--skip monitoring`、或首次部署网关刚启动且尚未写入第一行日志（log group 未生成）后的补跑。
 
@@ -309,7 +325,7 @@ refreshIntervalSec?}`，**git-only**）。顶层 `refreshIntervalSec` 是全局�
 | 答案里出现原始 `<invoke>` XML 等标记 | 冷 microVM 首次 invoke 时 MCP 工具未注册（冷启动竞速） | 网关会自动重试一次；暖机后消失。查看日志 `num_turns`/`cache_read` 确认是否冷启动 |
 | 机器人在群里**完全无响应** | 网关未启动 / 未 @ 到机器人 / 同一 app 运行了两个网关争抢事件 | 进实例 `systemctl status 'bot-gateway@*'` 确认 active + 日志 `sdk_wsclient_connected`；确认 @ 的是 `FEISHU_BOT_OPEN_ID`；停止多余网关，只保留一个 |
 | 网关 `condition failed` 未启动 | `/etc/bot-gateway-<项目>.env` 尚未写入（runtime 未就绪 / gateway 阶段被跳过） | 重跑 `install.sh` 或 `deploy-all.sh`（不跳 gateway）；确认 `FEISHU_SECRET_ID` 已配 |
-| 卡片回「查询失败」/ 日志 `AccessDenied` | Bedrock 模型未在该区域开通 | 到 Bedrock 控制台开通模型访问；跨区域改用区域级推理档（见前置条件 2） |
+| 卡片回「查询失败」/ 日志 `AccessDenied` | 部署身份缺 `bedrock:InvokeModel`，或该模型在此区域无可用推理档 | 给部署身份补 `bedrock:InvokeModel`；模型档由部署按区域自动解析，查不到时 preflight 会列出该区域可用的档（见前置条件 3） |
 | 部署在 index-service 阶段超时 | 全新账号 NAT 路由未收敛 / 实例仍在冷启动建索引 | 多等一轮（bootstrap 对网络操作有重试）；查看 `/var/log/` 与 `journalctl -u 'index-build@*'` |
 | `/health` 长期非 200 | 索引损坏 / graph.db 空 / worker 反复重启 | 进实例查看 index-bridge-<项目> 日志；必要时 `--refresh-index` 重建（蓝绿，不破坏运行中实例） |
 | 重新部署后行为仍是旧版本 | 热 microVM 仍持旧镜像（约 15 分钟）/ 网关未重启 | 等待热 VM 回收；重启网关确保运行新代码 |
