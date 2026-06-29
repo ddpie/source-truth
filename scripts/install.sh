@@ -231,6 +231,16 @@ if [[ "$DEPS_OK" != true ]]; then
   say info "  aws CLI v2, python3, docker (ARM64-capable buildx), git"
   exit 1
 fi
+# gh is OPTIONAL — only needed to auto-download codegraph-server from a PRIVATE repo's
+# Release (gh carries auth). Not required if the repo is public, or if you already have
+# the binary locally (CODEGRAPH_SERVER_BIN / PATH / ~/.local/bin). Warn, don't block.
+if have_cmd gh && gh auth status >/dev/null 2>&1; then
+  say ok "gh (authenticated — can fetch codegraph-server from a private Release)"
+else
+  say info "gh 未安装或未登录 / gh absent or not logged in — fine if the repo is public or"
+  say info "  codegraph-server is already local. For a PRIVATE repo's auto-download, run"
+  say info "  'gh auth login', or set CODEGRAPH_SERVER_BIN=/path/to/codegraph-server."
+fi
 # AWS identity (also proves credentials work before we collect anything).
 if ! ACCOUNT="$(aws sts get-caller-identity --query Account --output text 2>/dev/null)"; then
   say err "AWS 凭证无效 / AWS credentials not working — run 'aws configure' or set AWS_PROFILE."

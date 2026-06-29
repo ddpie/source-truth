@@ -75,7 +75,25 @@ AI 助手读取项目真实代码、定位依据，再用业务语言给出结�
 
 ## 部署与测试
 
-交互式一键安装（全新账号 / 区域可跑、幂等），离线测试无需 Docker / AWS：
+交互式一键安装（全新账号 / 区域可跑、幂等）。在已配好 AWS 凭证的机器上，一行命令拉起。
+
+仓库公开时，裸 `curl` 即可：
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/ddpie/source-truth/main/scripts/get.sh)
+```
+
+仓库私有时，本机先 `gh auth login`（一次），再用 `gh` 取引导脚本（带认证，无需公开仓库）：
+
+```bash
+bash <(gh api repos/ddpie/source-truth/contents/scripts/get.sh --jq '.content' | base64 -d)
+```
+
+它把仓库克隆到当前目录的 `source-truth/`（私有仓自动走 `gh` 认证克隆），再进入交互式安装
+（问区域 / 代码仓 / 模型 / 飞书凭证，拉起后端 + 网关）。`codegraph-server` 索引引擎在本地与 S3 都没有时，
+由部署脚本下载：私有仓经 `gh release download`（带认证），公开仓经直链——都无需手动准备二进制。
+
+已克隆仓库则直接跑脚本即可，离线测试无需 Docker / AWS：
 
 ```bash
 ./scripts/install.sh    # 问区域 / 代码仓 / 模型 / 飞书凭证，拉起后端 + 网关
