@@ -93,5 +93,5 @@
     <text x="385" y="522" text-anchor="middle" fill="#2f7a47">成品卡片 · 可点「继续追问」或回复卡片带上文续问</text>
   </g>
 
-  <text x="380" y="558" text-anchor="middle" font-size="10.5" fill="#7a8493">全程只读取证 · 会话 microVM 不挂任何文件系统 · 工作原理见 docs/agent/architecture.md</text>
+  <text x="380" y="558" text-anchor="middle" font-size="10.5" fill="#7a8493">全程只读、读代码取证 · 会话 microVM 不挂任何文件系统 · 工作原理见 docs/agent/architecture.md</text>
 </svg>

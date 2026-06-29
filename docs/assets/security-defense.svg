@@ -13,34 +13,34 @@
   <g>
     <rect x="24" y="86" width="226" height="332" rx="10" fill="#eef3fb" stroke="#b9c9e6" stroke-width="1.2"/>
     <text x="137" y="116" text-anchor="middle" font-size="15" font-weight="700" fill="#1f2733">防越权</text>
-    <text x="137" y="137" text-anchor="middle" font-size="11" fill="#7a8493">不让只读变成写 / 提交</text>
+    <text x="137" y="137" text-anchor="middle" font-size="11" fill="#7a8493">无法越过只读权限写入或提交</text>
 
     <rect x="44" y="156" width="186" height="74" rx="7" fill="#ffffff" stroke="#cdd8ec" stroke-width="1"/>
-    <text x="137" y="178" text-anchor="middle" font-size="11.5" font-weight="600" fill="#3457a6">模型侧：能力不进上下文</text>
+    <text x="137" y="178" text-anchor="middle" font-size="11.5" font-weight="600" fill="#3457a6">模型侧：不提供写工具</text>
     <text x="137" y="198" text-anchor="middle" font-size="10.5" fill="#5b6573">tools=[] · disallowed_tools</text>
     <text x="137" y="216" text-anchor="middle" font-size="10.5" fill="#5b6573">dontAsk · strict_mcp_config</text>
 
     <rect x="44" y="244" width="186" height="74" rx="7" fill="#ffffff" stroke="#cdd8ec" stroke-width="1"/>
-    <text x="137" y="266" text-anchor="middle" font-size="11.5" font-weight="600" fill="#3457a6">服务侧：闭合白名单</text>
+    <text x="137" y="266" text-anchor="middle" font-size="11.5" font-weight="600" fill="#3457a6">服务侧：只开放只读工具</text>
     <text x="137" y="286" text-anchor="middle" font-size="10.5" fill="#5b6573">只注册 ≤9 个只读工具</text>
     <text x="137" y="304" text-anchor="middle" font-size="10.5" fill="#5b6573">不注册即无能力</text>
 
     <text x="137" y="346" text-anchor="middle" font-size="10.5" font-weight="600" fill="#9aa3b0">以谁为准</text>
     <text x="137" y="366" text-anchor="middle" font-size="10" fill="#7a8493">agent_lib.py（SDK 多层）</text>
     <text x="137" y="384" text-anchor="middle" font-size="10" fill="#7a8493">http_bridge.py（白名单）</text>
-    <text x="137" y="404" text-anchor="middle" font-size="10" fill="#7a8493">均 READONLY · 无写副作用</text>
+    <text x="137" y="404" text-anchor="middle" font-size="10" fill="#7a8493">两层均为只读，不改动任何文件</text>
   </g>
 
   <!-- ===== 防泄露 ===== -->
   <g>
     <rect x="267" y="86" width="226" height="332" rx="10" fill="#eef6ef" stroke="#9cc6a8" stroke-width="1.2"/>
     <text x="380" y="116" text-anchor="middle" font-size="15" font-weight="700" fill="#1f2733">防泄露</text>
-    <text x="380" y="137" text-anchor="middle" font-size="11" fill="#7a8493">密钥 / 内网拓扑不出系统</text>
+    <text x="380" y="137" text-anchor="middle" font-size="11" fill="#7a8493">密钥和内网信息不流出系统</text>
 
     <rect x="287" y="156" width="186" height="74" rx="7" fill="#ffffff" stroke="#bfe0c6" stroke-width="1"/>
-    <text x="380" y="178" text-anchor="middle" font-size="11.5" font-weight="600" fill="#2f7a47">进群字段全过脱敏</text>
+    <text x="380" y="178" text-anchor="middle" font-size="11.5" font-weight="600" fill="#2f7a47">回传群内的字段先脱敏</text>
     <text x="380" y="198" text-anchor="middle" font-size="10.5" fill="#5b6573">用户 / 会话标识 hashUserId</text>
-    <text x="380" y="216" text-anchor="middle" font-size="10.5" fill="#5b6573">密钥 · 内网拓扑不进群</text>
+    <text x="380" y="216" text-anchor="middle" font-size="10.5" fill="#5b6573">密钥、内网信息不发进群</text>
 
     <rect x="287" y="244" width="186" height="74" rx="7" fill="#ffffff" stroke="#bfe0c6" stroke-width="1"/>
     <text x="380" y="266" text-anchor="middle" font-size="11.5" font-weight="600" fill="#2f7a47">凭证不入库</text>
