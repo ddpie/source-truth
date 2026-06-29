@@ -30,8 +30,9 @@ Bash（`scripts/`）。会话容器 ARM64-only。
 # 各组件依赖见其 README（agent-container: uv；bot-gateway: npm）。
 ./scripts/test.sh           # 已实现。离线默认：lint + unit + typecheck（pre-push 跑这个）
 ./scripts/test.sh --full    # 已实现。加 e2e（对已部署 Runtime 跑真实问答，缺部署自动 skip）+ smoke（仍占位）
-# 一键部署（已实现、全新账号/区域可跑、幂等）：artifacts→IAM→network→index-service→镜像→Runtime
-./scripts/deploy-all.sh --region <r> --repo <path>   # 加 --dry-run 仅打印计划；deploy.sh 已废弃→转发垫片
+# 一键部署（已实现、全新账号/区域可跑、幂等）：artifacts→IAM→network→index-service→镜像→Runtime→gateway
+# 仓库不再走命令行，改由 .local/projects.json 配置（推荐 install.sh 交互式添加项目）
+./scripts/deploy-all.sh --region <r>   # 加 --dry-run 仅打印计划；deploy.sh 已废弃→转发垫片
 ```
 
 规划中的命令（**尚未实现**，阶段标注见 `scripts/README.md`；不要当作已存在去调用）：
@@ -83,14 +84,15 @@ pre-push 跑离线套件。结构自检 `./scripts/check-invariants.sh` 由 lint
 - **「不跑引擎」的一处明确例外——构建期引擎（术语表生成，2026-06-22）**：「不跑引擎」约束的是**按用户提问
   实时回答的引擎**（处理用户输入、需会话隔离，必须在 microVM 内）。**术语表生成**是另一类：在 **index 主机**
   上用本地 `claude` (cc) CLI 离线扫自己已持有的代码副本、产出「中文词→英文符号」对照表（`/data/glossary/<项目>/`），
-  **无用户输入、无会话、不在请求路径上**。这是有意纳入的构建期引擎，受三重约束：① cc 被锁定（`--disallowed-tools`
-  去掉 Bash/Write/WebFetch/Task 等、`--setting-sources ""` 不加载 repo 的 `.claude`，见 `glossary_build.run_cc`）；
-  ② 产物仅供只读服务，写盘在 index 主机本地，代码不出机器；③ cc 臆造的中文别名，会被 `extract_entries` 的 grounding
-  校验拦下丢弃（要求中文必须真实出现在源文件里）。扫描**不限文件类型**（代码 + 文档/README/设计案等任意文本，只排除二进制/
-  资源），因为中文术语常在文档里；但**文档与代码冲突时以代码为准**——文档来源的条目置信度降一档
-  （`glossary.is_code_source` / `demote_confidence`），同概念下代码来源恒高于文档来源，文档术语因此落到按需
-  `glossary_lookup` 层而非显眼的 index，且结论仍须实读代码取证。问答引擎仍只在 microVM 内。需 index 主机
-  `bedrock-invoke` IAM 权限。
+  **无用户输入、无会话、不在请求路径上**。这是有意纳入的构建期引擎，受三重约束：
+  - ① cc 被锁定：`--disallowed-tools` 去掉 Bash/Write/WebFetch/Task 等、`--setting-sources ""` 不加载 repo 的 `.claude`（见 `glossary_build.run_cc`）；
+  - ② 产物仅供只读服务，写盘在 index 主机本地，代码不出机器；
+  - ③ cc 臆造的中文别名会被 `extract_entries` 的 grounding 校验拦下丢弃（要求中文必须真实出现在源文件里）。
+
+  扫描**不限文件类型**（代码 + 文档/README/设计案等任意文本，只排除二进制/资源），因为中文术语常在文档里；
+  但**文档与代码冲突时以代码为准**——文档来源的条目置信度降一档（`glossary.is_code_source` / `demote_confidence`），
+  同概念下代码来源恒高于文档来源，文档术语因此落到按需 `glossary_lookup` 层而非显眼的 index，且结论仍须实读代码取证。
+  问答引擎仍只在 microVM 内。需 index 主机 `bedrock-invoke` IAM 权限。
 
 `scripts/check-invariants.sh`（已实现；将在 p1 接入 pre-commit）强制其中可自动检查的子集。
 
@@ -118,8 +120,8 @@ pre-push 跑离线套件。结构自检 `./scripts/check-invariants.sh` 由 lint
 ## Key resources
 
 - 架构工作原理：`docs/agent/architecture.md`
-- 术语表（中文提问→英文代码符号的桥）：`docs/agent/glossary.md`
-- CardKit「会生长的答案卡」调研（`bot-gateway` 核心能力）：`docs/agent/cardkit-streaming-spike.md`
+- 术语表（把中文提问映射到英文代码符号）：`docs/agent/glossary.md`
+- CardKit 流式答案卡调研（`bot-gateway` 核心能力）：`docs/agent/cardkit-streaming-spike.md`
 - 不变量与权威依据映射：`docs/agent/invariants.md`
 - 变更配方：`docs/agent/playbooks.md`
 - 部署 / 连飞书 / 运维 / 排错：`docs/runbook.md`

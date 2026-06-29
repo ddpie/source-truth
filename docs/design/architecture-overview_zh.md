@@ -2,6 +2,13 @@
 
 > 架构权威依据：POC 架构方案。MVP 边界与验收基准见 [`requirements_zh.md`](requirements_zh.md)；
 > 面向 AI 的实现工作原理见 [`../agent/architecture.md`](../agent/architecture.md)。
+>
+> **本文是早期 POC 方案存档，记录当初的设计选型；落地后部分技术选择已调整，与现状不一致处以
+> [`../agent/architecture.md`](../agent/architecture.md) 为准。** 已知偏离：
+> - 代码刷新走 **systemd timer 定时 `git pull` + codegraph file-watcher 增量**，不用 push webhook / inotify；
+> - MVP 是**单引擎 Claude Code**（Codex 后置），代码来源**仅 git**（无本地目录 / S3），**仅主分支**（无 worktree 多分支）；
+> - 不读设计文档、不做数值模拟（均 post-MVP）；
+> - 取证经 SDK 原生 HTTP MCP 连接，**无需 stdio→HTTP 转换层**（mcp-proxy）。
 
 策划日常有大量咨询性需求（理解代码逻辑、确认数值配置、评估修改影响），这些需求本身不复杂，却常常卡在研发
 排期上。本方案在飞书中部署 AI 编程助手（Claude Code / Codex），让业务人员直接获得代码级别的问答和数值
@@ -42,6 +49,8 @@ graph TB
     REPO -->|"push webhook"| CG
     BOT -.->|"CardKit流式卡片"| LARK
 ```
+
+> 图中 `push webhook` 为 POC 时的设想；现状改为 systemd timer 定时 `git pull` + file-watcher 增量，见顶部偏离说明。
 
 核心链路：用户在飞书提问 → Bot 转给会话容器 → 容器内的 AI（Claude Code / Codex）通过 CodeGraph 定位
 代码、读取配置、查阅飞书文档 → 结果流式返回飞书卡片。
@@ -104,8 +113,9 @@ graph LR
     WT -->|"经 HTTP 接口读文件工具"| VM
 ```
 
-> 实现备注：**代码只存在索引服务本地磁盘**，会话容器不挂任何文件系统，定位与读文件都经索引服务的 MCP-over-HTTP 接口
-> （`codegraph_read_file` / `codegraph_glob_files` / `codegraph_search_files` + 定位类）。
+> 实现备注：图中 `git push → webhook` 与 `inotify` 均为 POC 设想，现状为 systemd timer 定时 `git pull` + codegraph
+> file-watcher 增量（见顶部偏离说明）。**代码只存在索引服务本地磁盘**，会话容器不挂任何文件系统，定位与读文件都经索引服务的
+> MCP-over-HTTP 接口（`codegraph_read_file` / `codegraph_glob_files` / `codegraph_search_files` + 定位类）。
 
 - 会话容器与索引服务不共享挂载：索引服务在本地磁盘持唯一一份代码副本、监听变更构建索引——一份代码，
   无副本同步问题；定位查询与文件读取都由索引服务经 HTTP 接口暴露给会话容器

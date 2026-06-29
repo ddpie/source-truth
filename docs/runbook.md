@@ -16,6 +16,20 @@
 >
 > 两者都**幂等**：失败后重跑会继续未完成部分。`install.sh` 重跑会预填上次的答案。
 
+**目录**
+
+1. [前置条件（一次性）](#一前置条件一次性)
+2. [一键安装（交互式，推荐）](#二一键安装交互式推荐)
+3. [接入飞书（connect 清单）](#三接入飞书connect-清单)
+4. [网关运行位置](#四网关运行位置)
+5. [验证（端到端冒烟）](#五验证端到端冒烟)
+6. [日常运维（day-2）](#六日常运维day-2)
+7. [多项目（一台机器多个机器人）](#七多项目一台机器多个机器人)
+8. [排错（症状 → 原因 → 处置）](#八排错症状--原因--处置)
+9. [边界与安全（务必知道）](#九边界与安全务必知道)
+- [附录 A：手动 deploy-all.sh](#附录-a手动-deploy-allsh)
+- [附录 B：本地手动启动网关（开发调试）](#附录-b本地手动启动网关开发调试)
+
 ---
 
 ## 一、前置条件（一次性）
@@ -26,16 +40,11 @@
    `gh` 并已 `gh auth login`（用于克隆仓库 + 拉取 `codegraph-server`）。`codegraph-server` 二进制无需手动准备——
    本地与 S3 都没有时，部署会从本仓 Release 自动下载（私有仓经 `gh`，公开仓经直链）。
 3. **Bedrock 模型访问**：确保部署身份有 `bedrock:InvokeModel`（AWS 已不再需要逐模型在控制台「Model access」开通）。
-   模型 ID 是 Bedrock 的跨区域推理档；同一模型在不同区域的可用档不同——地域档是 `us.` / `eu.` / `jp.`（东京/大阪）/
-   `au.`（悉尼/墨尔本），不少区域（如新加坡 `ap-southeast-1`、孟买）**没有地域档、只有 `global.`**。
-   `deploy-all.sh` 不再靠猜前缀：部署时按 `--region` 调 `bedrock list-inference-profiles` 查该区域**实际提供**的档，
-   自动挑最优（地域档优先，没有就用 `global.`）。所以默认 `global.anthropic.claude-opus-4-8` 在东京会被解析为
-   `jp.…`、在新加坡保留 `global.…`，都无需手动指定。仅当查不到匹配档时 preflight 会 WARN 并列出该区域可用的档。
-4. **目标代码仓**：要被问答的游戏代码仓，可以是以下任一来源（index-service 会快照、建索引）：
-   - 本地路径：`/path/to/your-game-repo`
-   - git 地址：`https://github.com/org/repo.git`、`https://gitlab.com/org/repo.git`、`git@host:org/repo.git`
-     （可选 `--repo-ref <分支/标签/提交>`；git 源需本机有 `git` 与对私有仓的访问凭证）
-   - S3：`s3://bucket/code.tar.gz`（tarball）或 `s3://bucket/prefix/`（前缀同步）
+   模型推理档由部署按 `--region` 自动解析，无需手填——部署调 `bedrock list-inference-profiles` 查该区域实际提供的档、
+   自动挑最优（地域档 `us.`/`eu.`/`jp.`/`au.` 优先，没有就用 `global.`；如默认模型在东京解析为 `jp.…`、在新加坡保留 `global.…`）。
+   仅当查不到匹配档时 preflight 会 WARN 并列出该区域可用的档。
+4. **目标代码仓**：要被问答的游戏代码仓，**只支持 git 地址**（index-service clone 到本地、定时 `git pull` 保持新鲜）：
+   `https://github.com/org/repo.git`、`https://gitlab.com/org/repo.git`、`git@host:org/repo.git`，可选指定分支 / 标签 / 提交。私有仓需要本机有 `git` 与一份只读访问凭证。
 5. **飞书应用**（见第三节，可与部署并行准备）。
 
 ---
@@ -60,12 +69,13 @@ bash <(gh api repos/ddpie/source-truth/contents/scripts/get.sh --jq '.content' |
 ./scripts/install.sh
 ```
 
-它是一个**箭头菜单**（↑/↓ 选、回车确认），四个流程见 [6.5 多项目](#65多项目一台机器多个机器人)。
+它是一个交互菜单（键盘上下键选择、回车确认），四个流程见 [第七节 多项目](#七多项目一台机器多个机器人)。
 首次部署的典型顺序：
 
 1. **查依赖**：`aws` / `python3` / `docker`（含守护进程在运行）/ `git`，可选 `gh`（私有仓部署需要），并校验 AWS 凭证可用；
 2. **选「添加项目」**（底座不存在会自动先建）：填 projectId → 逐个加仓库（**git 地址** + 子目录 + 分支）→
-   bridge 端口（自动建议）→ 飞书 App 凭证（自动写入 `source-truth/feishu-<项目>`）→ 首次再给一个只读 git
+   索引服务端口（即该项目的 `index-bridge-<项目>` 进程监听端口，脚本自动建议）→ 飞书 App 凭证（自动写入
+   `source-truth/feishu-<项目>`）→ 首次再给一个只读 git
    凭证（写入全局 `source-truth/git-credentials`，后续项目复用）；
 3. 写入 `.local/projects.json` 并部署该项目（底座 + 该项目的 bridge + runtime + gateway）。
 
@@ -100,7 +110,7 @@ codegraph 索引吃内存、随仓库增大而增长，按仓库规模选机型�
 
 > 术语表是**后台异步**构建：部署完成后问答立即可用；大仓首次全量可能要几十分钟，**这段时间问答正常**，
 > 只是中文冷僻词可能还没对应上。构建进度/结果在主机日志里（`journalctl` 找 `glossary_gen_done` /
-> `cc_failed`）。构建失败（如 cc 没装上）只让术语表暂时为空，**不影响问答**。
+> `glossary_gen_cc_failed`）。构建失败（如 cc 没装上）只让术语表暂时为空，**不影响问答**。
 
 成功后应看到：
 
@@ -191,19 +201,19 @@ aws ssm start-session --region <r> --target <INDEX_SERVICE_INSTANCE>
 **代码更新了，刷新索引**：**无需手动操作**。每个仓库按 `refreshIntervalSec`（默认 300 秒）由 systemd timer
 定时 `git pull`，常驻 codegraph 的 file-watcher 在几秒内增量重建该仓的内存图——不重启、无中断。改频率就改
 `.local/projects.json` 里该仓/该项目的 `refreshIntervalSec`，再「重新部署该项目」。`--refresh-index` 现在只
-用于**换索引服务自身的代码/机型**（蓝绿换整机），不再用于刷新业务代码。多项目部署见第 6.5 节。
+用于**换索引服务自身的代码/机型**（蓝绿换整机），不再用于刷新业务代码。多项目部署见第七节。
 
 **改术语表构建上限（`GLOSSARY_MAX_FILES`）**：该值在主机首次启动时写入 `/etc/index-service.env`，**对已在
 运行的主机改了重跑不会生效**（复用实例不重写该文件）。要让新上限生效，用 `--refresh-index` 蓝绿换整机；或
 临时进实例手改 `/etc/index-service.env` 的 `GLOSSARY_MAX_FILES`，等下一轮刷新构建按新值跑。日常无需调整。
 
 **只重部署 runtime**（改了 agent 镜像 / system prompt 后）：重跑 `deploy-all.sh`（镜像与 runtime 阶段幂等）。
-注意热 microVM 会使用旧镜像约 15 分钟，直到被回收。
+注意仍存活的 microVM 会使用旧镜像约 15 分钟，直到被回收。
 
-**调整暖 VM 存活时长（追问命中率 vs 成本）**：`deploy-all.sh --idle-timeout <秒>`（默认 900，即 15 分钟，
+**调整 microVM 存活时长（追问命中率 vs 成本）**：`deploy-all.sh --idle-timeout <秒>`（默认 900，即 15 分钟，
 范围 60–28800）。该参数同时设置 AgentCore 的 `idleRuntimeSessionTimeout` 与网关的 session 复用 TTL，二者自动对齐。
-成本权衡：AgentCore 空闲时 CPU 免费、内存照常计费，因此调大会延长暖 VM 存活、提高追问命中暖机的概率，
-但需承担这段空闲期的内存开销；多数会话在一次问答后即结束，故默认 15 分钟。追问密集的场景可调大，需要压缩成本则调小。
+AgentCore 空闲时 CPU 免费、内存照常计费。调大延长 microVM 存活、提高追问命中存活实例的概率，代价是多付这段空闲期的内存。
+多数会话一次问答就结束，所以默认 15 分钟；追问密集（如客服式高频问答）可调大，要省钱则调小。
 详见 [`agent/architecture.md`](agent/architecture.md)「Runtime 调参与成本权衡」。
 
 **查看网关日志**（每项目一个 `bot-gateway@<项目>.service`，结构化 JSON 日志进 journald）：
@@ -268,8 +278,8 @@ aws ssm start-session --region <r> --target <INDEX_SERVICE_INSTANCE>
 ```
 
 关键告警：`ToolcallLeakDetected`（工具调用指令文本漏进卡片）、`FinalizeFailed`（卡片未正常结束、停在「分析中」）、
-`AnswerFailedBurst`（回答失败率激增）、`LogPipelineStalled`（日志管道存活兜底——监控网关每 60s 的
-`gateway_heartbeat` 心跳；只有当心跳停止（即管道中断或网关异常）时才告警，空闲夜晚仍发送心跳，不误报）。
+`AnswerFailedBurst`（回答失败率激增）、`LogPipelineStalled`（网关每 60 秒发一次 `gateway_heartbeat` 心跳日志，
+心跳断了才告警——日志管道中断或网关异常；空闲夜里仍有心跳，不会误报）。
 
 **拆除整套资源（停止计费）**：试用完、或某次部署中途失败留下计费资源（NAT ~$32/月、EIP、EC2）时，一条命令按反依赖顺序清理：
 
@@ -284,7 +294,7 @@ aws ssm start-session --region <r> --target <INDEX_SERVICE_INSTANCE>
 
 ---
 
-## 6.5、多项目（一台机器多个机器人）
+## 七、多项目（一台机器多个机器人）
 
 一台索引主机可承载多个互相隔离的项目：机器人（独立飞书 App）⟷ 项目 一一对应，项目 ⟷ 仓库 一对多。
 项目间逻辑隔离（各自进程 + 端口 + 服务端 scope，A 档），同团队互信项目共机即可；互不信任的项目仍应分机器。
@@ -297,7 +307,7 @@ refreshIntervalSec?}`，**git-only**）。顶层 `refreshIntervalSec` 是全局�
 
 - **初始化环境（不挂项目）**：只起共享底座（VPC/NAT/EC2/镜像），不挂任何项目。适合先把 AWS 环境拉起来、
   之后再凭 git 地址与凭证挂项目（即「先部署环境、后配置 git」）。
-- **添加项目**：交互填 projectId → 逐个加仓库（git 地址 + 子目录 + 分支）→ bridge 端口（自动建议下一个未用值）
+- **添加项目**：交互填 projectId → 逐个加仓库（git 地址 + 子目录 + 分支）→ 索引服务端口（自动建议下一个未用值）
   → 飞书 App 凭证（自动写入 `source-truth/feishu-<项目>`）→ 首次还会收一个**只读 git 凭证**写入全局
   `source-truth/git-credentials`（后续项目复用）。随后写入清单并部署该项目（其余项目不受影响）。
 - **重新部署现有项目**：改了某项目的仓库集合 / 端口 / 刷新间隔后，选它重跑（幂等）。
@@ -317,26 +327,26 @@ refreshIntervalSec?}`，**git-only**）。顶层 `refreshIntervalSec` 是全局�
 
 ---
 
-## 七、排错（症状 → 原因 → 处置）
+## 八、排错（症状 → 原因 → 处置）
 
 | 症状 | 可能原因 | 处置 |
 |------|----------|------|
 | 卡片一直「正在分析…」不结束 | 后端流被中断 / finalize 异常 | 查看网关日志 `finalize_error` / `card_closed failed:true`；偶发则重问；持续则查 runtime/index 健康 |
-| 答案里出现原始 `<invoke>` XML 等标记 | 冷 microVM 首次 invoke 时 MCP 工具未注册（冷启动竞速） | 网关会自动重试一次；暖机后消失。查看日志 `num_turns`/`cache_read` 确认是否冷启动 |
+| 卡片里冒出奇怪的 `<invoke>` 代码标记 | 冷启动那次问答，底层取证工具还没就绪 agent 就提前回了 | 网关会自动重试一次，暖机后消失。查日志 `num_turns`/`cache_read` 确认是否冷启动 |
 | 机器人在群里**完全无响应** | 网关未启动 / 未 @ 到机器人 / 同一 app 运行了两个网关争抢事件 | 进实例 `systemctl status 'bot-gateway@*'` 确认 active + 日志 `sdk_wsclient_connected`；确认 @ 的是 `FEISHU_BOT_OPEN_ID`；停止多余网关，只保留一个 |
 | 网关 `condition failed` 未启动 | `/etc/bot-gateway-<项目>.env` 尚未写入（runtime 未就绪 / gateway 阶段被跳过） | 重跑 `install.sh` 或 `deploy-all.sh`（不跳 gateway）；确认 `FEISHU_SECRET_ID` 已配 |
 | 卡片回「查询失败」/ 日志 `AccessDenied` | 部署身份缺 `bedrock:InvokeModel`，或该模型在此区域无可用推理档 | 给部署身份补 `bedrock:InvokeModel`；模型档由部署按区域自动解析，查不到时 preflight 会列出该区域可用的档（见前置条件 3） |
 | 部署在 index-service 阶段超时 | 全新账号 NAT 路由未收敛 / 实例仍在冷启动建索引 | 多等一轮（bootstrap 对网络操作有重试）；查看 `/var/log/` 与 `journalctl -u 'index-build@*'` |
 | `/health` 长期非 200 | 索引损坏 / graph.db 空 / worker 反复重启 | 进实例查看 index-bridge-<项目> 日志；必要时 `--refresh-index` 重建（蓝绿，不破坏运行中实例） |
-| 重新部署后行为仍是旧版本 | 热 microVM 仍持旧镜像（约 15 分钟）/ 网关未重启 | 等待热 VM 回收；重启网关确保运行新代码 |
-| 中文问答没用上项目专属命名 / 术语表像是空的 | 术语表后台构建未完成或失败（cc 没装上 / Bedrock 不可invoke） | 进实例看 `journalctl` 与 `/var/log/glossary-*`，找 `glossary_gen_done`（成功）/ `cc_failed` / `claude (cc) install failed`；不影响问答，问答会自动退回常规检索 |
+| 重新部署后行为仍是旧版本 | 仍存活的 microVM 持旧镜像（约 15 分钟）/ 网关未重启 | 等待该 microVM 回收；重启网关确保运行新代码 |
+| 中文问答没用上项目专属命名 / 术语表像是空的 | 术语表后台构建未完成或失败（cc 没装上 / Bedrock 调不通或无权限） | 进实例看 `journalctl` 与 `/var/log/glossary-build-*`，找 `glossary_gen_done`（成功）/ `glossary_gen_cc_failed`（构建失败）；不影响问答，问答会自动退回常规检索 |
 
 > 独占写入约束：index-service 的 graph.db 同一时刻只能有一个进程写入，并发写会导致 0 节点损坏。
 > 服务层已用 flock + 进程内锁 + orphan reaper 守护；**不要**在实例上手动再跑一个 codegraph-server 写同一份图。
 
 ---
 
-## 八、边界与安全（务必知道）
+## 九、边界与安全（务必知道）
 
 - **只读**：MVP 全程不写代码 / 不提交 / 不运行引擎；答案只基于最新主分支真实代码 + CodeGraph 取证。
 - **密钥**：飞书 `App Secret`、`App ID` 等绝不入仓库（gitleaks pre-commit 守）；走环境变量 / Secrets Manager / SSM。
@@ -361,6 +371,7 @@ refreshIntervalSec?}`，**git-only**）。顶层 `refreshIntervalSec` 是全局�
 ./scripts/deploy-all.sh --region <r> --dry-run
 
 # 跳过某阶段（可重复）：artifacts|iam|network|index-svc|image|runtime|gateway|monitoring
+# 注意 runtime 与 gateway 同属「按项目部署」一个阶段，只有两个都跳才会跳过它（单跳其一无效）。
 ./scripts/deploy-all.sh --region <r> --skip monitoring
 
 # 部署/重部署单个项目（底座须已就绪）：

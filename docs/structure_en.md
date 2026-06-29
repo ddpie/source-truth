@@ -16,14 +16,17 @@ agent-container/        Claude Code Agent running inside the session microVM (Py
 bot-gateway/            Feishu Bot long-connection event gateway + CardKit streaming (TypeScript long-running service)
   README.md             Long-connection / event dedup / session→runtimeSessionId map / card update throttling
   src/                  Event consumer entry, SigV4 call to AgentCore, session map, CardKit render, SSE parse, redacted logging
-  run.sh                Service launcher: source /etc/bot-gateway.env + fetch Feishu creds from Secrets Manager (never on disk) → node dist
+  run.sh                Service launcher: source the systemd-injected per-project env (/etc/bot-gateway-<project>.env) + fetch Feishu creds from Secrets Manager (never on disk) → node dist
 index-service/          Standalone CodeGraph index service + MCP-over-HTTP bridge
   README.md             Resident single-writer session / CodeGraph / HTTP bridge (locate + read files) / local repo copy / bootstrap
   http_bridge.py        FastMCP HTTP bridge (package root, not src/): exposes codegraph locate + read-file tools, aligns paths to repo-relative
   codegraph_session.py  Resident codegraph-server single-writer session (worker thread + private loop, health self-heal, timeouts)
+  repo_router.py        Server-side multi-repo routing + scope enforcement (multi-repo-isolation invariant 1: whitelist default-deny, out-of-scope repo arg never routes; pure decision core, unit-testable)
+  repo_fanout.py        Multi-repo query result merge (when no repo is named, query each repo's session and merge; pure merge core, no I/O, unit-testable)
   file_search.py        Local-copy ripgrep/grep search tool (searches the local copy; builtin Grep disabled in favor of the local copy; content-dedups hits; MCP-exposed)
   file_read.py          Local-copy by-line/by-point file reader (read_file, paths aligned to repo-relative; MCP-exposed)
   file_table.py         Structured config-table reader (Excel/CSV/TSV/SQLite → text, read_table; read-only, DoS-bounded; MCP-exposed)
+  text_decode.py        Robust text decoding (stdlib-only): Chinese game repos are often GBK/GB2312, config tables may be UTF-16; detects encoding to avoid mojibake
   glossary.py           Glossary data layer: concept-centric Entry/aggregate/incremental primitives/JSONL IO/lightweight projection
   glossary_read.py      Glossary read-only queries (glossary_index/glossary_lookup MCP tools; per-repo slice aggregation + project isolation)
   glossary_build.py     Build-time: local cc scans code → concept JSONL (prompt/tolerant parse/Chinese-alias grounding guard/incremental merge)
@@ -56,12 +59,14 @@ scripts/                Operational lifecycle
   apply-dau-lambda.sh   Deploy the B-class DAU pre-aggregation Lambda + daily EventBridge schedule (role/package/trigger, idempotent; --dry-run)
   test.sh               Single tiered test entrypoint (offline default / --full)
   check-versions.sh     Pinned-version drift guard (base digest / requirements pin / Node / claude-code npm)
+  get.sh                One-line bootstrap (fetch via curl/gh and run): clones the repo into ./source-truth then hands off to install.sh; re-runnable (git pull if it already exists)
   install.sh            Interactive one-click install (check deps→Feishu creds→config→confirm→deploy-all; pre-fills on re-run)
   deploy-all.sh         Canonical one-click deploy (artifacts→IAM→network→index-service→image→Runtime→gateway; idempotent)
   lib/provision_*.sh + deploy_runtime.py + wait_index_health.sh  deploy-all.sh phase implementations
   lib/deploy_project.sh + wait_base_host.sh + delete_runtime.py  Multi-project orchestration: build base / await base ready / delete per-project runtime
+  lib/resolve_model.sh  Query Bedrock list-inference-profiles to pick a profile that actually exists in the region (no prefix guessing; geo profiles vary by region)
   lib/resolve_repo.sh   Multi-source repo resolver (local / git / s3); now referenced by tests only, main path is git-only
-  lib/activate_gateway.sh  Write /etc/bot-gateway.env + start bot-gateway.service via SSM (gateway co-located with the index host)
+  lib/activate_gateway.sh  Write /etc/bot-gateway-<project>.env + start bot-gateway@<project> via SSM (gateway co-located with the index host)
   lib/stop_gateway.sh   Stop the old instance's gateway via SSM (break-before-make on blue-green swap; prevents two gateways racing the Feishu long-connection)
   deploy.sh             Deprecated compatibility shim (delegates to deploy-all.sh)
   (p2) ops.sh           Ops toolkit (status / logs / reindex)
@@ -83,10 +88,10 @@ docs/
   agent/                AI-facing docs
     architecture.md     Mental model: how one question crosses the system
     glossary.md         Term bridge: Chinese question → English code symbol (build/query time, grounding, value boundary)
-    invariants.md       source → generated map + change-X-must-change-Y couplings (8 invariants)
+    invariants.md       source → generated map + change-X-must-change-Y couplings (9 invariants)
     playbooks.md        ordered change recipes (7 recipes)
     *-spike.md          Research notes (cardkit streaming / indexing perf / storage selection / perf comparison / template)
-  assets/               Doc diagrams (hand-authored SVG: architecture / data-plane / session-isolation / glossary)
+  assets/               Doc diagrams (hand-authored SVG: architecture / data-plane / session-isolation / glossary / security-defense / sequence; plus demo-qa.gif, a real Q&A screen recording)
 .local/                 (gitignored) account-specific deploy state: deploy-config, projects.json (project routing), deploy-output.md
 ```
 

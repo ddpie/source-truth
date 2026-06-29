@@ -4,7 +4,7 @@
 [`invariants.md`](invariants.md) 的不变量。生效方式分三类，先区分：
 
 - **gateway 改动** → 重新部署该项目网关单元 `bot-gateway@<projectId>.service`（经 `deploy-all.sh` 的 gateway 阶段，每项目一个进程、各连自己的飞书 App）。
-- **agent 改动（含 system.md / 工具 / 镜像）** → 重建镜像 + 更新 runtime；**热 microVM 仍使用旧镜像约 15 分钟**才老化。
+- **agent 改动（含 system.md / 工具 / 镜像）** → 重建镜像 + 更新 runtime；**仍存活的 microVM 还会跑旧镜像，约 15 分钟后才被回收换上新镜像**。
 - **index-service 代码改动** → 重新部署 index-service（bootstrap + 重启 bridge）；**代码索引刷新无需部署**——定时 `git pull` + watcher 增量重建，分钟级自动新鲜（见配方 4）。
 
 每次改完都运行 `./scripts/test.sh`（离线套件，pre-push 必过）。
@@ -25,8 +25,8 @@
   # 只重建 image + 更新 runtime
   ```
 
-  等热 VM 老化（~15min）后再复测，否则读取到的可能仍是旧 prompt 的输出。
-- **注意**：preamble/marker 类「读取卡片发现没生效」，多半是因为热 VM 还在用旧 prompt——先看 deploy 时间，别急着改 gateway 正则兜底。
+  等旧 microVM 老化（~15min）后再复测，否则读取到的可能仍是旧 prompt 的输出。
+- **注意**：preamble/marker 类「读取卡片发现没生效」，多半是因为旧 microVM 还在用旧 prompt——先看 deploy 时间，别急着改 gateway 正则兜底。
 
 ## 配方 2：新增 / 修改一个 MCP 工具（index-service 暴露给 agent）
 
@@ -62,7 +62,7 @@
   `parse-stream.ts`、会话路由 `session-map.ts` / `card-registry.ts`。
 - **关键规则**：
   - 正则**行首/行尾的无界量词**（`X*` / `[\s\S]*?`）必须检查 ReDoS，用有界 `{0,N}`；修改后运行超长输入探针。
-  - `strip` / `normalize` 与 `redact` 同处一条 pipeline 时，**redact 必须在最后**（strip 重接被切断的 secret）。
+  - `strip` / `normalize` 与 `redact` 同处一条 pipeline 时，**redact 必须在最后**（strip 可能把被切断的 secret 重新拼回完整，故脱敏要收尾）。
   - 卡片正文/证据进 finalize PUT 前要 **clamp 长度**（超 Feishu 卡片体积上限会 400 → CardWriter 丢弃 → 卡片无法完成）。
   - 所有进群可见卡片的 agent/仓库派生文本都要过 `redactSensitive`；图表 spec 用 `redactDeep`（只清理 value，不修改 key）。
 - **验证**：`cd bot-gateway && npx jest`（含 ReDoS / 脱敏 / 抽取回归）。

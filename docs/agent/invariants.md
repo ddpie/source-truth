@@ -101,14 +101,14 @@
 - **不变量**：飞书 `App ID/Secret`、token 等不得提交进仓库；使用 Secrets Manager（运行时取出注入进程 env）。
 - **以谁为准**：`scripts/install.sh`（交互式把凭证按项目写进 Secrets Manager 密钥 `source-truth/feishu-<projectId>`）；
   `bot-gateway/run.sh`（启动时从 Secrets Manager 取出注入进程 env，不落盘）；`.local/` gitignored。
-- **机检**：gitleaks pre-commit（规划）；`deploy-all.sh`/`bootstrap.sh` 的 user-data 与 `/etc/bot-gateway.env`
+- **机检**：gitleaks pre-commit（规划）；`deploy-all.sh`/`bootstrap.sh` 的 user-data 与 `/etc/bot-gateway-<项目>.env`
   只写非敏感配置（后者只存密钥**名**，不存密钥值）。
 - **违反后果**：密钥泄露 → 安全事故。
 
 ## 8. 网关 session TTL 与 Runtime idle 对齐
 
 - **不变量**：网关的 session 复用 TTL 不得超过 AgentCore Runtime 的 `idleRuntimeSessionTimeout`。否则网关会
-  复用一个已被回收的暖 microVM，使追问触发冷启动——功能不受影响（历史由 replay 续接），但响应变慢。
+  复用一个已被回收的 microVM，使追问触发冷启动——功能不受影响（历史由 replay 续接），但响应变慢。
 - **以谁为准**：单一参数 `deploy-all.sh --idle-timeout`（默认 900 秒）同时设置 `deploy_runtime.py` 的
   `lifecycleConfiguration.idleRuntimeSessionTimeout` 与网关环境变量 `RUNTIME_IDLE_TIMEOUT_SECS`，后者再由
   `session-map.ts` 派生出 TTL。调整时只改这一个参数，两侧随之联动。
@@ -116,6 +116,17 @@
 - **违反后果**：若将 TTL 写成大于 idle 的独立常量（退化前即 TTL 30 分钟、idle 15 分钟），落在中间时间窗的追问
   会静默冷启。成本提示：调大 idle 会增加空闲期的内存计费（空闲 CPU 免费），详见
   [`architecture.md`](architecture.md)「Runtime 调参与成本权衡」。
+
+## 9. 全局共享 IAM 角色策略不得按区域钉死
+
+- **不变量**：账号级全局角色（`source-truth-index-role` / `source-truth-dau-lambda-role`）被多区域共用，其
+  内联策略里**资源型 ARN 的 region 段必须用 `*`**，不得钉死 `${REGION}`。`put-role-policy` 是覆盖写：若策略
+  Resource 写死单区，第二个区域部署会改写它、静默撤销第一个区域的权限。
+- **以谁为准**：`scripts/lib/provision_iam.sh`、`scripts/apply-dau-lambda.sh`——易越权的服务面
+  （logs / bedrock / bedrock-agentcore / secretsmanager / s3）ARN 的 region 段用 `*`，靠 account + 资源名前缀
+  兜底。（lambda / events 的 ARN 按区构造是合法用法，不在此列。）
+- **机检**：`scripts/check-invariants.sh` —— grep 上述服务面的 `${REGION}` 钉死写法，命中即失败。
+- **违反后果**：多区域部署互相覆盖角色策略，先部署的区域被静默撤权（2026-06-29 新加坡部署据此打挂东京）。
 
 ---
 

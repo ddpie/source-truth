@@ -12,7 +12,7 @@
 | 文件 | 职责 |
 |------|------|
 | `src/index.ts` | 事件消费入口（长连接订阅，类比 `lark-cli event consume`）；事件去重、@提及解析 |
-| `src/session-map.ts` | 会话 (chat_id / thread_id) → runtimeSessionId 映射（DDB + TTL，复用热容器） |
+| `src/session-map.ts` | 会话 (chat_id / thread_id) → runtimeSessionId 映射（MVP 为进程内内存 Map + 滑动 TTL，复用仍存活的会话；多进程扩展时再换 DDB） |
 | `src/sigv4.ts` | SigV4 签名调 AgentCore `/runtimes/<arn>/invocations`（按会话注入 runtimeSessionId） |
 | `src/cardkit-client.ts` | CardKit 卡片构建 + 流式 create/update 循环；动态追加停止按钮 / 图表 / 追问按钮 / 「供研发复核」出处面板 |
 | `src/log.ts` | 结构化日志 + `hashUserId` 脱敏（用户/会话/消息标识不落明文） |
@@ -21,7 +21,8 @@
 
 ## 关键约束
 
-- **长驻在线**：长连接需常在线，不能空闲缩零；当前由 index-service 主机上的 `bot-gateway.service` 承载。
+- **长驻在线**：长连接需常在线、不能空闲缩零；当前由 index-service 主机上的 systemd 实例
+  `bot-gateway@<项目>` 承载，每项目一个。独立托管形态为 post-MVP。
 - **会话隔离**：不同用户 / 会话绝不共用 runtimeSessionId，否则上下文串扰。
 - **卡片频控**：飞书卡片 update 有频率限制与 10 分钟更新窗口，流式更新需做节流。
 - **事件幂等**：飞书事件会重投，按 event_id 去重。
@@ -46,13 +47,3 @@ node_modules/.bin/ts-node --transpile-only src/index.ts
 
 > `package.json` 的 `build`/`lint`/`test` 是开发用脚本；启动用上面的 `ts-node` 命令运行入口。
 > **同一个飞书应用只能运行一个网关实例**（长连接集群模式，事件只投给一个 client；多实例会争抢事件，导致行为异常）。
-
-## 运行载体
-
-当前作为 index-service 主机上的 systemd 长驻服务运行。语言选 TypeScript：飞书官方 SDK 与 CardKit 流式卡片在 TS 生态最成熟。
-
-## 运行形态
-
-本地用 `ts-node` 运行，飞书长连接单消费者。运行所需 env：`RUNTIME_ARN` / `AWS_REGION` / `FEISHU_APP_ID` /
-`FEISHU_APP_SECRET` / `FEISHU_BOT_OPEN_ID`（用于判断群消息是否 @ 机器人）/ `LOG_HASH_SALT`。
-独立托管形态为 post-MVP。
