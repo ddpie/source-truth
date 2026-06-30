@@ -1,0 +1,84 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="430" viewBox="0 0 760 430" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#8a93a0"/>
+    </marker>
+    <marker id="arrowgreen" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#3b7d4f"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="760" height="430" fill="#ffffff"/>
+  <text x="380" y="34" text-anchor="middle" font-size="18" font-weight="700" fill="#1f2733">置信度决定一条对应放在哪一层</text>
+  <text x="380" y="56" text-anchor="middle" font-size="12.5" fill="#7a8493">一个词条取最强证据定级 · 中 / 高且带符号的进开局概览 · 获得符号后一律实际查看代码</text>
+
+  <!-- shared vertical band: top 86, bottom 404 for BOTH columns -->
+
+  <!-- ===== 左：一个词条的若干记录 ===== -->
+  <rect x="28" y="86" width="232" height="318" rx="11" fill="#fbfcfe" stroke="#d4dbe6" stroke-width="1.2"/>
+  <text x="144" y="112" text-anchor="middle" font-size="13" font-weight="700" fill="#2b3543">一个词条 = 多条记录</text>
+  <text x="144" y="130" text-anchor="middle" font-size="10" fill="#9aa3b0">concept_id：combat_power（战力）</text>
+
+  <!-- record 1 -->
+  <rect x="46" y="146" width="196" height="48" rx="7" fill="#ffffff" stroke="#e1e6ee" stroke-width="1"/>
+  <text x="58" y="168" font-size="11" font-weight="600" fill="#1f2733">符号 combatPower</text>
+  <text x="58" y="184" font-size="9" fill="#9aa3b0">代码来源 · 与引用行直接对应</text>
+  <rect x="204" y="158" width="28" height="20" rx="10" fill="#e3f3e8" stroke="#9cc6a8" stroke-width="1"/>
+  <text x="218" y="172" text-anchor="middle" font-size="9.5" font-weight="700" fill="#2f7a47">高</text>
+
+  <!-- record 2 -->
+  <rect x="46" y="204" width="196" height="48" rx="7" fill="#ffffff" stroke="#e1e6ee" stroke-width="1"/>
+  <text x="58" y="226" font-size="11" font-weight="600" fill="#1f2733">别名「战力」</text>
+  <text x="58" y="242" font-size="9" fill="#9aa3b0">代码来源 · 靠上下文推断</text>
+  <rect x="204" y="216" width="28" height="20" rx="10" fill="#fdf4e3" stroke="#e4c896" stroke-width="1"/>
+  <text x="218" y="230" text-anchor="middle" font-size="9.5" font-weight="700" fill="#a9772a">中</text>
+
+  <!-- record 3 -->
+  <rect x="46" y="262" width="196" height="48" rx="7" fill="#ffffff" stroke="#e1e6ee" stroke-width="1"/>
+  <text x="58" y="284" font-size="11" font-weight="600" fill="#1f2733">别名「战斗力」</text>
+  <text x="58" y="300" font-size="9" fill="#9aa3b0">文档来源 · 降一档</text>
+  <rect x="190" y="274" width="52" height="20" rx="10" fill="#eef0f3" stroke="#cdd5e0" stroke-width="1"/>
+  <text x="216" y="288" text-anchor="middle" font-size="9" font-weight="700" fill="#7a8493">高→中</text>
+
+  <!-- aggregate verdict -->
+  <rect x="46" y="324" width="196" height="64" rx="8" fill="#eef6ef" stroke="#9cc6a8" stroke-width="1.2"/>
+  <text x="144" y="350" text-anchor="middle" font-size="11.5" font-weight="700" fill="#2f7a47">取最强者 → 词条定为「高」</text>
+  <text x="144" y="370" text-anchor="middle" font-size="9.5" fill="#5b6573">词条以其最强的一条证据为准</text>
+
+  <!-- ===== 中：从词条分流到两层（两条带箭头的水平线） ===== -->
+  <text x="334" y="192" text-anchor="middle" font-size="10.5" font-weight="700" fill="#5b6573">按置信度 + 有无符号</text>
+
+  <!-- branch to overview ① -->
+  <line x1="260" y1="124" x2="404" y2="124" stroke="#3b7d4f" stroke-width="1.5" marker-end="url(#arrowgreen)"/>
+  <rect x="290" y="106" width="88" height="17" rx="8.5" fill="#eef6ef" stroke="#bfe0c6" stroke-width="0.8"/>
+  <text x="334" y="118" text-anchor="middle" font-size="9" font-weight="600" fill="#2f7a47">中 / 高 · 有符号</text>
+
+  <!-- branch to lookup ② -->
+  <line x1="260" y1="250" x2="404" y2="250" stroke="#8a93a0" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <rect x="288" y="232" width="92" height="17" rx="8.5" fill="#f1f3f7" stroke="#d4dbe6" stroke-width="0.8"/>
+  <text x="334" y="244" text-anchor="middle" font-size="9" font-weight="600" fill="#7a8493">判低 / 只有别名</text>
+
+  <!-- ===== 右：三层，与左框上下对齐（86..404） ===== -->
+  <!-- ① overview -->
+  <rect x="408" y="86" width="248" height="76" rx="10" fill="#eef6ef" stroke="#9cc6a8" stroke-width="1.3"/>
+  <text x="532" y="112" text-anchor="middle" font-size="12.5" font-weight="700" fill="#2f7a47">① 开局概览（轻量索引）</text>
+  <text x="532" y="133" text-anchor="middle" font-size="10" fill="#5b6573">会话一开始自动取一份精简对照</text>
+  <text x="532" y="149" text-anchor="middle" font-size="10" fill="#5b6573">仅收录可信且可检索者（有数量上限）</text>
+
+  <!-- ② lookup -->
+  <rect x="408" y="212" width="248" height="76" rx="10" fill="#f7f9f7" stroke="#c4d8c9" stroke-width="1.3"/>
+  <text x="532" y="238" text-anchor="middle" font-size="12.5" font-weight="700" fill="#3a4556">② 按需查询</text>
+  <text x="532" y="259" text-anchor="middle" font-size="10" fill="#5b6573">概览未收录的中文词，按需查询</text>
+  <text x="532" y="275" text-anchor="middle" font-size="10" fill="#5b6573">不设门槛 · 低置信度亦可取得</text>
+
+  <!-- verify -->
+  <rect x="408" y="350" width="248" height="54" rx="10" fill="#e3f3e8" stroke="#9cc6a8" stroke-width="1.5"/>
+  <text x="532" y="374" text-anchor="middle" font-size="12" font-weight="700" fill="#2f7a47">获得符号 → 实际查看代码取证</text>
+  <text x="532" y="391" text-anchor="middle" font-size="9.5" fill="#5b6573">术语表只是线索，从不替代看代码</text>
+
+  <!-- both layers feed verify via a bus on the far right, clear of every box -->
+  <line x1="656" y1="124" x2="690" y2="124" stroke="#3b7d4f" stroke-width="1.3"/>
+  <line x1="656" y1="250" x2="690" y2="250" stroke="#3b7d4f" stroke-width="1.3"/>
+  <line x1="690" y1="124" x2="690" y2="377" stroke="#3b7d4f" stroke-width="1.3"/>
+  <line x1="690" y1="377" x2="658" y2="377" stroke="#3b7d4f" stroke-width="1.3" marker-end="url(#arrowgreen)"/>
+</svg>

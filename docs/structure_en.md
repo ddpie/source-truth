@@ -79,6 +79,7 @@ docs/
   structure_zh.md       Authoritative tree (Chinese, bilingual pair)
   structure_en.md       This file (English counterpart)
   runbook.md            Deploy / connect-Feishu / ops / troubleshooting (neutral name, exempt from bilingual pairing)
+  glossary.md           How the term bridge is built: build flow / output structure / trust basis / cost & ops (human-facing, neutral name)
   design/               Design source of truth (Chinese only, not yet translated)
     README.md                   Directory notes + relation to architecture / invariants docs
     requirements_zh.md          Requirements & solution review notes (imported)
@@ -91,7 +92,7 @@ docs/
     invariants.md       source → generated map + change-X-must-change-Y couplings (9 invariants)
     playbooks.md        ordered change recipes (7 recipes)
     *-spike.md          Research notes (cardkit streaming / indexing perf / storage selection / perf comparison / template)
-  assets/               Doc diagrams (hand-authored SVG: architecture / data-plane / session-isolation / glossary / security-defense / sequence; plus demo-qa.gif, a real Q&A screen recording)
+  assets/               Doc diagrams (hand-authored SVG: architecture / data-plane / session-isolation / glossary / glossary-build / glossary-confidence / security-defense / sequence; plus demo-qa.gif, a real Q&A screen recording)
 .local/                 (gitignored) account-specific deploy state: deploy-config, projects.json (project routing), deploy-output.md
 ```
 

@@ -79,6 +79,7 @@ docs/
   structure_zh.md       本文件（权威目录树，双语配对）
   structure_en.md       英文对照
   runbook.md            部署 / 连飞书 / 运维 / 排错（中性名，不参与双语配对）
+  glossary.md           术语表怎么来的：构建流程 / 产物结构 / 可信依据 / 成本运维（面向人，中性名）
   design/               设计权威依据（仅中文，暂不翻译）
     README.md                   目录说明 + 与架构 / 不变量文档的关系
     requirements_zh.md          需求与方案评审纪要（导入）
@@ -91,7 +92,7 @@ docs/
     invariants.md       源 → 生成物映射 + 改 X 必改 Y 的耦合（9 条不变量）
     playbooks.md        有序变更配方（7 个配方）
     *-spike.md          调研记录（cardkit 流式 / 索引性能 / 存储选型 / 性能对比 / 模板）
-  assets/               文档配图（手写 SVG：架构 / 数据面 / 会话隔离 / 术语表 / 安全纵深 / 时序；及一次真实问答录屏 demo-qa.gif）
+  assets/               文档配图（手写 SVG：架构 / 数据面 / 会话隔离 / 术语表 / 术语表构建 / 术语表置信度分层 / 安全纵深 / 时序；及一次真实问答录屏 demo-qa.gif）
 .local/                 （已 gitignore）账号特定部署状态：deploy-config、projects.json（项目路由）、deploy-output.md
 ```
 

@@ -11,6 +11,7 @@ source-truth 的文档按**受众**分层：每类读者从自己的入口进，
 | [`runbook.md`](runbook.md) | 要部署并验证系统：前置 → 一键部署 → 连飞书 → 起网关 → 验证 → 运维 → 排错 |
 | [`structure_zh.md`](structure_zh.md) · [`structure_en.md`](structure_en.md) | 想知道某个模块在哪：权威目录树（双语） |
 | [`aws-services_zh.md`](aws-services_zh.md) · [`aws-services_en.md`](aws-services_en.md) | 想知道用到哪些 AWS 服务、规格 / 数量 / 用途（成本与容量规划，双语） |
+| [`glossary.md`](glossary.md) | 想搞懂术语表怎么来的：构建流程、产物结构、凭什么可信、成本与运维 |
 
 ## 给改代码的人 / AI agent
 
@@ -20,7 +21,7 @@ source-truth 的文档按**受众**分层：每类读者从自己的入口进，
 | [`agent/architecture.md`](agent/architecture.md) | 改请求流转 / 取证 / 卡片回传 / 会话隔离前：一次提问如何在系统里流转 |
 | [`agent/invariants.md`](agent/invariants.md) | 改代码前对照：9 条可执行不变量（是什么 / 以谁为准 / 怎么自动检查 / 违反后果） |
 | [`agent/playbooks.md`](agent/playbooks.md) | 做某类具体改动时：7 个变更配方（改哪 / 怎么验 / 怎么上线） |
-| [`agent/glossary.md`](agent/glossary.md) | 了解术语表：如何把中文提问的业务词映射到英文代码符号，作为额外检索线索 |
+| [`agent/glossary.md`](agent/glossary.md) | 术语表在查询期怎么用：工具、规则、给 agent 的接入约定（构建与产物面向人的说明见 [`glossary.md`](glossary.md)） |
 
 ## 设计权威依据（做什么 / 为什么）
 
