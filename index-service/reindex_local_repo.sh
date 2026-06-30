@@ -56,21 +56,81 @@ done
 [ -n "$PID" ] || { echo "REINDEX_FAILED: subdir '$SUBDIR' not found in any project manifest"; exit 1; }
 BRIDGE="index-bridge-${PID}.service"
 GRAPH="$WS/.home/.codegraph/graph.db"
+APP="${APP:-/opt/idx/app}"
+CHANGED_LIST="$(mktemp /tmp/reindex-changed.XXXXXX)"
+DELETED_LIST="$(mktemp /tmp/reindex-deleted.XXXXXX)"
+trap 'rm -f "$CHANGED_LIST" "$DELETED_LIST"' EXIT
 
 # Snapshot marker for OPS (not surfaced in answers — see invariants). `sudo cat .snapshot-time`
 # tells the operator when this local repo was last pushed.
 stamp_snapshot() { date -u +%Y-%m-%dT%H:%M:%SZ > "$WS/.snapshot-time" 2>/dev/null || true; }
 
-# Apply staged tree onto the live tree IN PLACE. --delete makes live mirror the staged copy, but
-# PROTECT the live graph dirs (they live inside $WS and must survive the sync), and don't follow
-# symlinks (push already dropped them; belt-and-suspenders). git metadata is irrelevant for a
-# local repo. Trailing slash on src copies CONTENTS into $WS.
+# Apply staged tree onto the live tree IN PLACE, capturing the change set into CHANGED_LIST /
+# DELETED_LIST for the incremental glossary rebuild. --delete makes live mirror the staged copy;
+# PROTECT the live graph dirs (they live inside $WS and must survive the sync); --no-links refuses
+# symlinks (push already dropped them; belt-and-suspenders). --itemize-changes prints one line per
+# path: a leading '*deleting' marks a removal, otherwise the change flags ('>f...' etc.) mark an
+# added/updated file. We parse that into the two lists (a dir line ends in '/', skipped).
+#
+# --delay-updates SHRINKS the interrupt window: rsync transfers every updated file into a holding
+# area inside $WS first, then renames them all in at the very end. If this script is killed (kill,
+# power loss, disk full) DURING the transfer — the long part — the live tree is left UNTOUCHED;
+# only an interrupt in the brief final rename batch can leave live half-updated. Either way the
+# staged dir survives (the `rm -rf "$STAGE"` runs only after a clean apply), so re-running push/
+# reindex reconverges live to the full staged state — the same recover-by-rerun story as an
+# interrupted `git pull`'s `git reset --hard`.
 apply_staged() {
   mkdir -p "$WS/.codegraph" "$WS/.home/.codegraph"
-  rsync -a --delete \
+  : > "$CHANGED_LIST"; : > "$DELETED_LIST"
+  rsync -a --delete --delay-updates --itemize-changes \
     --filter='P .codegraph/' --filter='P .home/' \
     --exclude='.git' --no-links \
-    "$STAGE/" "$WS/"
+    "$STAGE/" "$WS/" | while IFS= read -r line; do
+      path="${line#* }"                       # strip the leading flags + single space
+      case "$path" in */) continue ;; esac    # directory entry — no file term to (re)build
+      case "$line" in
+        '*deleting'*) printf '%s\n' "$path" >> "$DELETED_LIST" ;;
+        *)            printf '%s\n' "$path" >> "$CHANGED_LIST" ;;
+      esac
+    done
+}
+
+# Rebuild the glossary slice (best-effort, detached) — mirrors activate_project's build engine.
+# $1 = mode: "incremental" (feed the rsync-derived change lists) or "full" (first build).
+# Gated on MODEL + a Bedrock precheck so a host without the build engine degrades gracefully
+# (graph already updated; a stale/empty glossary is tolerable). Detached so reindex returns fast.
+refresh_glossary() {
+  local mode="$1"
+  ( # subshell: a glossary hiccup must never change reindex's exit code
+    # shellcheck disable=SC1091
+    . /etc/index-service.env 2>/dev/null || true   # MODEL, REGION, GLOSSARY_MAX_FILES
+    local groot="${GLOSSARY_ROOT:-/data/glossary}"
+    [ -n "${MODEL:-}" ] || { echo "reindex: MODEL empty — skipping glossary refresh"; return 0; }
+    aws bedrock-runtime converse --region "${REGION:-}" --model-id "$MODEL" \
+      --messages '[{"role":"user","content":[{"text":"ok"}]}]' \
+      --cli-connect-timeout 8 --cli-read-timeout 20 >/dev/null 2>&1 \
+      || { echo "reindex: Bedrock not invokable — skipping glossary refresh (slice left as-is)"; return 0; }
+    mkdir -p "$groot/${PID}"
+    local glog="/var/log/glossary-build-${PID}-${SUBDIR}.log"
+    local slice="$groot/${PID}/${SUBDIR}.jsonl"
+    local args=(--project "$PID" --repo-root "$WS" --out "$slice" --model "$MODEL" --region "${REGION:-}")
+    if [ "$mode" = "incremental" ]; then
+      # Copy the change lists to stable temp names: the detached build reads them asynchronously,
+      # so they must outlive this script's EXIT-trap cleanup of CHANGED_LIST/DELETED_LIST. These
+      # copies are tiny and left in /tmp (OS-cleared); not worth a cleanup race. An empty change
+      # set just makes glossary_gen no-op (it exits 0 without calling cc).
+      local cl dl; cl="$(mktemp /tmp/gloss-chg.XXXXXX)"; dl="$(mktemp /tmp/gloss-del.XXXXXX)"
+      cp "$CHANGED_LIST" "$cl"; cp "$DELETED_LIST" "$dl"
+      args+=(--changed-list "$cl" --deleted-list "$dl")
+    else
+      args+=(--full)
+    fi
+    ( cd "$APP" && nohup env GLOSSARY_ROOT="$groot" AWS_REGION="${REGION:-}" \
+        ${GLOSSARY_MAX_FILES:+GLOSSARY_MAX_FILES="$GLOSSARY_MAX_FILES"} \
+        flock "$groot/${PID}/.${SUBDIR}.lock" \
+        python3 -m glossary_gen "${args[@]}" >>"$glog" 2>&1 & ) || true
+    echo "reindex: glossary slice refresh launched (detached, $mode) for $SUBDIR"
+  ) || true
 }
 
 if [ -s "$GRAPH" ]; then
@@ -79,6 +139,7 @@ if [ -s "$GRAPH" ]; then
   apply_staged
   stamp_snapshot
   rm -rf "$STAGE"
+  refresh_glossary incremental
   echo "REINDEX_DONE subdir=${SUBDIR} project=${PID} mode=incremental"
 else
   # ----- FIRST push: no graph yet → full build with the bridge stopped (free the writer flock) -----
@@ -96,5 +157,6 @@ else
   fi
   rm -rf "$STAGE"
   systemctl start "$BRIDGE" || { echo "REINDEX_WARN: graph built OK but bridge start returned non-zero — check: systemctl status $BRIDGE"; }
+  refresh_glossary full
   echo "REINDEX_DONE subdir=${SUBDIR} project=${PID} mode=initial-build"
 fi

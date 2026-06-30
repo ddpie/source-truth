@@ -324,3 +324,54 @@ def test_max_files_zero_means_no_cap(repo, tmp_path, monkeypatch):
                        "--out", str(out), "--model", "m", "--region", "r", "--full",
                        "--max-files", "0"])   # 0 = no cap → all candidate files
     assert seen["n"] >= 8   # a.cpp seed + 8 new = all scanned, not capped to 2
+
+
+# --- LOCAL-REPO incremental: changed/deleted lists from files (no git diff) ---
+def test_changed_list_incremental_no_git(tmp_path, monkeypatch):
+    """Local repos have no git/sha; reindex passes the rsync-derived change set via
+    --changed-list / --deleted-list files. Same merge as a git diff, just a different source."""
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "a.cpp").write_text("int combatPower;\n")
+    (ws / "b.cpp").write_text("int newFromB;\n")
+    out = tmp_path / "gloss" / "p" / "s.jsonl"
+    out.parent.mkdir(parents=True)
+    # seed: a.cpp + b.cpp contributed; deleted.cpp contributed a stale entry to be removed.
+    glossary.write_entries(str(out), [
+        glossary.Entry("cp", "symbol", "combatPower", "a.cpp", 1, "high"),
+        glossary.Entry("cp", "symbol", "oldFromB", "b.cpp", 1, "high"),
+        glossary.Entry("gone", "symbol", "deadSym", "deleted.cpp", 1, "high"),
+    ])
+    changed = tmp_path / "changed.txt"
+    changed.write_text("b.cpp\n")
+    deleted = tmp_path / "deleted.txt"
+    deleted.write_text("deleted.cpp\n")
+    monkeypatch.setattr(glossary_build, "run_cc", _fake_cc(
+        '{"concept_id":"cp","kind":"symbol","value":"newFromB","source":"b.cpp","line":1,"confidence":"high"}'
+    ))
+    rc = glossary_gen.main(["--project", "p", "--repo-root", str(ws),
+                            "--out", str(out), "--model", "m", "--region", "r",
+                            "--changed-list", str(changed), "--deleted-list", str(deleted)])
+    assert rc == 0
+    concepts = glossary.aggregate(glossary.read_entries(str(out)))
+    assert set(concepts["cp"].symbols) == {"combatPower", "newFromB"}  # a.cpp kept, b.cpp updated
+    assert "gone" not in concepts  # deleted.cpp's entry removed
+
+
+def test_changed_list_empty_is_noop_no_cc(tmp_path, monkeypatch):
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "a.cpp").write_text("int x;\n")
+    out = tmp_path / "gloss" / "p" / "s.jsonl"
+    called = {"n": 0}
+    monkeypatch.setattr(glossary_build, "run_cc", lambda *a, **k: called.__setitem__("n", called["n"] + 1) or "")
+    changed = tmp_path / "c.txt"
+    changed.write_text("")        # nothing changed
+    deleted = tmp_path / "d.txt"
+    deleted.write_text("")
+    rc = glossary_gen.main(["--project", "p", "--repo-root", str(ws),
+                            "--out", str(out), "--model", "m", "--region", "r",
+                            "--changed-list", str(changed), "--deleted-list", str(deleted)])
+    assert rc == 0
+    assert called["n"] == 0          # no cc call on an empty change set
+    assert not out.exists()

@@ -25,9 +25,15 @@ grep -q 'systemctl stop "\$BRIDGE"' "$S"; check "first build stops the bridge (s
 
 # In-place apply must protect the live graph dirs from rsync --delete.
 grep -q "filter=.P .codegraph" "$S" && grep -q "filter=.P .home" "$S"; check "apply protects .codegraph/.home from --delete" $?
-# Apply uses --delete to mirror the staged tree, and --no-links to refuse symlinks.
+# Apply uses --delete to mirror the staged tree, --itemize-changes to derive the change set,
+# and --no-links to refuse symlinks.
 grep -q 'rsync -a --delete' "$S" && grep -q -- '--no-links' "$S"; check "apply rsync mirrors + refuses symlinks" $?
+grep -q -- '--itemize-changes' "$S"; check "apply captures change set via --itemize-changes" $?
 
-# MVP: reindex builds ONLY the graph — it must NOT run the glossary engine (deferred; see plan).
-! grep -q 'glossary_gen' "$S"; check "reindex does NOT rebuild glossary (deferred to redeploy)" $?
+# Glossary refresh: incremental path feeds the rsync-derived change lists; first build does --full;
+# both gated by a Bedrock precheck (degrade gracefully on a no-engine host).
+grep -q 'refresh_glossary incremental' "$S"; check "incremental path refreshes glossary from change lists" $?
+grep -q 'refresh_glossary full' "$S"; check "first build refreshes glossary with --full" $?
+grep -q -- '--changed-list' "$S" && grep -q -- '--deleted-list' "$S"; check "feeds glossary_gen change/deleted lists" $?
+grep -q 'bedrock-runtime converse' "$S"; check "glossary refresh gated by Bedrock precheck" $?
 [[ "$_fail" -eq 0 ]]; exit $?

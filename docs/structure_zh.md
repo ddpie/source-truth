@@ -38,7 +38,7 @@ index-service/          常驻 CodeGraph 索引服务 + MCP-over-HTTP 接口
   bootstrap.sh          EC2 user-data：装依赖 + codegraph 二进制 + 术语表构建用的 claude(cc) CLI + 网关构建 + systemd 模板（base host，不挂项目）
   activate_project.sh   按项目挂载（SSM 调用）：写清单 / git 仓 clone、本地仓确认代码已推送 / 建图 / 起 index-bridge-<项目> + 刷新 timer（仅 git 仓）/ 按上一版清单清理已移除的仓
   git_fetch.sh          单仓 git clone/pull（凭证 + ref + 失败 GIT_FETCH_FAILED 告警；bootstrap 与刷新 timer 共用）
-  reindex_local_repo.sh local 仓应用暂存代码：常规推送原地同步到 live、watcher 增量重建（不停 bridge）；首次推送停 bridge 全量建图；--prepare 建暂存目录
+  reindex_local_repo.sh local 仓应用暂存代码：常规推送原地同步到 live（--delay-updates 缩小中断窗口）、watcher 增量重建索引 + 按变更清单增量刷新术语表（不停 bridge）；首次推送停 bridge 全量建图；--prepare 建暂存目录
   tests/                pytest（由 scripts/test.sh 调用）
 infra/                  基础设施即代码（MVP 先 agentcore toolkit / boto3，渐进 CDK 化）
   README.md             IaC 分工：CDK 管稳定层 / deploy-all.sh 用 boto3 配 AgentCore Runtime

@@ -74,7 +74,9 @@ structure）描述系统*是什么*；本文描述*一次提问如何在系统�
 一致的结果，watcher 随后即补齐——这与 git 仓原地 `git pull` 的行为一致（见
 [`design/multi-repo-isolation_zh.md`](../design/multi-repo-isolation_zh.md) §8）。**例外是首次推送**：此时 live 副本
 还没有 graph，watcher 无从增量，故先停 bridge、跑一次 `index-build@` 全量建图、再起 bridge（与 git 仓首次 activate
-相同）。本地仓是手动推送的**快照**，更新时机由运维决定、可能滞后于真实主分支——重新推送后才更新。
+相同）。**术语表**也随推送增量刷新：脚本用本次同步的变更文件清单喂 `glossary_gen`（`--changed-list`/`--deleted-list`），
+只重建变更文件的条目——与 git 仓按 `git diff` 增量是同一条路径，只是变更集来自 rsync 而非 git。本地仓是手动推送的
+**快照**，更新时机由运维决定、可能滞后于真实主分支——重新推送后才更新。
 
 **术语表（构建期引擎，离线）**：同一刷新链上，index 主机用本地 `claude` (cc) CLI 扫自有代码副本，产出
 「中文词→英文符号」术语表（per-repo slice `/data/glossary/<项目>/<subdir>.jsonl`），供上面取证通道作旁路
