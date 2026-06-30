@@ -7,7 +7,7 @@
 
   <rect x="0" y="0" width="760" height="430" fill="#ffffff"/>
   <text x="380" y="34" text-anchor="middle" font-size="18" font-weight="700" fill="#1f2733">会话隔离：什么共享、什么隔离</text>
-  <text x="380" y="56" text-anchor="middle" font-size="12.5" fill="#7a8493">每个游戏项目一个机器人 · 机器人内按会话隔离 · 多会话共用唯一只读代码副本</text>
+  <text x="380" y="56" text-anchor="middle" font-size="12.5" fill="#7a8493">每个游戏项目一个机器人 · 机器人内按会话隔离 · 同项目多会话共读本项目的只读副本</text>
 
   <!-- three per-session microVMs (each isolated) -->
   <text x="380" y="92" text-anchor="middle" font-size="11.5" font-weight="600" fill="#9aa3b0">per-session 独占（仅本 microVM 可见 · 约 14 天空闲过期）</text>
@@ -38,9 +38,9 @@
   <text x="455" y="232" text-anchor="middle" font-size="10.5" fill="#7a8493">MCP-over-HTTP（只读）</text>
 
   <!-- shared index-service (read-only, single copy) -->
-  <text x="380" y="294" text-anchor="middle" font-size="11.5" font-weight="600" fill="#3b7d4f">共享只读（所有会话 · 定时 git pull 刷新，分钟级新鲜）</text>
+  <text x="380" y="294" text-anchor="middle" font-size="11.5" font-weight="600" fill="#3b7d4f">共享只读（本项目所有会话 · 定时 git pull 刷新，分钟级新鲜）</text>
   <rect x="150" y="306" width="460" height="86" rx="8" fill="#eef6ef" stroke="#9cc6a8" stroke-width="1.2"/>
-  <text x="380" y="332" text-anchor="middle" font-size="13.5" font-weight="600" fill="#1f2733">index-service（常驻 · 唯一一份代码副本）</text>
+  <text x="380" y="332" text-anchor="middle" font-size="13.5" font-weight="600" fill="#1f2733">index-service（常驻 · 每项目各持自己的只读副本）</text>
   <text x="380" y="354" text-anchor="middle" font-size="11.5" fill="#5b6573">CodeGraph 索引 + HTTP 读取接口 · 本地磁盘 /data/repo/&lt;subdir&gt;</text>
-  <text x="380" y="375" text-anchor="middle" font-size="11" fill="#3b7d4f">项目代码（主分支）+ 配置表 · 全部会话只读访问，互不写扰</text>
+  <text x="380" y="375" text-anchor="middle" font-size="11" fill="#3b7d4f">项目代码（主分支）+ 配置表 · 本项目会话只读访问，互不写扰</text>
 </svg>
