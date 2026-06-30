@@ -118,7 +118,7 @@ graph LR
 > MCP-over-HTTP 接口（`codegraph_read_file` / `codegraph_glob_files` / `codegraph_search_files` + 定位类）。
 
 - 会话容器与索引服务不共享挂载：索引服务在本地磁盘持唯一一份代码副本、监听变更构建索引——一份代码，
-  无副本同步问题；定位查询与文件读取都由索引服务经 HTTP 接口暴露给会话容器
+  无副本同步问题；定位查询与文件读取都由索引服务经 HTTP 接口提供给会话容器
 - AI 通过索引定位文件后，读取的是代码最新版本（非索引快照）
 - 刷新靠 systemd timer 定时 `git pull` + file-watcher 增量（HEAD 未变即跳过），无夜间全量重建兜底
 
@@ -207,7 +207,7 @@ MCP-over-HTTP 接口（定位 + 读文件工具）提供给所有会话容器，
 | AgentCore Session Storage | Preview | 会话级独占存储，14 天空闲过期；Preview 阶段，正式商用前需复核可用性 |
 | Claude Code Agent SDK | GA | 官方容器化方案 |
 | Codex CLI | GA | headless 模式 |
-| CodeGraph | 开源 | MCP server（stdio），经索引服务侧代理暴露 HTTP；文件监听增量 |
+| CodeGraph | 开源 | MCP server（stdio），经索引服务侧代理转成 HTTP 提供；文件监听增量 |
 | lark-cli | GA | 飞书文档读取 |
 | 飞书 CardKit 流式卡片 | GA | 客户端 7.20+ |
 | 飞书 CardKit 图表组件 | GA | VChart 规范，支持柱状/折线/饼图等，依赖较新客户端版本 |

@@ -5,7 +5,7 @@
 
 - **gateway 改动** → 重新部署该项目网关单元 `bot-gateway@<projectId>.service`（经 `deploy-all.sh` 的 gateway 阶段，每项目一个进程、各连自己的飞书 App）。
 - **agent 改动（含 system.md / 工具 / 镜像）** → 重建镜像 + 更新 runtime；**仍存活的 microVM 还会跑旧镜像，约 15 分钟后才被回收换上新镜像**。
-- **index-service 代码改动** → 重新部署 index-service（bootstrap + 重启 bridge）；**代码索引刷新无需部署**——定时 `git pull` + watcher 增量重建，分钟级自动新鲜（见场景 4）。
+- **index-service 代码改动** → 重新部署 index-service（bootstrap + 重启 bridge）；**代码索引刷新无需部署**——定时 `git pull` + watcher 增量重建，分钟级内即跟上最新代码（见场景 4）。
 
 每次改完都运行 `./scripts/test.sh`（离线套件，pre-push 必过）。
 
@@ -28,11 +28,11 @@
   等旧 microVM 老化（~15min）后再复测，否则读取到的可能仍是旧 prompt 的输出。
 - **注意**：preamble/marker 类「读取卡片发现没生效」，多半是因为旧 microVM 还在用旧 prompt——先看 deploy 时间，别急着改 gateway 正则兜底。
 
-## 场景 2：新增 / 修改一个 MCP 工具（index-service 暴露给 agent）
+## 场景 2：新增 / 修改一个 MCP 工具（index-service 提供给 agent）
 
 - **修改位置**：`index-service/http_bridge.py`（注册 + 处理器，闭合白名单）+ 工具实现（`file_read.py` /
   `file_search.py` / `file_table.py` / `codegraph_session.py`）；**同步** `agent-container/agent_lib.py`
-  的 `CODEGRAPH_TOOLS` 允许清单（两端工具名必须一致，否则 agent 无法调用或 server 不暴露）。
+  的 `CODEGRAPH_TOOLS` 允许清单（两端工具名必须一致，否则 agent 无法调用或 server 不注册该工具）。
 - **只读约束**：新工具必须只读（`readOnlyHint=True`）；不得增加写/exec 能力（MVP 边界）。
 - **路径安全**：任何接受 agent 路径的工具必须经 `path_align.to_local_path`（词法 + realpath 双层 confine）。
 - **验证**：`cd index-service && python -m pytest -q`；增加路径逃逸/注入用例。
@@ -43,7 +43,7 @@
 - **修改位置**：`scripts/deploy-all.sh` 的 `DEFAULT_MODEL`，或部署时传 `--model <id>`。
 - **注意**：`global.*` 推理档只在部分区域承载；跨区域用区域级档（`apac.*`/`us.*`/`eu.*`）。
   目标区域 Bedrock 控制台需先开通该模型访问。
-- **验证**：deploy 的 `preflight_model_access` 会检查可用性，并对 AccessDenied/不可用给可操作 WARN。
+- **验证**：deploy 的 `preflight_model_access` 会检查可用性，并对 AccessDenied/不可用给出可处置的 WARN 提示。
 - **上线**：重新运行 deploy 的 runtime 阶段（写入 runtime env `ANTHROPIC_MODEL`）。
 
 ## 场景 4：刷新代码索引（目标仓库更新了）

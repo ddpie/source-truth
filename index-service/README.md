@@ -1,10 +1,10 @@
 # index-service
 
-常驻 **CodeGraph 索引服务** + **MCP-over-HTTP 接口**。独立常驻服务（不在会话容器内），持有唯一一份代码本地副本，对会话容器暴露只读的「定位 + 读文件」查询。
+常驻 **CodeGraph 索引服务** + **MCP-over-HTTP 接口**。独立常驻服务（不在会话容器内），持有唯一一份代码本地副本，向会话容器提供只读的「定位 + 读文件」查询。
 
 ## 对外接口
 
-CodeGraph 引擎原生仅 stdio MCP，本服务（`http_bridge.py`）把它暴露为 streamable HTTP，供会话容器远程调用。工具分四类：
+CodeGraph 引擎原生仅 stdio MCP，本服务（`http_bridge.py`）把它转成 streamable HTTP 对外提供，供会话容器远程调用。工具分五类：
 
 | 类别 | 工具 | 实现 |
 |------|------|------|
@@ -22,7 +22,7 @@ CodeGraph 引擎原生仅 stdio MCP，本服务（`http_bridge.py`）把它暴�
 
 | 文件 | 职责 |
 |------|------|
-| `http_bridge.py` | FastMCP streamable-HTTP 接口（`mcp.server.fastmcp.FastMCP`），注册并暴露上述工具 |
+| `http_bridge.py` | FastMCP streamable-HTTP 接口（`mcp.server.fastmcp.FastMCP`），注册并对外提供上述工具 |
 | `codegraph_session.py` | 常驻 codegraph-server 会话，独占写入 `graph.db`（worker 线程 + 私有事件循环 + 健康自愈 + liveness 容忍） |
 | `repo_router.py` | 服务端多仓路由 + 范围强制（多仓隔离不变量 1：白名单默认拒绝，越界 `repo` 参数永不路由） |
 | `repo_fanout.py` | 未指定 `repo` 时对每个仓的会话各查一遍再合并结果（纯合并核，无 I/O） |

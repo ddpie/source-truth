@@ -145,7 +145,7 @@ source-truth 不同于「在容器外把 AI 当远程 MCP 客户端」的常见�
 内，并围绕代码取证新增了两个有状态组件。四个核心选择：
 
 1. **AI 在容器内运行**——会话 microVM 内直接运行 Claude Code Agent SDK（`agent-container/agent.py` 的
-   agent 循环），AI 既是推理主体也是 MCP 消费端，而非外部 MCP 客户端。
+   agent 循环），AI 既是推理主体，也直接调用 MCP 工具，而不是容器外的 MCP 客户端。
 2. **飞书 Bot 网关**——机器人身份 + 长连接事件流 + 会话→runtimeSessionId 映射。MVP 不引入每用户
    OAuth 体系；上下文挂在飞书对话上、按需拉取。**部署形态**：网关与 index-service **同主机**（每个项目一个
    systemd 实例 `bot-gateway@<projectId>.service`），由 deploy 的 gateway 阶段经 SSM 写
@@ -153,7 +153,7 @@ source-truth 不同于「在容器外把 AI 当远程 MCP 客户端」的常见�
    client，否则争抢事件）——故蓝绿换 index 实例时，gateway 走 **break-before-make**（先停旧实例网关、确认长连接断开，
    再启动新实例网关），与 index/codegraph 的 make-before-break 相反。
 3. **独立 CodeGraph 索引服务**——常驻服务，由唯一进程独占写 graph.db、stdio→streamable-HTTP 接口，对会话容器
-   暴露只读**定位 + 读文件**查询；每个项目一个 bridge 进程 `index-bridge-<projectId>`（各占独立端口
+   提供只读**定位 + 读文件**查询；每个项目一个 bridge 进程 `index-bridge-<projectId>`（各占独立端口
    8080/8081/…，仅服务该项目的仓库，靠重复 `--workspace` 限定范围），其 file-watcher 对定时 git pull 的
    变更做增量重建（详见上文「代码如何进入 index-service、索引如何更新」）。
 4. **代码仓只在 index-service 本地**——它在本地磁盘持唯一一份代码副本，由 `activate_project.sh` 用只读 git

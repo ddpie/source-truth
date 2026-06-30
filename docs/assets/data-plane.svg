@@ -26,7 +26,7 @@
   <!-- stage 3 -->
   <rect x="120" y="230" width="520" height="52" rx="8" fill="#eef3fb" stroke="#b9c9e6" stroke-width="1.2"/>
   <text x="140" y="254" font-size="13.5" font-weight="600" fill="#1f2733">③ index-bridge-&lt;projectId&gt;.service · 每项目一个常驻只读</text>
-  <text x="140" y="273" font-size="11.5" fill="#5b6573">codegraph-server --mcp（内存图）+ http_bridge 暴露 HTTP；各占独立端口，仅服务本项目仓库</text>
+  <text x="140" y="273" font-size="11.5" fill="#5b6573">codegraph-server --mcp（内存图）+ http_bridge 提供 HTTP；各占独立端口，仅服务本项目仓库</text>
 
   <!-- stage 4 (refresh, accent amber) -->
   <rect x="120" y="306" width="520" height="52" rx="8" fill="#fbf4e8" stroke="#e0c48f" stroke-width="1.2"/>

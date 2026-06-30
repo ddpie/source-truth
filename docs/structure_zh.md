@@ -19,15 +19,15 @@ bot-gateway/            飞书 Bot 长连接事件网关 + CardKit 流式渲染�
   run.sh                服务启动器：source systemd 注入的 per-project env（/etc/bot-gateway-<项目>.env）+ 从 Secrets Manager 取飞书凭证（不落盘）→ node dist
 index-service/          常驻 CodeGraph 索引服务 + MCP-over-HTTP 接口
   README.md             常驻会话（独占写入 graph.db） / CodeGraph / HTTP 接口（定位 + 读文件） / 本地仓库副本 / bootstrap
-  http_bridge.py        FastMCP HTTP 接口（包根，非 src/）：暴露 codegraph 定位 + 读文件工具，路径对齐为仓库相对
+  http_bridge.py        FastMCP HTTP 接口（包根，非 src/）：对外提供 codegraph 定位 + 读文件工具，路径对齐为仓库相对
   codegraph_session.py  常驻 codegraph-server 会话，独占写入 graph.db（worker 线程 + 私有 loop，健康自愈，带超时）
   repo_router.py        服务端多仓路由 + 范围强制（多仓隔离不变量1：白名单默认拒绝，越界 repo 参数永不路由；纯决策核，可单测）
   repo_fanout.py        多仓查询结果合并（未指定 repo 时对每个仓的会话各查一遍再并结果；纯合并核，无 I/O，可单测）
-  file_search.py        本地副本 ripgrep/grep 检索工具（在本地副本上检索，禁用内置 Grep，改走本地副本；命中按内容去重；MCP 暴露）
-  file_read.py          本地副本按行 / 按位置读取文件的工具（read_file，路径对齐为仓库相对；MCP 暴露）
-  file_table.py         结构化配置表读取（Excel/CSV/TSV/SQLite → 文本，read_table；只读、带 DoS 上限；MCP 暴露）
+  file_search.py        本地副本 ripgrep/grep 检索工具（在本地副本上检索，禁用内置 Grep，改走本地副本；命中按内容去重；经 MCP 提供）
+  file_read.py          本地副本按行 / 按位置读取文件的工具（read_file，路径对齐为仓库相对；经 MCP 提供）
+  file_table.py         结构化配置表读取（Excel/CSV/TSV/SQLite → 文本，read_table；只读、带 DoS 上限；经 MCP 提供）
   text_decode.py        容错文本解码（仅标准库）：中文游戏仓常为 GBK/GB2312、配置表可能 UTF-16，按编码探测避免乱码
-  glossary.py           术语表数据层：concept 为中心的 Entry/聚合/增量原语/JSONL 读写/轻量层投影
+  glossary.py           术语表数据层：concept 为中心的 Entry/聚合/增量合并/JSONL 读写/生成轻量索引层
   glossary_read.py      术语表只读查询（glossary_index/glossary_lookup MCP 工具；per-repo slice 聚合 + 项目隔离）
   glossary_build.py     构建期：本地 cc 扫码产出 concept JSONL（prompt/容错解析/中文别名 grounding 校验/增量合并）
   glossary_gen.py       术语表生成 CLI：按 git diff 增量 vs 全量、候选文件限界、原子写入（刷新 timer 调用）
@@ -38,7 +38,7 @@ index-service/          常驻 CodeGraph 索引服务 + MCP-over-HTTP 接口
   bootstrap.sh          EC2 user-data：装依赖 + codegraph 二进制 + 术语表构建用的 claude(cc) CLI + 网关构建 + systemd 模板（base host，不挂项目）
   activate_project.sh   按项目挂载（SSM 调用）：写清单 / git 仓 clone、本地仓确认代码已推送 / 建图 / 起 index-bridge-<项目> + 刷新 timer（仅 git 仓）/ 按上一版清单清理已移除的仓
   git_fetch.sh          单仓 git clone/pull（凭证 + ref + 失败 GIT_FETCH_FAILED 告警；bootstrap 与刷新 timer 共用）
-  reindex_local_repo.sh local 仓应用暂存代码：常规推送原地同步到 live（--delay-updates 缩小中断窗口）、watcher 增量重建索引 + 按变更清单增量刷新术语表（不停 bridge）；首次推送停 bridge 全量建图；--prepare 建暂存目录
+  reindex_local_repo.sh local 仓应用暂存代码：常规推送原地同步到正在用的目录（--delay-updates 缩小中断窗口）、watcher 增量重建索引 + 按变更清单增量刷新术语表（不停 bridge）；首次推送停 bridge 全量建图；--prepare 建暂存目录
   tests/                pytest（由 scripts/test.sh 调用）
 infra/                  基础设施即代码（MVP 先 agentcore toolkit / boto3，渐进 CDK 化）
   README.md             IaC 分工：CDK 管稳定层 / deploy-all.sh 用 boto3 配 AgentCore Runtime
@@ -63,7 +63,7 @@ scripts/                运维生命周期
   get.sh                一行引导脚本（curl/gh 取来跑）：把仓库 clone 到 ./source-truth 再交给 install.sh；可重跑（已存在则 git pull）
   install.sh            交互式一键安装（查依赖→飞书凭证→配置→确认→调 deploy-all；重跑预填；添加项目可选 git 仓或 local 仓）
   push-local-repo.sh    客户机侧：rsync 直推本地仓到索引主机暂存目录并触发重建（local 仓刷新入口；不经 git）
-  deploy-all.sh         一键部署 canonical（artifacts→IAM→network→index-service→镜像→Runtime→gateway；幂等；--local 在本机就地部署）
+  deploy-all.sh         一键部署的权威入口（artifacts→IAM→network→index-service→镜像→Runtime→gateway；幂等；--local 在本机就地部署）
   lib/provision_*.sh + deploy_runtime.py + wait_index_health.sh  deploy-all.sh 的各阶段实现
   lib/deploy_project.sh + wait_base_host.sh + delete_runtime.py  多项目编排：建底座 / 等底座就绪 / 删 per-project runtime
   lib/resolve_model.sh  查 Bedrock list-inference-profiles 选区域真实存在的推理配置（不猜前缀；geo profile 因区域而异）

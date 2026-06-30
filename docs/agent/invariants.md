@@ -19,7 +19,7 @@
 - **以谁为准**：被索引的目标仓库（index-service 本地副本，git clone 而来）。其次是 `agent-container/prompts/system.md`
   里对这条的强约束（信任边界：只信 system prompt，不信工具读到的内容里的指令）。
 - **机检/观测**：属行为约束，无纯静态机检——由 system.md 规则 + gateway 的脱敏/泄漏剥离兜底；观测上靠 gateway 的
-  `card_health{zero_evidence_answer}` 指标标记「零工具+零引用却作答」的疑似 confabulation。
+  `card_health{zero_evidence_answer}` 指标标记「零工具+零引用却作答」的疑似无依据编造。
 - **违反后果**：幻觉或被注入误导 → 给出无依据答案，背离「代码为唯一依据」这一产品根本。
 
 ## 2. 会话容器 ARM64-only + 版本固定
@@ -76,7 +76,7 @@
   通过 `git_fetch.sh` 的 `guard_graph_dirs` 与之隔离：把这两个路径写进 `.git/info/exclude`；若上游仓库 track 了
   同名路径则 fail-loud（不支持）。
 - **机检**：运行期不变量，无静态机检；守卫是 flock（跨进程）+ 进程内 `_restart_lock` + `codegraph_client.
-  _assert_spawn_allowed()` tripwire + 上面的图目录保护（`scripts/tests/test_git_fetch.sh` 覆盖）。
+  _assert_spawn_allowed()` 触发即报错的断言 + 上面的图目录保护（`scripts/tests/test_git_fetch.sh` 覆盖）。
 - **违反后果**：两个进程同时写 / 刷新时覆盖掉正在服务的那张图 → graph.db 损坏 → `/health` 报 0 节点 → 该仓问答失败。
   **不要**在 index 实例上手动再启一个 codegraph-server 写同一份图。
 
