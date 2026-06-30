@@ -61,7 +61,7 @@
 
 飞书客户端 →（经飞书开放平台长连接）网关 → 会话隔离的 microVM → index-service 上的只读代码副本，中间是三个常驻组件。每个会话在各自的 microVM 里互不可见，又都向本项目那份只读副本读代码核对。同一项目下的多仓库联合检索已支持，一台 index-service 主机可承载多个项目（各自独立进程与端口；会话各自跑在独立 microVM 上）。
 
-![source-truth 架构图：飞书客户端 → 飞书开放平台（长连接事件订阅）→ bot-gateway → 多个各自隔离的会话 microVM → 共享只读的 index-service 代码副本，答案流式回填](docs/assets/architecture.svg)
+![source-truth 架构图，按机器分三层：飞书侧 → 一台 EC2（每个项目的 bot-gateway 与 index-bridge 同机，都在 index-service 主机上）→ AgentCore 会话 microVM；事件经长连接推给网关，网关 invoke 会话，会话再经 HTTP 向 bridge 只读访问（定位代码 / 读文件·配置表 / 查术语表）](docs/assets/architecture.svg)
 
 > **会话 microVM 不挂任何文件系统**：源码与配置表都经 index-service 的 HTTP 接口读取（`codegraph_read_file` / `codegraph_glob_files` / `codegraph_search_files`），代码副本只在 index-service 本地磁盘（每项目各一份，不进 microVM、无第二处）。
 
@@ -214,7 +214,7 @@ These boundaries are both product positioning and a security guarantee. Planned 
 
 A question flows through three resident components: the **bot-gateway** (subscribed to Feishu events over a persistent connection), one **session-isolated microVM** per conversation, and **index-service**, which holds a read-only copy of your code. The client talks to the gateway, the gateway routes to a microVM, and the microVM reads code through index-service. Each session is invisible to the others inside its own microVM, yet all read against this project's read-only copy to check the code. A single query can search across multiple repos in one project, and one index-service host can serve several projects (each gets its own process and port, and every session still runs in its own microVM).
 
-![source-truth architecture: Feishu client → Feishu open platform (persistent-connection event subscription) → bot-gateway → multiple isolated session microVMs → the project's read-only index-service code copy (one per project), with answers streamed back](docs/assets/architecture.en.svg)
+![source-truth architecture across three tiers: Feishu side → one EC2 (each project's bot-gateway and index-bridge co-located on the index-service host) → AgentCore session microVMs; events are pushed to the gateway over a persistent connection, the gateway invokes a session, and the session reaches the bridge over HTTP read-only (locate code / read files & config tables / glossary lookup)](docs/assets/architecture.en.svg)
 
 > **Session microVMs don't mount any filesystem**: source and config tables are read through index-service's HTTP interface (`codegraph_read_file` / `codegraph_glob_files` / `codegraph_search_files`); the code copy lives only on index-service's local disk (one copy per project, kept off the microVM entirely — there is never a second copy).
 
