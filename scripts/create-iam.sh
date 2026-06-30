@@ -3,17 +3,17 @@
 #
 # Usually you don't run this directly — launch-host.sh calls it. Run it standalone only to (re)create
 # the IAM stack. It picks an AWS profile (you SELECT from your configured profiles — no credentials
-# typed) and a region, then deploys docs/deploy/source-truth-iam.yaml: one instance role (carrying
+# typed) and a region, then deploys infra/source-truth-iam.yaml: one instance role (carrying
 # both deploy-time and runtime permissions, since --local runs the whole deploy on the EC2 itself)
 # plus its instance profile. Idempotent.
 #
-#   docs/deploy/create-iam.sh                    # interactive: pick profile + region
-#   docs/deploy/create-iam.sh --profile admin --region ap-northeast-1   # non-interactive
+#   scripts/create-iam.sh                    # interactive: pick profile + region
+#   scripts/create-iam.sh --profile admin --region ap-northeast-1   # non-interactive
 #
 # It also creates the AgentCore service-linked role (fresh-account safe; ignored if it exists).
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TEMPLATE="$HERE/source-truth-iam.yaml"
+TEMPLATE="$HERE/../infra/source-truth-iam.yaml"
 STACK="source-truth-iam"
 
 PROFILE="" REGION=""

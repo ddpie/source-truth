@@ -13,8 +13,8 @@
 # That's why the box is NOT part of any CloudFormation stack (deleting a stack would take the
 # state with it) — only IAM is.
 #
-#   docs/deploy/launch-host.sh                 # fully interactive
-#   docs/deploy/launch-host.sh --profile admin --region ap-northeast-1   # skip those two prompts
+#   scripts/launch-host.sh                 # fully interactive
+#   scripts/launch-host.sh --profile admin --region ap-northeast-1   # skip those two prompts
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 

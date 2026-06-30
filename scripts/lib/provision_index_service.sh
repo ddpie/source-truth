@@ -151,7 +151,7 @@ if [[ "$LOCAL_MODE" == "true" ]]; then
   fi
   if ! sudo aws s3 ls "s3://${BUCKET}/" --region "$REGION" >/dev/null 2>&1; then
     log err "local mode: this instance's role cannot read s3://${BUCKET} — check the instance role"
-    log err "  created from docs/deploy/source-truth-iam.yaml (see runbook), then re-run."
+    log err "  created from infra/source-truth-iam.yaml (see runbook), then re-run."
     exit 1
   fi
   log info "local mode: instance role present + S3 artifact read OK ($SELF_ROLE)"

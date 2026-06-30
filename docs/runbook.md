@@ -125,11 +125,11 @@ codegraph 索引吃内存、随仓库增大而增长，按仓库规模选机型�
 
 默认流程是「在一台部署机上运行脚本，由脚本新建索引主机 EC2」。若希望**只开一台 EC2、在其上完成整套部署**（省去单独的部署机），用 `--local` 模式——这台 EC2 既跑部署、又常驻为索引与网关主机。它**长期保留**：部署状态（`.local/`）就存在这台机器的仓库目录里，以后升级 SSH 回这台、重跑即可。
 
-**操作三步（前两步用 [`docs/deploy/launch-host.sh`](deploy/launch-host.sh) 在你自己的机器上一条龙完成）：**
+**操作三步（前两步用 [`scripts/launch-host.sh`](../scripts/launch-host.sh) 在你自己的机器上一条龙完成）：**
 
 ```bash
 # ① 在你本地：选 AWS profile → 建 IAM → 选 VPC/子网/密钥/机型 → 起一台 ARM64 EC2 并挂好实例角色
-./docs/deploy/launch-host.sh          # 全程交互选择；也可 --profile <名> --region <r> 跳过前两问
+./scripts/launch-host.sh          # 全程交互选择；也可 --profile <名> --region <r> 跳过前两问
 
 # ② 按脚本末尾提示 SSH 进这台 EC2，克隆仓库
 ssh ubuntu@<脚本打印的 IP>
@@ -143,7 +143,7 @@ cd source-truth && ./scripts/install.sh        # 或 ./scripts/deploy-all.sh --r
 
 - **EC2 必须是 ARM64（aarch64）、Ubuntu 24.04**：镜像在本机构建、codegraph-server 也是 ARM64；脚本一开始就检查，x86 直接拦下。`launch-host.sh` 会设置 IMDSv2 required + hop-limit 1。
 - 部署用户需**免密 sudo**（或以 root 运行）——`bootstrap.sh` 与本地仓 `reindex` 都用 `sudo`。
-- **`--local` 部署调用 AWS 用的是这台机器的实例角色**，不是你本地的 profile（profile 只在你自己机器上，SSH 进 EC2 后就用不上了）。所以这个角色既要有建资源的权限（VPC/EC2/ECR/AgentCore/Secrets），也要有运行期的权限，**权限比较大**——这台机器应**专机专用，不跟其它业务混跑**。角色由 `launch-host.sh` 一次性建好（它内部调 [`create-iam.sh`](deploy/create-iam.sh) 跑 CloudFormation 模板 [`source-truth-iam.yaml`](deploy/source-truth-iam.yaml)）；建角色这一步用你本地选的 profile，该 profile 需有建 IAM 的权限。
+- **`--local` 部署调用 AWS 用的是这台机器的实例角色**，不是你本地的 profile（profile 只在你自己机器上，SSH 进 EC2 后就用不上了）。所以这个角色既要有建资源的权限（VPC/EC2/ECR/AgentCore/Secrets），也要有运行期的权限，**权限比较大**——这台机器应**专机专用，不跟其它业务混跑**。角色由 `launch-host.sh` 一次性建好（它内部调 [`scripts/create-iam.sh`](../scripts/create-iam.sh) 跑 CloudFormation 模板 [`infra/source-truth-iam.yaml`](../infra/source-truth-iam.yaml)）；建角色这一步用你本地选的 profile，该 profile 需有建 IAM 的权限。
 - 角色由 CloudFormation 管理（无状态、可重建）；EC2 独立长存（带着 `.local/` 状态），**不在任何 CloudFormation 栈里**——否则删栈会连部署状态一起删。
 
 `--local` 不新建 VPC/NAT，复用本机所在的 VPC 和子网；另建一个专用安全组附加到本机，runtime 也用它——该安全组只放行 8080-8099 端口、且只对组内成员（本机及其启动的 runtime）开放，外部访问不到 bridge。**AgentCore Runtime 仍由 AWS 托管**，不占用本机资源、也无需运维——「单台 EC2」指只需开通并维护这一台主机。首次部署约 10–20 分钟（视机型而定）：bootstrap 与镜像构建都在本机串行执行，比默认的双机方式略慢。

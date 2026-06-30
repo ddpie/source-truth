@@ -42,6 +42,7 @@ index-service/          常驻 CodeGraph 索引服务 + MCP-over-HTTP 接口
   tests/                pytest（由 scripts/test.sh 调用）
 infra/                  基础设施即代码（MVP 先 agentcore toolkit / boto3，渐进 CDK 化）
   README.md             IaC 分工：CDK 管稳定层 / deploy-all.sh 用 boto3 配 AgentCore Runtime
+  source-truth-iam.yaml CloudFormation：--local（单台 EC2）模式的实例角色（部署期 + 运行期权限合一）+ instance profile；由 scripts/create-iam.sh 部署
   monitoring/           监控（CloudWatch 侧；scripts/boto3，非 CDK stack）
     queries/metric-filters/a-class-metrics.json  A 类指标口径单一事实源（计数/分位/分布 → metric-filter）
     queries/metric-filters/alarm-metrics.json    告警专用稠密 filter（每 card_health kind 一条，defaultValue:0）
@@ -64,6 +65,8 @@ scripts/                运维生命周期
   install.sh            交互式一键安装（查依赖→飞书凭证→配置→确认→调 deploy-all；重跑预填；添加项目可选 git 仓或 local 仓）
   push-local-repo.sh    客户机侧：rsync 直推本地仓到索引主机暂存目录并触发重建（local 仓刷新入口；不经 git）
   deploy-all.sh         一键部署的权威入口（artifacts→IAM→network→index-service→镜像→Runtime→gateway；幂等；--local 在本机就地部署）
+  launch-host.sh        --local（单台 EC2）模式入口（运维本地跑）：选 profile → 建 IAM → 选 VPC/子网/密钥/机型 → 起 ARM64 EC2 挂好实例角色 → 打印后续步骤
+  create-iam.sh         用 infra/source-truth-iam.yaml 建 --local 模式实例角色 + instance profile（一般由 launch-host.sh 内部调用）
   lib/provision_*.sh + deploy_runtime.py + wait_index_health.sh  deploy-all.sh 的各阶段实现
   lib/deploy_project.sh + wait_base_host.sh + delete_runtime.py  多项目编排：建底座 / 等底座就绪 / 删 per-project runtime
   lib/resolve_model.sh  查 Bedrock list-inference-profiles 选区域真实存在的推理配置（不猜前缀；geo profile 因区域而异）
@@ -82,11 +85,6 @@ docs/
   structure_en.md       英文对照
   runbook.md            部署 / 连飞书 / 运维 / 排错（中性名，不参与双语配对）
   glossary.md           术语表怎么来的：构建流程 / 产物结构 / 可信依据 / 成本运维（面向人，中性名）
-  deploy/               --local（单台 EC2）模式的引导脚本与 IAM 模板（运维一次性跑）
-    README.md                   本目录索引：三文件各自用途 + 入口
-    launch-host.sh              入口（运维本地跑）：选 profile → 建 IAM → 选 VPC/子网/密钥/机型 → 起 ARM64 EC2 挂好实例角色
-    create-iam.sh               选 profile / region 后调下面的 CFN 建实例角色（一般由 launch-host.sh 内部调用）
-    source-truth-iam.yaml       CloudFormation：建一个 EC2 实例角色（部署期 + 运行期权限合一）+ 实例 profile
   design/               设计权威依据（仅中文，暂不翻译）
     README.md                   目录说明 + 与架构 / 不变量文档的关系
     requirements_zh.md          需求与方案评审纪要（导入）

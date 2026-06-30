@@ -42,6 +42,7 @@ index-service/          Standalone CodeGraph index service + MCP-over-HTTP bridg
   tests/                pytest (invoked by scripts/test.sh)
 infra/                  Infrastructure as code (MVP starts with agentcore toolkit / boto3, CDK-ified incrementally)
   README.md             IaC split: CDK owns the stable layer / deploy-all.sh provisions AgentCore Runtime via boto3
+  source-truth-iam.yaml CloudFormation: --local (single-EC2) mode instance role (deploy-time + runtime perms) + instance profile; deployed by scripts/create-iam.sh
   monitoring/           Monitoring (CloudWatch side; scripts/boto3, not a CDK stack)
     queries/metric-filters/a-class-metrics.json  Single source of A-class metric intent (counts/percentiles/distributions → metric-filter)
     queries/metric-filters/alarm-metrics.json    Dedicated dense alarm filters (one per card_health kind, defaultValue:0)
@@ -64,6 +65,8 @@ scripts/                Operational lifecycle
   install.sh            Interactive one-click install (check deps→Feishu creds→config→confirm→deploy-all; pre-fills on re-run; add-project picks git or local repo source)
   push-local-repo.sh    Operator-side: rsync a local repo to the index host's staging dir and trigger a rebuild (local-repo refresh entry; no git)
   deploy-all.sh         Canonical one-click deploy (artifacts→IAM→network→index-service→image→Runtime→gateway; idempotent; --local single-host bootstrap)
+  launch-host.sh        --local (single-EC2) mode entry (run on your machine): pick profile → create IAM → pick VPC/subnet/key/type → launch the ARM64 EC2 with the instance role attached → print next steps
+  create-iam.sh         Create the --local instance role + profile from infra/source-truth-iam.yaml (usually called by launch-host.sh)
   lib/provision_*.sh + deploy_runtime.py + wait_index_health.sh  deploy-all.sh phase implementations
   lib/deploy_project.sh + wait_base_host.sh + delete_runtime.py  Multi-project orchestration: build base / await base ready / delete per-project runtime
   lib/resolve_model.sh  Query Bedrock list-inference-profiles to pick a profile that actually exists in the region (no prefix guessing; geo profiles vary by region)
@@ -82,11 +85,6 @@ docs/
   structure_en.md       This file (English counterpart)
   runbook.md            Deploy / connect-Feishu / ops / troubleshooting (neutral name, exempt from bilingual pairing)
   glossary.md           How the term bridge is built: build flow / output structure / trust basis / cost & ops (human-facing, neutral name)
-  deploy/               Bootstrap scripts + IAM template for --local (single-EC2) mode (operator runs once)
-    README.md                   Index of this dir: what each file does + the entry point
-    launch-host.sh              Entry (run on your machine): pick profile → create IAM → pick VPC/subnet/key/type → launch the ARM64 EC2 with the instance role attached
-    create-iam.sh               Pick profile / region, then deploy the CFN below to create the instance role (usually called by launch-host.sh)
-    source-truth-iam.yaml       CloudFormation: one EC2 instance role (deploy-time + runtime perms) + instance profile
   design/               Design source of truth (Chinese only, not yet translated)
     README.md                   Directory notes + relation to architecture / invariants docs
     requirements_zh.md          Requirements & solution review notes (imported)
