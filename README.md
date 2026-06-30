@@ -12,7 +12,7 @@
 
 飞书客户端 → 网关 → 会话隔离的 microVM → 共享只读代码副本，中间是三个常驻组件。每个会话在各自的 microVM 里互不可见，又都向同一份只读副本读代码核对。同一项目下的多仓库联合检索已支持，一台机器可承载多个项目（各自独立进程与端口）。
 
-![source-truth 架构图：飞书客户端 → bot-gateway → 多个各自隔离的会话 microVM → 共享只读的 index-service 代码副本，答案流式回填](docs/assets/architecture.svg)
+![source-truth 架构图：飞书客户端 → 飞书开放平台（长连接事件订阅）→ bot-gateway → 多个各自隔离的会话 microVM → 共享只读的 index-service 代码副本，答案流式回填](docs/assets/architecture.svg)
 
 > **会话 microVM 不挂任何文件系统**：源码与配置表都经 index-service 的 HTTP 接口读取（`codegraph_read_file` / `codegraph_glob_files` / `codegraph_search_files`），唯一一份副本只在 index-service 本地磁盘。
 
@@ -21,7 +21,7 @@
 - **答得可信，且能复核**：以真实代码为唯一依据，每条结论附 `文件:行号` 出处（折叠在「供研发复核」区，策划看结论、研发按需展开）。代码与文档冲突时以代码为准并标注差异；证据不足时提示转研发，不猜不编。
 - **大代码库不拖慢定位**：常驻 CodeGraph 索引先定位、再精准读取，不全仓扫描。16 GB、7.5 万文件的工程上，定位查询稳定在 **1–5 毫秒**；整轮问答比原生 Claude Code 快 **2.7–5.1 倍**。
 - **中文提问也能命中英文代码**：策划问「公会战怎么结算」，代码里却可能写成历史代号 `LeagueWar`；「招募保底」藏在 `pity_counter` 这类内部叫法里，直接用中文搜常只命中注释、甚至零命中。术语表离线把中文业务词映射到代码里真实出现的英文符号，作为额外检索线索——只负责「该搜哪个英文词」，结论仍以查看代码为准。
-- **在飞书里直接用**：无需部署、下载或开账号，@ 机器人即可。答案是一张流式卡片：实时进度、结论流式展开、出处自动折叠，手机上同样可用；看完可点按钮或回复卡片，带上下文继续追问。
+- **答案是会生长的交互卡片**：在飞书 @ 机器人即可（免部署、下载、开账号）。卡片实时显示进度、结论先行边写边展开、能画图表 / 表格、出处自动折叠（策划看结论、研发按需展开）；看完点按钮或回复卡片就能带上下文继续追问，手机上同样可用。
 
 > 性能数据来源与复现见 [`docs/agent/perf-comparison.md`](docs/agent/perf-comparison.md) 与
 > [`docs/agent/indexing-performance-spike.md`](docs/agent/indexing-performance-spike.md)。
