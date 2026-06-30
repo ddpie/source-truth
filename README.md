@@ -114,7 +114,12 @@ bash <(gh api repos/ddpie/source-truth/contents/scripts/get.sh --jq '.content' |
 
 ## 代码怎么进入系统、怎么刷新
 
-git 为唯一来源：每个仓库 clone 到 index-service 本地，systemd timer 定时 `git pull`，file-watcher 增量重建索引，新鲜度分钟级、无需重部署、无需手动操作。刷新机制与「为何必须建索引」的实测见 [`docs/agent/architecture.md`](docs/agent/architecture.md) 的「数据面」。
+每个仓库 clone 到 index-service 本地，file-watcher 增量重建索引。两种代码来源：
+
+- **git 仓**（默认）：systemd timer 定时 `git pull`，新鲜度分钟级、无需重部署、无需手动操作。
+- **本地仓**（推不到 git 远端时）：用 `scripts/push-local-repo.sh` 经 rsync 直推到主机的快照，手动刷新——代码变更后重跑一次上传命令。
+
+刷新机制与「为何必须建索引」的实测见 [`docs/agent/architecture.md`](docs/agent/architecture.md) 的「数据面」；本地仓上传与单台 EC2 自举（`--local`）见 [`docs/runbook.md`](docs/runbook.md)。
 
 ## 安全设计
 
@@ -264,7 +269,12 @@ Full deployment flow (prerequisites, `deploy-all.sh` staged options, connecting 
 
 ## How code enters the system and refreshes
 
-git is the single source: each repo is cloned to index-service locally, a systemd timer runs `git pull` periodically, and a file-watcher rebuilds the index incrementally — freshness is minute-level, with no redeploy and no manual steps. The refresh mechanism and the measured "why an index is required" are in the "data plane" section of [`docs/agent/architecture.md`](docs/agent/architecture.md).
+Each repo is cloned to index-service locally and a file-watcher rebuilds the index incrementally. Two code sources:
+
+- **git repos** (default): a systemd timer runs `git pull` periodically — freshness is minute-level, with no redeploy and no manual steps.
+- **local repos** (when there's no git remote to push to): a snapshot pushed to the host via `scripts/push-local-repo.sh` over rsync, refreshed manually — re-run the upload command after the code changes.
+
+The refresh mechanism and the measured "why an index is required" are in the "data plane" section of [`docs/agent/architecture.md`](docs/agent/architecture.md); local-repo upload and single-host bootstrap (`--local`) are in [`docs/runbook.md`](docs/runbook.md).
 
 ## Security design
 
