@@ -96,4 +96,4 @@ docs/
 .local/                 (gitignored) account-specific deploy state: deploy-config, projects.json (project routing)
 ```
 
-Entries tagged `(p1)` / `(p2)` are later-phase outputs; currently placeholders or not yet created. Untagged entries are all in place.
+Entries tagged `(p2)` are later-phase outputs; currently placeholders or not yet created. Untagged entries are all in place.

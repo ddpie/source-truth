@@ -30,7 +30,7 @@
     <text x="548" y="91">index-service</text><text x="548" y="105" font-size="9" font-weight="400" fill="#7a8493">查证 · 读文件</text>
 
     <rect x="646" y="72" width="92" height="40" rx="7" fill="#fdf5e9" stroke="#e4c896"/>
-    <text x="692" y="91">CardKit</text><text x="692" y="105" font-size="9" font-weight="400" fill="#7a8493">流式卡片</text>
+    <text x="692" y="91">CardKit</text><text x="692" y="105" font-size="9" font-weight="400" fill="#7a8493">开放平台·流式卡片</text>
   </g>
 
   <!-- lifelines -->
