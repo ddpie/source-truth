@@ -36,7 +36,7 @@ index-service/          Standalone CodeGraph index service + MCP-over-HTTP bridg
   codegraph_client.py   codegraph-server client wrapper (dormant: tests only, single-writer tripwire-guarded, never on the resident serving path)
   perf.py               Structured latency logging
   bootstrap.sh          EC2 user-data: install deps + codegraph binary + claude(cc) CLI for glossary build + gateway build + systemd templates (base host, no project bound)
-  activate_project.sh   Per-project attach (invoked over SSM): write manifest / git clone (git repos) or verify pushed (local repos) / build graph / start index-bridge-<projectId> + refresh timers (git repos only) / old-manifest orphan cleanup
+  activate_project.sh   Per-project attach (invoked over SSM): write manifest / git clone (git repos) or confirm code already pushed (local repos) / build graph / start index-bridge-<projectId> + refresh timers (git repos only) / clean up repos dropped since the last manifest
   git_fetch.sh          Single-repo git clone/pull (credential + ref + fail-loud GIT_FETCH_FAILED; shared by bootstrap and the refresh timer)
   reindex_local_repo.sh Local-repo swap+rebuild orchestration (stop bridge→swap→build→start, atomic rollback on failure; --prepare makes the staging dir)
   tests/                pytest (invoked by scripts/test.sh)

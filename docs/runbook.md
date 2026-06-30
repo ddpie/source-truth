@@ -45,7 +45,7 @@
    仅当查不到匹配档时 preflight 会 WARN 并列出该区域可用的档。
 4. **目标代码仓**：要被问答的游戏代码仓，两种来源（同项目可混用）：
    - **git 源**（推荐）：`https://github.com/org/repo.git`、`https://gitlab.com/org/repo.git`、`git@host:org/repo.git`，可选分支 / 标签 / 提交。index-service clone 到本地、定时 `git pull` 保持「最新主分支」分钟级新鲜。私有仓需本机有 `git` 与一份只读访问凭证。
-   - **local 源**（无 git 远端时）：代码只在本地、无法 push 到 git 远端的场景。声明 `source:"local"`，部署后用 `scripts/push-local-repo.sh` 经 rsync 直推到索引主机（见[第九节末「本地仓上传」](#本地仓上传local-源)）。**它是手动推送的快照，不自动刷新**——代码变了要重跑上传命令。
+   - **local 源**：代码只在本地、push 不到任何 git 远端时用。声明 `source:"local"`，部署后用 `scripts/push-local-repo.sh` 经 rsync 直推到索引主机（见[第九节末「本地仓上传」](#本地仓上传local-源)）。它是手动推上去的快照，不会自动刷新——代码变了就重跑一次上传命令。
 5. **飞书应用**（见第三节，可与部署并行准备）。
 
 ---
@@ -130,10 +130,10 @@ codegraph 索引吃内存、随仓库增大而增长，按仓库规模选机型�
 - **必须是 ARM64（aarch64）EC2**、Ubuntu 24.04：镜像在本机构建、codegraph-server 也是 ARM64。x86 机器会被入口处的架构检查直接拦下。
 - **IMDSv2 required、hop-limit 1**；这台机器不要与其它用途共用（它的实例角色权限较大）。
 - 部署用户需**免密 sudo**（或以 root 跑）——`bootstrap.sh` 与本地仓 `reindex` 都用 `sudo`。
-- **实例角色须预挂权限**（`--local` 不在部署里授 IAM，必须开机时就带上，否则 gateway 每次回答 403、术语表静默为空、日志不上传）。一台 EC2 只有一个实例角色，它同时承担「部署期建资源」和「运行期」两类权限：
-  - 部署期：建/查 VPC·子网·SG、ECR push、`bedrock-agentcore` 建/调 runtime、Secrets Manager 读写 `source-truth/*`、SSM、EC2 `describe`/`modify-instance-attribute`。
-  - 运行期：`s3:GetObject`/`ListBucket` on `source-truth-repo-<account>-*`；`secretsmanager:GetSecretValue` on `source-truth/*`；`bedrock:InvokeModel(WithResponseStream)` on `anthropic.*` + inference-profile；`bedrock-agentcore:InvokeAgentRuntime` on `source_truth_agent*`；CloudWatch logs on `/source-truth/*`。
-  - 运行期这套与默认流程里 `provision_iam.sh` 给 `source-truth-index-role` 配的 5 条 inline policy（s3-artifacts / secrets-read / cloudwatch-logs / agentcore-invoke / bedrock-invoke）等价——可直接抄给本机角色，再加上部署期建资源的权限。部署只做 fail-loud 预检（有角色 + 能读 S3 artifact），其余缺失由首次提问 / e2e 探针暴露。
+- **实例角色须预先挂好权限**：`--local` 不会在部署过程里改 IAM，权限得在开机时就配好。少了权限不会当场报错，而是后面才暴露——网关每次回答都 403、术语表一直是空的、日志上不了 CloudWatch。一台 EC2 只有一个实例角色，它要同时干两件事：
+  - 部署时建资源：建/查 VPC·子网·安全组、向 ECR 推镜像、用 `bedrock-agentcore` 建和调用 runtime、读写 Secrets Manager 的 `source-truth/*`、SSM、EC2 的 `describe`/`modify-instance-attribute`。
+  - 平时运行：`s3:GetObject`/`ListBucket`（`source-truth-repo-<account>-*`）、`secretsmanager:GetSecretValue`（`source-truth/*`）、`bedrock:InvokeModel(WithResponseStream)`（`anthropic.*` 及其 inference-profile）、`bedrock-agentcore:InvokeAgentRuntime`（`source_truth_agent*`）、CloudWatch logs（`/source-truth/*`）。
+  - 运行这套权限，和默认流程里 `provision_iam.sh` 给 `source-truth-index-role` 配的 5 条 inline policy（s3-artifacts / secrets-read / cloudwatch-logs / agentcore-invoke / bedrock-invoke）是一样的——直接照抄到本机角色，再补上部署建资源的那部分即可。部署只做一次预检：有没有实例角色、能不能读到 S3 上的部署产物；不通过就直接停下报错。其余缺的权限要到首次提问或 e2e 探针时才会显出来。
 
 跑法（在那台 EC2 上）：
 
@@ -144,7 +144,7 @@ codegraph 索引吃内存、随仓库增大而增长，按仓库规模选机型�
 ./scripts/deploy-all.sh --region <r> --local
 ```
 
-说明：`--local` 下不新建 VPC/NAT（复用本机所在 VPC/子网），新建一个专用安全组（仅 8080-8099 自引用）附加到本机、并作为 runtime 的 SG；`bootstrap` 在本机同步跑完再继续。**AgentCore Runtime 仍是 AWS 托管的**（不占这台机器、免运维）——「单台 EC2」指你只需开/运维这一台。**总耗时**：bootstrap（apt/pip/npm/网关构建）与镜像构建在同机串行，比双机路径慢，首次约 10–20 分钟（视机型）。
+`--local` 不新建 VPC/NAT，复用本机所在的 VPC 和子网；另建一个专用安全组（只放行 8080-8099 自引用）附加到本机，runtime 也用它。`bootstrap` 在本机跑完才继续后面的步骤。**AgentCore Runtime 仍由 AWS 托管**，不占这台机器、也不用你运维——所谓「单台 EC2」是指你只需要开和管这一台。首次部署约 10–20 分钟（看机型）：bootstrap（装依赖、构建网关）和镜像构建都在这一台上挨着跑，比默认的双机方式慢一些。
 
 ---
 
@@ -391,18 +391,18 @@ refreshIntervalSec?}`，**git-only**）。顶层 `refreshIntervalSec` 是全局�
 
 - **重建期间该项目的 bot 会离线几分钟**（与首次建图同量级），**同项目的其他仓（含 git 仓）也会一并离线**（共用一个 bot 进程）。重建失败会**自动回滚到上一版**，bot 不会服务到坏代码。
 - 「刷新」= 重跑这条命令（local 仓不自动更新，**不是**最新主干）。代码变了就再推一次。
-- `--delete` 镜像语义（主机副本与本地一致）、自动排除 `.git`、软链不会被同步进仓（`--safe-links --no-links`）、**不支持自由 `--ssh-opts`**（防注入，只认 `--identity <key>`）。
-- **首次推送前**：用带外渠道核对 EC2 的 SSH host key 指纹（脚本首连用 `accept-new`，会信任首次见到的指纹），或预置 `known_hosts`，以防中间人截获源码。
+- 用 `rsync --delete`，主机副本与本地保持一致（本地删掉的文件主机上也删）；自动排除 `.git`；符号链接不会被同步进仓（`--safe-links --no-links`）；不接受任意 `--ssh-opts`，只认 `--identity <key>`（避免被注入 `ProxyCommand` 之类）。
+- **首次推送前**先核对 EC2 的 SSH host key 指纹：脚本首次连接用 `accept-new`，会信任第一次见到的指纹，所以最好通过带外渠道核对一次，或预先写好 `known_hosts`，防止有人冒充主机截走源码。
 - 术语表（中文词→符号）MVP 不随推送刷新；问答靠 codegraph 直接定位即可。需刷新 local 仓术语表时，对该项目重新执行 `install.sh` 的「重新部署」。
 
-**最小 sudoers**——只授权这一个脚本（建/授暂存目录、切换、重建都在脚本内做，参数已被脚本内 `^[a-z0-9][a-z0-9-]*$` 校验、unit 名固定）：
+**最小 sudoers**——只放行这一个脚本（建暂存目录、切换、重建都在脚本里完成，参数先经 `^[a-z0-9][a-z0-9-]*$` 校验、systemd 单元名固定写死）：
 
 ```
 # /etc/sudoers.d/source-truth-push  (仅推送用户)
 <pushuser> ALL=(root) NOPASSWD: /bin/bash /opt/idx/app/reindex_local_repo.sh *
 ```
 
-`/bin/bash <固定脚本路径> *` 把可执行体钉死在这一个脚本上、`*` 只放开它的参数；**不可**写成裸 `/bin/bash *`（等于任意命令），也不要把 `systemctl`/`mkdir`/`chown` 等通用命令放进 NOPASSWD（通配会被 `-R`/`..` 滥用提权）。
+这里 `/bin/bash <固定脚本路径> *` 把可执行的对象限定在这一个脚本，`*` 只放开它后面的参数。**不要**写成裸 `/bin/bash *`（那等于放行任意命令），也不要把 `systemctl`/`mkdir`/`chown` 这类通用命令放进 NOPASSWD——它们的通配会被 `-R`、`..` 之类绕开、提权成 root。
 
 ---
 
