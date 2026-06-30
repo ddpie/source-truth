@@ -375,3 +375,24 @@ def test_changed_list_empty_is_noop_no_cc(tmp_path, monkeypatch):
     assert rc == 0
     assert called["n"] == 0          # no cc call on an empty change set
     assert not out.exists()
+
+
+def test_changed_list_drops_unsafe_paths(tmp_path, monkeypatch):
+    """Defense in depth: a changed-list path that is absolute or climbs out via '..' must be
+    dropped, never handed to cc. (Today rsync can't produce these; this guards future callers.)"""
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "ok.cpp").write_text("int v;\n")
+    out = tmp_path / "gloss" / "p" / "s.jsonl"
+    seen = {}
+    monkeypatch.setattr(glossary_build, "build",
+                        lambda files, **k: seen.__setitem__("files", list(files)) or [])
+    changed = tmp_path / "c.txt"
+    changed.write_text("ok.cpp\n../../etc/passwd\n/etc/shadow\n")
+    deleted = tmp_path / "d.txt"
+    deleted.write_text("")
+    rc = glossary_gen.main(["--project", "p", "--repo-root", str(ws),
+                            "--out", str(out), "--model", "m", "--region", "r",
+                            "--changed-list", str(changed), "--deleted-list", str(deleted)])
+    assert rc == 0
+    assert seen.get("files") == ["ok.cpp"]   # only the safe in-tree path survived

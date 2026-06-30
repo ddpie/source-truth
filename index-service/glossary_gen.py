@@ -122,15 +122,25 @@ def changed_files(repo_root: str, old: str, new: str) -> tuple[set[str], set[str
 
 def _read_path_list(path: str) -> set[str]:
     """Read a file of repo-relative paths (one per line) into a set; skip blanks + VCS/vendored.
-    Missing file → empty set (caller treats it as 'no changes / no deletions')."""
+    Missing file → empty set (caller treats it as 'no changes / no deletions').
+
+    DEFENSE IN DEPTH: these paths are scoped to repo-root and handed to cc (Read/Glob are allowed).
+    Today the list is produced by reindex_local_repo.sh from rsync --itemize-changes, which only
+    ever emits in-tree, relative paths — so nothing escapes. But to keep that true regardless of the
+    caller, fail closed here: normalize and drop any absolute path or one that climbs out via '..'."""
     if not path or not os.path.isfile(path):
         return set()
     out: set[str] = set()
     with open(path, encoding="utf-8") as fh:
         for line in fh:
             rel = line.strip()
-            if rel and not rel.startswith(_SKIP_PREFIXES):
-                out.add(rel)
+            if not rel or rel.startswith(_SKIP_PREFIXES):
+                continue
+            norm = os.path.normpath(rel)
+            if os.path.isabs(norm) or norm == ".." or norm.startswith(".." + os.sep):
+                logger.warning(json.dumps({"event": "glossary_gen_dropped_unsafe_path", "path": rel}))
+                continue
+            out.add(norm)
     return out
 
 

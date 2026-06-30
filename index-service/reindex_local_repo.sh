@@ -86,7 +86,12 @@ apply_staged() {
     --filter='P .codegraph/' --filter='P .home/' \
     --exclude='.git' --no-links \
     "$STAGE/" "$WS/" | while IFS= read -r line; do
-      path="${line#* }"                       # strip the leading flags + single space
+      # itemize lines are "<flags> <path>": an 11-char flag field for a change (e.g. ">f+++++++++"),
+      # or the "*deleting" keyword for a removal — both followed by one-or-more spaces then the path.
+      # Strip the leading non-space token AND all following spaces so the path has no leading blanks
+      # (the *deleting keyword is shorter than 11 chars and pads with spaces, which a single ${#* }
+      # strip would leave behind).
+      path="${line#* }"; path="${path#"${path%%[![:space:]]*}"}"
       case "$path" in */) continue ;; esac    # directory entry — no file term to (re)build
       case "$line" in
         '*deleting'*) printf '%s\n' "$path" >> "$DELETED_LIST" ;;

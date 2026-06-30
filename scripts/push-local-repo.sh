@@ -5,8 +5,10 @@
 #
 #   scripts/push-local-repo.sh --host <ssh-host> [--identity <key>] <subdir> <local-path> [--dry-run]
 #
-# Code is staged to /data/repo/<subdir>.incoming/ (the live dir keeps serving), then the host's
-# reindex_local_repo.sh stops that project's bridge, lands the code, rebuilds, and restarts.
+# Code is staged to /data/repo/<subdir>.incoming/ (the serving copy is untouched during the network
+# transfer), then the host's reindex_local_repo.sh applies it: a SUBSEQUENT push syncs the staged
+# tree onto the serving copy in place and the resident watcher re-indexes incrementally (bridge
+# stays up); only the FIRST push (no graph yet) stops the bridge for a one-time full build.
 #
 # SECURITY: we deliberately do NOT expose a free-form --ssh-opts (a `-oProxyCommand=...` there is
 # local RCE). Only a vetted --identity keyfile is accepted. <subdir> is regex-validated; it is the
@@ -69,6 +71,6 @@ say step "preparing stage ${STAGE} on ${HOST} (via host script)"
 "${SSH[@]}" "$HOST" "$REMOTE_PREPARE"
 say step "rsync ${SRC} → ${HOST}:${STAGE}"
 "${RSYNC[@]}"
-say step "triggering host reindex (stop bridge → swap → build → start, rollback on failure)"
+say step "triggering host reindex (in-place incremental; first push does a one-time full build)"
 "${SSH[@]}" "$HOST" "$REMOTE_REINDEX"
 say ok "pushed + reindexed local repo '${SUBDIR}'"
