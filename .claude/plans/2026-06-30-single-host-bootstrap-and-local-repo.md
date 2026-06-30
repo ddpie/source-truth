@@ -259,71 +259,84 @@ done
 
 glossary 初建（218-265 行）对 local 仓照常进行，不改。
 
-**关键修正——reconcile 必须改为 slice-driven，否则删 local 仓会泄漏 graph + glossary slice（独立复审 H1）。**
-现有 reconcile 循环（181-201 行）**只遍历 `index-refresh-*.timer`** 来找「已从 manifest 删除的孤儿仓」并清其 slice。但 local 仓**不建 timer**（本任务设计），所以「项目内删掉一个 local 仓、重 activate」时该循环看不到它 → 它的 glossary slice 残留，被 `glossary_read.py` 的 `os.listdir` 无条件 glob 进索引、永久污染（注释 184 行自述此风险）。把驱动从「遍历 timer」改成「遍历**本项目 glossary 目录下的 slice**」——每个 activate 过的仓（git+local）都建 slice，且 slice 天然按 `PROJ_GLOSS_DIR` 隔离，故对 git 仓行为不变（仍删 timer），对 local 仓也能清。把 181-201 行整段替换为：
+**关键修正——reconcile 必须改为 old-manifest-driven，否则删 local 仓会泄漏 graph + glossary slice（独立复审 H1 + 多仓复审 M1）。**
+现有 reconcile（181-201 行）**只遍历 `index-refresh-*.timer`** 找孤儿。local 仓不建 timer，故删 local 仓后其 graph + slice 永久残留，slice 被 `glossary_read.py` 的 `os.listdir` 无条件 glob 进索引污染（注释 184 行自述）。
+**为什么不用 slice-driven**：slice 是**可选产物**——无 Bedrock 权限的部署里 local 仓根本不建 slice（`activate_project.sh:235` precheck 失败即跳过），那时「遍历 slice」同样看不到孤儿、泄漏复发。唯一**权威**的「本项目上次拥有哪些仓」信号是项目自己的**旧 manifest**（activate 在 55 行覆盖它之前的内容）。改为：覆盖前抓旧 subdirs，孤儿 = 旧 − 新，与 timer/slice/glossary-engine 是否存在**全部无关**。
+
+先在写新 manifest（55 行 `printf '%s' "$REPO_MANIFEST_JSON" > "$MANIFEST"`）**之前**抓旧 subdirs。在该行前插入：
 
 ```bash
-# RECONCILE (slice-driven): any repo whose glossary slice exists under THIS project's dir but is
-# NOT in the current manifest is an orphan — tear down its slice + graph copy + (git repos only)
-# refresh unit. Driving off the slice set (not refresh timers) is REQUIRED because local repos have
-# NO timer; a timer-driven loop would never see a removed local repo and leak its slice forever
-# (glossary_read globs every <sub>.jsonl unconditionally). git orphans still get their timer removed.
+# Capture the project's PREVIOUS subdirs BEFORE overwriting the manifest — the authoritative
+# "what this project owned last time" set for orphan reconcile (independent of timers/slices,
+# which may not exist for local repos or on a no-glossary-engine host).
+OLD_SUBDIRS=""
+[ -f "$MANIFEST" ] && OLD_SUBDIRS="$(python3 "$RENDER_MANIFEST" --field subdir "$MANIFEST" 2>/dev/null || echo "")"
+```
+
+然后把 181-201 行整段替换为 old-manifest-driven 清理：
+
+```bash
+# RECONCILE (old-manifest-driven): orphans = OLD_SUBDIRS − current SUBDIRS. Authoritative and
+# source-agnostic — works for local repos (no timer) AND on hosts with no glossary engine (no
+# slice). Tear down each orphan's refresh unit (git repos only; disable is a no-op for local),
+# its glossary slice + lock, and its on-disk repo copy + graph.
 CUR_SUBDIRS=" $(echo $SUBDIRS) "   # space-delimited membership test
 GLOSSARY_ROOT="${GLOSSARY_ROOT:-/data/glossary}"
 PROJ_GLOSS_DIR="$GLOSSARY_ROOT/$PROJECT_ID"
-if [ -d "$PROJ_GLOSS_DIR" ]; then
-  for slice in "$PROJ_GLOSS_DIR"/*.jsonl; do
-    [ -e "$slice" ] || continue                  # nullglob-safe: no slices yet
-    sub="$(basename "$slice" .jsonl)"
-    case "$CUR_SUBDIRS" in *" $sub "*) continue ;; esac   # still current → keep
-    echo "glossary: reconcile — repo '$sub' removed from project; tearing down slice + graph + any refresh unit"
-    # git repos have a refresh unit/timer; local repos don't — disable is a benign no-op either way.
-    systemctl disable --now "index-refresh-${sub}.timer" 2>/dev/null || true
-    systemctl reset-failed "index-refresh-${sub}.timer" "index-refresh-${sub}.service" 2>/dev/null || true
-    rm -f "/etc/systemd/system/index-refresh-${sub}.service" "/etc/systemd/system/index-refresh-${sub}.timer" 2>/dev/null || true
-    rm -f "$PROJ_GLOSS_DIR/${sub}.jsonl" "$PROJ_GLOSS_DIR/.${sub}.lock" 2>/dev/null || true
-    rm -rf "$LOCAL_REPO_ROOT/${sub}" "$LOCAL_REPO_ROOT/${sub}.bridge.lock" 2>/dev/null || true  # drop the orphan repo copy + graph
-  done
-fi
+for sub in $OLD_SUBDIRS; do
+  case "$CUR_SUBDIRS" in *" $sub "*) continue ;; esac   # still current → keep
+  echo "reconcile: repo '$sub' removed from project $PROJECT_ID — tearing down unit + slice + repo copy"
+  systemctl disable --now "index-refresh-${sub}.timer" 2>/dev/null || true
+  systemctl reset-failed "index-refresh-${sub}.timer" "index-refresh-${sub}.service" 2>/dev/null || true
+  rm -f "/etc/systemd/system/index-refresh-${sub}.service" "/etc/systemd/system/index-refresh-${sub}.timer" 2>/dev/null || true
+  rm -f "$PROJ_GLOSS_DIR/${sub}.jsonl" "$PROJ_GLOSS_DIR/.${sub}.lock" 2>/dev/null || true
+  rm -rf "$LOCAL_REPO_ROOT/${sub}" "$LOCAL_REPO_ROOT/${sub}.incoming" "$LOCAL_REPO_ROOT/${sub}.bridge.lock" 2>/dev/null || true
+done
 systemctl daemon-reload 2>/dev/null || true
 ```
 
-注：原版「Repo working copies under /data/repo are left in place」的注释也一并去掉——slice-driven 下顺手清掉孤儿 repo 副本，避免删 local 仓后 `/data/repo/<sub>` + graph 残留占盘（独立复审 H1 的另一半）。git 孤儿仓现在也会被清副本，行为更干净、与「不再 serve 即可回收」一致。
+注：清理也含孤儿的 `.incoming` 暂存目录（local 仓特有），避免删仓后残留。git 孤儿仓现在也清 repo 副本，与「不再 serve 即可回收」一致，比原版「副本留在原地」更干净。
 
 - [ ] **Step 4: 写 reconcile 回归测试**
 
-新建 `scripts/tests/test_reconcile_slice_driven.sh`：静态断言 reconcile 是 slice-driven、且 local 仓孤儿能被该逻辑覆盖。
+新建 `scripts/tests/test_reconcile_orphans.sh`：静态断言 reconcile 是 old-manifest-driven、覆盖无 timer 的 local 孤儿、清 repo 副本。
 
 ```bash
 #!/usr/bin/env bash
-# test_reconcile_slice_driven.sh — reconcile must iterate glossary slices, not refresh timers,
-# so a removed LOCAL repo (which has no timer) still gets cleaned. Static assertions on the source.
+# test_reconcile_orphans.sh — reconcile must be driven by the OLD manifest's subdirs (orphans =
+# old − new), NOT by refresh timers (local repos have none) or glossary slices (may be absent on a
+# no-engine host). Static assertions on the source.
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 A="$ROOT/index-service/activate_project.sh"
 _run=0 _fail=0
 check() { _run=$((_run+1)); if [[ "$2" -eq 0 ]]; then printf '  ok   %s\n' "$1"; else printf '  FAIL %s\n' "$1"; _fail=$((_fail+1)); fi; }
-echo "test_reconcile_slice_driven:"
+echo "test_reconcile_orphans:"
 
-# reconcile loop drives off slices in the project glossary dir, NOT systemctl list-unit-files
-grep -q 'for slice in "$PROJ_GLOSS_DIR"/\*\.jsonl' "$A"; check "reconcile iterates glossary slices" $?
+# OLD_SUBDIRS captured BEFORE the manifest is overwritten
+grep -q 'OLD_SUBDIRS=' "$A"; check "captures old subdirs" $?
+ovl=$(grep -n 'OLD_SUBDIRS="\$(python3' "$A" | head -1 | cut -d: -f1)
+wrl=$(grep -n "printf '%s' \"\$REPO_MANIFEST_JSON\" > \"\$MANIFEST\"" "$A" | head -1 | cut -d: -f1)
+[[ -n "$ovl" && -n "$wrl" && "$ovl" -lt "$wrl" ]]; check "old subdirs captured before manifest overwrite" $?
+# reconcile iterates OLD_SUBDIRS, NOT refresh timers
+grep -q 'for sub in \$OLD_SUBDIRS' "$A"; check "reconcile iterates old manifest subdirs" $?
 ! grep -q "list-unit-files 'index-refresh-\*.timer'" "$A"; check "reconcile no longer driven by refresh timers" $?
-# orphan cleanup removes the repo copy too (not just the slice)
-grep -q 'rm -rf "$LOCAL_REPO_ROOT/${sub}"' "$A"; check "orphan repo copy is removed" $?
+# orphan cleanup removes the repo copy + .incoming, not just the slice
+grep -q 'rm -rf "$LOCAL_REPO_ROOT/${sub}" "$LOCAL_REPO_ROOT/${sub}.incoming"' "$A"; check "orphan repo copy + .incoming removed" $?
 bash -n "$A"; check "activate_project.sh parses" $?
 [[ "$_fail" -eq 0 ]]; exit $?
 ```
 
 - [ ] **Step 5: 运行测试，确认通过**
 
-Run: `bash scripts/tests/test_activate_branch.sh && bash scripts/tests/test_reconcile_slice_driven.sh && bash scripts/tests/test_manifest.sh && bash -n index-service/activate_project.sh`
+Run: `bash scripts/tests/test_activate_branch.sh && bash scripts/tests/test_reconcile_orphans.sh && bash scripts/tests/test_manifest.sh && bash -n index-service/activate_project.sh`
 Expected: 全 ok。
 
 - [ ] **Step 6: 提交**
 
 ```bash
-git add index-service/activate_project.sh scripts/tests/test_activate_branch.sh scripts/tests/test_reconcile_slice_driven.sh
-git commit -m "feat(index): source-aware activate + slice-driven reconcile (clean removed local repos)"
+git add index-service/activate_project.sh scripts/tests/test_activate_branch.sh scripts/tests/test_reconcile_orphans.sh
+git commit -m "feat(index): source-aware activate + old-manifest-driven reconcile (clean removed local repos)"
 ```
 
 ---
@@ -504,6 +517,10 @@ start_ln=$(grep -nF 'systemctl start "$BRIDGE"' "$S" | tail -1 | cut -d: -f1)
 check "stop bridge < build < start bridge" $?
 grep -q 'trap rollback EXIT' "$S"; check "arms rollback on failure" $?
 grep -q 'REINDEX_PREPARED' "$S"; check "has --prepare mode" $?
+# glossary slice must be rebuilt after a successful graph build (local repos have no refresh timer)
+grep -q 'glossary_gen' "$S" && glos_ln=$(grep -nF 'glossary_gen' "$S" | head -1 | cut -d: -f1)
+[[ -n "${glos_ln:-}" && "$glos_ln" -gt "$start_ln" ]]; check "glossary rebuilt after graph build+bridge start" $?
+grep -q 'bedrock-runtime converse' "$S"; check "glossary rebuild gated by Bedrock precheck" $?
 [[ "$_fail" -eq 0 ]]; exit $?
 ```
 
@@ -597,6 +614,35 @@ R="$(systemctl show "index-build@${SUBDIR}.service" --value -p Result 2>/dev/nul
 systemctl start "$BRIDGE"
 trap - EXIT
 rm -rf "$OLD"
+
+# REBUILD THE GLOSSARY SLICE (修多仓复审 C1). git repos refresh their slice via the per-repo timer
+# (glossary_refresh.sh, diff-based); LOCAL repos have NO timer, so without this the slice would stay
+# frozen at the first activate — new/renamed Chinese-term→symbol mappings would be missing and
+# deleted symbols would linger. We mirror activate_project's initial build: --full (local repos have
+# no sha to diff), same per-slice flock shared with any concurrent refresh, Bedrock precheck so a
+# no-engine host degrades gracefully (graph already rebuilt; an empty/stale glossary is tolerable).
+# Detached so reindex returns promptly; the bridge is already serving the fresh graph.
+# shellcheck disable=SC1091
+. /etc/index-service.env 2>/dev/null || true   # MODEL, REGION, GLOSSARY_MAX_FILES
+GLOSSARY_ROOT="${GLOSSARY_ROOT:-/data/glossary}"
+if [ -z "${MODEL:-}" ]; then
+  echo "reindex: MODEL empty — graph rebuilt, skipping glossary refresh (engine disabled)"
+elif ! aws bedrock-runtime converse --region "${REGION:-}" --model-id "$MODEL" \
+        --messages '[{"role":"user","content":[{"text":"ok"}]}]' \
+        --cli-connect-timeout 8 --cli-read-timeout 20 >/dev/null 2>&1; then
+  echo "reindex: Bedrock not invokable — graph rebuilt, skipping glossary refresh (slice left as-is)"
+else
+  mkdir -p "$GLOSSARY_ROOT/${PID}"
+  GLOG="/var/log/glossary-build-${PID}-${SUBDIR}.log"
+  ( cd /opt/idx/app && nohup env GLOSSARY_ROOT="$GLOSSARY_ROOT" AWS_REGION="${REGION:-}" \
+      ${GLOSSARY_MAX_FILES:+GLOSSARY_MAX_FILES="$GLOSSARY_MAX_FILES"} \
+      flock "$GLOSSARY_ROOT/${PID}/.${SUBDIR}.lock" \
+        python3 -m glossary_gen --project "${PID}" --repo-root "$WS" \
+          --out "$GLOSSARY_ROOT/${PID}/${SUBDIR}.jsonl" \
+          --model "$MODEL" --region "${REGION:-}" --full \
+          >>"$GLOG" 2>&1 & ) || true
+  echo "reindex: glossary slice rebuild launched (detached) for $SUBDIR"
+fi
 echo "REINDEX_DONE subdir=${SUBDIR} project=${PID}"
 ```
 
@@ -1146,7 +1192,7 @@ git commit -m "docs: single-host bootstrap + local-repo ingestion (runbook, inva
 - [ ] **Step 1: 离线套件**
 
 Run: `./scripts/test.sh`
-Expected: 退出码 0（lint + 全部 shell/python 单测 + typecheck；新增 `test_activate_branch.sh`/`test_reconcile_slice_driven.sh`/`test_local_repo_config.sh`/`test_reindex_local_repo.sh`/`test_push_local_repo.sh`/`test_bootstrap_idempotent.sh`/`test_provision_local_mode.sh`/`test_deploy_all_local.sh` + 扩充的 `test_manifest.sh` 均被发现并通过）。
+Expected: 退出码 0（lint + 全部 shell/python 单测 + typecheck；新增 `test_activate_branch.sh`/`test_reconcile_orphans.sh`/`test_local_repo_config.sh`/`test_reindex_local_repo.sh`/`test_push_local_repo.sh`/`test_bootstrap_idempotent.sh`/`test_provision_local_mode.sh`/`test_deploy_all_local.sh` + 扩充的 `test_manifest.sh` 均被发现并通过）。
 
 - [ ] **Step 2: 结构自检**
 
@@ -1198,7 +1244,13 @@ Expected: 干净。
 - 🟡 纯 push 时脚本可能无 +x → Task 6 改 `sudo bash <script>` 调用；Task 10 sudoers 同步为 `/bin/bash <固定脚本> *` ✓
 
 **第四轮 review 修订（独立全量复审 H1）：**
-- 🔴 删 local 仓泄漏 graph + glossary slice（reconcile 只遍历 refresh timer，local 仓无 timer 故永不被清，slice 被 glossary_read 无条件 glob 污染索引）→ Task 2 把 reconcile 改为 **slice-driven**（遍历本项目 glossary slice，覆盖 git+local 两类孤儿，并顺手清孤儿 repo 副本）；加 `test_reconcile_slice_driven.sh` 回归 ✓
+- 🔴 删 local 仓泄漏 graph + glossary slice（reconcile 只遍历 refresh timer，local 仓无 timer 故永不被清，slice 被 glossary_read 无条件 glob 污染索引）→ Task 2 reconcile 改为按孤儿清理（初版 slice-driven，第五轮升级为 old-manifest-driven）✓
+
+**第五轮 review 修订（多仓/路径对齐独立复审）：**
+- 🔴 C1：local 仓 glossary 词表永不刷新（git 仓靠 timer→glossary_refresh.sh diff 重建；local 无 timer，reindex 只建 graph 不碰词表 → 中文词→新符号映射失效，删的旧符号仍被返回）→ Task 5 reindex 成功后追加一次 `--full` glossary 重建（镜像 activate：Bedrock precheck + 同一 per-slice flock + 后台 detached）✓
+- 🟠 M1：slice-driven reconcile 在「无 Bedrock 引擎」部署下失效（local 仓没 slice → 孤儿判据落空、泄漏复发）→ Task 2 reconcile 升级为 **old-manifest-driven**（覆盖前抓旧 subdirs，孤儿=旧−新，与 timer/slice/引擎是否存在全部无关）；测试改名 `test_reconcile_orphans.sh` ✓
+- 🟡 M2：build 模板未排除 `.codegraph/.home`（local reindex 走全新空目录、无残留，比 git 仓更干净；列入真机集成核对 graph 节点数）— 记录，不阻断
+- 五个面（路径对齐 / bridge 多仓隔离 / 停机波及 git 仓 / `.incoming` 不干扰 glossary / serve-args 隔离）经独立复审验证正确，无需改
 
 **Placeholder scan:** 无 TBD/TODO；每个代码步骤含完整代码块与命令、预期输出。
 
