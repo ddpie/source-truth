@@ -123,30 +123,32 @@ codegraph 索引吃内存、随仓库增大而增长，按仓库规模选机型�
 
 ### 在单台 EC2 上就地部署（`--local`）
 
-默认流程是「在一台部署机上运行脚本，由脚本新建索引主机 EC2」。若希望**只开一台 EC2、在其上运行脚本完成整套部署**（省去单独的部署机），使用 `--local` 模式——这台 EC2 同时是部署机和常驻索引主机。
+默认流程是「在一台部署机上运行脚本，由脚本新建索引主机 EC2」。若希望**只开一台 EC2、在其上完成整套部署**（省去单独的部署机），用 `--local` 模式——这台 EC2 既跑部署、又常驻为索引与网关主机。它**长期保留**：部署状态（`.local/`）就存在这台机器的仓库目录里，以后升级 SSH 回这台、重跑即可。
 
-前提（与默认流程的差异）：
-
-- **必须是 ARM64（aarch64）EC2**、Ubuntu 24.04：镜像在本机构建，codegraph-server 也是 ARM64。x86 机器会在入口处的架构检查被拦下。
-- **IMDSv2 required、hop-limit 1**；该机器专用于本系统，不与其它业务共用。
-- 部署用户需**免密 sudo**（或以 root 运行）——`bootstrap.sh` 与本地仓 `reindex` 均需 `sudo`。
-- **实例角色须预先配好权限**：`--local` 不会在部署过程中修改 IAM，权限需在开机前配置到位。权限缺失不会立即报错，而是延迟暴露——网关每次回答返回 403、术语表始终为空、日志无法写入 CloudWatch。一台 EC2 只有一个实例角色，它需同时承担两类职责：
-  - 部署期建资源：建/查 VPC·子网·安全组、向 ECR 推镜像、用 `bedrock-agentcore` 创建并调用 runtime、读写 Secrets Manager 的 `source-truth/*`、SSM、EC2 的 `describe`/`modify-instance-attribute`。
-  - 运行期：`s3:GetObject`/`ListBucket`（`source-truth-repo-<account>-*`）、`secretsmanager:GetSecretValue`（`source-truth/*`）、`bedrock:InvokeModel(WithResponseStream)`（`anthropic.*` 及其 inference-profile）、`bedrock-agentcore:InvokeAgentRuntime`（`source_truth_agent*`）、CloudWatch logs（`/source-truth/*`）。
-  - 运行期这套权限与默认流程中 `provision_iam.sh` 为 `source-truth-index-role` 配的 5 条 inline policy（s3-artifacts / secrets-read / cloudwatch-logs / agentcore-invoke / bedrock-invoke）一致——可直接复制到本机角色，再补上部署期建资源的权限。部署仅做一次预检：确认实例角色存在、且能读取 S3 上的部署产物；不通过即停止并报错。其余权限的缺失要到首次提问或 e2e 探针时才会暴露。
-
-运行方式（在该 EC2 上）：
+**操作三步（前两步用 [`docs/deploy/launch-host.sh`](deploy/launch-host.sh) 在你自己的机器上一条龙完成）：**
 
 ```bash
-# 克隆仓库后
-./scripts/install.sh                      # 交互式（同样可选 git 仓或本地仓）
-# 或直接：
-./scripts/deploy-all.sh --region <r> --local
+# ① 在你本地：选 AWS profile → 建 IAM → 选 VPC/子网/密钥/机型 → 起一台 ARM64 EC2 并挂好实例角色
+./docs/deploy/launch-host.sh          # 全程交互选择；也可 --profile <名> --region <r> 跳过前两问
+
+# ② 按脚本末尾提示 SSH 进这台 EC2，克隆仓库
+ssh ubuntu@<脚本打印的 IP>
+bash <(curl -fsSL https://raw.githubusercontent.com/ddpie/source-truth/main/scripts/get.sh)
+
+# ③ 在 EC2 上部署（用这台机器的实例角色，无需配 profile）
+cd source-truth && ./scripts/install.sh        # 或 ./scripts/deploy-all.sh --region <r> --local
 ```
 
-`--local` 不新建 VPC/NAT，复用本机所在的 VPC 和子网；另建一个专用安全组附加到本机，runtime 也使用它——该安全组只放行 8080-8099 端口，且仅对组内成员（本机及其启动的 runtime）开放，外部无法访问 bridge。`bootstrap` 在本机执行完毕后再继续后续步骤。**AgentCore Runtime 仍由 AWS 托管**，既不占用本机资源、也无需自行运维——「单台 EC2」指只需开通并维护这一台主机。首次部署约 10–20 分钟（视机型而定）：bootstrap（安装依赖、构建网关）与镜像构建都在本机串行执行，因此比默认的双机方式略慢。
+要点与前提：
 
-**升级 source-truth（本地模式）**：默认（双机）模式靠 `--refresh-index` 蓝绿换一台新机来升级底座；本地模式只有这一台主机，不走蓝绿，而是**就地重跑** `./scripts/deploy-all.sh --region <r> --local` 升级——它会重新下发底座代码（bridge / 网关 / 依赖）、重建并推送镜像、更新 runtime，各项目的网关与索引随之重启到新版本。**因此实例角色须长期保留上面列出的部署期权限**（建 / 改 ECR、AgentCore runtime、安全组等），每次升级都会用到，不能在首次部署后移除。升级有一段服务中断（与首次部署同量级，主要是镜像重建 + 索引重启），低峰期操作。
+- **EC2 必须是 ARM64（aarch64）、Ubuntu 24.04**：镜像在本机构建、codegraph-server 也是 ARM64；脚本一开始就检查，x86 直接拦下。`launch-host.sh` 会设置 IMDSv2 required + hop-limit 1。
+- 部署用户需**免密 sudo**（或以 root 运行）——`bootstrap.sh` 与本地仓 `reindex` 都用 `sudo`。
+- **`--local` 部署用的是这台机器的实例角色**（不是你本地的 profile，那个 profile 进了 EC2 就不在了）。因此这台机器的角色既要建资源（VPC/EC2/ECR/AgentCore/Secrets）、又要运行期那几类，**是一个权限较大的角色**——这台机器应**专机专用、不与其它业务共用**。角色由 `launch-host.sh`（内部调 [`create-iam.sh`](deploy/create-iam.sh) + CloudFormation 模板 [`source-truth-iam.yaml`](deploy/source-truth-iam.yaml)）一次性建好。建角色那一步用你本地选定的 profile（要有建 IAM 的权限）。
+- 角色由 CloudFormation 管理（无状态、可重建）；EC2 独立长存（带着 `.local/` 状态），**不在任何 CloudFormation 栈里**——否则删栈会连部署状态一起删。
+
+`--local` 不新建 VPC/NAT，复用本机所在的 VPC 和子网；另建一个专用安全组附加到本机，runtime 也用它——该安全组只放行 8080-8099 端口、且只对组内成员（本机及其启动的 runtime）开放，外部访问不到 bridge。**AgentCore Runtime 仍由 AWS 托管**，不占用本机资源、也无需运维——「单台 EC2」指只需开通并维护这一台主机。首次部署约 10–20 分钟（视机型而定）：bootstrap 与镜像构建都在本机串行执行，比默认的双机方式略慢。
+
+**升级 source-truth（本地模式）**：默认（双机）模式靠 `--refresh-index` 蓝绿换一台新机升级底座；本地模式只有这一台主机，不走蓝绿，而是 SSH 回这台 EC2、`cd source-truth && git pull && ./scripts/deploy-all.sh --region <r> --local` 就地升级——`.local/` 状态还在，脚本据此增量更新：重新下发底座代码、重建并推送镜像、更新 runtime，各项目的网关与索引随之重启到新版本。升级有一段服务中断（与首次部署同量级，主要是镜像重建 + 索引重启），低峰期操作。
 
 ## 三、接入飞书（connect 清单）
 

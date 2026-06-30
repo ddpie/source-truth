@@ -82,6 +82,9 @@ docs/
   structure_en.md       This file (English counterpart)
   runbook.md            Deploy / connect-Feishu / ops / troubleshooting (neutral name, exempt from bilingual pairing)
   glossary.md           How the term bridge is built: build flow / output structure / trust basis / cost & ops (human-facing, neutral name)
+  deploy/               IAM resources to pre-create for --local mode (operator runs once)
+    source-truth-iam.yaml       CloudFormation: two roles (instance role + AgentCore runtime role) + instance profile
+    create-iam.sh               Wrapper: pick AWS profile / region, then invoke the CFN above (interactive, no flags to type)
   design/               Design source of truth (Chinese only, not yet translated)
     README.md                   Directory notes + relation to architecture / invariants docs
     requirements_zh.md          Requirements & solution review notes (imported)

@@ -1,0 +1,186 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  source-truth --local 模式的 EC2 实例角色（运维一次性预建）。
+  --local 把整套部署放在这一台 EC2 上跑，部署调用 AWS 用的就是这台机器的实例角色，因此该角色既要
+  「部署期建资源」的权限，也要「运行期」的权限——是一个权限较大的角色。**这台机器应专机专用、不与其它业务
+  共用**（IMDSv2 + hop-limit 1 已由 launch-host.sh 设置以降低被借用风险）。
+  默认（双机）模式不需要这个模板：那条路由 scripts/lib/provision_iam.sh 用运维的 admin 凭证自动建角色。
+
+Resources:
+
+  IndexRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: source-truth-index-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore   # SSM 接入（进实例排查）
+
+      Policies:
+        # ---- 运行期：与 provision_iam.sh 给 source-truth-index-role 配的 5 条一致 ----
+        - PolicyName: s3-artifacts
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [ s3:GetObject, s3:ListBucket ]
+                Resource:
+                  - !Sub "arn:aws:s3:::source-truth-repo-${AWS::AccountId}-*"
+                  - !Sub "arn:aws:s3:::source-truth-repo-${AWS::AccountId}-*/*"
+        - PolicyName: secrets-read
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Sub "arn:aws:secretsmanager:*:${AWS::AccountId}:secret:source-truth/*"
+        - PolicyName: cloudwatch-logs
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: logs:CreateLogGroup
+                Resource: "*"
+              - Effect: Allow
+                Action: [ logs:CreateLogStream, logs:PutLogEvents, logs:DescribeLogStreams, logs:PutRetentionPolicy ]
+                Resource:
+                  - !Sub "arn:aws:logs:*:${AWS::AccountId}:log-group:/source-truth/*"
+                  - !Sub "arn:aws:logs:*:${AWS::AccountId}:log-group:/source-truth/*:*"
+        - PolicyName: bedrock-invoke
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [ bedrock:InvokeModel, bedrock:InvokeModelWithResponseStream ]
+                Resource:
+                  - "arn:aws:bedrock:*::foundation-model/anthropic.*"
+                  - !Sub "arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/*anthropic.*"
+
+        # ---- 部署期：在本机跑 deploy-all --local 时建资源所需 ----
+        - PolicyName: deploy-network        # VPC/子网/NAT/EIP/路由/安全组 的 describe + create + 改属性
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:Describe*
+                  - ec2:CreateVpc
+                  - ec2:CreateSubnet
+                  - ec2:CreateInternetGateway
+                  - ec2:AttachInternetGateway
+                  - ec2:CreateNatGateway
+                  - ec2:AllocateAddress
+                  - ec2:CreateRouteTable
+                  - ec2:CreateRoute
+                  - ec2:AssociateRouteTable
+                  - ec2:CreateSecurityGroup
+                  - ec2:AuthorizeSecurityGroupIngress
+                  - ec2:CreateTags
+                  - ec2:ModifyVpcAttribute
+                  - ec2:ModifySubnetAttribute
+                  - ec2:ModifyInstanceAttribute        # 把专用 SG 附加到本机
+                  - ec2:RunInstances
+                  - ec2:TerminateInstances
+                Resource: "*"
+        - PolicyName: deploy-ecr            # 建仓库 + 推 agent 镜像
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+                  - ecr:DescribeRepositories
+                  - ecr:CreateRepository
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:InitiateLayerUpload
+                  - ecr:UploadLayerPart
+                  - ecr:CompleteLayerUpload
+                  - ecr:PutImage
+                Resource: "*"
+        - PolicyName: deploy-agentcore      # 建/查/调 AgentCore Runtime
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock-agentcore:CreateAgentRuntime
+                  - bedrock-agentcore:UpdateAgentRuntime
+                  - bedrock-agentcore:GetAgentRuntime
+                  - bedrock-agentcore:ListAgentRuntimes
+                  - bedrock-agentcore:DeleteAgentRuntime
+                  - bedrock-agentcore:InvokeAgentRuntime
+                Resource: "*"
+              - Effect: Allow                # 解析区域可用的推理档（resolve_model.sh）
+                Action: [ bedrock:ListInferenceProfiles, bedrock:GetInferenceProfile ]
+                Resource: "*"
+        - PolicyName: deploy-secrets        # 建/写飞书 + git + 日志盐 密钥
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:CreateSecret
+                  - secretsmanager:PutSecretValue
+                  - secretsmanager:DescribeSecret
+                  - secretsmanager:TagResource
+                Resource: !Sub "arn:aws:secretsmanager:*:${AWS::AccountId}:secret:source-truth/*"
+        - PolicyName: deploy-iam            # provision_iam.sh 建 runtime 角色 + 给本角色补运行期策略 + PassRole
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - iam:GetRole
+                  - iam:CreateRole
+                  - iam:PutRolePolicy
+                  - iam:DeleteRolePolicy
+                  - iam:AttachRolePolicy
+                  - iam:GetInstanceProfile
+                  - iam:CreateInstanceProfile
+                  - iam:AddRoleToInstanceProfile
+                  - iam:CreateServiceLinkedRole
+                  - iam:PassRole
+                Resource:
+                  - !Sub "arn:aws:iam::${AWS::AccountId}:role/source-truth-*"
+                  - !Sub "arn:aws:iam::${AWS::AccountId}:role/SourceTruthAgentRuntimeRole"
+                  - !Sub "arn:aws:iam::${AWS::AccountId}:instance-profile/source-truth-*"
+              - Effect: Allow                # AgentCore 服务关联角色（aws-service-name 固定）
+                Action: iam:CreateServiceLinkedRole
+                Resource: "*"
+                Condition:
+                  StringEquals: { "iam:AWSServiceName": "bedrock-agentcore.amazonaws.com" }
+        - PolicyName: deploy-misc
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow                # 上传部署产物到 S3 + 建产物桶
+                Action: [ s3:PutObject, s3:CreateBucket, s3:PutBucketPolicy, s3:GetBucketLocation, s3:ListAllMyBuckets ]
+                Resource: "*"
+              - Effect: Allow                # 经 SSM 在本机跑 activate/gateway 命令
+                Action: [ ssm:SendCommand, ssm:GetCommandInvocation ]
+                Resource: "*"
+              - Effect: Allow                # route53 私有 DNS（index 主机稳定名）
+                Action: [ route53:ListHostedZonesByVPC, route53:ListHostedZones, route53:ChangeResourceRecordSets, route53:CreateHostedZone, route53:GetChange ]
+                Resource: "*"
+              - Effect: Allow
+                Action: sts:GetCallerIdentity
+                Resource: "*"
+
+  IndexInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: source-truth-index-profile
+      Roles: [ !Ref IndexRole ]
+
+Outputs:
+  InstanceProfileName:
+    Description: 启动索引主机 EC2 时挂这个 instance profile（launch-host.sh 会自动挂）
+    Value: !Ref IndexInstanceProfile
+  RoleName:
+    Description: 实例角色名（部署期 + 运行期权限都在它上面）
+    Value: !Ref IndexRole

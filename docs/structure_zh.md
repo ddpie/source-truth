@@ -82,6 +82,9 @@ docs/
   structure_en.md       英文对照
   runbook.md            部署 / 连飞书 / 运维 / 排错（中性名，不参与双语配对）
   glossary.md           术语表怎么来的：构建流程 / 产物结构 / 可信依据 / 成本运维（面向人，中性名）
+  deploy/               --local 模式的 IAM 预建资源（运维一次性跑）
+    source-truth-iam.yaml       CloudFormation：建两个角色（实例角色 + AgentCore 运行角色）+ 实例 profile
+    create-iam.sh               包装脚本：选 AWS profile / region 后调上面的 CFN（运维交互选，不手敲参数）
   design/               设计权威依据（仅中文，暂不翻译）
     README.md                   目录说明 + 与架构 / 不变量文档的关系
     requirements_zh.md          需求与方案评审纪要（导入）
