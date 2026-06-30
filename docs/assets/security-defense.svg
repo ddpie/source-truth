@@ -16,7 +16,7 @@
     <text x="137" y="137" text-anchor="middle" font-size="11" fill="#7a8493">无法越过只读权限写入或提交</text>
 
     <rect x="44" y="156" width="186" height="74" rx="7" fill="#ffffff" stroke="#cdd8ec" stroke-width="1"/>
-    <text x="137" y="178" text-anchor="middle" font-size="11.5" font-weight="600" fill="#3457a6">模型侧：不提供写工具</text>
+    <text x="137" y="178" text-anchor="middle" font-size="11.5" font-weight="600" fill="#3457a6">SDK 侧：只放行只读工具</text>
     <text x="137" y="198" text-anchor="middle" font-size="10.5" fill="#5b6573">tools=[] · disallowed_tools</text>
     <text x="137" y="216" text-anchor="middle" font-size="10.5" fill="#5b6573">dontAsk · strict_mcp_config</text>
 
