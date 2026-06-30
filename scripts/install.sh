@@ -364,19 +364,31 @@ flow_add_project() {
   # repos: loop git URL + subdir + ref until blank. N counts repos ALREADY added, so the
   # prompt announces which repo you're entering ("第 1 个仓库" first, then 2, 3, …) — without
   # it a multi-repo project gives no signal of how many are in or which one you're on.
-  local REPOS_JSON="[]" RGIT RSUB RREF N=0
-  say info "逐个添加该项目的代码仓库（git 地址留空结束）/ add repos (blank git URL = done):"
+  local REPOS_JSON="[]" RGIT RSUB RREF RSRC SRC_CHOICE N=0
+  say info "逐个添加该项目的代码仓库（仓库名留空结束）/ add repos (blank subdir = done):"
   while true; do
-    ask RGIT "  第 $((N + 1)) 个仓库 · git 地址 / repo #$((N + 1)) git URL (blank=done)" ""
-    [[ -z "$RGIT" ]] && break
-    ask RSUB "    on-host 子目录名 / subdir (^[a-z0-9-]+$)" ""
-    [[ "$RSUB" =~ ^[a-z0-9][a-z0-9-]*$ ]] || { say warn "subdir 非法，跳过该仓 / invalid subdir, skipped"; continue; }
-    ask RREF "    分支/标签（留空=默认分支）/ ref (blank=default)" ""
-    REPOS_JSON="$(RGIT="$RGIT" RSUB="$RSUB" RREF="$RREF" python3 -c '
+    ask RSUB "  第 $((N + 1)) 个仓库 · on-host 子目录名 / repo #$((N + 1)) subdir (^[a-z0-9-]+$, blank=done)" ""
+    [[ -z "$RSUB" ]] && break
+    [[ "$RSUB" =~ ^[a-z0-9][a-z0-9-]*$ ]] || { say warn "subdir 非法，跳过 / invalid subdir, skipped"; continue; }
+    pick SRC_CHOICE 0 \
+      "git    远程 git 仓（自动定时刷新）/ remote git repo (auto-refresh)" \
+      "local  本地仓（rsync 直推 + 手动刷新）/ local repo (rsync push + manual refresh)"
+    RSRC="${SRC_CHOICE%%[[:space:]]*}"
+    if [[ "$RSRC" == "git" ]]; then
+      ask RGIT "    git 地址 / repo git URL" ""
+      [[ -n "$RGIT" ]] || { say warn "git 仓必须有地址，跳过 / git repo needs a URL, skipped"; continue; }
+      ask RREF "    分支/标签（留空=默认分支）/ ref (blank=default)" ""
+      REPOS_JSON="$(RGIT="$RGIT" RSUB="$RSUB" RREF="$RREF" python3 -c '
 import json,os,sys
-a=json.loads(sys.argv[1]); a.append({"subdir":os.environ["RSUB"],"git":os.environ["RGIT"],"ref":os.environ["RREF"]}); print(json.dumps(a))' "$REPOS_JSON")"
+a=json.loads(sys.argv[1]); a.append({"subdir":os.environ["RSUB"],"source":"git","git":os.environ["RGIT"],"ref":os.environ["RREF"]}); print(json.dumps(a))' "$REPOS_JSON")"
+      say ok "    已加入 git 仓 / git repo: $RSUB ← $RGIT${RREF:+ @$RREF}"
+    else
+      REPOS_JSON="$(RSUB="$RSUB" python3 -c '
+import json,os,sys
+a=json.loads(sys.argv[1]); a.append({"subdir":os.environ["RSUB"],"source":"local"}); print(json.dumps(a))' "$REPOS_JSON")"
+      say ok "    已加入本地仓 / local repo: $RSUB （部署后用 scripts/push-local-repo.sh 推送代码）"
+    fi
     N=$((N + 1))
-    say ok "    已加入第 $N 个仓库 / repo #$N added: $RSUB ← $RGIT${RREF:+ @$RREF}"
   done
   [[ "$REPOS_JSON" != "[]" ]] || { say err "至少要一个仓库 / need at least one repo"; exit 1; }
 
