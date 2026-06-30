@@ -259,16 +259,71 @@ done
 
 glossary 初建（218-265 行）对 local 仓照常进行，不改。
 
-- [ ] **Step 4: 运行测试，确认通过**
-
-Run: `bash scripts/tests/test_activate_branch.sh && bash scripts/tests/test_manifest.sh && bash -n index-service/activate_project.sh`
-Expected: 全 ok。
-
-- [ ] **Step 5: 提交**
+**关键修正——reconcile 必须改为 slice-driven，否则删 local 仓会泄漏 graph + glossary slice（独立复审 H1）。**
+现有 reconcile 循环（181-201 行）**只遍历 `index-refresh-*.timer`** 来找「已从 manifest 删除的孤儿仓」并清其 slice。但 local 仓**不建 timer**（本任务设计），所以「项目内删掉一个 local 仓、重 activate」时该循环看不到它 → 它的 glossary slice 残留，被 `glossary_read.py` 的 `os.listdir` 无条件 glob 进索引、永久污染（注释 184 行自述此风险）。把驱动从「遍历 timer」改成「遍历**本项目 glossary 目录下的 slice**」——每个 activate 过的仓（git+local）都建 slice，且 slice 天然按 `PROJ_GLOSS_DIR` 隔离，故对 git 仓行为不变（仍删 timer），对 local 仓也能清。把 181-201 行整段替换为：
 
 ```bash
-git add index-service/activate_project.sh scripts/tests/test_activate_branch.sh
-git commit -m "feat(index): branch activate_project by repo source (local skips git fetch + refresh timer)"
+# RECONCILE (slice-driven): any repo whose glossary slice exists under THIS project's dir but is
+# NOT in the current manifest is an orphan — tear down its slice + graph copy + (git repos only)
+# refresh unit. Driving off the slice set (not refresh timers) is REQUIRED because local repos have
+# NO timer; a timer-driven loop would never see a removed local repo and leak its slice forever
+# (glossary_read globs every <sub>.jsonl unconditionally). git orphans still get their timer removed.
+CUR_SUBDIRS=" $(echo $SUBDIRS) "   # space-delimited membership test
+GLOSSARY_ROOT="${GLOSSARY_ROOT:-/data/glossary}"
+PROJ_GLOSS_DIR="$GLOSSARY_ROOT/$PROJECT_ID"
+if [ -d "$PROJ_GLOSS_DIR" ]; then
+  for slice in "$PROJ_GLOSS_DIR"/*.jsonl; do
+    [ -e "$slice" ] || continue                  # nullglob-safe: no slices yet
+    sub="$(basename "$slice" .jsonl)"
+    case "$CUR_SUBDIRS" in *" $sub "*) continue ;; esac   # still current → keep
+    echo "glossary: reconcile — repo '$sub' removed from project; tearing down slice + graph + any refresh unit"
+    # git repos have a refresh unit/timer; local repos don't — disable is a benign no-op either way.
+    systemctl disable --now "index-refresh-${sub}.timer" 2>/dev/null || true
+    systemctl reset-failed "index-refresh-${sub}.timer" "index-refresh-${sub}.service" 2>/dev/null || true
+    rm -f "/etc/systemd/system/index-refresh-${sub}.service" "/etc/systemd/system/index-refresh-${sub}.timer" 2>/dev/null || true
+    rm -f "$PROJ_GLOSS_DIR/${sub}.jsonl" "$PROJ_GLOSS_DIR/.${sub}.lock" 2>/dev/null || true
+    rm -rf "$LOCAL_REPO_ROOT/${sub}" "$LOCAL_REPO_ROOT/${sub}.bridge.lock" 2>/dev/null || true  # drop the orphan repo copy + graph
+  done
+fi
+systemctl daemon-reload 2>/dev/null || true
+```
+
+注：原版「Repo working copies under /data/repo are left in place」的注释也一并去掉——slice-driven 下顺手清掉孤儿 repo 副本，避免删 local 仓后 `/data/repo/<sub>` + graph 残留占盘（独立复审 H1 的另一半）。git 孤儿仓现在也会被清副本，行为更干净、与「不再 serve 即可回收」一致。
+
+- [ ] **Step 4: 写 reconcile 回归测试**
+
+新建 `scripts/tests/test_reconcile_slice_driven.sh`：静态断言 reconcile 是 slice-driven、且 local 仓孤儿能被该逻辑覆盖。
+
+```bash
+#!/usr/bin/env bash
+# test_reconcile_slice_driven.sh — reconcile must iterate glossary slices, not refresh timers,
+# so a removed LOCAL repo (which has no timer) still gets cleaned. Static assertions on the source.
+set -uo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+A="$ROOT/index-service/activate_project.sh"
+_run=0 _fail=0
+check() { _run=$((_run+1)); if [[ "$2" -eq 0 ]]; then printf '  ok   %s\n' "$1"; else printf '  FAIL %s\n' "$1"; _fail=$((_fail+1)); fi; }
+echo "test_reconcile_slice_driven:"
+
+# reconcile loop drives off slices in the project glossary dir, NOT systemctl list-unit-files
+grep -q 'for slice in "$PROJ_GLOSS_DIR"/\*\.jsonl' "$A"; check "reconcile iterates glossary slices" $?
+! grep -q "list-unit-files 'index-refresh-\*.timer'" "$A"; check "reconcile no longer driven by refresh timers" $?
+# orphan cleanup removes the repo copy too (not just the slice)
+grep -q 'rm -rf "$LOCAL_REPO_ROOT/${sub}"' "$A"; check "orphan repo copy is removed" $?
+bash -n "$A"; check "activate_project.sh parses" $?
+[[ "$_fail" -eq 0 ]]; exit $?
+```
+
+- [ ] **Step 5: 运行测试，确认通过**
+
+Run: `bash scripts/tests/test_activate_branch.sh && bash scripts/tests/test_reconcile_slice_driven.sh && bash scripts/tests/test_manifest.sh && bash -n index-service/activate_project.sh`
+Expected: 全 ok。
+
+- [ ] **Step 6: 提交**
+
+```bash
+git add index-service/activate_project.sh scripts/tests/test_activate_branch.sh scripts/tests/test_reconcile_slice_driven.sh
+git commit -m "feat(index): source-aware activate + slice-driven reconcile (clean removed local repos)"
 ```
 
 ---
@@ -993,7 +1048,15 @@ Phase 3 调用（541-542 行）传 `ST_LOCAL_MODE`：
     "$REGION" "$CONFIG_FILE" "$BUCKET" "$MAX_FILES" "$INSTANCE_TYPE" "$REFRESH_INDEX" "$ROOT_VOLUME_GB" "$MODEL" "$GLOSSARY_MAX_FILES")"
 ```
 
-bootstrap 等待段（547 行起 `wait_base_host.sh`）改为本地模式短路：
+bootstrap 等待段（现有 `if [[ "$DRY_RUN" != true ]] && [[ -n "${INDEX_SERVICE_INSTANCE:-}" ]]; then ... fi`，约 549-571 行，内含 `wait_base_host.sh` + 失败的 --refresh-index 清理）改为：**把现有 `if` 整块原样降级为 `elif`，前面加一个 LOCAL_MODE 短路分支**。即把开头的 `if [[ "$DRY_RUN" != true ]] && [[ -n "${INDEX_SERVICE_INSTANCE:-}" ]]; then` 这一行改成下面这两段（其余行——`wait_base_host.sh` 调用、failed-refresh 清理、收尾 `fi`——**一字不动保留**）：
+
+把这一行：
+
+```bash
+  if [[ "$DRY_RUN" != true ]] && [[ -n "${INDEX_SERVICE_INSTANCE:-}" ]]; then
+```
+
+替换为：
 
 ```bash
   if [[ "$LOCAL_MODE" == true ]]; then
@@ -1003,16 +1066,9 @@ bootstrap 等待段（547 行起 `wait_base_host.sh`）改为本地模式短路�
       || { say err "local-mode bootstrap did not finish (no BOOTSTRAP_DONE) — sudo tail /var/log/index-svc-bootstrap.log"; exit 1; }
     say ok "local-mode base host bootstrap confirmed"
   elif [[ "$DRY_RUN" != true ]] && [[ -n "${INDEX_SERVICE_INSTANCE:-}" ]]; then
-    say info "waiting for base-host bootstrap (apt + codegraph bin + gateway build, ~3-8 min) ..."
-    "$SCRIPT_DIR/lib/wait_base_host.sh" "$REGION" "$INDEX_SERVICE_INSTANCE" || {
-      say err "index base host never finished bootstrap — aborting before attaching projects."
-      say err "  inspect: aws ssm start-session --target $INDEX_SERVICE_INSTANCE ; tail /var/log/index-svc-bootstrap.log"
-      exit 1
-    }
-  fi
 ```
 
-（保留原 wait 分支里 --refresh-index 的失败清理逻辑——把上面 `elif` 分支体替换为原有完整内容，仅在前面加 `if LOCAL_MODE` 短路。实现者照原文保留。）
+这样 `wait_base_host.sh` 块连同其 failed-refresh 清理逻辑（terminate 坏的新实例、还原 INDEX_SERVICE_INSTANCE）完整保留在 `elif` 分支里，本地模式只是在它前面短路掉。
 
 Phase 4（image）：本机 ARM64 时现有 `uname -m` buildx 守卫自然放行，无需改。
 
@@ -1090,7 +1146,7 @@ git commit -m "docs: single-host bootstrap + local-repo ingestion (runbook, inva
 - [ ] **Step 1: 离线套件**
 
 Run: `./scripts/test.sh`
-Expected: 退出码 0（lint + 全部 shell/python 单测 + typecheck；新增 `test_activate_branch.sh`/`test_local_repo_config.sh`/`test_reindex_local_repo.sh`/`test_push_local_repo.sh`/`test_bootstrap_idempotent.sh`/`test_provision_local_mode.sh`/`test_deploy_all_local.sh` + 扩充的 `test_manifest.sh` 均被发现并通过）。
+Expected: 退出码 0（lint + 全部 shell/python 单测 + typecheck；新增 `test_activate_branch.sh`/`test_reconcile_slice_driven.sh`/`test_local_repo_config.sh`/`test_reindex_local_repo.sh`/`test_push_local_repo.sh`/`test_bootstrap_idempotent.sh`/`test_provision_local_mode.sh`/`test_deploy_all_local.sh` + 扩充的 `test_manifest.sh` 均被发现并通过）。
 
 - [ ] **Step 2: 结构自检**
 
@@ -1136,6 +1192,13 @@ Expected: 干净。
 - 🟡 停整项目 bridge 波及同项目其他仓 → Task 10 runbook 明说「同项目其他仓一并离线几分钟」✓
 - 🟡 SG `--groups $CUR_SGS` 裸展开 → Task 8 改 `mapfile` 数组 + `grep '^sg-'` 过滤 None + 已含则跳过 ✓
 - 🟡 host key TOFU → Task 10 runbook 提示首推前带外核对指纹 ✓
+
+**第三轮 review 修订：**
+- 🟡 SG 空读会替换掉客户原 SG → Task 8 加 `${#CUR_SGS[@]}>0` 守卫，fail-closed ✓
+- 🟡 纯 push 时脚本可能无 +x → Task 6 改 `sudo bash <script>` 调用；Task 10 sudoers 同步为 `/bin/bash <固定脚本> *` ✓
+
+**第四轮 review 修订（独立全量复审 H1）：**
+- 🔴 删 local 仓泄漏 graph + glossary slice（reconcile 只遍历 refresh timer，local 仓无 timer 故永不被清，slice 被 glossary_read 无条件 glob 污染索引）→ Task 2 把 reconcile 改为 **slice-driven**（遍历本项目 glossary slice，覆盖 git+local 两类孤儿，并顺手清孤儿 repo 副本）；加 `test_reconcile_slice_driven.sh` 回归 ✓
 
 **Placeholder scan:** 无 TBD/TODO；每个代码步骤含完整代码块与命令、预期输出。
 
