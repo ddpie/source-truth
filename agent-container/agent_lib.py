@@ -119,10 +119,11 @@ CODEGRAPH_TOOLS: tuple[str, ...] = (
 # allow-list change or preset must not be able to admit a graph mutation.
 # NOTE: this list is NOT an exhaustive enumeration of the ~50 codegraph tools — the
 # AUTHORITATIVE read-only guarantee is server-side: the index-service HTTP bridge
-# (http_bridge.py) is a CLOSED allowlist — it only ``add_tool``-registers 7 read-only
-# tools, so no mutating codegraph tool has an MCP descriptor for the model to name at
-# all. This blocklist names only the highest-risk mutators as a redundant agent-side
-# guard; completeness is intentionally delegated to the bridge's closed allowlist.
+# (http_bridge.py) is a CLOSED allowlist — it only ``add_tool``-registers 7 core read-only
+# tools (+ 2 read-only glossary tools when the project is known → ≤9 total), so no mutating
+# codegraph tool has an MCP descriptor for the model to name at all. This blocklist names
+# only the highest-risk mutators as a redundant agent-side guard; completeness is
+# intentionally delegated to the bridge's closed allowlist.
 CODEGRAPH_WRITE_TOOLS: tuple[str, ...] = (
     "mcp__codegraph__codegraph_reindex_workspace",
     "mcp__codegraph__codegraph_index_directory",
@@ -253,6 +254,10 @@ def build_options_dict(
     permitted tools run without prompting under ``dontAsk``. CodeGraph MCP tools
     and server config are added only when a CodeGraph endpoint URL is supplied.
     """
+    # `tools` governs SDK BUILT-INS only (Read/Write/Bash/Glob/…). READONLY_TOOLS is empty,
+    # so built-ins are cleared — the model never even sees their descriptors. The CodeGraph
+    # tools the agent actually uses are NOT built-ins: they arrive via `mcp_servers` below and
+    # are auto-approved through `allowed_tools`, a SEPARATE channel `tools` does not gate.
     tools: list[str] = list(READONLY_TOOLS)
     allowed_tools: list[str] = list(READONLY_TOOLS)
     mcp_servers: dict[str, Any] = {}
