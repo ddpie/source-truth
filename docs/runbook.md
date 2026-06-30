@@ -139,7 +139,7 @@ ssh -t ubuntu@<脚本打印的 IP> 'if [ -d source-truth/.git ]; then git -C sou
 
 要点与前提：
 
-- **某一步失败不用从头来**：`launch-host.sh` 每步都幂等（IAM、建网、安全组都是「有就复用、没有才建」），直接重跑即可，不会留下重复资源。唯一例外是它已经起了 EC2、之后才失败——这时重跑会提示「已有一台 source-truth-host」，照提示复用那台、别再起新的（部署状态在它上面）。第二步（EC2 上 `install.sh` / `deploy-all`）同样幂等，断在哪重跑哪。
+- **某一步失败不用从头来**：`launch-host.sh` 每步都幂等（IAM、建网、安全组都是「有就复用、没有才建」），直接重跑即可，不会留下重复资源。**若它上次已经起了 EC2、之后才中断，重跑会自动复用那台**（确认 IAM 就绪后直接打印第二步的 SSH 命令；机器若被停了会先帮你启动），不会再起一台。确实想要一台全新的就加 `--new-host`。第二步（EC2 上 `install.sh` / `deploy-all`）同样幂等，断在哪重跑哪。
 - **EC2 必须是 ARM64（aarch64）、Ubuntu 24.04**：镜像在本机构建、codegraph-server 也是 ARM64；脚本一开始就检查，x86 直接拦下。`launch-host.sh` 会设置 IMDSv2 required + hop-limit 1。
 - 部署用户需**免密 sudo**（或以 root 运行）——`bootstrap.sh` 与本地仓 `reindex` 都用 `sudo`。
 - **`--local` 部署调用 AWS 用的是这台机器的实例角色**，不是你本地的 profile（profile 只在你自己机器上，SSH 进 EC2 后就用不上了）。所以这个角色既要有建资源的权限（VPC/EC2/ECR/AgentCore/Secrets），也要有运行期的权限，**权限比较大**——这台机器应**专机专用，不跟其它业务混跑**。角色由 `launch-host.sh` 一次性建好（它内部调 [`scripts/create-iam.sh`](../scripts/create-iam.sh)）；建角色这一步用你本地选的 profile，该 profile 需有建 IAM 的权限。

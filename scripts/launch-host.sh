@@ -13,19 +13,24 @@
 #
 # The EC2 is LONG-LIVED and holds the deployment state in its repo's .local/ (deploy-config +
 # projects.json), so later upgrades = SSH back into the SAME box and re-run deploy-all --local.
+# If a source-truth-host already exists (e.g. a prior run died before deploy finished), this REUSES
+# it by default — ensures IAM, then prints the step-② command for that box. Pass --new-host to force
+# launching another instead.
 #
-#   scripts/launch-host.sh                 # fully interactive
+#   scripts/launch-host.sh                 # fully interactive (reuse existing host if any)
 #   scripts/launch-host.sh --profile admin --region ap-northeast-1   # skip those two prompts
+#   scripts/launch-host.sh --new-host      # force a brand-new host even if one exists
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-PROFILE="" REGION=""
+PROFILE="" REGION="" NEW_HOST=false
 while [ $# -gt 0 ]; do
   case "$1" in
     --profile) PROFILE="${2:-}"; shift 2 ;;
     --region)  REGION="${2:-}"; shift 2 ;;
-    -h|--help) sed -n '2,18p' "$0"; exit 0 ;;
-    *) echo "unknown flag: $1" >&2; sed -n '2,18p' "$0"; exit 2 ;;
+    --new-host) NEW_HOST=true; shift ;;
+    -h|--help) sed -n '2,22p' "$0"; exit 0 ;;
+    *) echo "unknown flag: $1" >&2; sed -n '2,22p' "$0"; exit 2 ;;
   esac
 done
 command -v aws >/dev/null || { echo "✗ aws CLI not found — install AWS CLI v2 first." >&2; exit 1; }
@@ -40,6 +45,25 @@ pick_one() {
     [[ "$choice" =~ ^[0-9]+$ ]] && (( choice>=1 && choice<=${#opts[@]} )) && { echo "${opts[$((choice-1))]}"; return; }
     echo "  请输入 1-${#opts[@]} / enter 1-${#opts[@]}" >&2
   done
+}
+
+# print_next_steps <instance-id> <ip> : the step-② command to run ON the host. One pasteable
+# ssh -t one-liner (tty for the interactive installer) that clones-or-pulls + runs install.sh.
+# Shared by the launch path and the reuse path so the two never drift.
+print_next_steps() {
+  local iid="$1" ip="$2"
+  cat <<NEXT
+
+✓ EC2 $iid（$ip）。这台机器长期保留：它的仓库 .local/ 会存部署状态，以后升级 SSH 回这台、重跑即可。
+
+下一步：复制这一条命令跑（在这台 EC2 上部署，用它的实例角色，无需配 profile；交互填区域/代码仓/模型/飞书凭证）：
+
+  ssh -t ubuntu@$ip 'if [ -d source-truth/.git ]; then git -C source-truth pull --ff-only; else git clone --depth 1 https://github.com/ddpie/source-truth.git; fi && cd source-truth && ./scripts/install.sh'
+
+（SSH 密钥不在 ssh-agent 里就加 -i：ssh -t -i <你的 key>.pem ubuntu@$ip '...'）
+
+升级版本：SSH 回这台 $iid，跑：cd source-truth && git pull && ./scripts/deploy-all.sh --region $REGION --local
+NEXT
 }
 
 # --- 1. profile ---------------------------------------------------------------------------------
@@ -59,16 +83,26 @@ echo "• profile=$PROFILE  account=$ACCOUNT  region=$REGION"
 echo "▶ ensuring IAM roles (create-iam.sh) ..."
 "$HERE/create-iam.sh" --profile "$PROFILE" --region "$REGION"
 
-# Only one host is meant to exist (it holds the deploy state); warn before launching a second.
-mapfile -t RUNNING < <(aws ec2 describe-instances \
-  --filters "Name=tag:Name,Values=source-truth-host" "Name=instance-state-name,Values=running,pending" \
-  --query 'Reservations[].Instances[].[InstanceId,PublicIpAddress]' --output text 2>/dev/null | grep -v '^$' || true)
-if [ "${#RUNNING[@]}" -gt 0 ]; then
-  echo "⚠ already running a source-truth-host:" >&2
-  printf '    %s\n' "${RUNNING[@]}" >&2
-  echo "  这台机器应只有一台（部署状态存在它的 .local/，升级是 SSH 回这台重跑，不是新起一台）。" >&2
-  read -rp "  仍要再起一台？/ launch ANOTHER one anyway? [y/N]: " more || true
-  [[ "${more:-}" =~ ^[Yy] ]] || { echo "已取消 / cancelled"; exit 0; }
+# Only one host is meant to exist (it holds the deploy state). If one is already up — e.g. a prior
+# run that died after launch but before deploy finished — REUSE it by default: IAM is now ensured
+# above, so just hand back the step-② command to run on that box. Pass --new-host to force a second.
+mapfile -t EXISTING < <(aws ec2 describe-instances \
+  --filters "Name=tag:Name,Values=source-truth-host" "Name=instance-state-name,Values=running,pending,stopped,stopping" \
+  --query 'Reservations[].Instances[].[InstanceId,State.Name,PublicIpAddress]' --output text 2>/dev/null | grep -v '^[[:space:]]*$' || true)
+if [ "${#EXISTING[@]}" -gt 0 ] && [ "$NEW_HOST" != true ]; then
+  echo "• 发现已有 source-truth-host，复用它（不再起新机；要强制新建用 --new-host）：" >&2
+  printf '    %s\n' "${EXISTING[@]}" >&2
+  # Reuse the first one. Read its id/state/ip; a stopped box must be started before you can SSH in.
+  read -r EX_ID EX_STATE EX_IP <<<"${EXISTING[0]}"
+  if [ "$EX_STATE" = stopped ] || [ "$EX_STATE" = stopping ]; then
+    echo "  实例当前 $EX_STATE，正在启动 / starting it ..." >&2
+    aws ec2 start-instances --instance-ids "$EX_ID" >/dev/null
+    aws ec2 wait instance-running --instance-ids "$EX_ID"
+  fi
+  EX_IP="$(aws ec2 describe-instances --instance-ids "$EX_ID" --query 'Reservations[0].Instances[0].PublicIpAddress' --output text 2>/dev/null)"
+  [ -n "$EX_IP" ] && [ "$EX_IP" != None ] || EX_IP="$(aws ec2 describe-instances --instance-ids "$EX_ID" --query 'Reservations[0].Instances[0].PrivateIpAddress' --output text)"
+  print_next_steps "$EX_ID" "$EX_IP"
+  exit 0
 fi
 
 # --- 3. network (auto-create source-truth VPC/subnets/IGW/NAT) + host SG + key/type ------------
@@ -159,18 +193,4 @@ IP="$(aws ec2 describe-instances --instance-ids "$IID" --query 'Reservations[0].
 [ -n "$IP" ] && [ "$IP" != None ] || IP="$(aws ec2 describe-instances --instance-ids "$IID" --query 'Reservations[0].Instances[0].PrivateIpAddress' --output text)"
 
 # --- 5. next steps ------------------------------------------------------------------------------
-# One pasteable command for step ②: ssh in (with a tty so the interactive installer works), clone or
-# refresh the repo, then run install.sh. No $-vars inside the single-quoted remote script, so this
-# heredoc doesn't expand them locally. Add -i <your-key.pem> if your key isn't in ssh-agent.
-cat <<NEXT
-
-✓ EC2 $IID 已启动（$IP）。这台机器长期保留：它的仓库 .local/ 会存部署状态，以后升级 SSH 回这台、重跑即可。
-
-下一步：复制这一条命令跑（在这台 EC2 上部署，用它的实例角色，无需配 profile；交互填区域/代码仓/模型/飞书凭证）：
-
-  ssh -t ubuntu@$IP 'if [ -d source-truth/.git ]; then git -C source-truth pull --ff-only; else git clone --depth 1 https://github.com/ddpie/source-truth.git; fi && cd source-truth && ./scripts/install.sh'
-
-（SSH 密钥不在 ssh-agent 里就加 -i：ssh -t -i <你的 key>.pem ubuntu@$IP '...'）
-
-升级版本：SSH 回这台 $IID，跑：cd source-truth && git pull && ./scripts/deploy-all.sh --region $REGION --local
-NEXT
+print_next_steps "$IID" "$IP"
