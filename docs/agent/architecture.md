@@ -65,11 +65,16 @@ structure）描述系统*是什么*；本文描述*一次提问如何在系统�
 进程的 file-watcher 在数秒内对内存图做增量重建——无须重启、无第二个写者、无服务抖动。主分支的改动因此
 分钟级内即反映到问答，无需重新部署。
 
-**刷新方式（本地仓，手动）**：`source:"local"` 的仓没有 git 远端，因此**不挂 refresh timer**。运维在自己
-机器上跑 `scripts/push-local-repo.sh` 把代码 rsync 到主机暂存目录，再由 `index-service/reindex_local_repo.sh`
-**停该项目 bridge → 切换代码 → 重建该仓 graph → 起 bridge**（失败原子回滚到上一版）。它是手动推送的**快照**，
-更新时机由运维决定、可能滞后于真实主分支——重新推送后才更新。单写者不变量靠「重建期间 bridge 已停、flock
-空闲」保证。
+**刷新方式（本地仓，手动）**：`source:"local"` 的仓没有 git 远端，因此**不挂 refresh timer**。运维在自己机器上跑
+`scripts/push-local-repo.sh`，先把代码经网络 rsync 到主机的暂存目录 `/data/repo/<subdir>.incoming`（这一步较慢、
+可能中断，但不碰 live 副本，bridge 照常服务）；传完后 `index-service/reindex_local_repo.sh` 再在主机本地把暂存目录
+**原地 rsync 到 live 副本**——与 git 仓 `git pull` 用 `git reset --hard` 改写工作树是同一条路径：常驻 codegraph
+进程的 file-watcher 几秒内对内存图增量重建，**不停 bridge、不全量重建、无第二个写者**（`.codegraph`/`.home` 图目录
+受 rsync protect 保护不被删）。本地 rsync 逐文件覆盖，期间 live 副本有数秒处于新旧文件混合的状态、查询可能读到尚未
+一致的结果，watcher 随后即补齐——这与 git 仓原地 `git pull` 的行为一致（见
+[`design/multi-repo-isolation_zh.md`](../design/multi-repo-isolation_zh.md) §8）。**例外是首次推送**：此时 live 副本
+还没有 graph，watcher 无从增量，故先停 bridge、跑一次 `index-build@` 全量建图、再起 bridge（与 git 仓首次 activate
+相同）。本地仓是手动推送的**快照**，更新时机由运维决定、可能滞后于真实主分支——重新推送后才更新。
 
 **术语表（构建期引擎，离线）**：同一刷新链上，index 主机用本地 `claude` (cc) CLI 扫自有代码副本，产出
 「中文词→英文符号」术语表（per-repo slice `/data/glossary/<项目>/<subdir>.jsonl`），供上面取证通道作旁路

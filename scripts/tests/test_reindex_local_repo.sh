@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# test_reindex_local_repo.sh — static checks: arg validation + orchestration order + rollback arm
-# + prepare mode. No systemd, no network.
+# test_reindex_local_repo.sh — static checks for the local-repo ingest script. No systemd, no network.
+# Update model: first push (no graph) → full build with bridge stopped; subsequent push (graph
+# exists) → in-place rsync apply, watcher picks it up, bridge stays up.
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 S="$ROOT/index-service/reindex_local_repo.sh"
@@ -12,14 +13,21 @@ echo "test_reindex_local_repo:"
 bash -n "$S"; check "parses" $?
 bash "$S" "Bad/Sub" 2>/dev/null; rc=$?; [[ $rc -ne 0 ]]; check "invalid subdir rejected" $?
 bash "$S" --prepare "Bad/Sub" 2>/dev/null; rc=$?; [[ $rc -ne 0 ]]; check "prepare rejects invalid subdir" $?
-# orchestration: stop bridge BEFORE build, build BEFORE final bridge start
-stop_ln=$(grep -nF 'systemctl stop "$BRIDGE"' "$S" | head -1 | cut -d: -f1)
-build_ln=$(grep -nF 'systemctl start "index-build@' "$S" | head -1 | cut -d: -f1)
-start_ln=$(grep -nF 'systemctl start "$BRIDGE"' "$S" | tail -1 | cut -d: -f1)
-[[ -n "$stop_ln" && -n "$build_ln" && -n "$start_ln" && "$stop_ln" -lt "$build_ln" && "$build_ln" -lt "$start_ln" ]]
-check "stop bridge < build < start bridge" $?
-grep -q 'trap rollback EXIT' "$S"; check "arms rollback on failure" $?
 grep -q 'REINDEX_PREPARED' "$S"; check "has --prepare mode" $?
+
+# Two update paths keyed on whether the graph already exists.
+grep -q 'if \[ -s "\$GRAPH" \]' "$S"; check "branches on existing graph (incremental vs first build)" $?
+# Incremental path: in-place apply, NO bridge stop (watcher picks it up).
+grep -q 'mode=incremental' "$S"; check "has incremental (watcher) path" $?
+# First-build path: stop bridge, build, start bridge.
+grep -q 'mode=initial-build' "$S"; check "has first-build path" $?
+grep -q 'systemctl stop "\$BRIDGE"' "$S"; check "first build stops the bridge (single-writer)" $?
+
+# In-place apply must protect the live graph dirs from rsync --delete.
+grep -q "filter=.P .codegraph" "$S" && grep -q "filter=.P .home" "$S"; check "apply protects .codegraph/.home from --delete" $?
+# Apply uses --delete to mirror the staged tree, and --no-links to refuse symlinks.
+grep -q 'rsync -a --delete' "$S" && grep -q -- '--no-links' "$S"; check "apply rsync mirrors + refuses symlinks" $?
+
 # MVP: reindex builds ONLY the graph — it must NOT run the glossary engine (deferred; see plan).
 ! grep -q 'glossary_gen' "$S"; check "reindex does NOT rebuild glossary (deferred to redeploy)" $?
 [[ "$_fail" -eq 0 ]]; exit $?

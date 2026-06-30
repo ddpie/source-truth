@@ -38,7 +38,7 @@ index-service/          Standalone CodeGraph index service + MCP-over-HTTP bridg
   bootstrap.sh          EC2 user-data: install deps + codegraph binary + claude(cc) CLI for glossary build + gateway build + systemd templates (base host, no project bound)
   activate_project.sh   Per-project attach (invoked over SSM): write manifest / git clone (git repos) or confirm code already pushed (local repos) / build graph / start index-bridge-<projectId> + refresh timers (git repos only) / clean up repos dropped since the last manifest
   git_fetch.sh          Single-repo git clone/pull (credential + ref + fail-loud GIT_FETCH_FAILED; shared by bootstrap and the refresh timer)
-  reindex_local_repo.sh Local-repo swap+rebuild orchestration (stop bridge→swap→build→start, atomic rollback on failure; --prepare makes the staging dir)
+  reindex_local_repo.sh Apply a local repo's staged code: normal push syncs in place onto live and the watcher re-indexes incrementally (no bridge stop); first push stops the bridge for a full build; --prepare makes the staging dir
   tests/                pytest (invoked by scripts/test.sh)
 infra/                  Infrastructure as code (MVP starts with agentcore toolkit / boto3, CDK-ified incrementally)
   README.md             IaC split: CDK owns the stable layer / deploy-all.sh provisions AgentCore Runtime via boto3

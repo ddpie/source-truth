@@ -2,19 +2,25 @@
 # reindex_local_repo.sh — host-side ingest for a LOCAL repo. Two modes:
 #   --prepare <subdir>  : create staging dir /data/repo/<subdir>.incoming owned by the SSH user
 #                         (so push-local-repo.sh rsyncs into it without sudo on the dir).
-#   <subdir>            : swap staged code into live and rebuild, with ATOMIC ROLLBACK on failure.
+#   <subdir>            : apply the staged code to the live repo dir and pick up the change.
 #
-# CORRECTNESS OVER SPEED (MVP). We stop the project bridge, snapshot the current live dir aside,
-# move staged code into place, and rebuild the graph AT THE LIVE PATH (never build at a different
-# path than it's served from). If the build FAILS, we roll back to the snapshot (old code + old
-# graph) and restart — the live copy is never left as "new code + stale graph" (which would cite
-# wrong lines, 违反代码为唯一依据). The bridge is down for the rebuild duration; local pushes are
-# manual + infrequent so this is acceptable (see runbook). A future optimization is build-in-
-# staging-then-rename for sub-second downtime — DEFERRED pending verification that graph.db is
-# portable across a directory rename.
+# UPDATE MODEL — same path git repos already use (multi-repo-isolation §8):
+#   - FIRST push (no graph yet): the live dir has no graph.db, so the resident codegraph watcher
+#     has nothing to incrementally update. Build the graph once via index-build@ (bridge stopped so
+#     its flock is free — single-writer, 不变量2), then start the bridge.
+#   - SUBSEQUENT push (graph exists): rsync the staged tree onto the live tree IN PLACE — exactly
+#     like `git pull`'s `git reset --hard` rewrites the working tree. The resident codegraph --mcp
+#     process's file-watcher picks up the changed files and rebuilds the in-memory graph within
+#     seconds. NO bridge stop, NO full rebuild, NO second writer. The graph dirs (.codegraph/.home)
+#     are PROTECTED from rsync --delete so the live graph survives the sync.
 #
-# SINGLE-WRITER (不变量2): the rebuild runs while the bridge is STOPPED, so index-build@'s flock is
-# free — never two writers on graph.db.
+# Why stage first, then apply locally (push-local-repo.sh does the slow network rsync into
+# .incoming; this script does the fast LOCAL rsync .incoming -> live): the network transfer can be
+# slow or fail, and it must never touch the live dir mid-flight. By the time we apply, the staged
+# tree is complete, so the only window of inconsistency is the brief local rsync — during which the
+# live tree is momentarily a mix of old and new files. A query landing in that window may read a
+# not-yet-consistent tree, but the watcher reconciles within seconds. This is the SAME accepted
+# behavior as a git repo's in-place `git pull` (multi-repo-isolation §8.2).
 set -euo pipefail
 
 MODE="reindex"
@@ -49,40 +55,46 @@ m=json.load(open(sys.argv[1])); sys.exit(0 if sys.argv[2] in [r.get("subdir") fo
 done
 [ -n "$PID" ] || { echo "REINDEX_FAILED: subdir '$SUBDIR' not found in any project manifest"; exit 1; }
 BRIDGE="index-bridge-${PID}.service"
-OLD="$LOCAL_REPO_ROOT/.$SUBDIR.old.$$"
+GRAPH="$WS/.home/.codegraph/graph.db"
 
-echo "reindex: stopping $BRIDGE for swap+rebuild (project offline during rebuild)"
-systemctl stop "$BRIDGE" 2>/dev/null || true
-
-rollback() {
-  echo "reindex: ROLLING BACK — restoring previous live copy"
-  rm -rf "$WS" 2>/dev/null || true
-  [ -d "$OLD" ] && mv "$OLD" "$WS" 2>/dev/null || true
-  systemctl start "$BRIDGE" 2>/dev/null || true
-}
-trap rollback EXIT
-
-# Snapshot current live aside (atomic rename, same filesystem), then move staged code into place.
-if [ -d "$WS" ]; then mv "$WS" "$OLD"; fi
-mv "$STAGE" "$WS"
-mkdir -p "$WS/.codegraph" "$WS/.home/.codegraph"   # fresh graph workspace dirs for the rebuild
 # Snapshot marker for OPS (not surfaced in answers — see invariants). `sudo cat .snapshot-time`
-# tells the operator when this local repo was last pushed. mv (not --delete rsync) keeps it.
-date -u +%Y-%m-%dT%H:%M:%SZ > "$WS/.snapshot-time" 2>/dev/null || true
+# tells the operator when this local repo was last pushed.
+stamp_snapshot() { date -u +%Y-%m-%dT%H:%M:%SZ > "$WS/.snapshot-time" 2>/dev/null || true; }
 
-echo "reindex: building graph at live path (bridge stopped, flock free)"
-systemctl reset-failed "index-build@${SUBDIR}.service" 2>/dev/null || true
-# `|| true`: a failed oneshot returns non-zero from `start`; without it `set -e` would exit here
-# (still rolling back via the EXIT trap, but skipping the Result check + journalctl diagnostic).
-# Let the explicit Result gate below own the decision so the failure log actually prints.
-systemctl start "index-build@${SUBDIR}.service" || true
-R="$(systemctl show "index-build@${SUBDIR}.service" --value -p Result 2>/dev/null || echo unknown)"
-[ "$R" = "success" ] || { echo "REINDEX_FAILED: index-build@${SUBDIR} Result=$R — rolling back"; journalctl -u "index-build@${SUBDIR}.service" --no-pager | tail -30 || true; exit 1; }
+# Apply staged tree onto the live tree IN PLACE. --delete makes live mirror the staged copy, but
+# PROTECT the live graph dirs (they live inside $WS and must survive the sync), and don't follow
+# symlinks (push already dropped them; belt-and-suspenders). git metadata is irrelevant for a
+# local repo. Trailing slash on src copies CONTENTS into $WS.
+apply_staged() {
+  mkdir -p "$WS/.codegraph" "$WS/.home/.codegraph"
+  rsync -a --delete \
+    --filter='P .codegraph/' --filter='P .home/' \
+    --exclude='.git' --no-links \
+    "$STAGE/" "$WS/"
+}
 
-# Build succeeded → the new code+graph IS the final state. Disarm rollback BEFORE starting the
-# bridge: a transient `systemctl start "$BRIDGE"` hiccup must NOT trip the EXIT trap and throw away
-# the freshly-built new graph to restore the old one. Restart issues are recoverable on their own.
-trap - EXIT
-rm -rf "$OLD"
-systemctl start "$BRIDGE" || { echo "REINDEX_WARN: graph rebuilt OK but bridge restart returned non-zero — check: systemctl status $BRIDGE"; }
-echo "REINDEX_DONE subdir=${SUBDIR} project=${PID}"
+if [ -s "$GRAPH" ]; then
+  # ----- SUBSEQUENT push: in-place update, watcher picks it up, bridge stays up -----
+  echo "reindex: applying staged update in place (bridge stays up; watcher re-indexes incrementally)"
+  apply_staged
+  stamp_snapshot
+  rm -rf "$STAGE"
+  echo "REINDEX_DONE subdir=${SUBDIR} project=${PID} mode=incremental"
+else
+  # ----- FIRST push: no graph yet → full build with the bridge stopped (free the writer flock) -----
+  echo "reindex: first build for $SUBDIR — stopping $BRIDGE to build the graph (single-writer)"
+  systemctl stop "$BRIDGE" 2>/dev/null || true
+  apply_staged
+  stamp_snapshot
+  systemctl reset-failed "index-build@${SUBDIR}.service" 2>/dev/null || true
+  systemctl start "index-build@${SUBDIR}.service" || true
+  R="$(systemctl show "index-build@${SUBDIR}.service" --value -p Result 2>/dev/null || echo unknown)"
+  if [ "$R" != "success" ]; then
+    echo "REINDEX_FAILED: index-build@${SUBDIR} Result=$R"; journalctl -u "index-build@${SUBDIR}.service" --no-pager | tail -30 || true
+    systemctl start "$BRIDGE" 2>/dev/null || true   # bring the project back even on a failed first build
+    exit 1
+  fi
+  rm -rf "$STAGE"
+  systemctl start "$BRIDGE" || { echo "REINDEX_WARN: graph built OK but bridge start returned non-zero — check: systemctl status $BRIDGE"; }
+  echo "REINDEX_DONE subdir=${SUBDIR} project=${PID} mode=initial-build"
+fi
