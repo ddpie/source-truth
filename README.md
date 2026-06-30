@@ -109,7 +109,12 @@ bash <(gh api repos/ddpie/source-truth/contents/scripts/get.sh --jq '.content' |
 ./scripts/test.sh       # 离线套件：lint + unit + typecheck
 ```
 
-完整部署流程（前置条件、`deploy-all.sh` 分阶段控参、连飞书、运维、排错）见
+两种部署拓扑：
+
+- **默认（两台）**：在一台部署机上跑脚本，由它新建并配置索引主机 EC2。
+- **单台 EC2（`--local`）**：直接在目标 EC2 上跑 `./scripts/deploy-all.sh --region <r> --local`，这台机器既跑部署、又常驻索引与网关，不再单开部署机。需 ARM64 + 实例角色 + 免密 sudo；AgentCore Runtime 仍由 AWS 托管，不占本机。
+
+完整部署流程（前置条件、`deploy-all.sh` 分阶段控参、`--local` 的角色与权限要求、连飞书、运维、排错）见
 [`docs/runbook.md`](docs/runbook.md)。飞书凭证走 Secrets Manager，不落盘、不入仓库。
 
 ## 代码怎么进入系统、怎么刷新
@@ -265,7 +270,12 @@ With the repo already cloned, just run the scripts; offline tests need no Docker
 ./scripts/test.sh       # offline suite: lint + unit + typecheck
 ```
 
-Full deployment flow (prerequisites, `deploy-all.sh` staged options, connecting Feishu, ops, troubleshooting): [`docs/runbook.md`](docs/runbook.md). Feishu credentials go through Secrets Manager — never written to disk, never committed.
+Two deployment topologies:
+
+- **Default (two machines)**: run the script on a deploy box, which creates and configures the index-host EC2.
+- **Single EC2 (`--local`)**: run `./scripts/deploy-all.sh --region <r> --local` directly on the target EC2 — that one machine both deploys and then resides as the index + gateway host, with no separate deploy box. Needs ARM64 + an instance role + passwordless sudo; the AgentCore Runtime is still AWS-managed and off this host.
+
+Full deployment flow (prerequisites, `deploy-all.sh` staged options, the `--local` role/permission requirements, connecting Feishu, ops, troubleshooting): [`docs/runbook.md`](docs/runbook.md). Feishu credentials go through Secrets Manager — never written to disk, never committed.
 
 ## How code enters the system and refreshes
 
