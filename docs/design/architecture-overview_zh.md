@@ -6,7 +6,7 @@
 > **本文是早期 POC 方案存档，记录当初的设计选型；落地后部分技术选择已调整，与现状不一致处以
 > [`../agent/architecture.md`](../agent/architecture.md) 为准。** 已知偏离：
 > - 代码刷新走 **systemd timer 定时 `git pull` + codegraph file-watcher 增量**，不用 push webhook / inotify；
-> - MVP 是**单引擎 Claude Code**（Codex 后置），代码来源**仅 git**（无本地目录 / S3），**仅主分支**（无 worktree 多分支）；
+> - MVP 是**单引擎 Claude Code**（Codex 后置），**仅主分支**（无 worktree 多分支）；代码来源以 git 仓为主（定时 `git pull` 跟主分支），并支持本地仓（`source:"local"`，rsync 手动推送的快照，详见 [`../runbook.md`](../runbook.md)）；
 > - 不读设计文档、不做数值模拟（均 post-MVP）；
 > - 取证经 SDK 原生 HTTP MCP 连接，**无需 stdio→HTTP 转换层**（mcp-proxy）。
 
@@ -83,7 +83,7 @@ sequenceDiagram
 |-|-|-|
 | AI 引擎 | Claude Code + Codex 双引擎 | 共享同一套索引和知识层。默认使用 Claude Code；Codex 作为备选，按管理员配置或任务特征路由 |
 | 运行环境 | AWS AgentCore Runtime | Firecracker microVM 隔离，托管扩缩容和生命周期，不自建 |
-| 代码索引 | 独立索引服务（非容器内） | 索引服务常驻持有一份 clone，靠 systemd timer 定时 `git pull` + codegraph file-watcher 增量（分钟级新鲜，见顶部偏离说明）；用户容器通过远程 MCP 查询，不占用用户侧资源 |
+| 代码索引 | 独立索引服务（非容器内） | 索引服务常驻持有一份 clone，靠 systemd timer 定时 `git pull` + codegraph file-watcher 增量（主分支改动分钟级反映，见顶部偏离说明）；用户容器通过远程 MCP 查询，不占用用户侧资源 |
 | 多分支 | git worktree | 共享对象库，每分支独立 worktree + 独立索引实例（CodeGraph 官方推荐的多分支模式），存储开销仅为工作区文件 |
 | 配置表 | AI 直接读文件 | 配置在代码仓库内（Excel/JSON/CSV），不引入中间数据库 |
 | 设计文档 | lark-cli 按需读取 | 容器内预装 lark-cli，需要时直接调用飞书 API 读文档，不预同步 |

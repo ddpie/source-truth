@@ -21,7 +21,7 @@
 
 ## 2. 核心抉择：一仓一图，不合并
 
-**一个仓库 = 一张独立的 `graph.db` + 独立工作目录 + 独立写锁 + 独立新鲜度标记。** 不把多仓放进同一张图：
+**一个仓库 = 一张独立的 `graph.db` + 独立工作目录 + 独立写锁 + 独立刷新状态。** 不把多仓放进同一张图：
 
 1. **符号不混淆**：多仓同名符号会混淆、路径不唯一、凭空产生跨仓调用关系。
 2. **刷新互不拖累**：合并成一张图后任何仓库更新都得锁住全图重建；各仓更新频率差异很大，合并只会互相阻塞。
@@ -136,8 +136,8 @@ agent 会话（注入本项目服务地址）
 项目 1:N 仓库，全部共用一台 index EC2。
 
 - **配置权威来源**：`.local/projects.json`（不进 git，模板 `config/projects.example.json`），每个项目一条：
-  `port`（该项目 bridge 端口，全机唯一）、`feishuSecretId`、`repos`（每仓 `{subdir, git, ref?,
-  refreshIntervalSec?}`，git-only）。网关启动时校验，配置错即启动失败。
+  `port`（该项目 bridge 端口，全机唯一）、`feishuSecretId`、`repos`（每仓 `{subdir, source?, git, ref?,
+  refreshIntervalSec?}`，`source` 默认 `git`、本地仓写 `local`）。网关启动时校验，配置错即启动失败。
 - **网关路由**（`bot-gateway/src/project-routing.ts`）：网关服务哪个项目由 `PROJECT_ID` 绑定（唯一项目零配置
   自动命中），解析出该项目的仓库集合与 bridge 端口，`projectId` 写入监控指标。
 - **索引侧多图**：每个仓库独立 `graph.db` / HOME / 写锁；每个项目一个 bridge 进程 `index-bridge-<projectId>`
@@ -150,7 +150,7 @@ agent 会话（注入本项目服务地址）
 
 ## 8. 定时刷新
 
-问答对新鲜度只要求分钟级。**落地形态**：每个仓库一个 systemd timer（`index-refresh-<subdir>.timer`，默认
+问答对代码时效只要求分钟级。**落地形态**：每个仓库一个 systemd timer（`index-refresh-<subdir>.timer`，默认
 300s，`projects.json` 可配）周期性 `git pull`；常驻 codegraph `--mcp` 进程的 file-watcher 在文件落盘后数秒内
 增量重建内存图——无重启、无第二个写者。不对外暴露端点（零新增攻击面）；webhook / push 触发为预留项。
 
