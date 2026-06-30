@@ -62,15 +62,15 @@ structure）描述系统*是什么*；本文描述*一次提问如何在系统�
 
 **刷新方式（git，自动）**：每个仓库一个 systemd timer `index-refresh-<subdir>.timer`（默认 300 秒，
 可经 `projects.json` 的 `refreshIntervalSec` 配置）周期性 `git pull`；常驻 codegraph（`--mcp --graph-only`）
-进程的 file-watcher 在数秒内对内存图做增量重建——无须重启、无第二个写者、无服务抖动。主分支的改动因此
-分钟级内即反映到问答，无需重新部署。
+进程的 file-watcher 在数秒内对内存图做增量重建——无须重启、不会有两个进程同时写同一张 graph.db、无服务抖动。
+主分支的改动因此分钟级内即反映到问答，无需重新部署。
 
 **刷新方式（本地仓，手动）**：`source:"local"` 的仓没有 git 远端，因此**不挂 refresh timer**。运维在自己机器上跑
 `scripts/push-local-repo.sh`，先把代码经网络 rsync 到主机的暂存目录 `/data/repo/<subdir>.incoming`（这一步较慢、
 可能中断，但不碰 live 副本，bridge 照常服务）；传完后 `index-service/reindex_local_repo.sh` 再在主机本地把暂存目录
 **原地 rsync 到 live 副本**——与 git 仓 `git pull` 用 `git reset --hard` 改写工作树是同一条路径：常驻 codegraph
-进程的 file-watcher 几秒内对内存图增量重建，**不停 bridge、不全量重建、无第二个写者**（`.codegraph`/`.home` 图目录
-受 rsync protect 保护不被删）。本地 rsync 逐文件覆盖，期间 live 副本有数秒处于新旧文件混合的状态、查询可能读到尚未
+进程的 file-watcher 几秒内对内存图增量重建，**不停 bridge、不全量重建、也不会有两个进程同时写同一张 graph.db**
+（`.codegraph`/`.home` 图目录受 rsync protect 保护不被删）。本地 rsync 逐文件覆盖，期间 live 副本有数秒处于新旧文件混合的状态、查询可能读到尚未
 一致的结果，watcher 随后即补齐——这与 git 仓原地 `git pull` 的行为一致（见
 [`design/multi-repo-isolation_zh.md`](../design/multi-repo-isolation_zh.md) §8）。**例外是首次推送**：此时 live 副本
 还没有 graph，watcher 无从增量，故先停 bridge、跑一次 `index-build@` 全量建图、再起 bridge（与 git 仓首次 activate
@@ -150,7 +150,7 @@ source-truth 不同于「在容器外把 AI 当远程 MCP 客户端」的常见�
    `/etc/bot-gateway-<projectId>.env` + 启动；飞书凭证运行时从 Secrets Manager 取（不落盘）。注意飞书长连接是**全局单例**（同 app 只能一个
    client，否则争抢事件）——故蓝绿换 index 实例时，gateway 走 **break-before-make**（先停旧实例网关、确认长连接断开，
    再启动新实例网关），与 index/codegraph 的 make-before-break 相反。
-3. **独立 CodeGraph 索引服务**——常驻服务，单写者独占 graph.db、stdio→streamable-HTTP 接口，对会话容器
+3. **独立 CodeGraph 索引服务**——常驻服务，由唯一进程独占写 graph.db、stdio→streamable-HTTP 接口，对会话容器
    暴露只读**定位 + 读文件**查询；每个项目一个 bridge 进程 `index-bridge-<projectId>`（各占独立端口
    8080/8081/…，仅服务该项目的仓库，靠重复 `--workspace` 限定范围），其 file-watcher 对定时 git pull 的
    变更做增量重建（详见「数据面」）。

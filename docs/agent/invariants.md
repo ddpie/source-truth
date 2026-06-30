@@ -70,14 +70,14 @@
   `--workspace` 末尾锚定匹配防跨仓误杀）、`index-service/http_bridge.py`（每 workspace 一把 flock）、
   `activate_project.sh`（per-repo `index-build@<subdir>` 用 `flock -n`，serve 单元 `index-bridge-<projectId>`
   链式持有本项目每仓的 flock，build 与 serve 锁同一文件 → 不可能并发写）。
-- **刷新不另起写者**：定时刷新只跑 `git pull`，图更新由常驻进程的 file-watcher 增量完成——绝不 spawn 第二个
+- **刷新不另起写进程**：定时刷新只跑 `git pull`，图更新由常驻进程的 file-watcher 增量完成——绝不 spawn 第二个
   codegraph 进程写同一张图。
-- **图目录围栏**：graph.db / HOME 在工作树内（`<subdir>/.codegraph`、`.home`），刷新的 `git reset --hard`
+- **图目录保护**：graph.db / HOME 在工作树内（`<subdir>/.codegraph`、`.home`），刷新的 `git reset --hard`
   通过 `git_fetch.sh` 的 `guard_graph_dirs` 与之隔离：把这两个路径写进 `.git/info/exclude`；若上游仓库 track 了
   同名路径则 fail-loud（不支持）。
 - **机检**：运行期不变量，无静态机检；守卫是 flock（跨进程）+ 进程内 `_restart_lock` + `codegraph_client.
-  _assert_spawn_allowed()` tripwire + 图目录围栏（`scripts/tests/test_git_fetch.sh` 覆盖）。
-- **违反后果**：第二个写者 / 刷新 clobber 活图 → graph.db 损坏 → `/health` 报 0 节点 → 该仓问答失败。
+  _assert_spawn_allowed()` tripwire + 上面的图目录保护（`scripts/tests/test_git_fetch.sh` 覆盖）。
+- **违反后果**：两个进程同时写 / 刷新时覆盖掉正在服务的那张图 → graph.db 损坏 → `/health` 报 0 节点 → 该仓问答失败。
   **不要**在 index 实例上手动再启一个 codegraph-server 写同一份图。
 
 ## 6. MVP 只读边界
