@@ -125,22 +125,21 @@ codegraph 索引吃内存、随仓库增大而增长，按仓库规模选机型�
 
 默认流程是「在一台部署机上运行脚本，由脚本新建索引主机 EC2」。若希望**只开一台 EC2、在其上完成整套部署**（省去单独的部署机），用 `--local` 模式——这台 EC2 既跑部署、又常驻为索引与网关主机。它**长期保留**：部署状态（`.local/`）就存在这台机器的仓库目录里，以后升级 SSH 回这台、重跑即可。
 
-**操作三步（前两步用 [`scripts/launch-host.sh`](../scripts/launch-host.sh) 在你自己的机器上一条龙完成）：**
+**两步（第一步在你本地起机，第二步在 EC2 上部署；命令由 [`scripts/launch-host.sh`](../scripts/launch-host.sh) 末尾打印，照抄即可）：**
 
 ```bash
 # ① 在你本地：选 AWS profile → 建 IAM → 自动建一套 source-truth 专用网络 + 安全组（只放行你的 IP 的 22）→ 选密钥/机型 → 起一台 ARM64 EC2 并挂好实例角色
 ./scripts/launch-host.sh          # 全程交互选择；也可 --profile <名> --region <r> 跳过前两问
 
-# ② 按脚本末尾提示 SSH 进这台 EC2，克隆仓库
-ssh ubuntu@<脚本打印的 IP>
-bash <(curl -fsSL https://raw.githubusercontent.com/ddpie/source-truth/main/scripts/get.sh)
-
-# ③ 在 EC2 上部署（用这台机器的实例角色，无需配 profile）
-cd source-truth && ./scripts/install.sh        # 或 ./scripts/deploy-all.sh --region <r> --local
+# ② 复制 launch-host 末尾打印的这一条命令：SSH 进 EC2（带 tty）→ 克隆/更新仓库 → 跑 install.sh
+#    （部署用这台机器的实例角色，无需配 profile；交互填区域/代码仓/模型/飞书凭证）
+ssh -t ubuntu@<脚本打印的 IP> 'if [ -d source-truth/.git ]; then git -C source-truth pull --ff-only; else git clone --depth 1 https://github.com/ddpie/source-truth.git; fi && cd source-truth && ./scripts/install.sh'
+#    SSH 密钥不在 ssh-agent 里就加 -i <你的 key>.pem
 ```
 
 要点与前提：
 
+- **某一步失败不用从头来**：`launch-host.sh` 每步都幂等（IAM、建网、安全组都是「有就复用、没有才建」），直接重跑即可，不会留下重复资源。唯一例外是它已经起了 EC2、之后才失败——这时重跑会提示「已有一台 source-truth-host」，照提示复用那台、别再起新的（部署状态在它上面）。第二步（EC2 上 `install.sh` / `deploy-all`）同样幂等，断在哪重跑哪。
 - **EC2 必须是 ARM64（aarch64）、Ubuntu 24.04**：镜像在本机构建、codegraph-server 也是 ARM64；脚本一开始就检查，x86 直接拦下。`launch-host.sh` 会设置 IMDSv2 required + hop-limit 1。
 - 部署用户需**免密 sudo**（或以 root 运行）——`bootstrap.sh` 与本地仓 `reindex` 都用 `sudo`。
 - **`--local` 部署调用 AWS 用的是这台机器的实例角色**，不是你本地的 profile（profile 只在你自己机器上，SSH 进 EC2 后就用不上了）。所以这个角色既要有建资源的权限（VPC/EC2/ECR/AgentCore/Secrets），也要有运行期的权限，**权限比较大**——这台机器应**专机专用，不跟其它业务混跑**。角色由 `launch-host.sh` 一次性建好（它内部调 [`scripts/create-iam.sh`](../scripts/create-iam.sh)）；建角色这一步用你本地选的 profile，该 profile 需有建 IAM 的权限。

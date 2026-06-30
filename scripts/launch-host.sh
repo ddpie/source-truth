@@ -159,16 +159,18 @@ IP="$(aws ec2 describe-instances --instance-ids "$IID" --query 'Reservations[0].
 [ -n "$IP" ] && [ "$IP" != None ] || IP="$(aws ec2 describe-instances --instance-ids "$IID" --query 'Reservations[0].Instances[0].PrivateIpAddress' --output text)"
 
 # --- 5. next steps ------------------------------------------------------------------------------
+# One pasteable command for step ②: ssh in (with a tty so the interactive installer works), clone or
+# refresh the repo, then run install.sh. No $-vars inside the single-quoted remote script, so this
+# heredoc doesn't expand them locally. Add -i <your-key.pem> if your key isn't in ssh-agent.
 cat <<NEXT
 
 ✓ EC2 $IID 已启动（$IP）。这台机器长期保留：它的仓库 .local/ 会存部署状态，以后升级 SSH 回这台、重跑即可。
 
-接下来在这台 EC2 上（部署用这台机器的实例角色，无需配 profile）：
-  ssh ubuntu@$IP
-  bash <(curl -fsSL https://raw.githubusercontent.com/ddpie/source-truth/main/scripts/get.sh)
-  cd source-truth
-  ./scripts/install.sh                              # 交互：区域/代码仓/模型/飞书凭证
-  #   或：./scripts/deploy-all.sh --region $REGION --local
+下一步：复制这一条命令跑（在这台 EC2 上部署，用它的实例角色，无需配 profile；交互填区域/代码仓/模型/飞书凭证）：
 
-升级版本：SSH 回这台 $IID → cd source-truth && git pull && ./scripts/deploy-all.sh --region $REGION --local
+  ssh -t ubuntu@$IP 'if [ -d source-truth/.git ]; then git -C source-truth pull --ff-only; else git clone --depth 1 https://github.com/ddpie/source-truth.git; fi && cd source-truth && ./scripts/install.sh'
+
+（SSH 密钥不在 ssh-agent 里就加 -i：ssh -t -i <你的 key>.pem ubuntu@$IP '...'）
+
+升级版本：SSH 回这台 $IID，跑：cd source-truth && git pull && ./scripts/deploy-all.sh --region $REGION --local
 NEXT
