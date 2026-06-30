@@ -270,7 +270,12 @@ glossary 初建（218-265 行）对 local 仓照常进行，不改。
 # "what this project owned last time" set for orphan reconcile (independent of timers/slices,
 # which may not exist for local repos or on a no-glossary-engine host).
 OLD_SUBDIRS=""
-[ -f "$MANIFEST" ] && OLD_SUBDIRS="$(python3 "$RENDER_MANIFEST" --field subdir "$MANIFEST" 2>/dev/null || echo "")"
+# Explicit `if` (NOT `[ -f ] && OLD_SUBDIRS=...`): the && form's exit code on a first activate
+# (no manifest yet) is non-zero, and as a bare statement that can trip `set -e` on some readings —
+# an `if` makes the "manifest absent → empty old set" path unambiguous (修第六轮 Y 段 MEDIUM).
+if [ -f "$MANIFEST" ]; then
+  OLD_SUBDIRS="$(python3 "$RENDER_MANIFEST" --field subdir "$MANIFEST" 2>/dev/null || echo "")"
+fi
 ```
 
 然后把 181-201 行整段替换为 old-manifest-driven 清理：
@@ -622,29 +627,40 @@ rm -rf "$OLD"
 # no sha to diff), same per-slice flock shared with any concurrent refresh, Bedrock precheck so a
 # no-engine host degrades gracefully (graph already rebuilt; an empty/stale glossary is tolerable).
 # Detached so reindex returns promptly; the bridge is already serving the fresh graph.
-# shellcheck disable=SC1091
-. /etc/index-service.env 2>/dev/null || true   # MODEL, REGION, GLOSSARY_MAX_FILES
-GLOSSARY_ROOT="${GLOSSARY_ROOT:-/data/glossary}"
-if [ -z "${MODEL:-}" ]; then
-  echo "reindex: MODEL empty — graph rebuilt, skipping glossary refresh (engine disabled)"
-elif ! aws bedrock-runtime converse --region "${REGION:-}" --model-id "$MODEL" \
-        --messages '[{"role":"user","content":[{"text":"ok"}]}]' \
-        --cli-connect-timeout 8 --cli-read-timeout 20 >/dev/null 2>&1; then
-  echo "reindex: Bedrock not invokable — graph rebuilt, skipping glossary refresh (slice left as-is)"
-else
-  mkdir -p "$GLOSSARY_ROOT/${PID}"
-  GLOG="/var/log/glossary-build-${PID}-${SUBDIR}.log"
-  ( cd /opt/idx/app && nohup env GLOSSARY_ROOT="$GLOSSARY_ROOT" AWS_REGION="${REGION:-}" \
-      ${GLOSSARY_MAX_FILES:+GLOSSARY_MAX_FILES="$GLOSSARY_MAX_FILES"} \
-      flock "$GLOSSARY_ROOT/${PID}/.${SUBDIR}.lock" \
-        python3 -m glossary_gen --project "${PID}" --repo-root "$WS" \
-          --out "$GLOSSARY_ROOT/${PID}/${SUBDIR}.jsonl" \
-          --model "$MODEL" --region "${REGION:-}" --full \
-          >>"$GLOG" 2>&1 & ) || true
-  echo "reindex: glossary slice rebuild launched (detached) for $SUBDIR"
-fi
+#
+# ISOLATED in a subshell with a trailing `|| true` (修第六轮 X 段 HIGH): reindex has ALREADY
+# succeeded by here (graph built, bridge up, $OLD dropped, EXIT trap disarmed). The glossary refresh
+# is best-effort — a sourced-env quirk or a stray non-zero under `set -e` must NOT flip reindex's
+# exit code to failure and make the caller (push over ssh) think the reindex failed. The whole block
+# runs in `( ... ) || true`, so nothing inside it can change our exit status.
+APP="${APP:-/opt/idx/app}"
+(
+  # shellcheck disable=SC1091
+  . /etc/index-service.env 2>/dev/null || true   # MODEL, REGION, GLOSSARY_MAX_FILES
+  GLOSSARY_ROOT="${GLOSSARY_ROOT:-/data/glossary}"
+  if [ -z "${MODEL:-}" ]; then
+    echo "reindex: MODEL empty — graph rebuilt, skipping glossary refresh (engine disabled)"
+  elif ! aws bedrock-runtime converse --region "${REGION:-}" --model-id "$MODEL" \
+          --messages '[{"role":"user","content":[{"text":"ok"}]}]' \
+          --cli-connect-timeout 8 --cli-read-timeout 20 >/dev/null 2>&1; then
+    echo "reindex: Bedrock not invokable — graph rebuilt, skipping glossary refresh (slice left as-is)"
+  else
+    mkdir -p "$GLOSSARY_ROOT/${PID}"
+    GLOG="/var/log/glossary-build-${PID}-${SUBDIR}.log"
+    ( cd "$APP" && nohup env GLOSSARY_ROOT="$GLOSSARY_ROOT" AWS_REGION="${REGION:-}" \
+        ${GLOSSARY_MAX_FILES:+GLOSSARY_MAX_FILES="$GLOSSARY_MAX_FILES"} \
+        flock "$GLOSSARY_ROOT/${PID}/.${SUBDIR}.lock" \
+          python3 -m glossary_gen --project "${PID}" --repo-root "$WS" \
+            --out "$GLOSSARY_ROOT/${PID}/${SUBDIR}.jsonl" \
+            --model "$MODEL" --region "${REGION:-}" --full \
+            >>"$GLOG" 2>&1 & ) || true
+    echo "reindex: glossary slice rebuild launched (detached) for $SUBDIR"
+  fi
+) || true
 echo "REINDEX_DONE subdir=${SUBDIR} project=${PID}"
 ```
+
+注：脚本顶部需定义 `APP=/opt/idx/app`（与 activate_project.sh:36 一致）——若 reindex 脚本前文未定义，在此 `APP="${APP:-/opt/idx/app}"` 兜底，避免硬编码漂移（修第六轮 X 段 MEDIUM）。
 
 - [ ] **Step 4: 运行测试，确认通过**
 
@@ -975,6 +991,31 @@ if [[ "$LOCAL_MODE" == "true" ]]; then
     Q modify-instance-attribute --instance-id "$SELF_ID" --groups "${CUR_SGS[@]}" "$SG"
   fi
 
+  # INSTANCE-ROLE PERMISSIONS (修第六轮复审 A2 — 否则 gateway 每次回答 403、glossary 静默空、日志不上传).
+  # 正常流程里所有 host 权限（S3 读 artifacts / Secrets / bedrock-invoke / agentcore:InvokeAgentRuntime /
+  # /source-truth/* 日志）挂在 deploy 新建的 source-truth-index-role 上，绑给 deploy 新建的 EC2。本地模式
+  # 下本机是客户预先开的、挂的是客户自己的角色——一个 EC2 只有一个 instance profile，且这个 profile 正是
+  # deploy-all 此刻用来建 VPC/ECR/AgentCore 的身份，不能换。所以把那 5 条 inline 策略**附加到本机现有
+  # 角色**（provision_iam 把它们抽成可复用函数 attach_index_role_policies <role> <account>，见 Task 8b）。
+  # 先 fail-loud 确认本机确实挂了实例角色——没有就连 S3 都拉不动，必须显式报错而非让 bootstrap 半路 403。
+  SELF_ROLE="$(Q describe-instances --instance-ids "$SELF_ID" --query 'Reservations[0].Instances[0].IamInstanceProfile.Arn' --output text 2>/dev/null || echo None)"
+  if [[ -z "$SELF_ROLE" || "$SELF_ROLE" == None ]]; then
+    log err "local mode: this EC2 has NO IAM instance profile attached — it cannot read S3 artifacts,"
+    log err "  invoke Bedrock, or invoke the AgentCore runtime. Attach a role (see runbook role spec) and re-run."
+    exit 1
+  fi
+  # Resolve the role NAME behind the instance profile, then attach the index-host policies to IT.
+  PROF_NAME="${SELF_ROLE##*/}"
+  ROLE_NAME="$(aws iam get-instance-profile --instance-profile-name "$PROF_NAME" \
+    --query 'InstanceProfile.Roles[0].RoleName' --output text 2>/dev/null || echo "")"
+  [[ -n "$ROLE_NAME" && "$ROLE_NAME" != None ]] \
+    || { log err "local mode: could not resolve the role behind instance profile '$PROF_NAME'"; exit 1; }
+  log info "local mode: attaching index-host policies to this instance's role '$ROLE_NAME'"
+  # shellcheck source=provision_iam.sh
+  source "$SCRIPT_DIR/provision_iam.sh" --lib   # load attach_index_role_policies without running main
+  attach_index_role_policies "$ROLE_NAME" "$ACCOUNT" \
+    || { log err "local mode: failed to attach index-host policies to '$ROLE_NAME' (deploy identity needs iam:PutRolePolicy on it)"; exit 1; }
+
   sudo tee /etc/index-service.env >/dev/null <<ENV
 BUCKET='$BUCKET'
 REGION='$REGION'
@@ -1008,6 +1049,113 @@ Expected: 全 ok。
 ```bash
 git add scripts/lib/provision_index_service.sh scripts/tests/test_provision_local_mode.sh
 git commit -m "feat(provision): local mode — dedicated SG + in-place bounded bootstrap on this EC2"
+```
+
+> 注：Task 8 的本地模式分支调用 `attach_index_role_policies`（Task 8b 引入）+ 一段 fail-loud 的实例角色校验——这两者随本任务一起落地、一起测（`test_provision_local_mode.sh` 增断言见 Task 8b）。
+
+---
+
+### Task 8b: 把 index-host 的 5 条 inline 策略抽成 `provision_iam.sh` 可复用函数（A2 修复的前置）
+
+> 第六轮复审 A2：本地模式下本机挂的是客户自己的实例角色，从没拿到 deploy 角色那 5 条策略（S3 读 / Secrets / cloudwatch-logs / agentcore-invoke / bedrock-invoke）→ gateway 每次回答 403、glossary 静默空、日志不上传。修复要把这些策略**附加到本机现有角色**，故 provision_iam 必须把它们抽成一个**既能在 main 流程里对 deploy 角色用、也能被 Task 8 source 进来对本机角色用**的函数。
+
+**Files:**
+- Modify: `scripts/lib/provision_iam.sh`（把 35-120 行的 5 个 `put-role-policy` 提进函数 `attach_index_role_policies <role> <account>`；main 改为调它；加 `--lib` 早退出，使 `source ... --lib` 只载函数不跑 main）
+- Test: `scripts/tests/test_provision_iam_lib.sh`
+
+**Interfaces:**
+- Produces: `attach_index_role_policies <role_name> <account_id>` —— 幂等 upsert s3-artifacts / secrets-read / cloudwatch-logs / agentcore-invoke / bedrock-invoke 五条 inline 策略到指定角色（策略 JSON 与现有逐字一致，含所有 region-`*` / 前缀作用域注释）。`source provision_iam.sh --lib` 载入函数后**不执行** main。
+- Consumes（Task 8）：本机实例角色名 + account。
+
+- [ ] **Step 1: 写失败测试**
+
+新建 `scripts/tests/test_provision_iam_lib.sh`：
+
+```bash
+#!/usr/bin/env bash
+# test_provision_iam_lib.sh — provision_iam.sh exposes attach_index_role_policies as a sourceable
+# function; sourcing with --lib must NOT run main (no AWS calls). Static + source-guard checks.
+set -uo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+P="$ROOT/scripts/lib/provision_iam.sh"
+_run=0 _fail=0
+check() { _run=$((_run+1)); if [[ "$2" -eq 0 ]]; then printf '  ok   %s\n' "$1"; else printf '  FAIL %s\n' "$1"; _fail=$((_fail+1)); fi; }
+echo "test_provision_iam_lib:"
+
+bash -n "$P"; check "parses" $?
+grep -q 'attach_index_role_policies()' "$P"; check "defines attach_index_role_policies" $?
+# the 5 policy names live inside the function
+for pol in s3-artifacts secrets-read cloudwatch-logs agentcore-invoke bedrock-invoke; do
+  grep -q "policy-name $pol" "$P"; check "policy $pol present" $?
+done
+# sourcing with --lib loads the function but does NOT call AWS (main is gated). We stub aws to fail
+# loudly so any accidental main execution would be caught.
+( aws() { echo "AWS CALLED" >&2; return 99; }; export -f aws 2>/dev/null
+  source "$P" --lib >/dev/null 2>"$ROOT/.lib_err" || true
+  declare -F attach_index_role_policies >/dev/null ) ; check "source --lib loads fn without running main" $?
+! grep -q 'AWS CALLED' "$ROOT/.lib_err" 2>/dev/null; check "source --lib made no AWS calls" $?
+rm -f "$ROOT/.lib_err"
+[[ "$_fail" -eq 0 ]]; exit $?
+```
+
+- [ ] **Step 2: 运行测试，确认失败**
+
+Run: `bash scripts/tests/test_provision_iam_lib.sh`
+Expected: FAIL —— 函数不存在、`--lib` 未实现。
+
+- [ ] **Step 3: 重构 `provision_iam.sh`**
+
+在 `INDEX_ROLE=`/`INDEX_PROFILE=` 定义之后、`# ---- 1. index-service instance profile ----` 之前，加 `--lib` 早退出哨兵 + 函数定义。把现有的 5 个 `aws iam put-role-policy --role-name "$INDEX_ROLE" ...`（35-120 行，连同其全部注释）原样搬进函数体，把硬编码的 `"$INDEX_ROLE"`/`"${ACCOUNT}"` 换成函数参数 `$1`/`$2`：
+
+```bash
+# attach_index_role_policies <role_name> <account_id>: upsert the 5 inline policies the index host
+# needs (S3 artifacts read / Secrets read / CloudWatch logs / AgentCore invoke / Bedrock invoke).
+# Idempotent. Used by main (deploy-built role) AND by deploy-all --local (the operator's own role).
+attach_index_role_policies() {
+  local role="$1" acct="$2"
+  aws iam delete-role-policy --role-name "$role" --policy-name feishu-secret >/dev/null 2>&1 || true
+  aws iam put-role-policy --role-name "$role" --policy-name s3-artifacts --policy-document "{ ... }" >/dev/null
+  aws iam put-role-policy --role-name "$role" --policy-name secrets-read  --policy-document "{ ... }" >/dev/null
+  aws iam put-role-policy --role-name "$role" --policy-name cloudwatch-logs --policy-document "{ ... }" >/dev/null
+  aws iam put-role-policy --role-name "$role" --policy-name agentcore-invoke --policy-document "{ ... }" >/dev/null
+  aws iam put-role-policy --role-name "$role" --policy-name bedrock-invoke  --policy-document "{ ... }" >/dev/null
+}
+
+# `source provision_iam.sh --lib` loads the functions above without running the provisioning main —
+# deploy-all --local sources it to reuse attach_index_role_policies against the instance's own role.
+[[ "${1:-}" == "--lib" ]] && return 0
+```
+
+（`{ ... }` 处填入现有 35-120 行各策略**逐字不变**的 JSON，仅 `$INDEX_ROLE`→`$role`、`${ACCOUNT}`→`$acct`。`secrets-read` 前那条 `delete-role-policy feishu-secret` 清理也并进函数开头。）
+
+然后把 main 里原来那 5 段 `put-role-policy`（现已移走）替换为一行调用：
+
+```bash
+attach_index_role_policies "$INDEX_ROLE" "$ACCOUNT"
+```
+
+放在 `# Inline policy: ...` 原位置（创建/复用 `$INDEX_ROLE` 之后、创建 instance profile `if ! aws iam get-instance-profile ...` 之前）。
+
+- [ ] **Step 4: 运行测试，确认通过**
+
+Run: `bash scripts/tests/test_provision_iam_lib.sh && bash -n scripts/lib/provision_iam.sh`
+Expected: 全 ok。
+
+- [ ] **Step 5: 在 `test_provision_local_mode.sh` 补 A2 断言**
+
+给 Task 8 的测试加：本地模式必须校验实例角色存在并附加策略。在 `test_provision_local_mode.sh` 末尾追加：
+
+```bash
+grep -q 'IamInstanceProfile.Arn' "$F"; check "local mode reads the instance's IAM profile" $?
+grep -q 'attach_index_role_policies' "$F"; check "local mode attaches index-host policies to the instance role" $?
+grep -q 'has NO IAM instance profile' "$F"; check "local mode fails loud when no instance role" $?
+```
+
+- [ ] **Step 6: 提交**
+
+```bash
+git add scripts/lib/provision_iam.sh scripts/lib/provision_index_service.sh scripts/tests/test_provision_iam_lib.sh scripts/tests/test_provision_local_mode.sh
+git commit -m "feat(iam): reusable attach_index_role_policies; local mode grants them to the instance role (fix 403 + silent-degrade)"
 ```
 
 ---
@@ -1192,7 +1340,7 @@ git commit -m "docs: single-host bootstrap + local-repo ingestion (runbook, inva
 - [ ] **Step 1: 离线套件**
 
 Run: `./scripts/test.sh`
-Expected: 退出码 0（lint + 全部 shell/python 单测 + typecheck；新增 `test_activate_branch.sh`/`test_reconcile_orphans.sh`/`test_local_repo_config.sh`/`test_reindex_local_repo.sh`/`test_push_local_repo.sh`/`test_bootstrap_idempotent.sh`/`test_provision_local_mode.sh`/`test_deploy_all_local.sh` + 扩充的 `test_manifest.sh` 均被发现并通过）。
+Expected: 退出码 0（lint + 全部 shell/python 单测 + typecheck；新增 `test_activate_branch.sh`/`test_reconcile_orphans.sh`/`test_local_repo_config.sh`/`test_reindex_local_repo.sh`/`test_push_local_repo.sh`/`test_bootstrap_idempotent.sh`/`test_provision_iam_lib.sh`/`test_provision_local_mode.sh`/`test_deploy_all_local.sh` + 扩充的 `test_manifest.sh` 均被发现并通过）。
 
 - [ ] **Step 2: 结构自检**
 
@@ -1251,6 +1399,14 @@ Expected: 干净。
 - 🟠 M1：slice-driven reconcile 在「无 Bedrock 引擎」部署下失效（local 仓没 slice → 孤儿判据落空、泄漏复发）→ Task 2 reconcile 升级为 **old-manifest-driven**（覆盖前抓旧 subdirs，孤儿=旧−新，与 timer/slice/引擎是否存在全部无关）；测试改名 `test_reconcile_orphans.sh` ✓
 - 🟡 M2：build 模板未排除 `.codegraph/.home`（local reindex 走全新空目录、无残留，比 git 仓更干净；列入真机集成核对 graph 节点数）— 记录，不阻断
 - 五个面（路径对齐 / bridge 多仓隔离 / 停机波及 git 仓 / `.incoming` 不干扰 glossary / serve-args 隔离）经独立复审验证正确，无需改
+
+**第六轮 review 修订（部署时序/编码面 + 新代码自洽双路）：**
+- 🔴 A2：本地模式从不给本机配/校验实例角色（权限都在 deploy 新建角色上，本机挂客户角色）→ gateway 每次回答 403、glossary 静默空、日志不上传 → 新增 Task 8b 把 5 条 inline 策略抽成 `attach_index_role_policies`，Task 8 本地模式 fail-loud 校验本机有实例角色 + 把策略附加到该角色 ✓
+- 🟠 X 段 HIGH：reindex 的 glossary 重建段在 `trap - EXIT` 后裸跑，`set -e` 下可能误翻 reindex 退出码 → 整段包进 `( ... ) || true` 子 shell 隔离 ✓
+- 🟡 X 段 MEDIUM：`cd /opt/idx/app` 硬编码 → 用 `APP="${APP:-/opt/idx/app}"` ✓
+- 🟡 Y 段 MEDIUM：`[ -f ] && OLD_SUBDIRS=` 经典 set -e 陷阱（当前安全）→ 改显式 `if` ✓
+- 编码面（B：GBK 中文仓 / 配置表）经独立复审**全部干净**——local 仓走与 git 仓完全相同的 codegraph/glossary/text_decode 路径，rsync `-az` 二进制安全、reindex `mv` + ASCII `.snapshot-time`，无新暴露面；预存 `glossary_build.py:322` 的 `errors="ignore"` 对 git/local 一视同仁，非本计划引入
+- A1/A3/A4（phase 顺序无错位 / bootstrap→image→runtime 时序对 / 重跑安全）经复审确认正确，仅 A3 总耗时（单机串行 bootstrap+build）建议 runbook 注明
 
 **Placeholder scan:** 无 TBD/TODO；每个代码步骤含完整代码块与命令、预期输出。
 
