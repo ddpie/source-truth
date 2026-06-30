@@ -25,4 +25,8 @@ grep -qE 'timeout [0-9].* bash .*bootstrap.sh|run_timeout .* bootstrap.sh' "$F";
 grep -q 'IamInstanceProfile.Arn' "$F"; check "local mode reads the instance's IAM profile" $?
 grep -q 'NO IAM instance profile' "$F"; check "local mode fails loud when no instance role" $?
 grep -q 'cannot read s3' "$F"; check "local mode fails loud when S3 artifact unreadable" $?
+# runtime subnet must be the source-truth-private subnet (NAT egress), NOT this host's own subnet —
+# a VPC-mode runtime ENI has no public IP and can't reach Bedrock via an IGW.
+grep -q 'Name=tag:Name,Values=source-truth-private' "$F"; check "runtime uses the private subnet, not self subnet" $?
+grep -q 'no source-truth-private subnet' "$F"; check "fails loud when no private subnet present" $?
 [[ "$_fail" -eq 0 ]]; exit $?

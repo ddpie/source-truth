@@ -168,7 +168,20 @@ ENV
   timeout 1800 sudo -E bash "$ROOT/index-service/bootstrap.sh" >&2 \
     || { log err "local-mode bootstrap.sh failed/timed out — see /var/log/index-svc-bootstrap.log"; exit 1; }
 
-  update_env "$CONFIG" PRIVATE_SUBNET "$SELF_SUBNET"
+  # PRIVATE_SUBNET feeds the AgentCore runtime ENI (deploy_project.sh → deploy_runtime.py). It must
+  # be a PRIVATE subnet with NAT egress, NOT this host's own subnet: a VPC-mode runtime ENI gets no
+  # public IP, so it can't reach Bedrock via an IGW — only via NAT. This host itself may sit in a
+  # public subnet (it has a public IP for SSH). Take the source-truth-private subnet that
+  # launch-host's network step (provision_network.sh) created in this VPC.
+  PRIV_SUBNET="$(Q describe-subnets --filters "Name=tag:Name,Values=source-truth-private" \
+    "Name=vpc-id,Values=$SELF_VPC" --query 'Subnets[0].SubnetId' --output text 2>/dev/null)"
+  if [[ "$PRIV_SUBNET" == None || -z "$PRIV_SUBNET" ]]; then
+    log err "local mode: no source-truth-private subnet in $SELF_VPC — the AgentCore runtime needs a"
+    log err "  private subnet with NAT egress to reach Bedrock. Run scripts/launch-host.sh (it builds"
+    log err "  the network), or create the source-truth network in this VPC, then re-run."
+    exit 1
+  fi
+  update_env "$CONFIG" PRIVATE_SUBNET "$PRIV_SUBNET"
   update_env "$CONFIG" VPC_ID "$SELF_VPC"
   update_env "$CONFIG" INDEX_SERVICE_SG "$SG"
   update_env "$CONFIG" INDEX_SERVICE_INSTANCE "$SELF_ID"

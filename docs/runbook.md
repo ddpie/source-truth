@@ -128,7 +128,7 @@ codegraph 索引吃内存、随仓库增大而增长，按仓库规模选机型�
 **操作三步（前两步用 [`scripts/launch-host.sh`](../scripts/launch-host.sh) 在你自己的机器上一条龙完成）：**
 
 ```bash
-# ① 在你本地：选 AWS profile → 建 IAM → 选 VPC/子网/密钥/机型 → 起一台 ARM64 EC2 并挂好实例角色
+# ① 在你本地：选 AWS profile → 建 IAM → 自动建一套 source-truth 专用网络 + 安全组（只放行你的 IP 的 22）→ 选密钥/机型 → 起一台 ARM64 EC2 并挂好实例角色
 ./scripts/launch-host.sh          # 全程交互选择；也可 --profile <名> --region <r> 跳过前两问
 
 # ② 按脚本末尾提示 SSH 进这台 EC2，克隆仓库
@@ -146,7 +146,7 @@ cd source-truth && ./scripts/install.sh        # 或 ./scripts/deploy-all.sh --r
 - **`--local` 部署调用 AWS 用的是这台机器的实例角色**，不是你本地的 profile（profile 只在你自己机器上，SSH 进 EC2 后就用不上了）。所以这个角色既要有建资源的权限（VPC/EC2/ECR/AgentCore/Secrets），也要有运行期的权限，**权限比较大**——这台机器应**专机专用，不跟其它业务混跑**。角色由 `launch-host.sh` 一次性建好（它内部调 [`scripts/create-iam.sh`](../scripts/create-iam.sh)）；建角色这一步用你本地选的 profile，该 profile 需有建 IAM 的权限。
 - **角色名与默认部署共用**（都是 `source-truth-index-role`，IAM 角色账号级全局、不分区域）。`create-iam.sh` 幂等：角色已存在就直接复用、只补 `--local` 要的部署期权限，不会重建。但要留意一个副作用——**该账号若已有默认（双机）部署在用这个角色，补上部署期权限后那台机器也会一并拿到**。要让默认部署保持最小权限，就别在同一账号跑 `--local`，换个账号。
 
-`--local` 不新建 VPC/NAT，复用本机所在的 VPC 和子网；另建一个专用安全组附加到本机，runtime 也用它——该安全组只放行 8080-8099 端口、且只对组内成员（本机及其启动的 runtime）开放，外部访问不到 bridge。**AgentCore Runtime 仍由 AWS 托管**，不占用本机资源、也无需运维——「单台 EC2」指只需开通并维护这一台主机。首次部署约 10–20 分钟（视机型而定）：bootstrap 与镜像构建都在本机串行执行，比默认的双机方式略慢。
+**网络**：`launch-host.sh` 会自动建一套 source-truth 专用网络（一个 VPC + 一个公有子网 + 一个私有子网 + IGW + NAT），运维不用挑现有 VPC/子网。这套网络复用默认部署那条久经测试的建网逻辑、按 tag 幂等，账号里已有就直接复用。机器起在**公有子网**、带公网 IP（供你 SSH）；**AgentCore Runtime 起在私有子网，经 NAT 出网到 Bedrock**——Runtime 的网卡是 AWS 托管、没有公网 IP，只能走 NAT，公有子网到不了 Bedrock，这也是这里必须有 NAT 的原因（NAT 有固定费用，约每月 $32 起，省不掉）。机器的安全组只放行你指定来源的 22；runtime 另用一个自引用安全组，只开 8080-8099、只对组内成员（本机及其 runtime）开放，外部访问不到 bridge。**Runtime 由 AWS 托管**，不占本机资源——「单台 EC2」指只需开通并维护这一台主机。首次部署约 10–20 分钟（视机型而定）：bootstrap 与镜像构建都在本机串行执行，比默认的双机方式略慢。
 
 **升级 source-truth（本地模式）**：默认（双机）模式靠 `--refresh-index` 起一台新机蓝绿切换来升级底座；本地模式只有这一台主机，不走蓝绿，而是 SSH 回这台 EC2 就地升级：`cd source-truth && git pull && ./scripts/deploy-all.sh --region <r> --local`。`.local/` 里的状态还在，脚本读它就知道该更新哪些：重新下发底座代码、重建并推送镜像、更新 runtime，各项目的网关与索引随之重启到新版本。升级期间会有一段服务中断（时长和首次部署差不多，主要花在镜像重建 + 索引重启），挑低峰期做。
 

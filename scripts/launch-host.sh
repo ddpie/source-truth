@@ -4,8 +4,11 @@
 # It chains the steps that come before `deploy-all.sh --local`:
 #   1. pick an AWS profile (SELECT from your configured profiles — no credentials typed)
 #   2. create (or reuse) the EC2 instance role + profile via create-iam.sh
-#   3. pick VPC / subnet / key pair / instance type interactively
-#   4. launch ONE ARM64 Ubuntu 24.04 EC2 with the instance profile attached + IMDSv2 required
+#   3. auto-create the source-truth network (VPC / public+private subnets / IGW / NAT — reused if
+#      present) + a host security group that allows your SSH on 22; pick key pair + instance type
+#   4. launch ONE ARM64 Ubuntu 24.04 EC2 in the PUBLIC subnet (public IP for SSH), instance profile
+#      attached + IMDSv2 required. The AgentCore runtime later lands in the PRIVATE subnet (NAT egress
+#      to Bedrock) — a VPC-mode runtime ENI has no public IP, so it can't reach Bedrock via the IGW.
 #   5. print the SSH + deploy commands to run next
 #
 # The EC2 is LONG-LIVED and holds the deployment state in its repo's .local/ (deploy-config +
@@ -68,35 +71,46 @@ if [ "${#RUNNING[@]}" -gt 0 ]; then
   [[ "${more:-}" =~ ^[Yy] ]] || { echo "已取消 / cancelled"; exit 0; }
 fi
 
-# --- 3. pick VPC / subnet / key pair / instance type --------------------------------------------
-mapfile -t VPCS < <(aws ec2 describe-vpcs --query 'Vpcs[].VpcId' --output text 2>/dev/null | tr '\t' '\n')
-[ "${#VPCS[@]}" -gt 0 ] || { echo "✗ no VPC in $REGION." >&2; exit 1; }
-VPC="$(pick_one "选择 VPC / pick a VPC:" "${VPCS[@]}")"
+# --- 3. network (auto-create source-truth VPC/subnets/IGW/NAT) + host SG + key/type ------------
+# Reuse the same provisioner the default path uses — it's idempotent, reconciles by tag, and has
+# the NAT/EIP/route edge cases already handled. It needs a config file to write IDs into; we use a
+# throwaway temp file and read the IDs back from it.
+TMPCFG="$(mktemp)"; trap 'rm -f "$TMPCFG"' EXIT
+echo "▶ ensuring source-truth network (VPC / public+private subnets / IGW / NAT; reuses existing) ..."
+"$HERE/lib/provision_network.sh" "$REGION" "$TMPCFG"
+# shellcheck disable=SC1090
+source "$TMPCFG"   # sets VPC_ID PUBLIC_SUBNET PRIVATE_SUBNET NAT_GATEWAY VPC_CIDR
+[ -n "${VPC_ID:-}" ] && [ -n "${PUBLIC_SUBNET:-}" ] \
+  || { echo "✗ network provisioning did not yield VPC/public subnet (see output above)." >&2; exit 1; }
 
-mapfile -t SUBNETS < <(aws ec2 describe-subnets --filters "Name=vpc-id,Values=$VPC" \
-  --query 'Subnets[].[SubnetId,AvailabilityZone,CidrBlock]' --output text 2>/dev/null | awk '{print $1" ("$2" "$3")"}')
-[ "${#SUBNETS[@]}" -gt 0 ] || { echo "✗ no subnet in $VPC." >&2; exit 1; }
-SUBNET="$(pick_one "选择子网（需能出公网拉取依赖：公有子网或带 NAT 的私有子网）/ pick a subnet (must reach the internet):" "${SUBNETS[@]}")"
-SUBNET="${SUBNET%% *}"
+# Host SG (describe-or-create): opens 22 to the operator only. The runtime uses a separate
+# self-referencing SG (source-truth-index-svc) created later by the index-service phase.
+SG="$(aws ec2 describe-security-groups \
+  --filters "Name=group-name,Values=source-truth-host" "Name=vpc-id,Values=$VPC_ID" \
+  --query 'SecurityGroups[0].GroupId' --output text 2>/dev/null)"
+if [ "$SG" = None ] || [ -z "$SG" ]; then
+  SG="$(aws ec2 create-security-group --group-name source-truth-host \
+    --description "source-truth --local host (operator SSH)" --vpc-id "$VPC_ID" \
+    --query GroupId --output text)"
+  aws ec2 create-tags --resources "$SG" --tags Key=Name,Value=source-truth-host >/dev/null
+fi
+
+# SSH source CIDR: default to this operator's egress IP (/32), but allow overriding (e.g. an office
+# range). Add the ingress only if absent — idempotent across re-runs.
+MYIP="$(curl -fsS https://checkip.amazonaws.com 2>/dev/null | tr -d '[:space:]' || true)"
+DEFCIDR="${MYIP:+$MYIP/32}"
+read -rp "允许 SSH(22) 的来源 CIDR / source CIDR allowed to SSH [${DEFCIDR:-必填/required}]: " SSHCIDR || true
+SSHCIDR="${SSHCIDR:-$DEFCIDR}"
+[[ "$SSHCIDR" =~ ^[0-9.]+/[0-9]+$ ]] || { echo "✗ 需要一个 CIDR（如 1.2.3.4/32）/ need a CIDR like 1.2.3.4/32." >&2; exit 2; }
+if ! aws ec2 describe-security-groups --group-ids "$SG" \
+     --query "SecurityGroups[0].IpPermissions[?FromPort==\`22\`].IpRanges[].CidrIp" --output text 2>/dev/null \
+     | tr '\t' '\n' | grep -qx "$SSHCIDR"; then
+  aws ec2 authorize-security-group-ingress --group-id "$SG" --protocol tcp --port 22 --cidr "$SSHCIDR" >/dev/null
+fi
 
 mapfile -t KEYS < <(aws ec2 describe-key-pairs --query 'KeyPairs[].KeyName' --output text 2>/dev/null | tr '\t' '\n')
 [ "${#KEYS[@]}" -gt 0 ] || { echo "✗ no EC2 key pair in $REGION — create one first (you need it to SSH in)." >&2; exit 1; }
 KEY="$(pick_one "选择 SSH 密钥对 / pick an SSH key pair:" "${KEYS[@]}")"
-
-mapfile -t SGS < <(aws ec2 describe-security-groups --filters "Name=vpc-id,Values=$VPC" \
-  --query 'SecurityGroups[].[GroupId,GroupName]' --output text 2>/dev/null | awk '{print $1" ("$2")"}')
-[ "${#SGS[@]}" -gt 0 ] || { echo "✗ no security group in $VPC." >&2; exit 1; }
-SG="$(pick_one "选择安全组（需放行你的 SSH 22 端口）/ pick a security group (must allow your SSH on 22):" "${SGS[@]}")"
-SG="${SG%% *}"
-# Soft-check the SG actually opens 22 (FromPort<=22<=ToPort, or all-traffic -1) — wrong SG = can't SSH in.
-HAS22="$(aws ec2 describe-security-groups --group-ids "$SG" \
-  --query "SecurityGroups[0].IpPermissions[?(IpProtocol=='-1') || (FromPort<=\`22\` && ToPort>=\`22\`)] | [0]" \
-  --output text 2>/dev/null || true)"
-if [ -z "$HAS22" ] || [ "$HAS22" = None ]; then
-  echo "⚠ 所选安全组 $SG 似乎没放行 22 端口入站——起好后可能 SSH 连不上。" >&2
-  read -rp "  仍用它？/ use it anyway? [y/N]: " sgok || true
-  [[ "${sgok:-}" =~ ^[Yy] ]] || { echo "请先在该安全组放行你的 IP 的 22 端口再重跑 / open 22 first, then re-run"; exit 1; }
-fi
 
 ITYPE="$(pick_one "选择机型（ARM/Graviton）/ pick an instance type (ARM):" \
   "t4g.large" "t4g.xlarge" "m7g.large" "m7g.xlarge" "m7g.2xlarge")"
@@ -119,16 +133,17 @@ cat >&2 <<SUMMARY
 
   即将启动 / about to launch:
     region        $REGION   account $ACCOUNT
-    vpc / subnet  $VPC / $SUBNET
+    vpc           $VPC_ID
+    subnet        $PUBLIC_SUBNET (public — instance gets a public IP for SSH)
     type / disk   $ITYPE / ${DISK}GiB   AMI $AMI
-    key / sg      $KEY / $SG
+    key / sg      $KEY / $SG (SSH 22 from $SSHCIDR)
     profile(role) source-truth-index-profile  ·  IMDSv2 required
 SUMMARY
 read -rp "  确认启动？/ launch now? [y/N]: " ok || true
 [[ "${ok:-}" =~ ^[Yy] ]] || { echo "已取消 / cancelled"; exit 0; }
 
 IID="$(aws ec2 run-instances --image-id "$AMI" --instance-type "$ITYPE" \
-  --subnet-id "$SUBNET" --security-group-ids "$SG" --key-name "$KEY" \
+  --subnet-id "$PUBLIC_SUBNET" --associate-public-ip-address --security-group-ids "$SG" --key-name "$KEY" \
   --iam-instance-profile Name=source-truth-index-profile \
   --metadata-options 'HttpTokens=required,HttpPutResponseHopLimit=1,HttpEndpoint=enabled' \
   --block-device-mappings "[{\"DeviceName\":\"/dev/sda1\",\"Ebs\":{\"VolumeSize\":${DISK},\"VolumeType\":\"gp3\"}}]" \

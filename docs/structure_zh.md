@@ -64,7 +64,7 @@ scripts/                运维生命周期
   install.sh            交互式一键安装（查依赖→飞书凭证→配置→确认→调 deploy-all；重跑预填；添加项目可选 git 仓或 local 仓）
   push-local-repo.sh    客户机侧：rsync 直推本地仓到索引主机暂存目录并触发重建（local 仓刷新入口；不经 git）
   deploy-all.sh         一键部署的权威入口（artifacts→IAM→network→index-service→镜像→Runtime→gateway；幂等；--local 在本机就地部署）
-  launch-host.sh        --local（单台 EC2）模式入口（运维本地跑）：选 profile → 建 IAM → 选 VPC/子网/密钥/机型 → 起 ARM64 EC2 挂好实例角色 → 打印后续步骤
+  launch-host.sh        --local（单台 EC2）模式入口（运维本地跑）：选 profile → 建 IAM → 自动建净网（VPC/公私子网/IGW/NAT，复用 provision_network.sh）+ host 安全组（只放行运维 IP 的 22）→ 起公有子网 ARM64 EC2 挂好实例角色 → 打印后续步骤
   create-iam.sh         建/复用 --local 模式实例角色 + instance profile，并补部署期权限（幂等；一般由 launch-host.sh 内部调用）
   lib/provision_*.sh + deploy_runtime.py + wait_index_health.sh  deploy-all.sh 的各阶段实现
   lib/deploy_project.sh + wait_base_host.sh + delete_runtime.py  多项目编排：建底座 / 等底座就绪 / 删 per-project runtime
