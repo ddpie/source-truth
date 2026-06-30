@@ -27,7 +27,10 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$HERE/lib/common.sh"
 source "$HERE/lib/env-utils.sh"
 
-STATE="$HERE/../.local/launch-host.env"   # remembers prior choices for pre-fill (gitignored)
+# Prior-choice state for pre-fill is per-account (set once ACCOUNT is known, below): keys like the
+# SSH key name / CIDR / region only make sense within one account, so a single shared file would
+# cross-fill wrong values when an operator switches accounts. (gitignored under .local/)
+STATE=""
 
 PROFILE="" REGION="" NEW_HOST=false DRY_RUN=false
 while [ $# -gt 0 ]; do
@@ -89,24 +92,28 @@ install.sh 会交互问：AWS 区域、代码仓、回答模型、飞书 App ID/
 NEXT
 }
 
-# Pre-fill defaults from the last run (region/type/disk/cidr/key). Absent file → empty defaults.
-safe_source_env "$STATE" 2>/dev/null || true
-
-# --- 1. profile ---------------------------------------------------------------------------------
+# --- 1. profile (menu-picked; not pre-filled — pick is cheap and the account isn't known yet) ---
 if [ -z "$PROFILE" ]; then
   mapfile -t PROFILES < <(aws configure list-profiles 2>/dev/null || true)
   [ "${#PROFILES[@]}" -gt 0 ] || { say err "no AWS profiles (run aws configure / SSO, or pass --profile)."; exit 1; }
-  PROFILE="$(pick_one "选择 AWS profile / pick the AWS profile:" "${LH_PROFILE:-}" "${PROFILES[@]}")"
+  PROFILE="$(pick_one "选择 AWS profile / pick the AWS profile:" "" "${PROFILES[@]}")"
 fi
 export AWS_PROFILE="$PROFILE"
 ACCOUNT="$(aws sts get-caller-identity --query Account --output text 2>/dev/null)" \
   || { say err "profile '$PROFILE' credentials not working (try: aws sso login --profile $PROFILE)."; exit 1; }
+
+# Now that the account is known, load THIS account's prior choices for pre-fill (region/type/disk/
+# cidr/key). Absent file (first run / new account) → all LH_* unset → fallbacks below.
+STATE="$HERE/../.local/launch-host.${ACCOUNT}.env"
+safe_source_env "$STATE" 2>/dev/null || true
+
 if [ -z "$REGION" ]; then
   DEF="${LH_REGION:-$(aws configure get region 2>/dev/null || echo ap-northeast-1)}"
   read -rp "AWS region [${DEF}]: " REGION || true; REGION="${REGION:-$DEF}"
 fi
 export AWS_DEFAULT_REGION="$REGION"
-say info "profile=$PROFILE  account=$ACCOUNT  region=$REGION${DRY_RUN:+  (dry-run)}"
+dr=""; [ "$DRY_RUN" = true ] && dr="  (dry-run)"
+say info "profile=$PROFILE  account=$ACCOUNT  region=$REGION${dr}"
 
 # --- 2. IAM (reuse create-iam.sh; idempotent) ---------------------------------------------------
 if [ "$DRY_RUN" = true ]; then
@@ -212,9 +219,9 @@ if [ -z "$AMI" ] || [ "$AMI" = None ]; then
   exit 1
 fi
 
-# Remember the choices for next time (region/type/disk/cidr/key/profile).
+# Remember these for next time (per account). Saved BEFORE the launch confirmation below — so even
+# if you cancel at the confirm step, the choices are pre-filled next run (nothing was launched).
 mkdir -p "$(dirname "$STATE")"
-update_env "$STATE" LH_PROFILE "$PROFILE"
 update_env "$STATE" LH_REGION  "$REGION"
 update_env "$STATE" LH_ITYPE   "$ITYPE"
 update_env "$STATE" LH_DISK    "$DISK"
