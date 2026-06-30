@@ -138,7 +138,7 @@ git 为唯一来源：每个仓库 clone 到 index-service 本地，systemd time
 | **入门** | 部署 / 连飞书 / 运维 / 排错（从零到能用） | [`docs/runbook.md`](docs/runbook.md) |
 | **架构** | 一次提问如何在系统里流转（AI 必读） | [`docs/agent/architecture.md`](docs/agent/architecture.md) |
 | **架构** | 目录结构（双语） | [`docs/structure_zh.md`](docs/structure_zh.md) · [`docs/structure_en.md`](docs/structure_en.md) |
-| **架构** | 术语表（让中文提问命中英文代码符号） | [`docs/agent/glossary.md`](docs/agent/glossary.md) |
+| **架构** | 术语表怎么来的：构建 / 产物 / 可信依据（面向人） | [`docs/glossary.md`](docs/glossary.md) |
 | **规范** | AI 协作约定 | [`AGENTS.md`](AGENTS.md) |
 | **规范** | 不变量与权威依据映射（含安全不变量逐条） | [`docs/agent/invariants.md`](docs/agent/invariants.md) |
 | **规范** | 变更配方（改 X 怎么做 / 怎么验 / 怎么上线） | [`docs/agent/playbooks.md`](docs/agent/playbooks.md) |
