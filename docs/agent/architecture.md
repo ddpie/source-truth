@@ -1,7 +1,7 @@
 # 架构：写给 AI 的系统工作原理
 
 先读本文，再改请求如何流转、代码在哪取证、CardKit 如何回传、会话如何隔离。面向人的文档（README、
-structure）描述系统*是什么*；本文描述*一次提问如何在系统里流转*——动手改之前真正该先读懂的就是这个。
+structure）描述系统*是什么*；本文描述*一次提问如何在系统里流转*——改之前应先读懂的正是这部分。
 
 下文代码指针用「组件 + 概念锚点」给出，请按名字 grep 定位，不要依赖行号（行号会随代码演进漂移）。
 
@@ -97,7 +97,7 @@ git diff 增量。完整工作原理、grounding 把关与价值边界见 `docs/
 基础设施**不全归 CDK**，且 MVP 阶段刻意先不 CDK 化：
 
 - **MVP（当前）**：用 `agentcore` starter toolkit / boto3 直接配置 AgentCore Runtime + 创建 index-service，
-  先打通主流程与 POC 性能基准。CodeGraph 召回率、经 HTTP 接口读文件的延迟是主要待验证点——验证前不固化 IaC，
+  先跑通主流程、建立 POC 性能基准。CodeGraph 召回率、经 HTTP 接口读文件的延迟是主要待验证点——验证前不固化 IaC，
   避免返工。「为何必须建索引而非让 Agent 逐文件搜索」已有实测基准，见
   [`indexing-performance-spike.md`](indexing-performance-spike.md)（全仓冷扫描约 127s，建索引后定位查询恒 1–5ms）。
 - **post-MVP（p2，渐进）**：CDK 管**稳定层**——会话容器镜像（DockerImageAsset，`Platform.LINUX_ARM64`）、
@@ -153,7 +153,7 @@ source-truth 不同于「在容器外把 AI 当远程 MCP 客户端」的常见�
    凭证 `git clone` 写入、systemd timer 定时 `git pull` 刷新，既供 codegraph 索引、又经 HTTP 接口的文件工具
    服务给会话容器；会话 microVM 不挂任何文件系统（无共享挂载）。
 
-通用运维惯例：ARM64 容器 + DockerImageAsset、CDK / boto3 混合 IaC 分工、飞书 SDK / CardKit 生态、
+其余沿用通用运维惯例：ARM64 容器 + DockerImageAsset、CDK / boto3 分两层管 IaC、飞书 SDK / CardKit 生态、
 空闲缩零按量计费、按游戏项目隔离机器人、结构化 JSON 日志 + hashUserId 脱敏、`deploy/ops/test` 三类脚本。
 
 ## 待验证技术点（POC 优先，影响架构定型）

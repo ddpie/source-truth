@@ -4,7 +4,7 @@
 
 ## IaC 分工
 
-采用 CDK / boto3 混合分工：
+CDK 与 boto3 分两层管 IaC：
 
 - **CDK 管理稳定层**（post-MVP，p2）：会话容器镜像（DockerImageAsset，`Platform.LINUX_ARM64`）、AgentCore
   执行 IAM 角色、VPC / 网络、index-service 常驻计算（含其本地代码副本）、网关基础设施。会话
@@ -18,8 +18,8 @@
 ## MVP 阶段：先不 CDK 化
 
 MVP 用 `agentcore` starter toolkit / boto3 直接创建 Runtime + index-service（ARM EC2，本地代码副本 +
-CodeGraph + HTTP 文件工具），先打通主流程与 POC 性能基准。CodeGraph 召回率、本地检索/读文件
-延迟、常驻索引可靠性是待验证点——验证前不固化 IaC，避免返工。架构定型后再渐进 CDK 化。
+CodeGraph + HTTP 文件工具），先跑通主流程、建立 POC 性能基准。CodeGraph 召回率、本地检索/读文件
+延迟、常驻索引可靠性这几项还需验证——验证前不固化 IaC，避免返工。架构定型后再渐进 CDK 化。
 
 ## CDK 化目标（p2，未实现）
 

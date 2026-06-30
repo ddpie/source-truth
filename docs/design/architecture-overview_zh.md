@@ -96,7 +96,7 @@ sequenceDiagram
 
 ### 3.1 CodeGraph：为什么需要、如何工作
 
-大型代码库中，AI 仅靠 grep 逐文件搜索无法高效回答"改动会影响什么""从触发到生效经过哪些模块"这类结构性
+大型代码库中，AI 仅靠 grep 逐文件搜索很难答好"改动会影响什么""从触发到生效经过哪些模块"这类结构性
 问题。CodeGraph 预构建代码调用关系图（基于 Tree-sitter，支持 C#、C++、TypeScript、Python、Lua、Go、
 Java、Kotlin、Swift、Ruby 等主流语言），AI 通过 `codegraph_impact`（影响分析）/ `codegraph_callers`
 （调用链）/ `codegraph_search`（符号定位）等工具一次查询获取结果。

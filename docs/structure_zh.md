@@ -26,7 +26,7 @@ index-service/          常驻 CodeGraph 索引服务 + MCP-over-HTTP 接口
   file_search.py        本地副本 ripgrep/grep 检索工具（在本地副本上检索，禁用内置 Grep，改走本地副本；命中按内容去重；MCP 暴露）
   file_read.py          本地副本按行 / 按位置读取文件的工具（read_file，路径对齐为仓库相对；MCP 暴露）
   file_table.py         结构化配置表读取（Excel/CSV/TSV/SQLite → 文本，read_table；只读、带 DoS 上限；MCP 暴露）
-  text_decode.py        稳健文本解码（仅标准库）：中文游戏仓常为 GBK/GB2312、配置表可能 UTF-16，按编码探测避免乱码
+  text_decode.py        容错文本解码（仅标准库）：中文游戏仓常为 GBK/GB2312、配置表可能 UTF-16，按编码探测避免乱码
   glossary.py           术语表数据层：concept 为中心的 Entry/聚合/增量原语/JSONL 读写/轻量层投影
   glossary_read.py      术语表只读查询（glossary_index/glossary_lookup MCP 工具；per-repo slice 聚合 + 项目隔离）
   glossary_build.py     构建期：本地 cc 扫码产出 concept JSONL（prompt/容错解析/中文别名 grounding 校验/增量合并）
@@ -58,7 +58,7 @@ scripts/                运维生命周期
   apply-dashboards.sh   渲染看板模板并 put-dashboard（幂等；--dry-run；读 metric-filters 同源 namespace）
   apply-alarms.sh       建 SNS topic + 从 config/alarm-thresholds.json 建 CloudWatch 告警（幂等；订阅需手动确认）
   apply-dau-lambda.sh   部署 B 类 DAU 预聚合 Lambda + 每日 EventBridge 调度（角色/打包/触发，幂等；--dry-run）
-  test.sh               单一分层测试入口（离线默认 / --full）
+  test.sh               分层测试的唯一入口（离线默认 / --full）
   check-versions.sh     版本固定防漂移守卫（base digest / requirements pin / Node / claude-code npm）
   get.sh                一行引导脚本（curl/gh 取来跑）：把仓库 clone 到 ./source-truth 再交给 install.sh；可重跑（已存在则 git pull）
   install.sh            交互式一键安装（查依赖→飞书凭证→配置→确认→调 deploy-all；重跑预填；添加项目可选 git 仓或 local 仓）

@@ -28,7 +28,7 @@ CodeGraph 引擎原生仅 stdio MCP，本服务（`http_bridge.py`）把它暴�
 | `repo_fanout.py` | 未指定 `repo` 时对每个仓的会话各查一遍再合并结果（纯合并核，无 I/O） |
 | `codegraph_client.py` | 定位类工具的 stdio 调用封装 |
 | `file_read.py` / `file_search.py` / `file_table.py` | 读文件 / 文本检索 / 读数值表三个文件工具 |
-| `text_decode.py` | 稳健文本解码（仅标准库）：中文游戏仓常为 GBK/GB2312、配置表可能 UTF-16，按编码探测避免乱码 |
+| `text_decode.py` | 容错文本解码（仅标准库）：中文游戏仓常为 GBK/GB2312、配置表可能 UTF-16，按编码探测避免乱码 |
 | `path_align.py` | 索引路径对齐为仓库相对路径（`mount_root` 默认 `""`，拒越界） |
 | `glossary*.py` / `glossary_refresh.sh` | 术语表数据层 / 只读查询 / 构建期生成（详见 [`docs/agent/glossary.md`](../docs/agent/glossary.md)） |
 | `perf.py` | 结构化耗时日志 |
