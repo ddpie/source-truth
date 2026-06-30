@@ -93,7 +93,7 @@ docs/
     playbooks.md        ordered change recipes (7 recipes)
     *-spike.md          Research notes (cardkit streaming / indexing perf / storage selection / perf comparison / template)
   assets/               Doc diagrams (hand-authored SVG: architecture / data-plane / session-isolation / glossary / glossary-build / glossary-confidence / security-defense / sequence; plus demo-qa.gif, a real Q&A screen recording)
-.local/                 (gitignored) account-specific deploy state: deploy-config, projects.json (project routing), deploy-output.md
+.local/                 (gitignored) account-specific deploy state: deploy-config, projects.json (project routing)
 ```
 
 Entries tagged `(p1)` / `(p2)` are later-phase outputs; currently placeholders or not yet created. Untagged entries are all in place.

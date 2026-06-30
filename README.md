@@ -98,7 +98,7 @@ bash <(gh api repos/ddpie/source-truth/contents/scripts/get.sh --jq '.content' |
 完整部署流程（前置条件、`deploy-all.sh` 分阶段控参、连飞书、运维、排错）见
 [`docs/runbook.md`](docs/runbook.md)。飞书凭证走 Secrets Manager，不落盘、不入仓库。
 
-## 能力边界（有意不做的事）
+## 能力边界
 
 定位是**只读的代码问答**：只查主分支、只回答，不改动任何东西。明确**不做**：
 
@@ -114,13 +114,13 @@ bash <(gh api repos/ddpie/source-truth/contents/scripts/get.sh --jq '.content' |
 
 git 为唯一来源：每个仓库 clone 到 index-service 本地，systemd timer 定时 `git pull`，file-watcher 增量重建索引，新鲜度分钟级、无需重部署、无需手动操作。刷新机制与「为何必须建索引」的实测见 [`docs/agent/architecture.md`](docs/agent/architecture.md) 的「数据面」。
 
-## 安全设计（纵深防御）
+## 安全设计
 
 安全面有三类，且不只靠提示词约束、代码本身会强制执行：**防越权**（Agent 连写工具都不在上下文里，
 服务端只注册一组只读工具）、**防泄露**（进群字段全过脱敏，密钥 / 内网拓扑不进群；凭证走 Secrets Manager 不入库）、
 **防注入**（工具读到的代码 / 注释一律当待分析数据，只信打包进镜像的 system prompt）。
 
-![安全纵深防御图：防越权、防泄露、防注入三道由代码强制执行的防线，三栏并列](docs/assets/security-defense.svg)
+![安全设计图：防越权、防泄露、防注入三道由代码强制执行的防线，三栏并列](docs/assets/security-defense.svg)
 
 逐条「怎么强制 / 以谁为准 / 怎么自动检查 / 违反后果」见 [`docs/agent/invariants.md`](docs/agent/invariants.md)。
 

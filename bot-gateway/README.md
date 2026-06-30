@@ -38,9 +38,12 @@ export FEISHU_APP_ID=cli_xxx
 export FEISHU_APP_SECRET=xxx          # 从 Secrets Manager/SSM 取出注入，勿写进仓库
 export FEISHU_BOT_OPEN_ID=ou_xxx
 export LOG_HASH_SALT=some-salt        # 可选但建议（脱敏盐）
-# 启动（长驻；ts-node 直接运行 TS，无需预编译）：
+# 本地调试启动（长驻；ts-node 直接运行 TS，无需预编译）：
 node_modules/.bin/ts-node --transpile-only src/index.ts
 ```
+
+> 线上不是这样起的：index 主机上由 systemd 跑 `run.sh`，它从 Secrets Manager 取飞书凭证注入进程
+> 环境（不落盘），再 `exec node dist/index.js`（编译产物，非 ts-node）。详见 [`../docs/runbook.md`](../docs/runbook.md)。
 
 成功日志：`sdk_wsclient_started` → `sdk_wsclient_connected`。完整的「连飞书 + 验证 + 排错」见
 [`../docs/runbook.md`](../docs/runbook.md)。

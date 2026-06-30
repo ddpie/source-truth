@@ -83,7 +83,7 @@ sequenceDiagram
 |-|-|-|
 | AI 引擎 | Claude Code + Codex 双引擎 | 共享同一套索引和知识层。默认使用 Claude Code；Codex 作为备选，按管理员配置或任务特征路由 |
 | 运行环境 | AWS AgentCore Runtime | Firecracker microVM 隔离，托管扩缩容和生命周期，不自建 |
-| 代码索引 | 独立索引服务（非容器内） | 索引服务常驻持有一份 clone，靠本地 inotify 做到秒级增量更新；用户容器通过远程 MCP 查询，不占用用户侧资源 |
+| 代码索引 | 独立索引服务（非容器内） | 索引服务常驻持有一份 clone，靠 systemd timer 定时 `git pull` + codegraph file-watcher 增量（分钟级新鲜，见顶部偏离说明）；用户容器通过远程 MCP 查询，不占用用户侧资源 |
 | 多分支 | git worktree | 共享对象库，每分支独立 worktree + 独立索引实例（CodeGraph 官方推荐的多分支模式），存储开销仅为工作区文件 |
 | 配置表 | AI 直接读文件 | 配置在代码仓库内（Excel/JSON/CSV），不引入中间数据库 |
 | 设计文档 | lark-cli 按需读取 | 容器内预装 lark-cli，需要时直接调用飞书 API 读文档，不预同步 |
@@ -120,7 +120,7 @@ graph LR
 - 会话容器与索引服务不共享挂载：索引服务在本地磁盘持唯一一份代码副本、监听变更构建索引——一份代码，
   无副本同步问题；定位查询与文件读取都由索引服务经 HTTP 接口暴露给会话容器
 - AI 通过索引定位文件后，读取的是代码最新版本（非索引快照）
-- 夜间 CI 执行全量重建兜底
+- 刷新靠 systemd timer 定时 `git pull` + file-watcher 增量（HEAD 未变即跳过），无夜间全量重建兜底
 
 ### 3.2 飞书交互：流式卡片 + 动态组件
 
@@ -149,7 +149,7 @@ MCP-over-HTTP 接口（定位 + 读文件工具）提供给所有会话容器，
 | 数量 | 一组分支 worktree（全员共用） | 每个 Agent 一份 |
 | 权限 | 只读 | 可读写 |
 | 可见性 | 所有 Agent | 仅本 Agent |
-| 生命周期 | 持久（push 实时增量 + 夜间兜底） | 每会话独占（14 天空闲过期） |
+| 生命周期 | 持久（定时 `git pull` 分钟级 + file-watcher 增量） | 每会话独占（14 天空闲过期） |
 
 ### 3.4 文档与代码冲突
 

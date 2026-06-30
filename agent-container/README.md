@@ -15,7 +15,7 @@
 
 | 项 | 约定 |
 |----|------|
-| 入参 payload | `{ "prompt": <问题文本>, "session": <会话上下文> }`（由 bot-gateway 注入） |
+| 入参 payload | `{ "prompt": <问题文本>, "traceId": <贯通两侧日志>, "repos": <项目所属仓库列表，可选> }`（由 bot-gateway 注入；runtimeSessionId 走 AgentCore header，不在 payload 里） |
 | CodeGraph + 文件读取 | 远程 MCP-over-HTTP 端点（由 index-service 暴露），通过 env / option 注入；定位与读文件（`codegraph_read_file` / `codegraph_glob_files` / `codegraph_search_files` / `codegraph_read_table`）都走此接口 |
 | 代码与配置 | 经 index-service 文件工具读取（**仓库副本只在 index-service 本地磁盘**；microVM 不挂文件系统）；路径为仓库相对（如 `Assets/Scripts/Foo.cs`） |
 | 临时文件 | Session Storage 可写挂载在 `/mnt/workspace`（每会话隔离） |

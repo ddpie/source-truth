@@ -72,7 +72,7 @@
 
 - 见 [`../runbook.md`](../runbook.md)（前置 → 一条命令 → 连飞书 → 起网关 → 验证 → 运维 → 排错）。
 - 幂等：每个资源 describe-or-create，按 tag 复用；中途失败后重新运行会继续未完成步骤。
-- 飞书密钥手动创建（Secrets Manager/SSM），编排脚本不自动创建。
+- 飞书密钥由 `install.sh` 交互式创建（Secrets Manager：`source-truth/feishu-<projectId>` + 全局 `source-truth/git-credentials`）；纯 `deploy-all.sh`（CI）要求密钥已存在。
 
 ## 配方 7：改顶层目录 / 加文档
 

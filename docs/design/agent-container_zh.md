@@ -25,7 +25,7 @@ bot-gateway ──InvokeAgentRuntime──▶ agent-container（本组件，micr
   消费端，而不是容器外的远程客户端。宿主是 `bedrock_agentcore.runtime.BedrockAgentCoreApp`，`@app.entrypoint`
   异步流式 handler。
 - **模型使用 Bedrock**：`CLAUDE_CODE_USE_BEDROCK=1`，microVM 内用 IAM role 鉴权（不传 bearer token）。模型 id
-  固定为 `global.anthropic.claude-*:0`（具体版本待定）。
+  默认 `global.anthropic.claude-opus-4-8`，可经 `deploy_runtime.py` 的 `--model` / `ANTHROPIC_MODEL` 覆盖。
 - **只读边界由工具白名单保证**：agent 内建 `Read`/`Glob`/`Grep` 全部禁用（`tools=[]`、不设 `cwd`），不开放
   `Bash`/`Write`/`Edit`；读文件只能经 index-service 的 `codegraph_*` 工具（`read_file`/`glob_files`/`search_files`
   + 定位类）。落实「不运行引擎、不写回、不提交」。
