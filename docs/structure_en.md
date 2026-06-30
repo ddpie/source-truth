@@ -42,7 +42,6 @@ index-service/          Standalone CodeGraph index service + MCP-over-HTTP bridg
   tests/                pytest (invoked by scripts/test.sh)
 infra/                  Infrastructure as code (MVP starts with agentcore toolkit / boto3, CDK-ified incrementally)
   README.md             IaC split: CDK owns the stable layer / deploy-all.sh provisions AgentCore Runtime via boto3
-  source-truth-iam.yaml CloudFormation: --local (single-EC2) mode instance role (deploy-time + runtime perms) + instance profile; deployed by scripts/create-iam.sh
   monitoring/           Monitoring (CloudWatch side; scripts/boto3, not a CDK stack)
     queries/metric-filters/a-class-metrics.json  Single source of A-class metric intent (counts/percentiles/distributions → metric-filter)
     queries/metric-filters/alarm-metrics.json    Dedicated dense alarm filters (one per card_health kind, defaultValue:0)
@@ -66,7 +65,7 @@ scripts/                Operational lifecycle
   push-local-repo.sh    Operator-side: rsync a local repo to the index host's staging dir and trigger a rebuild (local-repo refresh entry; no git)
   deploy-all.sh         Canonical one-click deploy (artifacts→IAM→network→index-service→image→Runtime→gateway; idempotent; --local single-host bootstrap)
   launch-host.sh        --local (single-EC2) mode entry (run on your machine): pick profile → create IAM → pick VPC/subnet/key/type → launch the ARM64 EC2 with the instance role attached → print next steps
-  create-iam.sh         Create the --local instance role + profile from infra/source-truth-iam.yaml (usually called by launch-host.sh)
+  create-iam.sh         Create or reuse the --local instance role + profile and add the deploy-time policies (idempotent; usually called by launch-host.sh)
   lib/provision_*.sh + deploy_runtime.py + wait_index_health.sh  deploy-all.sh phase implementations
   lib/deploy_project.sh + wait_base_host.sh + delete_runtime.py  Multi-project orchestration: build base / await base ready / delete per-project runtime
   lib/resolve_model.sh  Query Bedrock list-inference-profiles to pick a profile that actually exists in the region (no prefix guessing; geo profiles vary by region)

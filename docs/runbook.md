@@ -143,8 +143,8 @@ cd source-truth && ./scripts/install.sh        # 或 ./scripts/deploy-all.sh --r
 
 - **EC2 必须是 ARM64（aarch64）、Ubuntu 24.04**：镜像在本机构建、codegraph-server 也是 ARM64；脚本一开始就检查，x86 直接拦下。`launch-host.sh` 会设置 IMDSv2 required + hop-limit 1。
 - 部署用户需**免密 sudo**（或以 root 运行）——`bootstrap.sh` 与本地仓 `reindex` 都用 `sudo`。
-- **`--local` 部署调用 AWS 用的是这台机器的实例角色**，不是你本地的 profile（profile 只在你自己机器上，SSH 进 EC2 后就用不上了）。所以这个角色既要有建资源的权限（VPC/EC2/ECR/AgentCore/Secrets），也要有运行期的权限，**权限比较大**——这台机器应**专机专用，不跟其它业务混跑**。角色由 `launch-host.sh` 一次性建好（它内部调 [`scripts/create-iam.sh`](../scripts/create-iam.sh) 跑 CloudFormation 模板 [`infra/source-truth-iam.yaml`](../infra/source-truth-iam.yaml)）；建角色这一步用你本地选的 profile，该 profile 需有建 IAM 的权限。
-- 角色由 CloudFormation 管理（无状态、可重建）；EC2 独立长存（带着 `.local/` 状态），**不在任何 CloudFormation 栈里**——否则删栈会连部署状态一起删。
+- **`--local` 部署调用 AWS 用的是这台机器的实例角色**，不是你本地的 profile（profile 只在你自己机器上，SSH 进 EC2 后就用不上了）。所以这个角色既要有建资源的权限（VPC/EC2/ECR/AgentCore/Secrets），也要有运行期的权限，**权限比较大**——这台机器应**专机专用，不跟其它业务混跑**。角色由 `launch-host.sh` 一次性建好（它内部调 [`scripts/create-iam.sh`](../scripts/create-iam.sh)）；建角色这一步用你本地选的 profile，该 profile 需有建 IAM 的权限。
+- **角色名与默认部署共用**（都是 `source-truth-index-role`，IAM 角色账号级全局、不分区域）。`create-iam.sh` 幂等：角色已存在就直接复用、只补 `--local` 要的部署期权限，不会重建。但要留意一个副作用——**该账号若已有默认（双机）部署在用这个角色，补上部署期权限后那台机器也会一并拿到**。要让默认部署保持最小权限，就别在同一账号跑 `--local`，换个账号。
 
 `--local` 不新建 VPC/NAT，复用本机所在的 VPC 和子网；另建一个专用安全组附加到本机，runtime 也用它——该安全组只放行 8080-8099 端口、且只对组内成员（本机及其启动的 runtime）开放，外部访问不到 bridge。**AgentCore Runtime 仍由 AWS 托管**，不占用本机资源、也无需运维——「单台 EC2」指只需开通并维护这一台主机。首次部署约 10–20 分钟（视机型而定）：bootstrap 与镜像构建都在本机串行执行，比默认的双机方式略慢。
 

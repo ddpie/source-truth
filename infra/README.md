@@ -2,11 +2,6 @@
 
 基础设施即代码（IaC）。
 
-`source-truth-iam.yaml` 是 `--local`（单台 EC2）模式的 IAM 模板：建一个 EC2 实例角色（部署期 + 运行期权限合一）
-+ instance profile。默认（双机）部署用不到它——那条路 IAM 由 `scripts/lib/provision_iam.sh` 自动建。`--local`
-怎么用见 [`../docs/runbook.md`](../docs/runbook.md) 的「在单台 EC2 上就地部署」一节；模板由 `scripts/create-iam.sh`
-（通常经 `scripts/launch-host.sh`）部署。
-
 ## IaC 分工
 
 CDK 与 boto3 分两层管 IaC：

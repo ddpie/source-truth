@@ -518,7 +518,7 @@ fi
 # Phase 1b: IAM (instance profile + runtime role) — fresh-account safe
 # ============================================================
 if skip iam; then say warn "skip iam"; else
-  # --local note: the EC2's instance role (pre-created via infra/source-truth-iam.yaml) carries
+  # --local note: the EC2's instance role (pre-created via scripts/create-iam.sh) carries
   # IAM-write perms, so this phase runs the same as the default path — provision_iam.sh creates the
   # AgentCore runtime role and (re)asserts the index role's runtime policies (idempotent).
   say step "Phase 1b: IAM"

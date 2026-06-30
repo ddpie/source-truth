@@ -3,15 +3,13 @@
 #
 # It chains the steps that come before `deploy-all.sh --local`:
 #   1. pick an AWS profile (SELECT from your configured profiles — no credentials typed)
-#   2. create the EC2 instance role + profile via create-iam.sh (CloudFormation)
+#   2. create (or reuse) the EC2 instance role + profile via create-iam.sh
 #   3. pick VPC / subnet / key pair / instance type interactively
 #   4. launch ONE ARM64 Ubuntu 24.04 EC2 with the instance profile attached + IMDSv2 required
 #   5. print the SSH + deploy commands to run next
 #
 # The EC2 is LONG-LIVED and holds the deployment state in its repo's .local/ (deploy-config +
 # projects.json), so later upgrades = SSH back into the SAME box and re-run deploy-all --local.
-# That's why the box is NOT part of any CloudFormation stack (deleting a stack would take the
-# state with it) — only IAM is.
 #
 #   scripts/launch-host.sh                 # fully interactive
 #   scripts/launch-host.sh --profile admin --region ap-northeast-1   # skip those two prompts
