@@ -185,7 +185,7 @@ Below is a real Q&A from a Feishu group (connected to a WoW-style C++ server cod
 
 Step by step, in time order, from question to conclusion:
 
-![End-to-end sequence of one Q&A: Feishu client, bot-gateway, AgentCore microVM, index-service, CardKit across five swimlanes, from @-mention to the streamed conclusion card](docs/assets/sequence-qa.svg)
+![End-to-end sequence of one Q&A: Feishu client, bot-gateway, AgentCore microVM, index-service, CardKit across five swimlanes, from @-mention to the streamed conclusion card](docs/assets/sequence-qa.en.svg)
 
 | # | What happens | Why this step |
 |---|--------------|---------------|
@@ -214,7 +214,7 @@ These boundaries are both product positioning and a security guarantee. Planned 
 
 A question flows through three resident components: the **bot-gateway** (subscribed to Feishu events over a persistent connection), one **session-isolated microVM** per conversation, and **index-service**, which holds a read-only copy of your code. The client talks to the gateway, the gateway routes to a microVM, and the microVM reads code through index-service. Each session is invisible to the others inside its own microVM, yet all read against this project's read-only copy to check the code. A single query can search across multiple repos in one project, and one index-service host can serve several projects (each gets its own process and port, and every session still runs in its own microVM).
 
-![source-truth architecture: Feishu client → Feishu open platform (persistent-connection event subscription) → bot-gateway → multiple isolated session microVMs → the project's read-only index-service code copy (one per project), with answers streamed back](docs/assets/architecture.svg)
+![source-truth architecture: Feishu client → Feishu open platform (persistent-connection event subscription) → bot-gateway → multiple isolated session microVMs → the project's read-only index-service code copy (one per project), with answers streamed back](docs/assets/architecture.en.svg)
 
 > **Session microVMs don't mount any filesystem**: source and config tables are read through index-service's HTTP interface (`codegraph_read_file` / `codegraph_glob_files` / `codegraph_search_files`); the code copy lives only on index-service's local disk (one copy per project, kept off the microVM entirely — there is never a second copy).
 
@@ -270,7 +270,7 @@ git is the single source: each repo is cloned to index-service locally, a system
 
 Three classes of security, and not by prompt constraints alone — the code enforces them: **anti-privilege-escalation** (the agent doesn't even have write tools in context; the server registers only a read-only tool set), **anti-leak** (all fields sent into the group are de-identified, secrets / internal topology never enter the group; credentials go through Secrets Manager, never stored in the repo), **anti-injection** (any code / comment read via tools is treated as data to analyze, trusting only the system prompt baked into the image).
 
-![Security design: anti-privilege-escalation, anti-leak, anti-injection — three code-enforced lines of defense, three columns side by side](docs/assets/security-defense.svg)
+![Security design: anti-privilege-escalation, anti-leak, anti-injection — a code-enforced guard for each of three risks, three columns side by side](docs/assets/security-defense.en.svg)
 
 Per-item "how it's enforced / source of truth / how it's auto-checked / consequence of violation": [`docs/agent/invariants.md`](docs/agent/invariants.md).
 

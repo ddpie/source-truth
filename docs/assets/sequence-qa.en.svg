@@ -1,0 +1,112 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="648" viewBox="0 0 760 648" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#5b6573"/>
+    </marker>
+    <marker id="arrowback" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#3b7d4f"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="760" height="648" fill="#ffffff"/>
+  <text x="380" y="32" text-anchor="middle" font-size="18" font-weight="700" fill="#1f2733">End-to-end sequence of one Q&amp;A</text>
+  <text x="380" y="54" text-anchor="middle" font-size="12.5" fill="#7a8493">solid = request · green = streamed back · top-to-bottom in time order</text>
+
+  <!-- lifelines: 6 actors. x centers: 56, 172, 300, 424, 548, 692 -->
+  <g font-size="11" font-weight="600" fill="#1f2733" text-anchor="middle">
+    <rect x="12" y="72" width="88" height="40" rx="7" fill="#f1f3f7" stroke="#cdd5e0"/>
+    <text x="56" y="91">Feishu client</text><text x="56" y="105" font-size="9" font-weight="400" fill="#7a8493">designer @-mentions</text>
+
+    <rect x="122" y="72" width="100" height="40" rx="7" fill="#fdf5e9" stroke="#e4c896"/>
+    <text x="172" y="91">open platform</text><text x="172" y="105" font-size="9" font-weight="400" fill="#7a8493">event sub · relay</text>
+
+    <rect x="248" y="72" width="104" height="40" rx="7" fill="#eef3fb" stroke="#b9c9e6"/>
+    <text x="300" y="91">bot-gateway</text><text x="300" y="105" font-size="9" font-weight="400" fill="#7a8493">persistent conn · route</text>
+
+    <rect x="374" y="72" width="100" height="40" rx="7" fill="#eef3fb" stroke="#b9c9e6"/>
+    <text x="424" y="91">AgentCore</text><text x="424" y="105" font-size="9" font-weight="400" fill="#7a8493">microVM Agent</text>
+
+    <rect x="494" y="72" width="108" height="40" rx="7" fill="#eef6ef" stroke="#9cc6a8"/>
+    <text x="548" y="91">index-service</text><text x="548" y="105" font-size="9" font-weight="400" fill="#7a8493">verify · read files</text>
+
+    <rect x="646" y="72" width="92" height="40" rx="7" fill="#fdf5e9" stroke="#e4c896"/>
+    <text x="692" y="91">CardKit</text><text x="692" y="105" font-size="9" font-weight="400" fill="#7a8493">open platform · card</text>
+  </g>
+
+  <!-- lifelines -->
+  <g stroke="#dfe4ea" stroke-width="1.2" stroke-dasharray="3,4">
+    <line x1="56" y1="112" x2="56" y2="578"/>
+    <line x1="172" y1="112" x2="172" y2="578"/>
+    <line x1="300" y1="112" x2="300" y2="578"/>
+    <line x1="424" y1="112" x2="424" y2="578"/>
+    <line x1="548" y1="112" x2="548" y2="578"/>
+    <line x1="692" y1="112" x2="692" y2="578"/>
+  </g>
+
+  <!-- messages -->
+  <g font-size="10" fill="#3b4654">
+    <!-- 1 client -> open platform -->
+    <line x1="56" y1="140" x2="170" y2="140" stroke="#5b6573" stroke-width="1.3" marker-end="url(#arrow)"/>
+    <text x="114" y="134" text-anchor="middle">(1) @-mention asks</text>
+
+    <!-- 2 open platform -> gateway (persistent-conn push) -->
+    <line x1="172" y1="170" x2="298" y2="170" stroke="#5b6573" stroke-width="1.3" marker-end="url(#arrow)"/>
+    <text x="236" y="164" text-anchor="middle">(2) pushes event</text>
+
+    <!-- 3 gateway -> CardKit: create card -->
+    <line x1="300" y1="198" x2="690" y2="198" stroke="#5b6573" stroke-width="1.3" marker-end="url(#arrow)"/>
+    <text x="496" y="192" text-anchor="middle">(3) create card "analyzing…" (get card_id)</text>
+
+    <!-- card visible back to client (through Feishu) -->
+    <line x1="690" y1="224" x2="58" y2="224" stroke="#3b7d4f" stroke-width="1.3" marker-end="url(#arrowback)"/>
+    <text x="374" y="218" text-anchor="middle" fill="#2f7a47">card visible instantly · live timer (pushed via Feishu)</text>
+
+    <!-- 4 gateway -> AgentCore: invoke -->
+    <line x1="300" y1="256" x2="422" y2="256" stroke="#5b6573" stroke-width="1.3" marker-end="url(#arrow)"/>
+    <text x="361" y="250" text-anchor="middle">(4) SigV4 invoke</text>
+
+    <!-- 5 glossary (auxiliary, not a mandatory serial gate — dashed) -->
+    <line x1="424" y1="286" x2="546" y2="286" stroke="#9aa3b0" stroke-width="1.3" stroke-dasharray="4,3" marker-end="url(#arrow)"/>
+    <text x="485" y="280" text-anchor="middle" fill="#7a8493">(5) glossary (aid · only if a CN term hits)</text>
+    <line x1="548" y1="310" x2="426" y2="310" stroke="#9aa3b0" stroke-width="1.3" stroke-dasharray="4,3" marker-end="url(#arrowback)"/>
+    <text x="487" y="304" text-anchor="middle" fill="#7a8493">CN → EN symbols (used alongside own terms)</text>
+
+    <!-- 6 locate -->
+    <line x1="424" y1="340" x2="546" y2="340" stroke="#5b6573" stroke-width="1.3" marker-end="url(#arrow)"/>
+    <text x="485" y="334" text-anchor="middle">(6) CodeGraph locate</text>
+    <line x1="548" y1="364" x2="426" y2="364" stroke="#3b7d4f" stroke-width="1.3" marker-end="url(#arrowback)"/>
+    <text x="487" y="358" text-anchor="middle" fill="#2f7a47">matched files</text>
+
+    <!-- 7 read -->
+    <line x1="424" y1="394" x2="546" y2="394" stroke="#5b6573" stroke-width="1.3" marker-end="url(#arrow)"/>
+    <text x="485" y="388" text-anchor="middle">(7) read files precisely</text>
+    <line x1="548" y1="418" x2="426" y2="418" stroke="#3b7d4f" stroke-width="1.3" marker-end="url(#arrowback)"/>
+    <text x="487" y="412" text-anchor="middle" fill="#2f7a47">real code content</text>
+
+    <!-- loop note over 5-7 -->
+    <rect x="437" y="274" width="18" height="162" rx="3" fill="none" stroke="#c7ccd4" stroke-width="1" stroke-dasharray="2,3"/>
+    <text x="486" y="434" text-anchor="middle" font-size="9" fill="#9aa3b0">as needed</text>
+
+    <!-- 8 stream back -->
+    <line x1="422" y1="456" x2="302" y2="456" stroke="#3b7d4f" stroke-width="1.3" marker-end="url(#arrowback)"/>
+    <text x="362" y="450" text-anchor="middle" fill="#2f7a47">(8) stream out (SSE: conclusion first)</text>
+
+    <!-- 9 update card -->
+    <line x1="300" y1="484" x2="690" y2="484" stroke="#3b7d4f" stroke-width="1.3" marker-end="url(#arrowback)"/>
+    <text x="496" y="478" text-anchor="middle" fill="#2f7a47">(9) update card while streaming</text>
+
+    <!-- card refreshes on client, through Feishu -->
+    <line x1="690" y1="510" x2="58" y2="510" stroke="#3b7d4f" stroke-width="1.3" marker-end="url(#arrowback)"/>
+    <text x="374" y="504" text-anchor="middle" fill="#2f7a47">card refreshes on the client as it writes (pushed via Feishu)</text>
+
+    <!-- 10 finalize -->
+    <line x1="300" y1="538" x2="690" y2="538" stroke="#3b7d4f" stroke-width="1.3" marker-end="url(#arrowback)"/>
+    <text x="496" y="532" text-anchor="middle" fill="#2f7a47">(10) finalize: "for engineers to verify" + follow-up button</text>
+
+    <!-- finished card back to client -->
+    <line x1="690" y1="564" x2="58" y2="564" stroke="#3b7d4f" stroke-width="1.3" marker-end="url(#arrowback)"/>
+    <text x="374" y="558" text-anchor="middle" fill="#2f7a47">finished card · keep following up (pushed via Feishu)</text>
+  </g>
+
+  <text x="380" y="600" text-anchor="middle" font-size="10.5" fill="#7a8493">read-only throughout, reading code to verify · session microVMs mount no filesystem · see docs/agent/architecture.md</text>
+</svg>

@@ -1,0 +1,79 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="478" viewBox="0 0 760 478" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#5b6573"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="760" height="478" fill="#ffffff"/>
+  <text x="380" y="34" text-anchor="middle" font-size="18" font-weight="700" fill="#1f2733">Security design</text>
+  <text x="380" y="56" text-anchor="middle" font-size="12.5" fill="#7a8493">not by prompt constraints alone · enforced by the code · a guard for each of three risks</text>
+
+  <!-- ===== anti privilege escalation ===== -->
+  <g>
+    <rect x="24" y="86" width="226" height="332" rx="10" fill="#eef3fb" stroke="#b9c9e6" stroke-width="1.2"/>
+    <text x="137" y="116" text-anchor="middle" font-size="15" font-weight="700" fill="#1f2733">Anti-escalation</text>
+    <text x="137" y="137" text-anchor="middle" font-size="11" fill="#7a8493">cannot write or commit past read-only</text>
+
+    <rect x="44" y="156" width="186" height="74" rx="7" fill="#ffffff" stroke="#cdd8ec" stroke-width="1"/>
+    <text x="137" y="178" text-anchor="middle" font-size="11.5" font-weight="600" fill="#3457a6">SDK side: read-only tools only</text>
+    <text x="137" y="198" text-anchor="middle" font-size="10.5" fill="#5b6573">tools=[] · disallowed_tools</text>
+    <text x="137" y="216" text-anchor="middle" font-size="10.5" fill="#5b6573">dontAsk · strict_mcp_config</text>
+
+    <rect x="44" y="244" width="186" height="74" rx="7" fill="#ffffff" stroke="#cdd8ec" stroke-width="1"/>
+    <text x="137" y="266" text-anchor="middle" font-size="11.5" font-weight="600" fill="#3457a6">Server side: read-only tools only</text>
+    <text x="137" y="286" text-anchor="middle" font-size="10.5" fill="#5b6573">registers ≤9 read-only tools</text>
+    <text x="137" y="304" text-anchor="middle" font-size="10.5" fill="#5b6573">unregistered = no capability</text>
+
+    <text x="137" y="346" text-anchor="middle" font-size="10.5" font-weight="600" fill="#9aa3b0">source of truth</text>
+    <text x="137" y="366" text-anchor="middle" font-size="10" fill="#7a8493">agent_lib.py (SDK layers)</text>
+    <text x="137" y="384" text-anchor="middle" font-size="10" fill="#7a8493">http_bridge.py (allowlist)</text>
+    <text x="137" y="404" text-anchor="middle" font-size="10" fill="#7a8493">both read-only, change no file</text>
+  </g>
+
+  <!-- ===== anti leak ===== -->
+  <g>
+    <rect x="267" y="86" width="226" height="332" rx="10" fill="#eef6ef" stroke="#9cc6a8" stroke-width="1.2"/>
+    <text x="380" y="116" text-anchor="middle" font-size="15" font-weight="700" fill="#1f2733">Anti-leak</text>
+    <text x="380" y="137" text-anchor="middle" font-size="11" fill="#7a8493">secrets and internal info never leave</text>
+
+    <rect x="287" y="156" width="186" height="74" rx="7" fill="#ffffff" stroke="#bfe0c6" stroke-width="1"/>
+    <text x="380" y="178" text-anchor="middle" font-size="11.5" font-weight="600" fill="#2f7a47">de-identify fields sent to chat</text>
+    <text x="380" y="198" text-anchor="middle" font-size="10.5" fill="#5b6573">user / session id via hashUserId</text>
+    <text x="380" y="216" text-anchor="middle" font-size="10.5" fill="#5b6573">no secrets or internal info in chat</text>
+
+    <rect x="287" y="244" width="186" height="74" rx="7" fill="#ffffff" stroke="#bfe0c6" stroke-width="1"/>
+    <text x="380" y="266" text-anchor="middle" font-size="11.5" font-weight="600" fill="#2f7a47">credentials never stored</text>
+    <text x="380" y="286" text-anchor="middle" font-size="10.5" fill="#5b6573">Feishu creds via Secrets Manager</text>
+    <text x="380" y="304" text-anchor="middle" font-size="10.5" fill="#5b6573">injected to env at runtime · no disk</text>
+
+    <text x="380" y="346" text-anchor="middle" font-size="10.5" font-weight="600" fill="#9aa3b0">source of truth</text>
+    <text x="380" y="366" text-anchor="middle" font-size="10" fill="#7a8493">bot-gateway/src/log.ts</text>
+    <text x="380" y="384" text-anchor="middle" font-size="10" fill="#7a8493">bot-gateway/run.sh</text>
+    <text x="380" y="404" text-anchor="middle" font-size="10" fill="#7a8493">install.sh (per-project secrets)</text>
+  </g>
+
+  <!-- ===== anti injection ===== -->
+  <g>
+    <rect x="510" y="86" width="226" height="332" rx="10" fill="#fdf5e9" stroke="#e4c896" stroke-width="1.2"/>
+    <text x="623" y="116" text-anchor="middle" font-size="15" font-weight="700" fill="#1f2733">Anti-injection</text>
+    <text x="623" y="137" text-anchor="middle" font-size="11" fill="#7a8493">instructions in read content are untrusted</text>
+
+    <rect x="530" y="156" width="186" height="74" rx="7" fill="#ffffff" stroke="#eedcb8" stroke-width="1"/>
+    <text x="623" y="178" text-anchor="middle" font-size="11.5" font-weight="600" fill="#a9772a">code / comments = data</text>
+    <text x="623" y="198" text-anchor="middle" font-size="10.5" fill="#5b6573">anything read via tools is data</text>
+    <text x="623" y="216" text-anchor="middle" font-size="10.5" fill="#5b6573">instructions in it are not run</text>
+
+    <rect x="530" y="244" width="186" height="74" rx="7" fill="#ffffff" stroke="#eedcb8" stroke-width="1"/>
+    <text x="623" y="266" text-anchor="middle" font-size="11.5" font-weight="600" fill="#a9772a">single trust boundary</text>
+    <text x="623" y="286" text-anchor="middle" font-size="10.5" fill="#5b6573">trusts only the image-baked</text>
+    <text x="623" y="304" text-anchor="middle" font-size="10.5" fill="#5b6573">system prompt</text>
+
+    <text x="623" y="346" text-anchor="middle" font-size="10.5" font-weight="600" fill="#9aa3b0">source of truth</text>
+    <text x="623" y="366" text-anchor="middle" font-size="10" fill="#7a8493">prompts/system.md</text>
+    <text x="623" y="386" text-anchor="middle" font-size="10" fill="#7a8493">(hard rule: trust the prompt,</text>
+    <text x="623" y="404" text-anchor="middle" font-size="10" fill="#7a8493">not instructions read via tools)</text>
+  </g>
+
+  <text x="380" y="452" text-anchor="middle" font-size="11" fill="#7a8493">per-item "how enforced / source of truth / auto-checked / consequence" in docs/agent/invariants.md</text>
+</svg>

@@ -1,0 +1,101 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="640" viewBox="0 0 760 640" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#5b6573"/>
+    </marker>
+    <marker id="arrowgreen" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#3b7d4f"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="760" height="640" fill="#ffffff"/>
+  <text x="380" y="40" text-anchor="middle" font-size="18" font-weight="700" fill="#1f2733">source-truth architecture</text>
+  <text x="380" y="62" text-anchor="middle" font-size="12.5" fill="#7a8493">One index-service host serves multiple projects; projects and sessions are isolated; code is read-only, local to the host</text>
+
+  <!-- Feishu clients: one bot per project -->
+  <rect x="200" y="84" width="360" height="46" rx="8" fill="#eef3fb" stroke="#b9c9e6" stroke-width="1.2"/>
+  <text x="380" y="105" text-anchor="middle" font-size="14" font-weight="600" fill="#1f2733">Feishu client</text>
+  <text x="380" y="122" text-anchor="middle" font-size="10.5" fill="#7a8493">one bot per project, each with its own Feishu app</text>
+
+  <!-- Feishu open platform: relays events to gateways over a long connection -->
+  <rect x="200" y="150" width="360" height="46" rx="8" fill="#fdf5e9" stroke="#e4c896" stroke-width="1.2"/>
+  <text x="380" y="171" text-anchor="middle" font-size="13" font-weight="600" fill="#1f2733">Feishu open platform</text>
+  <text x="380" y="187" text-anchor="middle" font-size="10.5" fill="#7a8493">event subscription · pushes to the gateway over a persistent connection (not a direct client link)</text>
+
+  <!-- two project lanes (gateway + sessions only) -->
+  <!-- lane A -->
+  <rect x="40" y="222" width="330" height="184" rx="10" fill="#fafbfd" stroke="#cdd5e0" stroke-width="1.2"/>
+  <text x="205" y="244" text-anchor="middle" font-size="12.5" font-weight="700" fill="#3a4556">Project A</text>
+  <!-- lane B -->
+  <rect x="390" y="222" width="330" height="184" rx="10" fill="#fafbfd" stroke="#cdd5e0" stroke-width="1.2"/>
+  <text x="555" y="244" text-anchor="middle" font-size="12.5" font-weight="700" fill="#3a4556">Project B</text>
+
+  <!-- gateway A -->
+  <rect x="64" y="260" width="282" height="44" rx="8" fill="#eef3fb" stroke="#b9c9e6" stroke-width="1.2"/>
+  <text x="205" y="278" text-anchor="middle" font-size="12.5" font-weight="600" fill="#1f2733">bot-gateway</text>
+  <text x="205" y="294" text-anchor="middle" font-size="10" fill="#7a8493">receives over a persistent connection, routes per session</text>
+  <!-- gateway B -->
+  <rect x="414" y="260" width="282" height="44" rx="8" fill="#eef3fb" stroke="#b9c9e6" stroke-width="1.2"/>
+  <text x="555" y="278" text-anchor="middle" font-size="12.5" font-weight="600" fill="#1f2733">bot-gateway</text>
+  <text x="555" y="294" text-anchor="middle" font-size="10" fill="#7a8493">receives over a persistent connection, routes per session</text>
+
+  <!-- runtime A: sessions -->
+  <text x="205" y="328" text-anchor="middle" font-size="10" fill="#9aa3b0">AgentCore Runtime · one isolated microVM per session</text>
+  <rect x="64" y="336" width="134" height="46" rx="7" fill="#eef3fb" stroke="#b9c9e6" stroke-width="1.1"/>
+  <text x="131" y="356" text-anchor="middle" font-size="11.5" font-weight="600" fill="#1f2733">Session A1</text>
+  <text x="131" y="372" text-anchor="middle" font-size="9.5" fill="#7a8493">Claude Code Agent</text>
+  <rect x="212" y="336" width="134" height="46" rx="7" fill="#eef3fb" stroke="#b9c9e6" stroke-width="1.1"/>
+  <text x="279" y="356" text-anchor="middle" font-size="11.5" font-weight="600" fill="#1f2733">Session A2</text>
+  <text x="279" y="372" text-anchor="middle" font-size="9.5" fill="#7a8493">Claude Code Agent</text>
+  <!-- runtime B: sessions -->
+  <text x="555" y="328" text-anchor="middle" font-size="10" fill="#9aa3b0">AgentCore Runtime · one isolated microVM per session</text>
+  <rect x="414" y="336" width="134" height="46" rx="7" fill="#eef3fb" stroke="#b9c9e6" stroke-width="1.1"/>
+  <text x="481" y="356" text-anchor="middle" font-size="11.5" font-weight="600" fill="#1f2733">Session B1</text>
+  <text x="481" y="372" text-anchor="middle" font-size="9.5" fill="#7a8493">Claude Code Agent</text>
+  <rect x="562" y="336" width="134" height="46" rx="7" fill="#eef3fb" stroke="#b9c9e6" stroke-width="1.1"/>
+  <text x="629" y="356" text-anchor="middle" font-size="11.5" font-weight="600" fill="#1f2733">Session B2</text>
+  <text x="629" y="372" text-anchor="middle" font-size="9.5" fill="#7a8493">Claude Code Agent</text>
+
+  <!-- edge: client -> open platform -->
+  <line x1="380" y1="130" x2="380" y2="150" stroke="#5b6573" stroke-width="1.3" marker-end="url(#arrow)"/>
+  <!-- edges: open platform -> gateways (persistent connection) -->
+  <line x1="380" y1="196" x2="205" y2="260" stroke="#5b6573" stroke-width="1.3" marker-end="url(#arrow)"/>
+  <line x1="380" y1="196" x2="555" y2="260" stroke="#5b6573" stroke-width="1.3" marker-end="url(#arrow)"/>
+  <!-- edges: gateway -> sessions -->
+  <line x1="205" y1="304" x2="205" y2="336" stroke="#5b6573" stroke-width="1.2" marker-end="url(#arrow)"/>
+  <line x1="555" y1="304" x2="555" y2="336" stroke="#5b6573" stroke-width="1.2" marker-end="url(#arrow)"/>
+
+  <!-- read-only evidence label between lanes and shared host -->
+  <text x="380" y="424" text-anchor="middle" font-size="10" fill="#3b7d4f" font-weight="600">Read-only: sessions mount no filesystem, reading code over HTTP throughout</text>
+  <!-- edges: sessions -> shared index host -->
+  <line x1="205" y1="382" x2="205" y2="438" stroke="#3b7d4f" stroke-width="1.3" marker-end="url(#arrowgreen)"/>
+  <line x1="555" y1="382" x2="555" y2="438" stroke="#3b7d4f" stroke-width="1.3" marker-end="url(#arrowgreen)"/>
+
+  <!-- shared index-service host: now physically CONTAINS both bridges -->
+  <rect x="40" y="438" width="680" height="172" rx="10" fill="#f4f7f4" stroke="#bcd6c2" stroke-width="1.4" stroke-dasharray="6,4"/>
+  <text x="380" y="460" text-anchor="middle" font-size="12.5" font-weight="700" fill="#3b7d4f">Same index-service host; each project keeps its own read-only code copy</text>
+  <text x="380" y="478" text-anchor="middle" font-size="10.5" fill="#5b6573">Code lives on local disk /data/repo/&lt;subdir&gt;, refreshed by periodic git pull, indexed and glossary-built offline</text>
+
+  <!-- bridge A (inside the shared host) -->
+  <rect x="64" y="492" width="282" height="104" rx="8" fill="#eef6ef" stroke="#9cc6a8" stroke-width="1.2"/>
+  <text x="205" y="512" text-anchor="middle" font-size="12" font-weight="600" fill="#1f2733">index-bridge · Project A (own process, own port)</text>
+  <rect x="78" y="524" width="120" height="58" rx="6" fill="#ffffff" stroke="#9cc6a8" stroke-width="1.1"/>
+  <text x="138" y="548" text-anchor="middle" font-size="10" font-weight="600" fill="#1f2733">client repo</text>
+  <text x="138" y="564" text-anchor="middle" font-size="8.5" fill="#7a8493">own graph.db</text>
+  <rect x="212" y="524" width="120" height="58" rx="6" fill="#ffffff" stroke="#9cc6a8" stroke-width="1.1"/>
+  <text x="272" y="548" text-anchor="middle" font-size="10" font-weight="600" fill="#1f2733">server repo</text>
+  <text x="272" y="564" text-anchor="middle" font-size="8.5" fill="#7a8493">own graph.db</text>
+
+  <!-- bridge B (inside the shared host) -->
+  <rect x="414" y="492" width="282" height="104" rx="8" fill="#eef6ef" stroke="#9cc6a8" stroke-width="1.2"/>
+  <text x="555" y="512" text-anchor="middle" font-size="12" font-weight="600" fill="#1f2733">index-bridge · Project B (own process, own port)</text>
+  <rect x="428" y="524" width="120" height="58" rx="6" fill="#ffffff" stroke="#9cc6a8" stroke-width="1.1"/>
+  <text x="488" y="548" text-anchor="middle" font-size="10" font-weight="600" fill="#1f2733">repo 1</text>
+  <text x="488" y="564" text-anchor="middle" font-size="8.5" fill="#7a8493">own graph.db</text>
+  <rect x="562" y="524" width="120" height="58" rx="6" fill="#ffffff" stroke="#9cc6a8" stroke-width="1.1"/>
+  <text x="622" y="548" text-anchor="middle" font-size="10" font-weight="600" fill="#1f2733">repo 2</text>
+  <text x="622" y="564" text-anchor="middle" font-size="8.5" fill="#7a8493">own graph.db</text>
+
+  <!-- isolation note -->
+  <text x="380" y="628" text-anchor="middle" font-size="10.5" fill="#aab2bd">Projects are isolated by process, port, and access scope; repos in one project are searched together and merged in repo-declaration order</text>
+</svg>
