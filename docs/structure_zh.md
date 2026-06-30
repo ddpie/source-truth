@@ -90,7 +90,7 @@ docs/
     architecture.md     工作原理：一次提问如何在系统里流转
     glossary.md         术语表：把中文提问映射到英文代码符号（构建期/查询期、grounding、价值边界）
     invariants.md       源 → 生成物映射 + 改 X 必改 Y 的耦合（9 条不变量）
-    playbooks.md        有序变更配方（7 个配方）
+    playbooks.md        变更手册（7 个改动场景）
     *-spike.md          调研记录（cardkit 流式 / 索引性能 / 存储选型 / 性能对比 / 模板）
   assets/               文档配图（手写 SVG：架构 / 数据面 / 会话隔离 / 术语表 / 术语表构建 / 术语表置信度分层 / 安全设计 / 时序；及一次真实问答录屏 demo-qa.gif）
 .local/                 （已 gitignore）账号特定部署状态：deploy-config、projects.json（项目路由）

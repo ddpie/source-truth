@@ -1,17 +1,17 @@
-# 变更配方（playbooks）
+# 变更手册（playbooks）
 
-常见改动「如何做、改哪里、如何验证、如何上线」的操作手册。每个配方都遵守
+常见改动「如何做、改哪里、如何验证、如何上线」的操作手册。每个场景都遵守
 [`invariants.md`](invariants.md) 的不变量。生效方式分三类，先区分：
 
 - **gateway 改动** → 重新部署该项目网关单元 `bot-gateway@<projectId>.service`（经 `deploy-all.sh` 的 gateway 阶段，每项目一个进程、各连自己的飞书 App）。
 - **agent 改动（含 system.md / 工具 / 镜像）** → 重建镜像 + 更新 runtime；**仍存活的 microVM 还会跑旧镜像，约 15 分钟后才被回收换上新镜像**。
-- **index-service 代码改动** → 重新部署 index-service（bootstrap + 重启 bridge）；**代码索引刷新无需部署**——定时 `git pull` + watcher 增量重建，分钟级自动新鲜（见配方 4）。
+- **index-service 代码改动** → 重新部署 index-service（bootstrap + 重启 bridge）；**代码索引刷新无需部署**——定时 `git pull` + watcher 增量重建，分钟级自动新鲜（见场景 4）。
 
 每次改完都运行 `./scripts/test.sh`（离线套件，pre-push 必过）。
 
 ---
 
-## 配方 1：改答案行为 / 输出规范（system prompt）
+## 场景 1：改答案行为 / 输出规范（system prompt）
 
 - **修改位置**：`agent-container/prompts/system.md`。
 - **注意**：marker 词（`供研发复核` / `你可能还想问` / `需要你确认`）是 gateway 解析器的**中文锚点**，
@@ -28,7 +28,7 @@
   等旧 microVM 老化（~15min）后再复测，否则读取到的可能仍是旧 prompt 的输出。
 - **注意**：preamble/marker 类「读取卡片发现没生效」，多半是因为旧 microVM 还在用旧 prompt——先看 deploy 时间，别急着改 gateway 正则兜底。
 
-## 配方 2：新增 / 修改一个 MCP 工具（index-service 暴露给 agent）
+## 场景 2：新增 / 修改一个 MCP 工具（index-service 暴露给 agent）
 
 - **修改位置**：`index-service/http_bridge.py`（注册 + 处理器，闭合白名单）+ 工具实现（`file_read.py` /
   `file_search.py` / `file_table.py` / `codegraph_session.py`）；**同步** `agent-container/agent_lib.py`
@@ -38,7 +38,7 @@
 - **验证**：`cd index-service && python -m pytest -q`；增加路径逃逸/注入用例。
 - **上线**：重新部署 index-service（重启各项目 bridge）+ 重建镜像（agent 侧允许清单已变更）。
 
-## 配方 3：切换模型
+## 场景 3：切换模型
 
 - **修改位置**：`scripts/deploy-all.sh` 的 `DEFAULT_MODEL`，或部署时传 `--model <id>`。
 - **注意**：`global.*` 推理档只在部分区域承载；跨区域用区域级档（`apac.*`/`us.*`/`eu.*`）。
@@ -46,7 +46,7 @@
 - **验证**：deploy 的 `preflight_model_access` 会检查可用性，并对 AccessDenied/不可用给可操作 WARN。
 - **上线**：重新运行 deploy 的 runtime 阶段（写入 runtime env `ANTHROPIC_MODEL`）。
 
-## 配方 4：刷新代码索引（目标仓库更新了）
+## 场景 4：刷新代码索引（目标仓库更新了）
 
 - **机制**：自动。每个仓库一个 systemd timer `index-refresh-<subdir>.timer`（默认 300s，`projects.json`
   的 `refreshIntervalSec` 可配）周期性 `git pull`；常驻 codegraph（`--mcp --graph-only`）进程的
@@ -55,7 +55,7 @@
   （`./scripts/deploy-all.sh ... --skip-base` 或 `install.sh` 的 redeploy 流程），脚本按清单重建 timer / bridge。
 - **验证**：`git pull` 失败会打 `GIT_FETCH_FAILED: <subdir>` 标记（可接监控）；端到端可问一个只有新提交才有的问题确认新鲜度。
 
-## 配方 5：改卡片渲染 / 流式 / 脱敏（gateway）
+## 场景 5：改卡片渲染 / 流式 / 脱敏（gateway）
 
 - **修改位置**：`bot-gateway/src/` —— 卡片构建 `cardkit-client.ts`、写入队列 `card-writer.ts`、
   抽取器 `extract-*.ts`、规范化 `normalize-blocks.ts`、脱敏 `redact.ts` / `strip-*.ts`、SSE 解析
@@ -68,13 +68,13 @@
 - **验证**：`cd bot-gateway && npx jest`（含 ReDoS / 脱敏 / 抽取回归）。
 - **上线**：重新部署该项目网关单元 `bot-gateway@<projectId>.service`（deploy-all 的 gateway 阶段）。
 
-## 配方 6：全新账号 / 新区域一键部署
+## 场景 6：全新账号 / 新区域一键部署
 
 - 见 [`../runbook.md`](../runbook.md)（前置 → 一条命令 → 连飞书 → 起网关 → 验证 → 运维 → 排错）。
 - 幂等：每个资源 describe-or-create，按 tag 复用；中途失败后重新运行会继续未完成步骤。
 - 飞书密钥由 `install.sh` 交互式创建（Secrets Manager：`source-truth/feishu-<projectId>` + 全局 `source-truth/git-credentials`）；纯 `deploy-all.sh`（CI）要求密钥已存在。
 
-## 配方 7：改顶层目录 / 加文档
+## 场景 7：改顶层目录 / 加文档
 
 - 改顶层目录 ⇒ 同步 `docs/structure_zh.md` 和 `_en.md`。
 - 新增 `docs/*_zh.md` ⇒ 补充 `_en.md`（反之亦然）；非双语的运维文档用中性名（如 `runbook.md`）避开配对校验。

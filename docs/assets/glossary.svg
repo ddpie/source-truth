@@ -50,7 +50,7 @@
   <text x="444" y="238" font-size="10.5" fill="#5b6573">成就 → Achievement / Status …（辅助·与自有检索词并用，非必经）</text>
 
   <rect x="428" y="268" width="308" height="52" rx="8" fill="#eef3fb" stroke="#b9c9e6" stroke-width="1.1"/>
-  <text x="444" y="289" font-size="12.5" font-weight="600" fill="#1f2733">用英文符号检索 + 实际查看代码取证</text>
+  <text x="444" y="289" font-size="12.5" font-weight="600" fill="#1f2733">用英文符号检索 + 实际查看代码核对</text>
   <text x="444" y="306" font-size="10.5" fill="#5b6573">search_files / symbol_search / read_file</text>
 
   <rect x="428" y="336" width="308" height="34" rx="8" fill="#eef6ef" stroke="#9cc6a8" stroke-width="1.1"/>
