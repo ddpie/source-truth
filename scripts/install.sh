@@ -13,9 +13,10 @@
 #       repo copies + removes it from projects.json (keeps secrets by default; never the global
 #       git credential).
 #
-# Code repos are git-only (R1) and live in .local/projects.json — never on the CLI. The single
-# read-only git credential (R-cred-1) is shared across projects. Re-runs pre-fill region/spec
-# from .local/deploy-config.
+# Code repos live in .local/projects.json — never on the CLI. Each repo is either a git source
+# (cloned + auto-pulled) or a local source (pushed via push-local-repo.sh); add-project asks which.
+# The single read-only git credential (R-cred-1) is shared across git-source repos. Re-runs pre-fill
+# region/spec from .local/deploy-config.
 #
 # Non-interactive: --yes accepts pre-filled/default answers; flows needing human-only input
 # (first Feishu/git secret) still hard-stop.
@@ -36,7 +37,7 @@ for a in "$@"; do
 Usage: ./scripts/install.sh [--yes]
 
 Interactive installer. Shows an arrow-key menu: init environment / add a project /
-redeploy a project / remove a project. Code repos are git-only and live in
+redeploy a project / remove a project. Code repos (git or local source) live in
 .local/projects.json; per-project Feishu + the shared git credential are created in
 Secrets Manager. Re-runs pre-fill region/spec from .local/deploy-config.
 

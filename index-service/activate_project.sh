@@ -67,7 +67,13 @@ MANIFEST="/etc/index-projects/${PROJECT_ID}.json"
 # (no manifest yet) is non-zero, and as a bare statement that can trip `set -e` on some readings.
 OLD_SUBDIRS=""
 if [ -f "$MANIFEST" ]; then
-  OLD_SUBDIRS="$(python3 "$RENDER_MANIFEST" --field subdir "$MANIFEST" 2>/dev/null || echo "")"
+  # A present-but-unparseable old manifest would silently yield an empty set → orphan cleanup
+  # skipped (leaking repo copies / glossary slices). Warn loudly so it's not invisible; the prior
+  # manifest was written by us and should always parse, so this is a "should never happen" tripwire.
+  if ! OLD_SUBDIRS="$(python3 "$RENDER_MANIFEST" --field subdir "$MANIFEST" 2>/dev/null)"; then
+    echo "WARN: existing manifest $MANIFEST did not parse — orphan reconcile may miss removed repos"
+    OLD_SUBDIRS=""
+  fi
 fi
 printf '%s' "$REPO_MANIFEST_JSON" > "$MANIFEST"
 

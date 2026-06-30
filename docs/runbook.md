@@ -121,7 +121,7 @@ codegraph 索引吃内存、随仓库增大而增长，按仓库规模选机型�
 
 > 无人值守 / CI：`./scripts/install.sh --yes` 接受所有预填值（首次仍需已存在的飞书密钥）。
 
-### 单台 EC2 自举部署（`--local`）
+### 在单台 EC2 上就地部署（`--local`）
 
 默认流程是「在一台部署机上运行脚本，由脚本新建索引主机 EC2」。若希望**只开一台 EC2、在其上运行脚本完成整套部署**（省去单独的部署机），使用 `--local` 模式——这台 EC2 同时是部署机和常驻索引主机。
 
@@ -333,14 +333,14 @@ refreshIntervalSec?}`，`source` 默认 `git`、本地仓写 `local`）。顶层
 
 - **初始化环境（不挂项目）**：只起共享底座（VPC/NAT/EC2/镜像），不挂任何项目。适合先把 AWS 环境拉起来、
   之后再凭 git 地址与凭证挂项目（即「先部署环境、后配置 git」）。
-- **添加项目**：交互填 projectId → 逐个加仓库（git 地址 + 子目录 + 分支）→ 索引服务端口（自动建议下一个未用值）
+- **添加项目**：交互填 projectId → 逐个加仓库（每个仓选 git 或本地：git 仓填地址 + 分支，本地仓选 local 后用 push-local-repo.sh 推送）→ 索引服务端口（自动建议下一个未用值）
   → 飞书 App 凭证（自动写入 `source-truth/feishu-<项目>`）→ 首次还会收一个**只读 git 凭证**写入全局
   `source-truth/git-credentials`（后续项目复用）。随后写入清单并部署该项目（其余项目不受影响）。
 - **重新部署现有项目**：改了某项目的仓库集合 / 端口 / 刷新间隔后，选它重跑（幂等）。
-- **删除项目**（破坏性，需打项目名二次确认）：停并删除该项目的 bridge/gateway/runtime 与代码副本、从清单移除；
+- **删除项目**（破坏性，需打项目名二次确认）：停并删除该项目的 bridge/gateway/runtime、各仓代码副本（含本地仓的 `.incoming` 暂存目录）与术语表，从清单移除；
   飞书密钥默认保留（会单独问是否删），**全局 git 凭证绝不删**；其余项目不受影响。
 
-**代码来源只支持 git（R1）**：本地目录 / S3 不再支持（它们没有可定时 pull 的上游）。私有仓需要那一份只读
+**代码来源**：git 仓与本地仓两种（见[前置条件 4](#一前置条件一次性)、[本地仓上传](#本地仓上传)）；S3 不支持。git 私有仓需要那一份只读
 凭证（GitHub/GitLab PAT 或 deploy key，所有仓共用一份）。索引主机在私有子网经 NAT 出网 clone/pull。
 
 排查某项目：主机上单元名都带项目/仓库标识——`index-bridge-<项目>.service`、`bot-gateway@<项目>.service`、
@@ -395,6 +395,11 @@ refreshIntervalSec?}`，`source` 默认 `git`、本地仓写 `local`）。顶层
 - **首次推送前**先核对 EC2 的 SSH host key 指纹：脚本首次连接用 `accept-new`，会信任第一次见到的指纹。建议通过其它渠道（如 AWS 控制台的实例 system log）单独核对一次，或预先写入 `known_hosts`，以防有人冒充主机窃取源码。
 - 术语表（中文词→代码符号）随推送增量刷新：脚本用本次同步出的变更文件清单，只重建这些文件的术语，后台进行、不阻塞推送（git 仓是按 `git diff` 算变更、本地仓改用 rsync 算变更，之后走同一套增量逻辑）。主机若未开通 Bedrock（构建引擎不可用），则跳过术语表、只更新索引，问答仍可经 codegraph 直接定位。
 - **推送中断的影响**：网络传输阶段（客户机 → 暂存目录）中断不碰正在用的代码，重跑即可。把暂存目录同步到 `/data/repo/<subdir>` 这一步用 `rsync --delay-updates`——变更文件先就位、最后统一切换，中断绝大多数落在切换前（正在用的代码不动），极小概率落在切换瞬间（留下部分更新）；两种情况暂存目录都还在，重跑推送即可让它重新对齐，不会不可恢复。
+
+**排查（推了却没生效 / 怀疑中断）：**
+- 推送本身成功的标志：push 命令退出码 0、主机上 reindex 打印 `REINDEX_DONE subdir=<sub> ...`（在 reindex 的 SSM/SSH 输出里）。
+- **怀疑半更新**：看 `sudo ls -d /data/repo/<subdir>.incoming` —— **暂存目录还在，说明上次没跑完**（正常跑完会删掉它），重跑一次 `push-local-repo.sh` 即可对齐。`sudo cat /data/repo/<subdir>/.snapshot-time` 是上次成功推送的时间戳，可对照。
+- **术语表是否刷新**：术语表在后台跑，日志在主机 `/var/log/glossary-build-<projectId>-<subdir>.log`，看末尾的 `glossary_gen_done`（成功）或 `glossary_gen_cc_failed`（cc 失败，索引不受影响、问答仍可用）。Bedrock 未开通时 reindex 会在输出里打印 `Bedrock not invokable — skipping glossary refresh`、只更新索引。
 
 **最小 sudoers**——只放行这一个脚本（建暂存目录、切换、重建都在脚本里完成，参数先经 `^[a-z0-9][a-z0-9-]*$` 校验、systemd 单元名固定写死）：
 

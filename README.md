@@ -119,7 +119,7 @@ bash <(gh api repos/ddpie/source-truth/contents/scripts/get.sh --jq '.content' |
 - **git 仓**（默认）：systemd timer 定时 `git pull`，主分支改动分钟级内反映到问答、无需重部署、无需手动操作。
 - **本地仓**（推不到 git 远端时）：用 `scripts/push-local-repo.sh` 经 rsync 直推到主机的快照，手动刷新——代码变更后重跑一次上传命令。
 
-刷新机制与「为何必须建索引」的实测见 [`docs/agent/architecture.md`](docs/agent/architecture.md) 的「数据面」；本地仓上传与单台 EC2 自举（`--local`）见 [`docs/runbook.md`](docs/runbook.md)。
+刷新机制与「为何必须建索引」的实测见 [`docs/agent/architecture.md`](docs/agent/architecture.md) 的「数据面」；本地仓上传与单台 EC2 就地部署（`--local`）见 [`docs/runbook.md`](docs/runbook.md)。
 
 ## 安全设计
 

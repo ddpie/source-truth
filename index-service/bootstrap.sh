@@ -40,10 +40,11 @@
 # Sets up the BASE host only — NO project is bound here. user-data runs once at first boot, so
 # it cannot add a project to a running host; projects are attached (and added/removed over the
 # host's life) by index-service/activate_project.sh, invoked per project over SSM by
-# deploy_project.sh. Code source is git-only (R1): activate_project.sh git-clones each repo to
-# /data/repo/<subdir>, writes that project's concrete bridge + per-repo refresh units, and a
-# read-only git credential is fetched host-side from Secrets Manager. codegraph's resident
-# file-watcher re-indexes in-place after each scheduled git pull (no second writer, no blip).
+# deploy_project.sh. Each repo is a git source or a local source: activate_project.sh git-clones a
+# git repo to /data/repo/<subdir> (read-only credential fetched host-side from Secrets Manager) and
+# writes its per-repo refresh unit; a local repo is pushed in via push-local-repo.sh + applied by
+# reindex_local_repo.sh (no refresh unit). Either way codegraph's resident file-watcher re-indexes
+# in-place after the working tree changes (no second writer, no blip).
 #
 # Inputs via environment (deploy-all.sh writes /etc/index-service.env first):
 #   BUCKET, REGION, MAX_FILES
