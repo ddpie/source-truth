@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="760" height="640" viewBox="0 0 760 640" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="632" viewBox="0 0 760 632" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif">
   <defs>
     <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
       <path d="M0,0 L10,5 L0,10 z" fill="#5b6573"/>
@@ -8,94 +8,93 @@
     </marker>
   </defs>
 
-  <rect x="0" y="0" width="760" height="640" fill="#ffffff"/>
-  <text x="380" y="40" text-anchor="middle" font-size="18" font-weight="700" fill="#1f2733">source-truth 架构</text>
-  <text x="380" y="62" text-anchor="middle" font-size="12.5" fill="#7a8493">一台 index-service 主机承载多个项目，项目和会话各自隔离，代码只读、只在主机本地</text>
+  <rect x="0" y="0" width="760" height="632" fill="#ffffff"/>
+  <text x="380" y="34" text-anchor="middle" font-size="18" font-weight="700" fill="#1f2733">source-truth 架构</text>
+  <text x="380" y="56" text-anchor="middle" font-size="12" fill="#7a8493">飞书侧 · 一台 EC2（bot-gateway 与 index-bridge 同机）· AgentCore 会话 microVM</text>
 
-  <!-- Feishu clients: one bot per project -->
-  <rect x="200" y="84" width="360" height="46" rx="8" fill="#eef3fb" stroke="#b9c9e6" stroke-width="1.2"/>
-  <text x="380" y="105" text-anchor="middle" font-size="14" font-weight="600" fill="#1f2733">飞书客户端</text>
-  <text x="380" y="122" text-anchor="middle" font-size="10.5" fill="#7a8493">每个项目一个机器人，各用独立飞书 App</text>
+  <!-- ===== 飞书侧 ===== -->
+  <rect x="262" y="72" width="236" height="40" rx="8" fill="#eef3fb" stroke="#b9c9e6" stroke-width="1.2"/>
+  <text x="380" y="89" text-anchor="middle" font-size="13" font-weight="600" fill="#1f2733">飞书客户端</text>
+  <text x="380" y="103" text-anchor="middle" font-size="9.5" fill="#7a8493">每个项目一个机器人（各用独立飞书 App）</text>
 
-  <!-- Feishu open platform: relays events to gateways over a long connection -->
-  <rect x="200" y="150" width="360" height="46" rx="8" fill="#fdf5e9" stroke="#e4c896" stroke-width="1.2"/>
-  <text x="380" y="171" text-anchor="middle" font-size="13" font-weight="600" fill="#1f2733">飞书开放平台</text>
-  <text x="380" y="187" text-anchor="middle" font-size="10.5" fill="#7a8493">事件订阅 · 长连接把消息推给网关（非客户端直连）</text>
+  <rect x="262" y="124" width="236" height="40" rx="8" fill="#fdf5e9" stroke="#e4c896" stroke-width="1.2"/>
+  <text x="380" y="141" text-anchor="middle" font-size="13" font-weight="600" fill="#1f2733">飞书开放平台</text>
+  <text x="380" y="155" text-anchor="middle" font-size="9.5" fill="#7a8493">事件订阅，长连接把消息推给网关</text>
 
-  <!-- two project lanes (gateway + sessions only) -->
-  <!-- lane A -->
-  <rect x="40" y="222" width="330" height="184" rx="10" fill="#fafbfd" stroke="#cdd5e0" stroke-width="1.2"/>
-  <text x="205" y="244" text-anchor="middle" font-size="12.5" font-weight="700" fill="#3a4556">项目 A</text>
-  <!-- lane B -->
-  <rect x="390" y="222" width="330" height="184" rx="10" fill="#fafbfd" stroke="#cdd5e0" stroke-width="1.2"/>
-  <text x="555" y="244" text-anchor="middle" font-size="12.5" font-weight="700" fill="#3a4556">项目 B</text>
+  <line x1="380" y1="112" x2="380" y2="124" stroke="#5b6573" stroke-width="1.2" marker-end="url(#arrow)"/>
 
-  <!-- gateway A -->
-  <rect x="64" y="260" width="282" height="44" rx="8" fill="#eef3fb" stroke="#b9c9e6" stroke-width="1.2"/>
-  <text x="205" y="278" text-anchor="middle" font-size="12.5" font-weight="600" fill="#1f2733">bot-gateway</text>
-  <text x="205" y="294" text-anchor="middle" font-size="10" fill="#7a8493">长连接收消息，按会话分发</text>
-  <!-- gateway B -->
-  <rect x="414" y="260" width="282" height="44" rx="8" fill="#eef3fb" stroke="#b9c9e6" stroke-width="1.2"/>
-  <text x="555" y="278" text-anchor="middle" font-size="12.5" font-weight="600" fill="#1f2733">bot-gateway</text>
-  <text x="555" y="294" text-anchor="middle" font-size="10" fill="#7a8493">长连接收消息，按会话分发</text>
+  <!-- ===== 一台 EC2：gateway（上）+ bridge（下，贴近会话） ===== -->
+  <rect x="40" y="198" width="680" height="222" rx="10" fill="#f4f7f4" stroke="#9cae9c" stroke-width="1.4"/>
+  <text x="380" y="219" text-anchor="middle" font-size="12.5" font-weight="700" fill="#3b7d4f">一台 EC2 · index-service 主机</text>
+  <text x="380" y="235" text-anchor="middle" font-size="9.5" fill="#5b6573">每个项目的 bot-gateway 与 index-bridge 都跑在这台机器上 · 代码副本只在本地磁盘</text>
+  <line x1="380" y1="246" x2="380" y2="410" stroke="#dde5dd" stroke-width="1" stroke-dasharray="3,3"/>
 
-  <!-- runtime A: sessions -->
-  <text x="205" y="328" text-anchor="middle" font-size="10" fill="#9aa3b0">AgentCore Runtime · 每个会话一台独立 microVM</text>
-  <rect x="64" y="336" width="134" height="46" rx="7" fill="#eef3fb" stroke="#b9c9e6" stroke-width="1.1"/>
-  <text x="131" y="356" text-anchor="middle" font-size="11.5" font-weight="600" fill="#1f2733">会话 A1</text>
-  <text x="131" y="372" text-anchor="middle" font-size="9.5" fill="#7a8493">Claude Code Agent</text>
-  <rect x="212" y="336" width="134" height="46" rx="7" fill="#eef3fb" stroke="#b9c9e6" stroke-width="1.1"/>
-  <text x="279" y="356" text-anchor="middle" font-size="11.5" font-weight="600" fill="#1f2733">会话 A2</text>
-  <text x="279" y="372" text-anchor="middle" font-size="9.5" fill="#7a8493">Claude Code Agent</text>
-  <!-- runtime B: sessions -->
-  <text x="555" y="328" text-anchor="middle" font-size="10" fill="#9aa3b0">AgentCore Runtime · 每个会话一台独立 microVM</text>
-  <rect x="414" y="336" width="134" height="46" rx="7" fill="#eef3fb" stroke="#b9c9e6" stroke-width="1.1"/>
-  <text x="481" y="356" text-anchor="middle" font-size="11.5" font-weight="600" fill="#1f2733">会话 B1</text>
-  <text x="481" y="372" text-anchor="middle" font-size="9.5" fill="#7a8493">Claude Code Agent</text>
-  <rect x="562" y="336" width="134" height="46" rx="7" fill="#eef3fb" stroke="#b9c9e6" stroke-width="1.1"/>
-  <text x="629" y="356" text-anchor="middle" font-size="11.5" font-weight="600" fill="#1f2733">会话 B2</text>
-  <text x="629" y="372" text-anchor="middle" font-size="9.5" fill="#7a8493">Claude Code Agent</text>
+  <!-- gateway A / B -->
+  <rect x="64" y="250" width="282" height="40" rx="7" fill="#eef3fb" stroke="#b9c9e6" stroke-width="1.1"/>
+  <text x="205" y="267" text-anchor="middle" font-size="11.5" font-weight="600" fill="#1f2733">bot-gateway · 项目 A</text>
+  <text x="205" y="282" text-anchor="middle" font-size="9" fill="#7a8493">长连接收消息，按会话分发</text>
+  <rect x="414" y="250" width="282" height="40" rx="7" fill="#eef3fb" stroke="#b9c9e6" stroke-width="1.1"/>
+  <text x="555" y="267" text-anchor="middle" font-size="11.5" font-weight="600" fill="#1f2733">bot-gateway · 项目 B</text>
+  <text x="555" y="282" text-anchor="middle" font-size="9" fill="#7a8493">长连接收消息，按会话分发</text>
 
-  <!-- edge: client -> open platform -->
-  <line x1="380" y1="130" x2="380" y2="150" stroke="#5b6573" stroke-width="1.3" marker-end="url(#arrow)"/>
-  <!-- edges: open platform -> gateways (long connection) -->
-  <line x1="380" y1="196" x2="205" y2="260" stroke="#5b6573" stroke-width="1.3" marker-end="url(#arrow)"/>
-  <line x1="380" y1="196" x2="555" y2="260" stroke="#5b6573" stroke-width="1.3" marker-end="url(#arrow)"/>
-  <!-- edges: gateway -> sessions -->
-  <line x1="205" y1="304" x2="205" y2="336" stroke="#5b6573" stroke-width="1.2" marker-end="url(#arrow)"/>
-  <line x1="555" y1="304" x2="555" y2="336" stroke="#5b6573" stroke-width="1.2" marker-end="url(#arrow)"/>
+  <!-- bridge A / B (bottom of EC2, nearest to the sessions below) -->
+  <rect x="64" y="300" width="282" height="106" rx="8" fill="#eef6ef" stroke="#9cc6a8" stroke-width="1.2"/>
+  <text x="205" y="319" text-anchor="middle" font-size="11.5" font-weight="600" fill="#1f2733">index-bridge · 项目 A（独立进程、端口）</text>
+  <rect x="78" y="330" width="120" height="64" rx="6" fill="#ffffff" stroke="#9cc6a8" stroke-width="1"/>
+  <text x="138" y="358" text-anchor="middle" font-size="10" font-weight="600" fill="#1f2733">客户端仓</text>
+  <text x="138" y="374" text-anchor="middle" font-size="8.5" fill="#7a8493">独立 graph.db</text>
+  <rect x="212" y="330" width="120" height="64" rx="6" fill="#ffffff" stroke="#9cc6a8" stroke-width="1"/>
+  <text x="272" y="358" text-anchor="middle" font-size="10" font-weight="600" fill="#1f2733">服务端仓</text>
+  <text x="272" y="374" text-anchor="middle" font-size="8.5" fill="#7a8493">独立 graph.db</text>
 
-  <!-- read-only evidence label between lanes and shared host -->
-  <text x="380" y="424" text-anchor="middle" font-size="10" fill="#3b7d4f" font-weight="600">只读不改：会话不挂文件系统，全程用 HTTP 读代码核对</text>
-  <!-- edges: sessions -> shared index host -->
-  <line x1="205" y1="382" x2="205" y2="438" stroke="#3b7d4f" stroke-width="1.3" marker-end="url(#arrowgreen)"/>
-  <line x1="555" y1="382" x2="555" y2="438" stroke="#3b7d4f" stroke-width="1.3" marker-end="url(#arrowgreen)"/>
+  <rect x="414" y="300" width="282" height="106" rx="8" fill="#eef6ef" stroke="#9cc6a8" stroke-width="1.2"/>
+  <text x="555" y="319" text-anchor="middle" font-size="11.5" font-weight="600" fill="#1f2733">index-bridge · 项目 B（独立进程、端口）</text>
+  <rect x="428" y="330" width="120" height="64" rx="6" fill="#ffffff" stroke="#9cc6a8" stroke-width="1"/>
+  <text x="488" y="358" text-anchor="middle" font-size="10" font-weight="600" fill="#1f2733">仓库 1</text>
+  <text x="488" y="374" text-anchor="middle" font-size="8.5" fill="#7a8493">独立 graph.db</text>
+  <rect x="562" y="330" width="120" height="64" rx="6" fill="#ffffff" stroke="#9cc6a8" stroke-width="1"/>
+  <text x="622" y="358" text-anchor="middle" font-size="10" font-weight="600" fill="#1f2733">仓库 2</text>
+  <text x="622" y="374" text-anchor="middle" font-size="8.5" fill="#7a8493">独立 graph.db</text>
 
-  <!-- shared index-service host: now physically CONTAINS both bridges -->
-  <rect x="40" y="438" width="680" height="172" rx="10" fill="#f4f7f4" stroke="#bcd6c2" stroke-width="1.4" stroke-dasharray="6,4"/>
-  <text x="380" y="460" text-anchor="middle" font-size="12.5" font-weight="700" fill="#3b7d4f">同一台 index-service 主机，每个项目各持自己的只读代码副本</text>
-  <text x="380" y="478" text-anchor="middle" font-size="10.5" fill="#5b6573">代码存在本地磁盘 /data/repo/&lt;subdir&gt;，定时 git pull 刷新，离线建好索引和术语表</text>
+  <!-- ===== AgentCore Runtime：会话 microVM（最下层） ===== -->
+  <rect x="40" y="458" width="680" height="104" rx="10" fill="#fafbfd" stroke="#cdd5e0" stroke-width="1.2"/>
+  <text x="380" y="479" text-anchor="middle" font-size="12" font-weight="700" fill="#3a4556">AgentCore Runtime（AWS 托管）· 每个会话一台独立 microVM，互不可见</text>
+  <rect x="70" y="494" width="128" height="50" rx="7" fill="#eef3fb" stroke="#b9c9e6" stroke-width="1.1"/>
+  <text x="134" y="515" text-anchor="middle" font-size="11" font-weight="600" fill="#1f2733">会话 A1</text>
+  <text x="134" y="531" text-anchor="middle" font-size="9" fill="#7a8493">Claude Code Agent</text>
+  <rect x="206" y="494" width="128" height="50" rx="7" fill="#eef3fb" stroke="#b9c9e6" stroke-width="1.1"/>
+  <text x="270" y="515" text-anchor="middle" font-size="11" font-weight="600" fill="#1f2733">会话 A2</text>
+  <text x="270" y="531" text-anchor="middle" font-size="9" fill="#7a8493">Claude Code Agent</text>
+  <rect x="426" y="494" width="128" height="50" rx="7" fill="#eef3fb" stroke="#b9c9e6" stroke-width="1.1"/>
+  <text x="490" y="515" text-anchor="middle" font-size="11" font-weight="600" fill="#1f2733">会话 B1</text>
+  <text x="490" y="531" text-anchor="middle" font-size="9" fill="#7a8493">Claude Code Agent</text>
+  <rect x="562" y="494" width="128" height="50" rx="7" fill="#eef3fb" stroke="#b9c9e6" stroke-width="1.1"/>
+  <text x="626" y="515" text-anchor="middle" font-size="11" font-weight="600" fill="#1f2733">会话 B2</text>
+  <text x="626" y="531" text-anchor="middle" font-size="9" fill="#7a8493">Claude Code Agent</text>
+  <line x1="380" y1="494" x2="380" y2="544" stroke="#e4e8ee" stroke-width="1" stroke-dasharray="3,3"/>
 
-  <!-- bridge A (inside the shared host) -->
-  <rect x="64" y="492" width="282" height="104" rx="8" fill="#eef6ef" stroke="#9cc6a8" stroke-width="1.2"/>
-  <text x="205" y="512" text-anchor="middle" font-size="12" font-weight="600" fill="#1f2733">index-bridge · 项目 A（独立进程、独立端口）</text>
-  <rect x="78" y="524" width="120" height="58" rx="6" fill="#ffffff" stroke="#9cc6a8" stroke-width="1.1"/>
-  <text x="138" y="548" text-anchor="middle" font-size="10" font-weight="600" fill="#1f2733">客户端仓</text>
-  <text x="138" y="564" text-anchor="middle" font-size="8.5" fill="#7a8493">独立 graph.db</text>
-  <rect x="212" y="524" width="120" height="58" rx="6" fill="#ffffff" stroke="#9cc6a8" stroke-width="1.1"/>
-  <text x="272" y="548" text-anchor="middle" font-size="10" font-weight="600" fill="#1f2733">服务端仓</text>
-  <text x="272" y="564" text-anchor="middle" font-size="8.5" fill="#7a8493">独立 graph.db</text>
+  <!-- ===== data flow, all top-down except the short ③ return ===== -->
+  <!-- ① open platform → each gateway -->
+  <line x1="344" y1="164" x2="244" y2="250" stroke="#5b6573" stroke-width="1.3" marker-end="url(#arrow)"/>
+  <line x1="416" y1="164" x2="516" y2="250" stroke="#5b6573" stroke-width="1.3" marker-end="url(#arrow)"/>
+  <text x="380" y="190" text-anchor="middle" font-size="9.5" fill="#5b6573">① 网关订阅 · 长连接推送事件</text>
 
-  <!-- bridge B (inside the shared host) -->
-  <rect x="414" y="492" width="282" height="104" rx="8" fill="#eef6ef" stroke="#9cc6a8" stroke-width="1.2"/>
-  <text x="555" y="512" text-anchor="middle" font-size="12" font-weight="600" fill="#1f2733">index-bridge · 项目 B（独立进程、独立端口）</text>
-  <rect x="428" y="524" width="120" height="58" rx="6" fill="#ffffff" stroke="#9cc6a8" stroke-width="1.1"/>
-  <text x="488" y="548" text-anchor="middle" font-size="10" font-weight="600" fill="#1f2733">仓库 1</text>
-  <text x="488" y="564" text-anchor="middle" font-size="8.5" fill="#7a8493">独立 graph.db</text>
-  <rect x="562" y="524" width="120" height="58" rx="6" fill="#ffffff" stroke="#9cc6a8" stroke-width="1.1"/>
-  <text x="622" y="548" text-anchor="middle" font-size="10" font-weight="600" fill="#1f2733">仓库 2</text>
-  <text x="622" y="564" text-anchor="middle" font-size="8.5" fill="#7a8493">独立 graph.db</text>
+  <!-- ② gateway → its session (invoke), down the outer margin, clear of the bridge box -->
+  <path d="M64 270 H26 V519 H68" fill="none" stroke="#5b6573" stroke-width="1.3" marker-end="url(#arrow)"/>
+  <text x="30" y="448" font-size="9.5" fill="#5b6573">② invoke</text>
+  <path d="M696 270 H734 V519 H692" fill="none" stroke="#5b6573" stroke-width="1.3" marker-end="url(#arrow)"/>
+  <text x="730" y="448" text-anchor="end" font-size="9.5" fill="#5b6573">② invoke</text>
 
-  <!-- isolation note -->
-  <text x="380" y="628" text-anchor="middle" font-size="10.5" fill="#aab2bd">项目之间靠进程、端口和访问范围隔开；同一项目的多个仓库一起检索，按仓库声明顺序合并结果</text>
+  <!-- ③ sessions → their bridge: three parallel read-only arrows per lane, in the clean gap -->
+  <!-- arrows span AgentCore box top (458) up to bridge box bottom (406); no title crossing -->
+  <line x1="130" y1="456" x2="130" y2="408" stroke="#3b7d4f" stroke-width="1.3" marker-end="url(#arrowgreen)"/>
+  <line x1="205" y1="456" x2="205" y2="408" stroke="#3b7d4f" stroke-width="1.3" marker-end="url(#arrowgreen)"/>
+  <line x1="280" y1="456" x2="280" y2="408" stroke="#3b7d4f" stroke-width="1.3" marker-end="url(#arrowgreen)"/>
+  <line x1="482" y1="456" x2="482" y2="408" stroke="#3b7d4f" stroke-width="1.3" marker-end="url(#arrowgreen)"/>
+  <line x1="557" y1="456" x2="557" y2="408" stroke="#3b7d4f" stroke-width="1.3" marker-end="url(#arrowgreen)"/>
+  <line x1="632" y1="456" x2="632" y2="408" stroke="#3b7d4f" stroke-width="1.3" marker-end="url(#arrowgreen)"/>
+  <text x="380" y="436" text-anchor="middle" font-size="9.5" fill="#2f7a47" font-weight="600">③ 只读访问</text>
+
+  <text x="380" y="596" text-anchor="middle" font-size="10" fill="#9aa3b0">③ 会话只经 HTTP 向 bridge 只读访问：定位代码 / 读文件·配置表 / 查术语表 · microVM 不挂任何文件系统</text>
+  <text x="380" y="612" text-anchor="middle" font-size="10" fill="#9aa3b0">项目之间靠进程、端口、访问范围隔开</text>
 </svg>
