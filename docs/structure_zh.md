@@ -36,7 +36,7 @@ index-service/          常驻 CodeGraph 索引服务 + MCP-over-HTTP 接口
   codegraph_client.py   codegraph-server 客户端封装（休眠：仅测试用，独占写入 tripwire 守护，绝不进常驻服务路径）
   perf.py               结构化耗时日志
   bootstrap.sh          EC2 user-data：装依赖 + codegraph 二进制 + 术语表构建用的 claude(cc) CLI + 网关构建 + systemd 模板（base host，不挂项目）
-  activate_project.sh   按项目挂载（SSM 调用）：写清单 / git 仓 clone、local 仓确认代码已推到位 / 建图 / 起 index-bridge-<项目> + 刷新 timer（仅 git 仓）/ 按上一版清单清理已移除的仓
+  activate_project.sh   按项目挂载（SSM 调用）：写清单 / git 仓 clone、本地仓确认代码已推送 / 建图 / 起 index-bridge-<项目> + 刷新 timer（仅 git 仓）/ 按上一版清单清理已移除的仓
   git_fetch.sh          单仓 git clone/pull（凭证 + ref + 失败 GIT_FETCH_FAILED 告警；bootstrap 与刷新 timer 共用）
   reindex_local_repo.sh local 仓切换+重建编排（停 bridge→切换→建图→起 bridge，失败原子回滚；--prepare 建暂存目录）
   tests/                pytest（由 scripts/test.sh 调用）

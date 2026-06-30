@@ -44,8 +44,8 @@
    自动挑最优（地域档 `us.`/`eu.`/`jp.`/`au.` 优先，没有就用 `global.`；如默认模型在东京解析为 `jp.…`、在新加坡保留 `global.…`）。
    仅当查不到匹配档时 preflight 会 WARN 并列出该区域可用的档。
 4. **目标代码仓**：要被问答的游戏代码仓，两种来源（同项目可混用）：
-   - **git 源**（推荐）：`https://github.com/org/repo.git`、`https://gitlab.com/org/repo.git`、`git@host:org/repo.git`，可选分支 / 标签 / 提交。index-service clone 到本地、定时 `git pull` 保持「最新主分支」分钟级新鲜。私有仓需本机有 `git` 与一份只读访问凭证。
-   - **local 源**：代码只在本地、push 不到任何 git 远端时用。声明 `source:"local"`，部署后用 `scripts/push-local-repo.sh` 经 rsync 直推到索引主机（见[第九节末「本地仓上传」](#本地仓上传local-源)）。它是手动推上去的快照，不会自动刷新——代码变了就重跑一次上传命令。
+   - **git 仓**（推荐，配置里写 `source: "git"`，默认值）：`https://github.com/org/repo.git`、`https://gitlab.com/org/repo.git`、`git@host:org/repo.git`，可选分支 / 标签 / 提交。index-service clone 到本地、定时 `git pull` 保持「最新主分支」分钟级新鲜。私有仓需本机有 `git` 与一份只读访问凭证。
+   - **本地仓**（配置里写 `source: "local"`，适用于代码只在本地、无法推送到任何 git 远端的情况）：部署后用 `scripts/push-local-repo.sh` 经 rsync 直推到索引主机（见[第九节末「本地仓上传」](#本地仓上传)）。它是手动推送的快照，不会自动刷新——代码变更后需重跑一次上传命令。
 5. **飞书应用**（见第三节，可与部署并行准备）。
 
 ---
@@ -123,30 +123,30 @@ codegraph 索引吃内存、随仓库增大而增长，按仓库规模选机型�
 
 ### 单台 EC2 自举部署（`--local`）
 
-默认流程是「在一台部署机上跑脚本、由脚本新建索引主机 EC2」。如果你希望**只开一台 EC2、在它上面跑脚本把整套装起来**（省掉单独的部署机），用 `--local` 模式——这台 EC2 既是部署机也是常驻索引主机。
+默认流程是「在一台部署机上运行脚本，由脚本新建索引主机 EC2」。若希望**只开一台 EC2、在其上运行脚本完成整套部署**（省去单独的部署机），使用 `--local` 模式——这台 EC2 同时是部署机和常驻索引主机。
 
 前提（与默认流程的差异）：
 
-- **必须是 ARM64（aarch64）EC2**、Ubuntu 24.04：镜像在本机构建、codegraph-server 也是 ARM64。x86 机器会被入口处的架构检查直接拦下。
-- **IMDSv2 required、hop-limit 1**；这台机器不要与其它用途共用（它的实例角色权限较大）。
-- 部署用户需**免密 sudo**（或以 root 跑）——`bootstrap.sh` 与本地仓 `reindex` 都用 `sudo`。
-- **实例角色须预先挂好权限**：`--local` 不会在部署过程里改 IAM，权限得在开机时就配好。少了权限不会当场报错，而是后面才暴露——网关每次回答都 403、术语表一直是空的、日志上不了 CloudWatch。一台 EC2 只有一个实例角色，它要同时干两件事：
-  - 部署时建资源：建/查 VPC·子网·安全组、向 ECR 推镜像、用 `bedrock-agentcore` 建和调用 runtime、读写 Secrets Manager 的 `source-truth/*`、SSM、EC2 的 `describe`/`modify-instance-attribute`。
-  - 平时运行：`s3:GetObject`/`ListBucket`（`source-truth-repo-<account>-*`）、`secretsmanager:GetSecretValue`（`source-truth/*`）、`bedrock:InvokeModel(WithResponseStream)`（`anthropic.*` 及其 inference-profile）、`bedrock-agentcore:InvokeAgentRuntime`（`source_truth_agent*`）、CloudWatch logs（`/source-truth/*`）。
-  - 运行这套权限，和默认流程里 `provision_iam.sh` 给 `source-truth-index-role` 配的 5 条 inline policy（s3-artifacts / secrets-read / cloudwatch-logs / agentcore-invoke / bedrock-invoke）是一样的——直接照抄到本机角色，再补上部署建资源的那部分即可。部署只做一次预检：有没有实例角色、能不能读到 S3 上的部署产物；不通过就直接停下报错。其余缺的权限要到首次提问或 e2e 探针时才会显出来。
+- **必须是 ARM64（aarch64）EC2**、Ubuntu 24.04：镜像在本机构建，codegraph-server 也是 ARM64。x86 机器会在入口处的架构检查被拦下。
+- **IMDSv2 required、hop-limit 1**；该机器专用于本系统，不与其它业务共用。
+- 部署用户需**免密 sudo**（或以 root 运行）——`bootstrap.sh` 与本地仓 `reindex` 均需 `sudo`。
+- **实例角色须预先配好权限**：`--local` 不会在部署过程中修改 IAM，权限需在开机前配置到位。权限缺失不会立即报错，而是延迟暴露——网关每次回答返回 403、术语表始终为空、日志无法写入 CloudWatch。一台 EC2 只有一个实例角色，它需同时承担两类职责：
+  - 部署期建资源：建/查 VPC·子网·安全组、向 ECR 推镜像、用 `bedrock-agentcore` 创建并调用 runtime、读写 Secrets Manager 的 `source-truth/*`、SSM、EC2 的 `describe`/`modify-instance-attribute`。
+  - 运行期：`s3:GetObject`/`ListBucket`（`source-truth-repo-<account>-*`）、`secretsmanager:GetSecretValue`（`source-truth/*`）、`bedrock:InvokeModel(WithResponseStream)`（`anthropic.*` 及其 inference-profile）、`bedrock-agentcore:InvokeAgentRuntime`（`source_truth_agent*`）、CloudWatch logs（`/source-truth/*`）。
+  - 运行期这套权限与默认流程中 `provision_iam.sh` 为 `source-truth-index-role` 配的 5 条 inline policy（s3-artifacts / secrets-read / cloudwatch-logs / agentcore-invoke / bedrock-invoke）一致——可直接复制到本机角色，再补上部署期建资源的权限。部署仅做一次预检：确认实例角色存在、且能读取 S3 上的部署产物；不通过即停止并报错。其余权限的缺失要到首次提问或 e2e 探针时才会暴露。
 
-跑法（在那台 EC2 上）：
+运行方式（在该 EC2 上）：
 
 ```bash
 # 克隆仓库后
-./scripts/install.sh                      # 交互式（同样可选 git / local 仓）
+./scripts/install.sh                      # 交互式（同样可选 git 仓或本地仓）
 # 或直接：
 ./scripts/deploy-all.sh --region <r> --local
 ```
 
-`--local` 不新建 VPC/NAT，复用本机所在的 VPC 和子网；另建一个专用安全组（只放行 8080-8099 自引用）附加到本机，runtime 也用它。`bootstrap` 在本机跑完才继续后面的步骤。**AgentCore Runtime 仍由 AWS 托管**，不占这台机器、也不用你运维——所谓「单台 EC2」是指你只需要开和管这一台。首次部署约 10–20 分钟（看机型）：bootstrap（装依赖、构建网关）和镜像构建都在这一台上挨着跑，比默认的双机方式慢一些。
+`--local` 不新建 VPC/NAT，复用本机所在的 VPC 和子网；另建一个专用安全组附加到本机，runtime 也使用它——该安全组只放行 8080-8099 端口，且仅对组内成员（本机及其启动的 runtime）开放，外部无法访问 bridge。`bootstrap` 在本机执行完毕后再继续后续步骤。**AgentCore Runtime 仍由 AWS 托管**，既不占用本机资源、也无需运维——「单台 EC2」指只需开通并维护这一台主机。首次部署约 10–20 分钟（视机型而定）：bootstrap（安装依赖、构建网关）与镜像构建都在本机串行执行，因此比默认的双机方式略慢。
 
----
+**升级 source-truth（本地模式）**：默认（双机）模式靠 `--refresh-index` 蓝绿换一台新机来升级底座；本地模式只有这一台主机，不走蓝绿，而是**就地重跑** `./scripts/deploy-all.sh --region <r> --local` 升级——它会重新下发底座代码（bridge / 网关 / 依赖）、重建并推送镜像、更新 runtime，各项目的网关与索引随之重启到新版本。**因此实例角色须长期保留上面列出的部署期权限**（建 / 改 ECR、AgentCore runtime、安全组等），每次升级都会用到，不能在首次部署后移除。升级有一段服务中断（与首次部署同量级，主要是镜像重建 + 索引重启），低峰期操作。
 
 ## 三、接入飞书（connect 清单）
 
@@ -379,21 +379,21 @@ refreshIntervalSec?}`，**git-only**）。顶层 `refreshIntervalSec` 是全局�
 - **越界能力后置**：多分支、设计文档读取、写回、第二引擎等均为 post-MVP，详见
   [`../README.md`](../README.md) 的「MVP 边界」与设计权威依据 [`design/`](design/)。
 
-### 本地仓上传（local 源）
+### 本地仓上传
 
-无法 push 到 git 远端的代码，用 local 源：在 `projects.json` 里声明 `{subdir, source:"local"}`（`install.sh` 添加项目时选「本地仓」即可），部署后在**你自己的机器**上推送：
+无法推送到 git 远端的代码，声明为本地仓：在 `projects.json` 里写 `{subdir, source:"local"}`（用 `install.sh` 添加项目时选「本地仓」即可），部署后在**你自己的机器**上推送：
 
 ```bash
 ./scripts/push-local-repo.sh --host <ec2-ssh-host> [--identity <key>] <subdir> <本地仓路径>
 ```
 
-流程：先把代码 rsync 到索引主机的暂存目录 `/data/repo/<subdir>.incoming`（此时 bot 仍在线），再由主机脚本**停该项目 bot → 切换代码 → 重建图 → 起 bot**。要点：
+流程：先把代码 rsync 到索引主机的暂存目录 `/data/repo/<subdir>.incoming`（此时网关仍在线），再由主机脚本**停该项目网关 → 切换代码 → 重建索引图 → 重启网关**。要点：
 
-- **重建期间该项目的 bot 会离线几分钟**（与首次建图同量级），**同项目的其他仓（含 git 仓）也会一并离线**（共用一个 bot 进程）。重建失败会**自动回滚到上一版**，bot 不会服务到坏代码。
-- 「刷新」= 重跑这条命令（local 仓不自动更新，**不是**最新主干）。代码变了就再推一次。
-- 用 `rsync --delete`，主机副本与本地保持一致（本地删掉的文件主机上也删）；自动排除 `.git`；符号链接不会被同步进仓（`--safe-links --no-links`）；不接受任意 `--ssh-opts`，只认 `--identity <key>`（避免被注入 `ProxyCommand` 之类）。
-- **首次推送前**先核对 EC2 的 SSH host key 指纹：脚本首次连接用 `accept-new`，会信任第一次见到的指纹，所以最好通过带外渠道核对一次，或预先写好 `known_hosts`，防止有人冒充主机截走源码。
-- 术语表（中文词→符号）MVP 不随推送刷新；问答靠 codegraph 直接定位即可。需刷新 local 仓术语表时，对该项目重新执行 `install.sh` 的「重新部署」。
+- **重建期间该项目网关会离线数分钟**（与首次建图耗时相当），**同项目的其它仓（含 git 仓）也会一并离线**（它们共用同一个网关进程）。重建失败会**自动回滚到上一版本**，网关不会对外服务出错的代码。
+- 「刷新」即重跑本命令（本地仓不会自动更新，**不反映**实时主分支）。代码变更后再推送一次即可。
+- 使用 `rsync --delete`，主机副本与本地保持一致（本地删除的文件，主机上同样删除）；自动排除 `.git`；符号链接不会被同步进仓（`--safe-links --no-links`）；不接受任意 `--ssh-opts`，仅认 `--identity <key>`（防止注入 `ProxyCommand` 等）。
+- **首次推送前**先核对 EC2 的 SSH host key 指纹：脚本首次连接用 `accept-new`，会信任第一次见到的指纹。建议通过其它渠道（如 AWS 控制台的实例 system log）单独核对一次，或预先写入 `known_hosts`，以防有人冒充主机窃取源码。
+- 术语表（中文词→代码符号）在 MVP 阶段不随推送刷新；问答可经 codegraph 直接定位，不依赖术语表。如需刷新本地仓的术语表，对该项目重新执行 `install.sh` 的「重新部署」。
 
 **最小 sudoers**——只放行这一个脚本（建暂存目录、切换、重建都在脚本里完成，参数先经 `^[a-z0-9][a-z0-9-]*$` 校验、systemd 单元名固定写死）：
 
@@ -402,7 +402,7 @@ refreshIntervalSec?}`，**git-only**）。顶层 `refreshIntervalSec` 是全局�
 <pushuser> ALL=(root) NOPASSWD: /bin/bash /opt/idx/app/reindex_local_repo.sh *
 ```
 
-这里 `/bin/bash <固定脚本路径> *` 把可执行的对象限定在这一个脚本，`*` 只放开它后面的参数。**不要**写成裸 `/bin/bash *`（那等于放行任意命令），也不要把 `systemctl`/`mkdir`/`chown` 这类通用命令放进 NOPASSWD——它们的通配会被 `-R`、`..` 之类绕开、提权成 root。
+这里 `/bin/bash <固定脚本路径> *` 把可执行对象限定为这一个脚本，`*` 只放开其后的参数。**不要**写成裸 `/bin/bash *`（等于放行任意命令），也不要把 `systemctl`/`mkdir`/`chown` 这类通用命令加入 NOPASSWD——它们的通配可被 `-R`、`..` 等绕过，从而提权为 root。
 
 ---
 

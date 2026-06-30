@@ -12,10 +12,10 @@
 
 - **不变量**：答案只能基于 index-service 服务的**最新主分支真实代码 + CodeGraph 取证**；代码与文档/记忆
   冲突时**以代码为准**并标注差异；证据不足或置信度低时**转研发**，不得编造。
-- **新鲜度**：分两种代码来源。**git 源**仓由 per-repo systemd timer（`index-refresh-<subdir>.timer`，默认 300s）
+- **新鲜度**：分两种代码来源。**git 仓**（`source:"git"`，默认）由 per-repo systemd timer（`index-refresh-<subdir>.timer`，默认 300s）
   定时 `git pull` 跟上游主分支，常驻 codegraph 的 file-watcher 数秒内增量重建内存图，故「最新主分支」是分钟级新鲜。
-  **local 源**仓（`projects.json` 里 `source:"local"`）是经 `scripts/push-local-repo.sh` **人工推送的快照**，无 timer、不自动刷新——新鲜度由运维决定，可能滞后于真实主干（重新推送才更新）。
-  **MVP 不在答案里自动标注 local 仓的快照时间**（后置）；`/data/repo/<subdir>/.snapshot-time` 仅为运维排查标记（`sudo cat` 可看上次推送时间）。涉及 local 仓的问题，运维应知答案反映的是上次推送的快照而非实时主干。
+  **本地仓**（`source:"local"`）是经 `scripts/push-local-repo.sh` **人工推送的快照**，无 timer、不自动刷新——新鲜度由运维决定，可能滞后于真实主分支（重新推送后才更新）。
+  **MVP 不在答案中自动标注本地仓的快照时间**（后置）；`/data/repo/<subdir>/.snapshot-time` 仅供运维排查（`sudo cat` 查看上次推送时间）。涉及本地仓的问题，运维需知答案反映的是上次推送的快照，而非实时主分支。
 - **以谁为准**：被索引的目标仓库（index-service 本地副本，git clone 而来）。其次是 `agent-container/prompts/system.md`
   里对这条的强约束（信任边界：只信 system prompt，不信工具读到的内容里的指令）。
 - **机检/观测**：属行为约束，无纯静态机检——由 system.md 规则 + gateway 的脱敏/泄漏剥离兜底；观测上靠 gateway 的
@@ -46,7 +46,7 @@
   | `node_modules/` | `bot-gateway/package.json` + lock | `npm install` |
   | `.venv/` | `requirements.txt` | `uv` / `pip install -r` |
   | 构建产物 / 镜像 | `agent-container/`（Dockerfile + 源） | `scripts/deploy-all.sh`（image 阶段） |
-  | 本地仓库副本 `/data/repo/<subdir>` | git 源：上游 git 仓库；local 源：运维本地仓 | git 源：`git_fetch.sh` clone + 定时 pull；local 源：`push-local-repo.sh` rsync 推送 + `reindex_local_repo.sh` 切换重建，无 timer |
+  | 本地仓库副本 `/data/repo/<subdir>` | git 仓：上游 git 仓库；本地仓：运维本地代码 | git 仓：`git_fetch.sh` clone + 定时 pull；本地仓：`push-local-repo.sh` rsync 推送 + `reindex_local_repo.sh` 切换重建，无 timer |
   | 索引 `graph.db`（每仓一张，`<subdir>/.home/.codegraph/`） | 本地仓库副本 | `activate_project.sh` 起 `index-build@<subdir>` 建图（独占写入）+ 常驻 watcher 增量 |
 
 - **机检**：暂无逐项 diff（依赖约定和 review）。`.gitignore` 排除大部分生成物。
