@@ -67,14 +67,14 @@ structure）描述系统*是什么*；本文描述*一次提问如何在系统�
 
 **刷新方式（本地仓，手动）**：`source:"local"` 的仓没有 git 远端，因此**不挂 refresh timer**。运维在自己机器上跑
 `scripts/push-local-repo.sh`，先把代码经网络 rsync 到主机的暂存目录 `/data/repo/<subdir>.incoming`（这一步较慢、
-可能中断，但不碰 live 副本，bridge 照常服务）；传完后 `index-service/reindex_local_repo.sh` 再在主机本地把暂存目录
-**原地 rsync 到 live 副本**——与 git 仓 `git pull` 用 `git reset --hard` 改写工作树是同一条路径：常驻 codegraph
+可能中断，但不碰正在用的代码，bridge 照常服务）；传完后 `index-service/reindex_local_repo.sh` 再在主机本地把暂存目录
+**原地 rsync 到正在用的代码目录 `/data/repo/<subdir>`**——与 git 仓 `git pull` 用 `git reset --hard` 改写工作树是同一条路径：常驻 codegraph
 进程的 file-watcher 几秒内对内存图增量重建，**不停 bridge、不全量重建、也不会有两个进程同时写同一张 graph.db**
-（`.codegraph`/`.home` 图目录受 rsync protect 保护不被删）。本地 rsync 逐文件覆盖，期间 live 副本有数秒处于新旧文件混合的状态、查询可能读到尚未
-一致的结果，watcher 随后即补齐——这与 git 仓原地 `git pull` 的行为一致（见
-[`design/multi-repo-isolation_zh.md`](../design/multi-repo-isolation_zh.md) §8）。**例外是首次推送**：此时 live 副本
+（`.codegraph`/`.home` 图目录受 rsync protect 保护不被删）。本地这步加 `--delay-updates`：变更文件先就位、
+最后统一切换，把"新旧文件混合、查询可能读到不一致结果"的窗口压到切换瞬间——与 git 仓原地 `git pull` 的行为一致
+（见 [`design/multi-repo-isolation_zh.md`](../design/multi-repo-isolation_zh.md) §8）。**例外是首次推送**：此时正在用的代码目录
 还没有 graph，watcher 无从增量，故先停 bridge、跑一次 `index-build@` 全量建图、再起 bridge（与 git 仓首次 activate
-相同）。**术语表**也随推送增量刷新：脚本用本次同步的变更文件清单喂 `glossary_gen`（`--changed-list`/`--deleted-list`），
+相同）。**术语表**也随推送增量刷新：脚本把本次同步的变更文件清单传给 `glossary_gen`（`--changed-list`/`--deleted-list`），
 只重建变更文件的条目——与 git 仓按 `git diff` 增量是同一条路径，只是变更集来自 rsync 而非 git。本地仓是手动推送的
 **快照**，更新时机由运维决定、可能滞后于真实主分支——重新推送后才更新。
 
