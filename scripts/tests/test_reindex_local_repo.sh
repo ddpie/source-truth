@@ -15,6 +15,10 @@ bash "$S" "Bad/Sub" 2>/dev/null; rc=$?; [[ $rc -ne 0 ]]; check "invalid subdir r
 bash "$S" --prepare "Bad/Sub" 2>/dev/null; rc=$?; [[ $rc -ne 0 ]]; check "prepare rejects invalid subdir" $?
 grep -q 'REINDEX_PREPARED' "$S"; check "has --prepare mode" $?
 
+# Must refuse a git-source repo: applying a push onto it would be undone by the next git pull.
+grep -q '\[ "\$SRC" = "local" \]' "$S"; check "refuses non-local (git) repos" $?
+grep -q 'not local' "$S"; check "fail-loud message explains git vs local" $?
+
 # Two update paths keyed on whether the graph already exists.
 grep -q 'if \[ -s "\$GRAPH" \]' "$S"; check "branches on existing graph (incremental vs first build)" $?
 # Incremental path: in-place apply, NO bridge stop (watcher picks it up).

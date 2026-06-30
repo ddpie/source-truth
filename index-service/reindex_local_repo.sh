@@ -44,16 +44,23 @@ fi
 [ -d "$STAGE" ] || { echo "REINDEX_FAILED: no staged code at $STAGE (run push-local-repo.sh first)"; exit 1; }
 [ -n "$(ls -A "$STAGE" 2>/dev/null)" ] || { echo "REINDEX_FAILED: staged dir $STAGE is empty"; exit 1; }
 
-# Resolve the owning project from the manifests.
-PID=""
+# Resolve the owning project from the manifests, AND the repo's declared source. We only ingest
+# LOCAL repos here: applying a push onto a git-source repo would be silently undone by the next
+# git-refresh `git reset --hard`, so refuse it loudly instead.
+PID=""; SRC=""
 for m in /etc/index-projects/*.json; do
   [ -f "$m" ] || continue
-  if python3 -c 'import json,sys
-m=json.load(open(sys.argv[1])); sys.exit(0 if sys.argv[2] in [r.get("subdir") for r in m.get("repos",[])] else 1)' "$m" "$SUBDIR"; then
-    PID="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["projectId"])' "$m")"; break
-  fi
+  # Print "<projectId> <source>" if this manifest owns $SUBDIR, else exit 1 (no output).
+  out="$(python3 -c 'import json,sys
+m=json.load(open(sys.argv[1]))
+for r in m.get("repos",[]):
+    if r.get("subdir")==sys.argv[2]:
+        print(m["projectId"], r.get("source","git")); sys.exit(0)
+sys.exit(1)' "$m" "$SUBDIR")" || continue
+  PID="${out%% *}"; SRC="${out##* }"; break
 done
 [ -n "$PID" ] || { echo "REINDEX_FAILED: subdir '$SUBDIR' not found in any project manifest"; exit 1; }
+[ "$SRC" = "local" ] || { echo "REINDEX_FAILED: '$SUBDIR' is a ${SRC:-git} repo, not local — push-local-repo.sh only applies to source:\"local\" repos (a git repo is refreshed by its own git pull)"; exit 1; }
 BRIDGE="index-bridge-${PID}.service"
 GRAPH="$WS/.home/.codegraph/graph.db"
 APP="${APP:-/opt/idx/app}"
