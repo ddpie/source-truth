@@ -577,7 +577,7 @@ for d in \$SUBS; do
   systemctl disable --now index-refresh-\$d.timer index-refresh-\$d.service index-build@\$d.service 2>/dev/null
   systemctl reset-failed index-refresh-\$d.timer index-refresh-\$d.service index-build@\$d.service 2>/dev/null
   rm -f /etc/systemd/system/index-refresh-\$d.service /etc/systemd/system/index-refresh-\$d.timer
-  rm -rf /data/repo/\$d /data/repo/\$d.bridge.lock
+  rm -rf /data/repo/\$d /data/repo/\$d.incoming /data/repo/\$d.bridge.lock
 done
 rm -rf /data/glossary/${SEL}
 rm -f /etc/bot-gateway-${SEL}.env /etc/index-projects/${SEL}.json /etc/systemd/system/index-bridge-${SEL}.service

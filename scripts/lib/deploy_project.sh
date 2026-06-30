@@ -33,7 +33,8 @@ cfg = json.load(open(sys.argv[1])); pid = sys.argv[2]
 p = cfg["projects"].get(pid)
 if p is None:
     sys.stderr.write(f"project '{pid}' not in projects.json\n"); sys.exit(1)
-specs = [{"subdir": r["subdir"], "git": r["git"], "ref": r.get("ref", ""),
+specs = [{"subdir": r["subdir"], "source": r.get("source", "git"),
+          "git": r.get("git", ""), "ref": r.get("ref", ""),
           "refreshIntervalSec": r.get("refreshIntervalSec")} for r in p["repos"]]
 print("PORT=" + shlex.quote(str(p["port"])))
 print("FEISHU_SECRET=" + shlex.quote(p.get("feishuSecretId", "")))
