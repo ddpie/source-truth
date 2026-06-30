@@ -37,6 +37,14 @@ APP=/opt/idx/app
 BIN=/opt/idx/bin/codegraph-server
 LOCAL_REPO_ROOT=/data/repo
 RENDER_MANIFEST="$APP/render_manifest.py"
+
+# repo_uses_git <source>: rc 0 if this repo is fetched via git (default), non-zero for local.
+# Local repos are pushed to /data/repo/<subdir> out-of-band (scripts/push-local-repo.sh) and
+# refreshed manually — no git_fetch, no refresh timer.
+repo_uses_git() {
+  [ "${1:-git}" != "local" ]
+}
+
 GIT_FETCH="$APP/git_fetch.sh"
 GLOSSARY_REFRESH="$APP/glossary_refresh.sh"
 [ -f "$RENDER_MANIFEST" ] || { echo "ACTIVATE_FAILED: render_manifest.py not in app bundle"; exit 1; }
@@ -52,6 +60,15 @@ GLOSSARY_REFRESH="$APP/glossary_refresh.sh"
 
 mkdir -p /etc/index-projects "$LOCAL_REPO_ROOT"
 MANIFEST="/etc/index-projects/${PROJECT_ID}.json"
+# Capture the project's PREVIOUS subdirs BEFORE overwriting the manifest — the authoritative
+# "what this project owned last time" set for orphan reconcile (independent of timers/slices,
+# which may not exist for local repos or on a no-glossary-engine host).
+# Explicit `if` (NOT `[ -f ] && OLD_SUBDIRS=...`): the && form's exit code on a first activate
+# (no manifest yet) is non-zero, and as a bare statement that can trip `set -e` on some readings.
+OLD_SUBDIRS=""
+if [ -f "$MANIFEST" ]; then
+  OLD_SUBDIRS="$(python3 "$RENDER_MANIFEST" --field subdir "$MANIFEST" 2>/dev/null || echo "")"
+fi
 printf '%s' "$REPO_MANIFEST_JSON" > "$MANIFEST"
 
 # Validate with the SHIPPED parser; fail loud before touching any repo/unit.
@@ -92,31 +109,41 @@ SERVE_FLOCKS=""
 while IFS= read -r SUBDIR; do
   : "${SUBDIR:?ACTIVATE_FAILED: empty subdir (refusing git op on repo root)}"
   WS="$LOCAL_REPO_ROOT/$SUBDIR"
-  GIT_URL="$(python3 "$RENDER_MANIFEST" --repo-field git "$SUBDIR" "$MANIFEST")" \
-    || { echo "ACTIVATE_FAILED: no git url for $SUBDIR"; exit 1; }
-  GIT_REF="$(python3 "$RENDER_MANIFEST" --repo-field ref "$SUBDIR" "$MANIFEST" || echo "")"
-  IV="$(python3 "$RENDER_MANIFEST" --repo-field refreshIntervalSec "$SUBDIR" "$MANIFEST" 2>/dev/null || echo "")"
-  [ -n "$IV" ] && [ "$IV" != "None" ] || IV=300
-
-  bash "$GIT_FETCH" "$SUBDIR" "$GIT_URL" "$GIT_REF" "$WS" \
-    || { echo "ACTIVATE_FAILED: git fetch $SUBDIR"; exit 1; }
-  # graph dirs INSIDE $WS (proven layout); created after clone, git-untracked so reset --hard keeps them.
+  SRC="$(python3 "$RENDER_MANIFEST" --repo-field source "$SUBDIR" "$MANIFEST" 2>/dev/null || echo git)"
+  [ -n "$SRC" ] && [ "$SRC" != "None" ] || SRC=git
+  if repo_uses_git "$SRC"; then
+    GIT_URL="$(python3 "$RENDER_MANIFEST" --repo-field git "$SUBDIR" "$MANIFEST")" \
+      || { echo "ACTIVATE_FAILED: no git url for $SUBDIR"; exit 1; }
+    GIT_REF="$(python3 "$RENDER_MANIFEST" --repo-field ref "$SUBDIR" "$MANIFEST" || echo "")"
+    IV="$(python3 "$RENDER_MANIFEST" --repo-field refreshIntervalSec "$SUBDIR" "$MANIFEST" 2>/dev/null || echo "")"
+    [ -n "$IV" ] && [ "$IV" != "None" ] || IV=300
+    bash "$GIT_FETCH" "$SUBDIR" "$GIT_URL" "$GIT_REF" "$WS" \
+      || { echo "ACTIVATE_FAILED: git fetch $SUBDIR"; exit 1; }
+  else
+    # LOCAL source: code is pushed out-of-band to $WS by scripts/push-local-repo.sh (+ host-side
+    # reindex_local_repo.sh). Refuse if it hasn't landed — index-build@ would otherwise fail later.
+    if [ -z "$(ls -A "$WS" 2>/dev/null)" ]; then
+      echo "ACTIVATE_FAILED: local repo '$SUBDIR' has no code at $WS — push it first (scripts/push-local-repo.sh)"
+      exit 1
+    fi
+    echo "activate: $SUBDIR is a LOCAL repo (no git fetch, no refresh timer)"
+  fi
+  # graph dirs INSIDE $WS (proven layout); created after fetch/push, git-untracked so reset --hard keeps them.
   mkdir -p "$WS/.codegraph" "$WS/.home/.codegraph"
 
   BUILD_UNITS="$BUILD_UNITS index-build@${SUBDIR}.service"
   SERVE_FLOCKS="$SERVE_FLOCKS /usr/bin/flock $WS/.codegraph/.writer.lock"
 
-  # Concrete refresh unit + timer for this repo. ExecStart re-reads git url/ref from THIS
-  # project's manifest at run time (via render_manifest --repo-field) rather than baking them
-  # into the unit text: that (a) preserves an EMPTY ref correctly — git_fetch treats "" as
-  # "default branch" — instead of an unquoted empty systemd arg collapsing and shifting the
-  # positional args (which made the DEST arg empty and every pull fail); and (b) keeps the git
-  # URL/ref out of the ExecStart line, so a value with whitespace or a leading dash can't become
-  # an extra/option arg. The whole command is one `bash -c` so the $(...) lookups run on the host.
-  # The refresh runs glossary_refresh.sh, which (a) does the authoritative git pull (its exit
-  # code fails the unit on a bad pull, unchanged), then (b) rebuilds THIS repo's glossary slice
-  # incrementally from the pull's old..new diff (best-effort, never fails the unit). MODEL/REGION
-  # come from /etc/index-service.env; the build-time cc engine uses them on Bedrock.
+  # Concrete refresh unit + timer — ONLY for git repos (local repos refresh manually via re-push).
+  # ExecStart re-reads git url/ref from THIS project's manifest at run time (via render_manifest
+  # --repo-field) rather than baking them into the unit text: that (a) preserves an EMPTY ref
+  # correctly — git_fetch treats "" as "default branch" — instead of an unquoted empty systemd arg
+  # collapsing and shifting the positional args; and (b) keeps the git URL/ref out of the ExecStart
+  # line, so a value with whitespace or a leading dash can't become an extra/option arg. The whole
+  # command is one `bash -c` so the $(...) lookups run on the host. The refresh runs
+  # glossary_refresh.sh, which (a) does the authoritative git pull (its exit code fails the unit on
+  # a bad pull), then (b) rebuilds THIS repo's glossary slice incrementally (best-effort).
+  if repo_uses_git "$SRC"; then
   cat > "/etc/systemd/system/index-refresh-${SUBDIR}.service" <<UNIT
 [Unit]
 Description=Scheduled git pull + glossary refresh for repo ${SUBDIR}
@@ -139,6 +166,7 @@ Unit=index-refresh-${SUBDIR}.service
 [Install]
 WantedBy=timers.target
 UNIT
+  fi
 done <<< "$SUBDIRS"
 
 # --- this project's CONCRETE resident bridge unit (index-bridge-<projectId>) -------------------
@@ -178,31 +206,30 @@ for SUBDIR in $SUBDIRS; do
   fi
 done
 
-# RECONCILE: a repo removed from this project's repos[] must not leave an orphan behind.
-# activate only ever (re)creates units/slices for the CURRENT $SUBDIRS, so a previously-activated
-# repo that's now gone would keep: (a) its index-refresh-<sub>.timer firing, and (b) its
-# /data/glossary/<project>/<sub>.jsonl slice — which glossary_read globs unconditionally, so its
-# stale concepts would pollute glossary_index forever. Tear down units + slice for any on-disk
-# <sub> not in the current manifest. (Repo working copies under /data/repo are left in place — a
-# stale graph isn't served once its bridge args drop it; only the glossary slice is globbed blindly.)
+# RECONCILE (old-manifest-driven): orphans = OLD_SUBDIRS − current SUBDIRS. Authoritative and
+# source-agnostic — works for local repos (no timer) AND on hosts with no glossary engine (no
+# slice). A timer-driven loop would never see a removed LOCAL repo (it has no timer) and would leak
+# its repo copy + glossary slice forever (glossary_read globs every <sub>.jsonl unconditionally).
+# Tear down each orphan's refresh unit (git repos only; disable is a no-op for local), its glossary
+# slice + lock, and its on-disk repo copy + graph.
 CUR_SUBDIRS=" $(echo $SUBDIRS) "   # space-delimited membership test
 GLOSSARY_ROOT="${GLOSSARY_ROOT:-/data/glossary}"
 PROJ_GLOSS_DIR="$GLOSSARY_ROOT/$PROJECT_ID"
-for unit in $(systemctl list-unit-files 'index-refresh-*.timer' --no-legend --plain 2>/dev/null | awk '{print $1}'); do
-  sub="${unit#index-refresh-}"; sub="${sub%.timer}"
-  # Only this project's repos are candidates; we can't tell ownership from the unit name alone,
-  # so only reconcile a unit whose matching slice lives under THIS project's glossary dir.
-  [ -f "$PROJ_GLOSS_DIR/${sub}.jsonl" ] || continue
+for sub in $OLD_SUBDIRS; do
   case "$CUR_SUBDIRS" in *" $sub "*) continue ;; esac   # still current → keep
-  echo "glossary: reconcile — repo '$sub' removed; tearing down its refresh unit + slice"
+  echo "reconcile: repo '$sub' removed from project $PROJECT_ID — tearing down unit + slice + repo copy"
   systemctl disable --now "index-refresh-${sub}.timer" 2>/dev/null || true
+  systemctl reset-failed "index-refresh-${sub}.timer" "index-refresh-${sub}.service" 2>/dev/null || true
   rm -f "/etc/systemd/system/index-refresh-${sub}.service" "/etc/systemd/system/index-refresh-${sub}.timer" 2>/dev/null || true
   rm -f "$PROJ_GLOSS_DIR/${sub}.jsonl" "$PROJ_GLOSS_DIR/.${sub}.lock" 2>/dev/null || true
+  rm -rf "$LOCAL_REPO_ROOT/${sub}" "$LOCAL_REPO_ROOT/${sub}.incoming" "$LOCAL_REPO_ROOT/${sub}.bridge.lock" 2>/dev/null || true
 done
 systemctl daemon-reload 2>/dev/null || true
 
 systemctl enable --now "index-bridge-${PROJECT_ID}.service"
 for SUBDIR in $SUBDIRS; do
+  SRC="$(python3 "$RENDER_MANIFEST" --repo-field source "$SUBDIR" "$MANIFEST" 2>/dev/null || echo git)"
+  repo_uses_git "${SRC:-git}" || { echo "activate: skip refresh timer for local repo $SUBDIR"; continue; }
   systemctl enable --now "index-refresh-${SUBDIR}.timer"
 done
 
