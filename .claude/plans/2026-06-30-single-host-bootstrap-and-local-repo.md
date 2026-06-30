@@ -406,17 +406,21 @@ git commit -m "feat(install): let add-project choose git or local repo source"
 
 ---
 
-### Task 5: host 侧 `reindex_local_repo.sh`（单写者安全的重建编排）
+### Task 5: host 侧 `reindex_local_repo.sh`（落地→建图→失败原子回滚）
 
-> 这是 review 挖出的核心修正：重建**必须先停该项目 bridge**（bridge 持 writer flock），否则 `index-build@` 的 `flock -n` 必失败。本任务把编排放在 host 侧脚本里，随 index-service 代码打包上 S3（与 activate_project.sh 同路径）。
+> 第二轮 review 的核心修正：原「先 rsync 覆盖 live、再建图」在 build 失败时会留下「新代码 + 旧/半截 graph」继续服务，违反「代码为唯一依据」。改为**已知正确**的方案：停 bridge → 把当前 live 快照到一旁 → 落地新代码 → **在 live 路径建图** → 成功才丢弃旧快照、失败则原子回滚到旧 live。**不**采用「在 `.incoming` 建图再 mv 切换」的低停机方案，因为 graph.db 是否能跨目录改名后仍可用未经验证（codegraph 可能写入绝对路径）——以确定正确换取一段重建期停机（local 推送是人工低频操作，可接受；停机时长见 runbook）。本脚本随 index-service 代码打包上 S3。
+>
+> 另含 `--prepare <subdir>` 子模式：建/授暂存目录给推送用户——使 push 脚本无需对暂存目录单独 sudo，从而 sudoers 只需授权这**一个**脚本（修第二轮安全-1）。
 
 **Files:**
 - Create: `index-service/reindex_local_repo.sh`
-- Test: `scripts/tests/test_reindex_local_repo.sh`（纯 bash：参数校验 + 编排顺序静态断言，不真动 systemd）
+- Test: `scripts/tests/test_reindex_local_repo.sh`（纯 bash：参数校验 + 编排顺序 + 回滚臂 + prepare 模式静态断言，不真动 systemd）
 
 **Interfaces:**
-- Consumes: `<subdir>`；host 上 `/etc/index-projects/<pid>.json` 各项目 manifest；暂存目录 `/data/repo/<subdir>.incoming/`（由 push 脚本 rsync 填充）。
-- Produces: 解析拥有该 subdir 的 projectId → 停 `index-bridge-<pid>` → 用 `rsync --delete` + protect filter 把 `.incoming/` 落地到 `/data/repo/<subdir>/`（bridge 已停，单写者安全）→ 写 `.snapshot-time` 标记 → `index-build@<subdir>` → 起 `index-bridge-<pid>` → 清 `.incoming/`。任一步失败 fail-loud 并尽力恢复起 bridge。
+- Consumes: `[--prepare] <subdir>`；host 上 `/etc/index-projects/<pid>.json` 各项目 manifest；暂存目录 `/data/repo/<subdir>.incoming/`（由 push 脚本 rsync 填充）；`$SUDO_USER`（prepare 模式 chown 目标）。
+- Produces:
+  - `--prepare <subdir>`：mkdir `/data/repo/<subdir>.incoming` 并 chown 给 `$SUDO_USER`（**从不**碰 live 目录）。
+  - `<subdir>`：解析拥有该 subdir 的 projectId → 停 `index-bridge-<pid>` → `mv` 当前 live 到一旁快照 → `mv` `.incoming` 到 live → 写 `.snapshot-time` → 在 live 路径 `index-build@<subdir>`（bridge 已停，flock 空闲）→ 成功则起 bridge + 删旧快照；**任何失败经 `trap rollback EXIT` 原子回滚旧 live 并起回 bridge**。
 
 - [ ] **Step 1: 写失败测试**
 
@@ -424,7 +428,8 @@ git commit -m "feat(install): let add-project choose git or local repo source"
 
 ```bash
 #!/usr/bin/env bash
-# test_reindex_local_repo.sh — static checks: arg validation + orchestration order. No systemd.
+# test_reindex_local_repo.sh — static checks: arg validation + orchestration order + rollback arm
+# + prepare mode. No systemd, no network.
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 S="$ROOT/index-service/reindex_local_repo.sh"
@@ -434,16 +439,16 @@ echo "test_reindex_local_repo:"
 
 [[ -f "$S" ]]; check "script exists" $?
 bash -n "$S"; check "parses" $?
-# bad subdir rejected before any systemctl
 bash "$S" "Bad/Sub" 2>/dev/null; rc=$?; [[ $rc -ne 0 ]]; check "invalid subdir rejected" $?
-# orchestration order: stop bridge BEFORE build, start bridge AFTER build
-stop_ln=$(grep -n 'systemctl stop "index-bridge' "$S" | head -1 | cut -d: -f1)
-build_ln=$(grep -n 'index-build@' "$S" | grep -i start | head -1 | cut -d: -f1)
-start_ln=$(grep -n 'systemctl start "index-bridge\|systemctl enable --now "index-bridge\|systemctl start index-bridge' "$S" | tail -1 | cut -d: -f1)
+bash "$S" --prepare "Bad/Sub" 2>/dev/null; rc=$?; [[ $rc -ne 0 ]]; check "prepare rejects invalid subdir" $?
+# orchestration: stop bridge BEFORE build, build BEFORE final bridge start
+stop_ln=$(grep -nF 'systemctl stop "$BRIDGE"' "$S" | head -1 | cut -d: -f1)
+build_ln=$(grep -nF 'systemctl start "index-build@' "$S" | head -1 | cut -d: -f1)
+start_ln=$(grep -nF 'systemctl start "$BRIDGE"' "$S" | tail -1 | cut -d: -f1)
 [[ -n "$stop_ln" && -n "$build_ln" && -n "$start_ln" && "$stop_ln" -lt "$build_ln" && "$build_ln" -lt "$start_ln" ]]
 check "stop bridge < build < start bridge" $?
-# protect filters guard the live graph dirs during the local landing rsync
-grep -q "filter=.P .codegraph" "$S" && grep -q "filter=.P .home" "$S"; check "protect filters for .codegraph/.home" $?
+grep -q 'trap rollback EXIT' "$S"; check "arms rollback on failure" $?
+grep -q 'REINDEX_PREPARED' "$S"; check "has --prepare mode" $?
 [[ "$_fail" -eq 0 ]]; exit $?
 ```
 
@@ -456,23 +461,46 @@ Expected: FAIL —— 脚本不存在。
 
 ```bash
 #!/usr/bin/env bash
-# reindex_local_repo.sh <subdir> — host-side reindex of a LOCAL repo after push-local-repo.sh has
-# staged new code into /data/repo/<subdir>.incoming/.
+# reindex_local_repo.sh — host-side ingest for a LOCAL repo. Two modes:
+#   --prepare <subdir>  : create staging dir /data/repo/<subdir>.incoming owned by the SSH user
+#                         (so push-local-repo.sh rsyncs into it without sudo on the dir).
+#   <subdir>            : swap staged code into live and rebuild, with ATOMIC ROLLBACK on failure.
 #
-# SINGLE-WRITER (不变量2): the resident bridge holds the per-repo writer flock for its whole life,
-# so index-build@'s `flock -n` would FAIL while the bridge runs. We therefore STOP the owning
-# project's bridge, land the staged code, rebuild, then START the bridge again — the same
-# stop→build→start discipline activate_project.sh uses. Brief serving blip for that project only.
+# CORRECTNESS OVER SPEED (MVP). We stop the project bridge, snapshot the current live dir aside,
+# move staged code into place, and rebuild the graph AT THE LIVE PATH (never build at a different
+# path than it's served from). If the build FAILS, we roll back to the snapshot (old code + old
+# graph) and restart — the live copy is never left as "new code + stale graph" (which would cite
+# wrong lines, 违反代码为唯一依据). The bridge is down for the rebuild duration; local pushes are
+# manual + infrequent so this is acceptable (see runbook). A future optimization is build-in-
+# staging-then-rename for sub-second downtime — DEFERRED pending verification that graph.db is
+# portable across a directory rename.
+#
+# SINGLE-WRITER (不变量2): the rebuild runs while the bridge is STOPPED, so index-build@'s flock is
+# free — never two writers on graph.db.
 set -euo pipefail
-SUBDIR="${1:?usage: reindex_local_repo.sh <subdir>}"
+
+MODE="reindex"
+if [ "${1:-}" = "--prepare" ]; then MODE="prepare"; shift; fi
+SUBDIR="${1:?usage: reindex_local_repo.sh [--prepare] <subdir>}"
 echo "$SUBDIR" | grep -qE '^[a-z0-9][a-z0-9-]*$' || { echo "REINDEX_FAILED: invalid subdir '$SUBDIR'"; exit 2; }
 
 LOCAL_REPO_ROOT=/data/repo
 WS="$LOCAL_REPO_ROOT/$SUBDIR"
 STAGE="$LOCAL_REPO_ROOT/$SUBDIR.incoming"
-[ -d "$STAGE" ] || { echo "REINDEX_FAILED: no staged code at $STAGE (run push-local-repo.sh first)"; exit 1; }
 
-# Resolve the owning project by scanning each manifest's repos[].subdir.
+if [ "$MODE" = "prepare" ]; then
+  # Staging dir owned by the INVOKING (sudo) user; NEVER touches the live dir.
+  mkdir -p "$STAGE"
+  owner="${SUDO_USER:-root}"
+  chown -R "$owner":"$owner" "$STAGE" 2>/dev/null || true
+  echo "REINDEX_PREPARED stage=$STAGE owner=$owner"
+  exit 0
+fi
+
+[ -d "$STAGE" ] || { echo "REINDEX_FAILED: no staged code at $STAGE (run push-local-repo.sh first)"; exit 1; }
+[ -n "$(ls -A "$STAGE" 2>/dev/null)" ] || { echo "REINDEX_FAILED: staged dir $STAGE is empty"; exit 1; }
+
+# Resolve the owning project from the manifests.
 PID=""
 for m in /etc/index-projects/*.json; do
   [ -f "$m" ] || continue
@@ -483,34 +511,37 @@ m=json.load(open(sys.argv[1])); sys.exit(0 if sys.argv[2] in [r.get("subdir") fo
 done
 [ -n "$PID" ] || { echo "REINDEX_FAILED: subdir '$SUBDIR' not found in any project manifest"; exit 1; }
 BRIDGE="index-bridge-${PID}.service"
+OLD="$LOCAL_REPO_ROOT/.$SUBDIR.old.$$"
 
-start_bridge() { systemctl start "$BRIDGE" 2>/dev/null || true; }
-trap start_bridge EXIT   # never leave the project's bridge down on an error path
-
-echo "reindex: stopping $BRIDGE to release the writer flock"
+echo "reindex: stopping $BRIDGE for swap+rebuild (project offline during rebuild)"
 systemctl stop "$BRIDGE" 2>/dev/null || true
 
-mkdir -p "$WS/.codegraph" "$WS/.home/.codegraph"
-# Land staged → live. --delete makes the live copy mirror the push, but PROTECT the live graph dirs
-# (they live INSIDE $WS and must survive). Protect is stronger than exclude: it forbids --delete
-# from touching them even if the source lacks them.
-rsync -a --delete \
-  --filter='P .codegraph/' --filter='P .home/' \
-  --exclude='.git' \
-  "$STAGE/" "$WS/"
+rollback() {
+  echo "reindex: ROLLING BACK — restoring previous live copy"
+  rm -rf "$WS" 2>/dev/null || true
+  [ -d "$OLD" ] && mv "$OLD" "$WS" 2>/dev/null || true
+  systemctl start "$BRIDGE" 2>/dev/null || true
+}
+trap rollback EXIT
 
-# Snapshot marker so answers can surface "pushed at <ts>" for local repos (git repos have a sha).
+# Snapshot current live aside (atomic rename, same filesystem), then move staged code into place.
+if [ -d "$WS" ]; then mv "$WS" "$OLD"; fi
+mv "$STAGE" "$WS"
+mkdir -p "$WS/.codegraph" "$WS/.home/.codegraph"   # fresh graph workspace dirs for the rebuild
+# Snapshot marker so answers can surface "pushed at <ts>" (local repos have no sha). It lives in
+# $WS and survives — reindex uses mv, not a --delete rsync, so nothing strips it.
 date -u +%Y-%m-%dT%H:%M:%SZ > "$WS/.snapshot-time" 2>/dev/null || true
 
-echo "reindex: building graph for $SUBDIR (bridge stopped, flock free)"
+echo "reindex: building graph at live path (bridge stopped, flock free)"
 systemctl reset-failed "index-build@${SUBDIR}.service" 2>/dev/null || true
 systemctl start "index-build@${SUBDIR}.service"
 R="$(systemctl show "index-build@${SUBDIR}.service" --value -p Result 2>/dev/null || echo unknown)"
-[ "$R" = "success" ] || { echo "REINDEX_FAILED: index-build@${SUBDIR} Result=$R"; journalctl -u "index-build@${SUBDIR}.service" --no-pager | tail -30 || true; exit 1; }
+[ "$R" = "success" ] || { echo "REINDEX_FAILED: index-build@${SUBDIR} Result=$R — rolling back"; journalctl -u "index-build@${SUBDIR}.service" --no-pager | tail -30 || true; exit 1; }
 
-start_bridge
+# Success: start bridge, drop the old copy, disarm rollback.
+systemctl start "$BRIDGE"
 trap - EXIT
-rm -rf "$STAGE"
+rm -rf "$OLD"
 echo "REINDEX_DONE subdir=${SUBDIR} project=${PID}"
 ```
 
@@ -540,7 +571,7 @@ chmod +x /opt/idx/app/activate_project.sh /opt/idx/app/git_fetch.sh /opt/idx/app
 ```bash
 chmod +x index-service/reindex_local_repo.sh
 git add index-service/reindex_local_repo.sh scripts/tests/test_reindex_local_repo.sh scripts/lib/deploy_project.sh
-git commit -m "feat(index): host-side reindex_local_repo.sh (stop-bridge -> land -> build -> start)"
+git commit -m "feat(index): reindex_local_repo.sh — swap+rebuild with atomic rollback; --prepare stage mode"
 ```
 
 ---
@@ -582,8 +613,11 @@ SRC="$(mktemp -d)"; echo hi > "$SRC/f.txt"
 out="$(bash "$S" --host ec2host --dry-run localsub "$SRC" 2>&1)"; rc=$?
 [[ $rc -eq 0 ]]; check "dry-run rc 0" $?
 grep -q 'rsync' <<<"$out"; check "dry-run shows rsync" $?
+grep -q 'safe-links' <<<"$out" && grep -q 'no-links' <<<"$out"; check "dry-run rsync refuses symlink escape" $?
 grep -q '/data/repo/localsub.incoming' <<<"$out"; check "dry-run stages to .incoming (not live dir)" $?
+grep -q 'reindex_local_repo.sh --prepare localsub' <<<"$out"; check "dry-run prepares stage via host script (no raw sudo mkdir)" $?
 grep -q 'reindex_local_repo.sh localsub' <<<"$out"; check "dry-run triggers host reindex" $?
+! grep -qE 'sudo (mkdir|chown)' <<<"$out"; check "no raw sudo mkdir/chown in remote commands" $?
 rm -rf "$SRC"
 [[ "$_fail" -eq 0 ]]; exit $?
 ```
@@ -642,27 +676,36 @@ SSH=(ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new)
 SRC="${REAL%/}/"
 STAGE="/data/repo/${SUBDIR}.incoming"
 REINDEX="/opt/idx/app/reindex_local_repo.sh"
-RSYNC=(rsync -az --delete --filter='P .codegraph/' --filter='P .home/' --exclude='.git'
+# --safe-links: drop any symlink that points OUTSIDE the tree; --no-links additionally refuses to
+# recreate symlinks at all. Without these, a pushed `x -> /etc` would let the host's root-run build
+# index files outside the repo (info leak). Both client push AND host landing must be link-safe.
+# --exclude .git keeps VCS metadata out; protect filters are belt-and-suspenders (stage has no graph
+# dirs, but if someone points --host at a live dir by mistake, --delete still won't strip them).
+RSYNC=(rsync -az --delete --safe-links --no-links
+  --filter='P .codegraph/' --filter='P .home/' --exclude='.git'
   -e "$(printf '%q ' "${SSH[@]}")" "$SRC" "${HOST}:${STAGE}/")
+# The host script (run via a SINGLE sudo-authorized entry) creates+owns the stage dir, then later
+# does the swap+rebuild. push never runs raw `sudo mkdir/chown` — so sudoers authorizes ONE script.
+REMOTE_PREPARE="sudo ${REINDEX} --prepare ${SUBDIR}"
 REMOTE_REINDEX="sudo ${REINDEX} ${SUBDIR}"
 
 if [ "$DRY" = true ]; then
-  say info "[dry-run] mkdir stage: ${SSH[*]} ${HOST} sudo mkdir -p ${STAGE}"
+  say info "[dry-run] prepare stage: ${SSH[*]} ${HOST} ${REMOTE_PREPARE}"
   say info "[dry-run] ${RSYNC[*]}"
   say info "[dry-run] reindex: ${SSH[*]} ${HOST} ${REMOTE_REINDEX}"
   exit 0
 fi
 
-say step "preparing stage ${STAGE} on ${HOST}"
-"${SSH[@]}" "$HOST" "sudo mkdir -p ${STAGE} && sudo chown \"\$(id -un)\":\"\$(id -gn)\" ${STAGE}"
+say step "preparing stage ${STAGE} on ${HOST} (via host script)"
+"${SSH[@]}" "$HOST" "$REMOTE_PREPARE"
 say step "rsync ${SRC} → ${HOST}:${STAGE}"
 "${RSYNC[@]}"
-say step "triggering host reindex (stop bridge → land → build → start)"
+say step "triggering host reindex (stop bridge → swap → build → start, rollback on failure)"
 "${SSH[@]}" "$HOST" "$REMOTE_REINDEX"
 say ok "pushed + reindexed local repo '${SUBDIR}'"
 ```
 
-注：staging 目录 `.incoming` chown 给推送用户是安全的（它不是 live 索引目录，reindex 落地后即删）；live 目录 `/data/repo/<subdir>` 的属主始终由 host 侧 reindex 控制，从不 chown 给推送用户（修 review 安全-4）。`--delete` 只作用于 staging→live 的 host 本地 rsync（在 reindex_local_repo.sh 内，带 protect filter），客户端 rsync 推到 `.incoming` 也带 protect/exclude 兜底。
+注：暂存目录 `.incoming` 由 host 脚本 `--prepare` 建并 chown 给 SSH 用户（push 端**不**跑裸 `sudo mkdir/chown`，使 sudoers 只授权这一个脚本——修第二轮安全-1）；live 目录 `/data/repo/<subdir>` 的属主始终由 host 侧 reindex 控制，从不 chown 给推送用户。`--safe-links --no-links` 在 push 与 host 落地两侧都防止软链逃逸出仓（修第二轮安全-2）。
 
 - [ ] **Step 4: 运行测试，确认通过**
 
@@ -812,8 +855,16 @@ if [[ "$LOCAL_MODE" == "true" ]]; then
     SG="$(Q create-security-group --group-name source-truth-index-svc --description "index-service codegraph bridge" --vpc-id "$SELF_VPC" --query GroupId --output text)"
   fi
   reconcile_index_sg_ingress "$SG"
-  CUR_SGS="$(Q describe-instances --instance-ids "$SELF_ID" --query 'Reservations[0].Instances[0].SecurityGroups[].GroupId' --output text)"
-  case " $CUR_SGS " in *" $SG "*) : ;; *) Q modify-instance-attribute --instance-id "$SELF_ID" --groups $CUR_SGS "$SG" ;; esac
+  # Collect the instance's current SGs into an ARRAY and filter out any "None"/empty token, so the
+  # `--groups` arg is never malformed (a bare `--groups "" sg-x` errors). modify-instance-attribute
+  # --groups is REPLACE-semantics, so we pass existing + new together to ADD without dropping any.
+  # Skip the call entirely if the dedicated SG is already attached (idempotent re-run).
+  mapfile -t CUR_SGS < <(Q describe-instances --instance-ids "$SELF_ID" \
+    --query 'Reservations[0].Instances[0].SecurityGroups[].GroupId' --output text | tr '\t' '\n' | grep -E '^sg-')
+  _has_sg=false; for g in "${CUR_SGS[@]}"; do [[ "$g" == "$SG" ]] && _has_sg=true; done
+  if [[ "$_has_sg" != true ]]; then
+    Q modify-instance-attribute --instance-id "$SELF_ID" --groups "${CUR_SGS[@]}" "$SG"
+  fi
 
   sudo tee /etc/index-service.env >/dev/null <<ENV
 BUCKET='$BUCKET'
@@ -985,14 +1036,19 @@ git commit -m "feat(deploy): --local mode (ARM64 guard, reuse VPC/subnet, in-pla
 
 「单台 EC2 自举部署」：开一台 **ARM64** EC2（Ubuntu 24.04；实例角色含建 ECR/AgentCore/Secrets/SSM/Bedrock + 出网；**IMDSv2 required、hop-limit 1**；该机不与其他用途共用）；deploy 用户需**免密 sudo**（或以 root 跑）——bootstrap 与 reindex 用 `sudo`；`git clone` 仓库后 `./scripts/install.sh` 或 `./scripts/deploy-all.sh --region <r> --local`；强调 AgentCore 仍托管、不占本机；前置仍需 Bedrock model access + 飞书 secret。
 
-「本地仓上传」：projects.json 声明 `{subdir, source:"local"}`；客户机跑 `scripts/push-local-repo.sh --host <ec2> [--identity <key>] <subdir> <本地路径>`；重跑即刷新；说明会先暂存再停该项目 bridge 落地重建（有数秒服务中断）、`--delete` 镜像语义、`.git` 排除、不支持自由 `--ssh-opts`（防注入）。给出**最小 sudoers** 示例：
+「本地仓上传」：projects.json 声明 `{subdir, source:"local"}`；客户机跑 `scripts/push-local-repo.sh --host <ec2> [--identity <key>] <subdir> <本地路径>`；重跑即刷新。要说明的点：
+- 推送先把代码同步到主机暂存目录（`.incoming`，此时 bot 仍在线），再由主机脚本**停该项目 bot → 切换代码 → 重建图 → 起 bot**；**重建期间该项目的 bot 会离线几分钟**（取决于仓库大小，与首次建图同量级），重建失败会**自动回滚到上一版**、bot 不会服务到坏代码。**同一项目的其他仓（含 git 仓）也会在这几分钟内一并离线**（它们共用一个 bot 进程）。
+- `--delete` 镜像语义（主机副本与本地一致）、自动排除 `.git`、软链不会被同步进仓（`--safe-links --no-links`）、不支持自由 `--ssh-opts`（防注入，只认 `--identity <key>`）。
+- **首次推送前**：用带外渠道核对 EC2 的 SSH host key 指纹（脚本首连用 `accept-new`，会信任首次见到的指纹），或预置 `known_hosts`，以防中间人截获源码。
+
+给出**最小 sudoers**——只授权这**一个**脚本（建/授暂存目录、切换、重建都在脚本内做，参数已被脚本内 `^[a-z0-9][a-z0-9-]*$` 校验、unit 名固定）：
 
 ```
 # /etc/sudoers.d/source-truth-push  (deploy/push user only)
-<pushuser> ALL=(root) NOPASSWD: /opt/idx/app/reindex_local_repo.sh, /bin/mkdir -p /data/repo/*, /bin/chown * /data/repo/*
+<pushuser> ALL=(root) NOPASSWD: /opt/idx/app/reindex_local_repo.sh
 ```
 
-并注明：reindex_local_repo.sh 内部已固定 unit 名 + 校验 subdir，禁止把 `systemctl` 直接放进 NOPASSWD 通配。
+明确禁止把 `systemctl`、`mkdir`、`chown` 等通用命令放进 NOPASSWD（通配会被 `-R`/`..` 滥用提权）。
 
 - [ ] **Step 2: invariants 改原文 + 加条目**
 
@@ -1002,7 +1058,7 @@ git commit -m "feat(deploy): --local mode (ARM64 guard, reuse VPC/subnet, in-pla
 
 - [ ] **Step 3: structure 双语 + scripts README**
 
-- `docs/structure_zh.md` scripts 段（62-65 行附近）加：`push-local-repo.sh  客户机侧：rsync 直推本地仓到索引主机暂存目录并触发重建（本地仓刷新入口）`；index-service 段加 `reindex_local_repo.sh  host 侧本地仓重建编排（停 bridge→落地→建图→起 bridge）`。
+- `docs/structure_zh.md` scripts 段（62-65 行附近）加：`push-local-repo.sh  客户机侧：rsync 直推本地仓到索引主机暂存目录并触发重建（本地仓刷新入口）`；index-service 段加 `reindex_local_repo.sh  host 侧本地仓切换+重建编排（停 bridge→切换→建图→起 bridge，失败回滚）`。
 - `docs/structure_en.md` 对应英文两行。
 - `scripts/README.md` 表格加 `push-local-repo.sh` 一行（客户机侧、阶段标 p1、职责）。
 
@@ -1044,7 +1100,9 @@ Expected: 干净。
 以下行为离线只能静态测，**必须**在一台真实 ARM64 EC2 上演练一遍（与项目「真实集成禁止桩刷绿」要求一致）：
 
 1. 全新 ARM64 EC2（仅 aws/docker/git/python3 + 实例角色 + 免密 sudo + IMDSv2 required）跑 `deploy-all.sh --region <r> --local`，**全程不另起第二台 EC2**，AgentCore runtime 正常创建。
-2. 一个项目内混声明一个 git 仓 + 一个 local 仓；git 仓自动刷新；local 仓 `push-local-repo.sh` 推送后，确认：bridge 短暂停后恢复、graph 节点数非 0、问答能取证到 local 仓代码、`.snapshot-time` 已写。
+2. 一个项目内混声明一个 git 仓 + 一个 local 仓；git 仓自动刷新；local 仓 `push-local-repo.sh` 推送后，确认：bot 重建期间离线、重建成功后恢复、graph 节点数非 0、问答能取证到 local 仓代码、`.snapshot-time` 已写。
+   - **回滚臂**：故意推一份会让 build 失败的代码（如制造空目录/超限），确认 reindex **回滚到上一版**、bot 起回服务的是旧代码（不是坏代码）、退出码非零且有 `REINDEX_FAILED` 日志。
+   - **软链防御**：在本地仓里放一个指向仓外（如 `/etc`）的符号链接，确认推送后主机副本里不含该软链、codegraph 未索引到仓外文件。
 3. 删除该 local 仓后 `/data/repo/<sub>` 与 graph、glossary slice 均被清理，git 仓不受影响。
 4. 验证专用 SG 只放行 8080-8099 自引用，客户原有 SG 仍在（附加而非替换）。
 
@@ -1058,8 +1116,17 @@ Expected: 干净。
 3. activate_project 分流（local 跳过）→ Task 2 ✓
 4. install 支持本地仓 + 删项目/reconcile 兼容 + **local teardown** → Task 3, 4 ✓
 5. push 脚本 → Task 6 ✓；6. schema + 模板 → Task 1 ✓；7. 文档 → Task 10 ✓
-- review 硬伤：①单写者重建编排→Task 5（停 bridge→落地→build→起）✓；②ssh 注入→Task 6（去 --ssh-opts、数组传参）✓；③防误删→Task 5/6（protect filter、不 chown live）✓；④专用 SG→Task 8 ✓
-- review 应修：⑤测试自洽→Task 9 grep `ST_LOCAL_MODE=`、Task 2/8 多行函数+`/^}$/` 抽取 ✓；⑥SG 用 describe-instances→Task 8 ✓；⑦ARM64 自检→Task 9 ✓；⑧超时+sudo 日志→Task 8/9 ✓；⑨local teardown→Task 3 ✓；⑩sudoers→Task 10 ✓；⑪structure+example→Task 1/10 ✓；⑫invariants 原文→Task 10 ✓；⑬快照标记→Task 5 写 `.snapshot-time` + Task 10 文档 ✓；⑭IMDSv2→Task 10 ✓
+- 第一轮 review 硬伤：①单写者重建编排→Task 5 ✓；②ssh 注入→Task 6（去 --ssh-opts、数组传参）✓；③防误删→Task 5/6 ✓；④专用 SG→Task 8 ✓
+- 第一轮应修：⑤测试自洽→Task 9 grep `ST_LOCAL_MODE=`、Task 2/8 多行函数+`/^}$/` 抽取 ✓；⑥SG 用 describe-instances→Task 8 ✓；⑦ARM64 自检→Task 9 ✓；⑧超时+sudo 日志→Task 8/9 ✓；⑨local teardown→Task 3 ✓；⑩sudoers→Task 10 ✓；⑪structure+example→Task 1/10 ✓；⑫invariants 原文→Task 10 ✓；⑬快照标记→Task 5 写 `.snapshot-time` + Task 10 文档 ✓；⑭IMDSv2→Task 10 ✓
+
+**第二轮 review 修订（修复引入的新问题）：**
+- 🔴 reindex 回滚语义（build 失败留「新代码+旧图」）→ Task 5 重写为 **swap+rebuild+原子回滚**：停 bridge→快照旧 live→切换→在 live 路径建图→失败 `trap rollback` 还原旧 live；放弃未验证的「.incoming 建图后 mv」方案，以重建期停机换确定正确（停机时长入 runbook）✓
+- 🟠 sudoers 通配可提权 → Task 5 加 `--prepare` 子模式把建/授暂存目录收进脚本；Task 10 sudoers 收成**单脚本授权** `NOPASSWD: /opt/idx/app/reindex_local_repo.sh`，删除 mkdir/chown 通配 ✓
+- 🟠 rsync 保留软链可越界 → Task 6 push 与 Task 5 落地两侧均用 `--safe-links --no-links`（落地侧用 mv，天然不引入软链；push 侧显式拒绝）✓
+- 🟡 `.snapshot-time` 自删 → Task 5 改用 mv 切换（无 `--delete` rsync 剥离），标记稳定保留 ✓
+- 🟡 停整项目 bridge 波及同项目其他仓 → Task 10 runbook 明说「同项目其他仓一并离线几分钟」✓
+- 🟡 SG `--groups $CUR_SGS` 裸展开 → Task 8 改 `mapfile` 数组 + `grep '^sg-'` 过滤 None + 已含则跳过 ✓
+- 🟡 host key TOFU → Task 10 runbook 提示首推前带外核对指纹 ✓
 
 **Placeholder scan:** 无 TBD/TODO；每个代码步骤含完整代码块与命令、预期输出。
 
