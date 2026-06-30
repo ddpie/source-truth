@@ -100,7 +100,8 @@ git diff 增量。完整工作原理、grounding 把关与价值边界见 `docs/
 
 **含义**：要改 Runtime 的 env / idle timeout / 请求头，编辑 `scripts/lib/deploy_runtime.py` 并重跑
 `deploy-all.sh`（`deploy.sh` 为已废弃转发垫片）——改 CDK 不生效。密钥（飞书 app secret、bot token）走
-Secrets Manager / SSM，**当前需手动在 CDK 外创建**（编排脚本尚未自动建密钥），重部署不覆盖真实凭证。
+Secrets Manager / SSM，由 `install.sh` 交互式创建（`source-truth/feishu-<projectId>` 与全局
+`source-truth/git-credentials`）；纯 `deploy-all.sh` 路径（CI）要求密钥已存在。重部署不覆盖真实凭证。
 
 ## Runtime 调参与成本权衡（idle / session 复用）
 

@@ -5,8 +5,10 @@ Runs inside the AgentCore Firecracker microVM. All testable logic lives in
 ``agent_lib`` (see agent_lib.run_agent); this module only wires it into the
 ``@app.entrypoint`` async streaming handler. Keep it thin.
 
-Payload contract: ``{"prompt": <question text>, "session": <opaque context>}``
-(injected by bot-gateway). The agent depends only on ``prompt``.
+Payload contract: ``{"prompt": <question text>, "traceId": <joins both-side logs>,
+"repos": <optional project repo list>}`` (injected by bot-gateway; the
+runtimeSessionId travels in the AgentCore header, not the payload). The agent
+depends only on ``prompt``.
 """
 
 from __future__ import annotations

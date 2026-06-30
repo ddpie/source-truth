@@ -44,7 +44,7 @@
 | 服务 | 规格 | 数量 | 用途 |
 |------|------|------|------|
 | **CloudWatch Logs** | 日志组 `/source-truth/bot-gateway` | 1（各项目网关汇入，按 `projectId` 维度区分） | 网关结构化日志，指标的数据源 |
-| **CloudWatch Metric Filters** | KPI 17 项 + 告警 4 项 + 按项目维度伴生指标 | 20+ | 从日志提取用量 / 延迟 / 健康 / 失败率等指标 |
+| **CloudWatch Metric Filters** | KPI 17 项 + 告警 4 项 + 按项目维度 8 项 | 29 | 从日志提取用量 / 延迟 / 健康 / 失败率等指标 |
 | **CloudWatch Dashboards** | 产品用量 / SRE 健康 / 分项目 | 3 | 看板可视化 |
 | **CloudWatch Alarms** | ToolcallLeakDetected / FinalizeFailed / AnswerFailedBurst / LogPipelineStalled | 4 | 关键健康事件告警，经 SNS 通知 |
 | **SNS** | 主题 `source-truth-alarms` | 1 | 告警分发（手动订阅邮件 / webhook） |

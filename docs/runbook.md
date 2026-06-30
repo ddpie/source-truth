@@ -375,7 +375,7 @@ refreshIntervalSec?}`，**git-only**）。顶层 `refreshIntervalSec` 是全局�
 ./scripts/deploy-all.sh --region <r> --skip monitoring
 
 # 部署/重部署单个项目（底座须已就绪）：
-./scripts/deploy_project.sh <r> <projectId>   # 即 scripts/lib/deploy_project.sh
+./scripts/lib/deploy_project.sh <r> <projectId>
 ```
 
 **前提**：`.local/projects.json` 里每个项目的 `feishuSecretId` 指向的飞书密钥、以及全局
