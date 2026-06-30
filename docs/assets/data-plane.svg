@@ -9,7 +9,7 @@
   </defs>
 
   <rect x="0" y="0" width="760" height="486" fill="#ffffff"/>
-  <text x="380" y="34" text-anchor="middle" font-size="18" font-weight="700" fill="#1f2733">数据面：代码如何进入 index-service、索引如何刷新</text>
+  <text x="380" y="34" text-anchor="middle" font-size="18" font-weight="700" fill="#1f2733">代码如何进入 index-service、索引如何刷新</text>
   <text x="380" y="56" text-anchor="middle" font-size="12.5" fill="#7a8493">git 仓定时 pull · 本地仓手动推送 · 常驻 watcher 增量重建 · 分钟级反映，无需重部署</text>
 
   <!-- 5 stacked stages, x=120 w=520 -->

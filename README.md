@@ -119,7 +119,7 @@ bash <(gh api repos/ddpie/source-truth/contents/scripts/get.sh --jq '.content' |
 - **git 仓**（默认）：systemd timer 定时 `git pull`，主分支改动分钟级内反映到问答、无需重部署、无需手动操作。
 - **本地仓**（推不到 git 远端时）：用 `scripts/push-local-repo.sh` 经 rsync 直推到主机的快照，手动刷新——代码变更后重跑一次上传命令。
 
-刷新机制与「为何必须建索引」的实测见 [`docs/agent/architecture.md`](docs/agent/architecture.md) 的「数据面」；本地仓上传与单台 EC2 就地部署（`--local`）见 [`docs/runbook.md`](docs/runbook.md)。
+刷新机制与「为何必须建索引」的实测见 [`docs/agent/architecture.md`](docs/agent/architecture.md) 的「代码如何进入与刷新」一节；本地仓上传与单台 EC2 就地部署（`--local`）见 [`docs/runbook.md`](docs/runbook.md)。
 
 ## 安全设计
 
@@ -274,7 +274,7 @@ Each repo is cloned to index-service locally and a file-watcher rebuilds the ind
 - **git repos** (default): a systemd timer runs `git pull` periodically — freshness is minute-level, with no redeploy and no manual steps.
 - **local repos** (when there's no git remote to push to): a snapshot pushed to the host via `scripts/push-local-repo.sh` over rsync, refreshed manually — re-run the upload command after the code changes.
 
-The refresh mechanism and the measured "why an index is required" are in the "data plane" section of [`docs/agent/architecture.md`](docs/agent/architecture.md); local-repo upload and single-host bootstrap (`--local`) are in [`docs/runbook.md`](docs/runbook.md).
+The refresh mechanism and the measured "why an index is required" are in the "how code enters and refreshes" section of [`docs/agent/architecture.md`](docs/agent/architecture.md); local-repo upload and single-host bootstrap (`--local`) are in [`docs/runbook.md`](docs/runbook.md).
 
 ## Security design
 

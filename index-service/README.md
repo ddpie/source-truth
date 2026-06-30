@@ -52,4 +52,4 @@ CodeGraph 引擎是独立的原生二进制 `codegraph-server`，**不在本仓�
 
 单测见 `index-service/tests/`，经 `./scripts/test.sh`（离线套件）运行。
 
-数据面工作原理见 [`docs/agent/architecture.md`](../docs/agent/architecture.md)。
+代码如何进入与索引如何刷新，见 [`docs/agent/architecture.md`](../docs/agent/architecture.md)。

@@ -45,14 +45,14 @@ structure）描述系统*是什么*；本文描述*一次提问如何在系统�
       · 结构化日志 + hashUserId 脱敏（src/log.ts，用户/会话标识不落明文，MVP 仅防滥用）
 ```
 
-## 数据面：代码如何进入 index-service、索引如何更新
+## 代码如何进入 index-service、索引如何更新
 
 每个仓库的代码落到 index-service 本地，常驻 codegraph 的 file-watcher 增量重建内存图。来源分两种：
 **git 仓**（默认）`git clone` 到本地、定时 `git pull` 保持最新主分支；**本地仓**（`source:"local"`，
 推不到 git 远端时）由运维经 `scripts/push-local-repo.sh` 用 rsync 直推一份快照、手动刷新。下文先讲 git
 仓的自动刷新链路，本地仓的手动链路见末尾「刷新方式（本地仓，手动）」。
 
-![数据面管线：activate_project 用只读 git 凭证 clone 各仓到本地，index-build@ 每仓建图，index-bridge-<projectId> 每项目常驻只读，index-refresh timer 定时 git pull + watcher 增量重建内存图，会话 microVM 经 HTTP 远程读代码](../assets/data-plane.svg)
+![代码进入与索引刷新的流程：activate_project 用只读 git 凭证 clone 各仓到本地，index-build@ 每仓建图，index-bridge-<projectId> 每项目常驻只读，index-refresh timer 定时 git pull + watcher 增量重建内存图，会话 microVM 经 HTTP 远程读代码](../assets/data-plane.svg)
 
 **唯一一份代码、本地副本**：仓库只在 index-service 的**本地磁盘** `/data/repo/<subdir>`，由
 `index-service/activate_project.sh` 用单一**只读 git 凭证**（Secrets Manager
@@ -155,7 +155,7 @@ source-truth 不同于「在容器外把 AI 当远程 MCP 客户端」的常见�
 3. **独立 CodeGraph 索引服务**——常驻服务，由唯一进程独占写 graph.db、stdio→streamable-HTTP 接口，对会话容器
    暴露只读**定位 + 读文件**查询；每个项目一个 bridge 进程 `index-bridge-<projectId>`（各占独立端口
    8080/8081/…，仅服务该项目的仓库，靠重复 `--workspace` 限定范围），其 file-watcher 对定时 git pull 的
-   变更做增量重建（详见「数据面」）。
+   变更做增量重建（详见上文「代码如何进入 index-service、索引如何更新」）。
 4. **代码仓只在 index-service 本地**——它在本地磁盘持唯一一份代码副本，由 `activate_project.sh` 用只读 git
    凭证 `git clone` 写入、systemd timer 定时 `git pull` 刷新，既供 codegraph 索引、又经 HTTP 接口的文件工具
    服务给会话容器；会话 microVM 不挂任何文件系统（无共享挂载）。
