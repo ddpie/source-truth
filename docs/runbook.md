@@ -43,8 +43,9 @@
    模型推理档由部署按 `--region` 自动解析，无需手填——部署调 `bedrock list-inference-profiles` 查该区域实际提供的档、
    自动挑最优（地域档 `us.`/`eu.`/`jp.`/`au.` 优先，没有就用 `global.`；如默认模型在东京解析为 `jp.…`、在新加坡保留 `global.…`）。
    仅当查不到匹配档时 preflight 会 WARN 并列出该区域可用的档。
-4. **目标代码仓**：要被问答的游戏代码仓，**只支持 git 地址**（index-service clone 到本地、定时 `git pull` 保持新鲜）：
-   `https://github.com/org/repo.git`、`https://gitlab.com/org/repo.git`、`git@host:org/repo.git`，可选指定分支 / 标签 / 提交。私有仓需要本机有 `git` 与一份只读访问凭证。
+4. **目标代码仓**：要被问答的游戏代码仓，两种来源（同项目可混用）：
+   - **git 源**（推荐）：`https://github.com/org/repo.git`、`https://gitlab.com/org/repo.git`、`git@host:org/repo.git`，可选分支 / 标签 / 提交。index-service clone 到本地、定时 `git pull` 保持「最新主分支」分钟级新鲜。私有仓需本机有 `git` 与一份只读访问凭证。
+   - **local 源**（无 git 远端时）：代码只在本地、无法 push 到 git 远端的场景。声明 `source:"local"`，部署后用 `scripts/push-local-repo.sh` 经 rsync 直推到索引主机（见[第九节末「本地仓上传」](#本地仓上传local-源)）。**它是手动推送的快照，不自动刷新**——代码变了要重跑上传命令。
 5. **飞书应用**（见第三节，可与部署并行准备）。
 
 ---
@@ -119,6 +120,31 @@ codegraph 索引吃内存、随仓库增大而增长，按仓库规模选机型�
 - 直接按第五节验证即可（各项目网关已在 index 主机上以 `bot-gateway@<项目>.service` 长驻）。
 
 > 无人值守 / CI：`./scripts/install.sh --yes` 接受所有预填值（首次仍需已存在的飞书密钥）。
+
+### 单台 EC2 自举部署（`--local`）
+
+默认流程是「在一台部署机上跑脚本、由脚本新建索引主机 EC2」。如果你希望**只开一台 EC2、在它上面跑脚本把整套装起来**（省掉单独的部署机），用 `--local` 模式——这台 EC2 既是部署机也是常驻索引主机。
+
+前提（与默认流程的差异）：
+
+- **必须是 ARM64（aarch64）EC2**、Ubuntu 24.04：镜像在本机构建、codegraph-server 也是 ARM64。x86 机器会被入口处的架构检查直接拦下。
+- **IMDSv2 required、hop-limit 1**；这台机器不要与其它用途共用（它的实例角色权限较大）。
+- 部署用户需**免密 sudo**（或以 root 跑）——`bootstrap.sh` 与本地仓 `reindex` 都用 `sudo`。
+- **实例角色须预挂权限**（`--local` 不在部署里授 IAM，必须开机时就带上，否则 gateway 每次回答 403、术语表静默为空、日志不上传）。一台 EC2 只有一个实例角色，它同时承担「部署期建资源」和「运行期」两类权限：
+  - 部署期：建/查 VPC·子网·SG、ECR push、`bedrock-agentcore` 建/调 runtime、Secrets Manager 读写 `source-truth/*`、SSM、EC2 `describe`/`modify-instance-attribute`。
+  - 运行期：`s3:GetObject`/`ListBucket` on `source-truth-repo-<account>-*`；`secretsmanager:GetSecretValue` on `source-truth/*`；`bedrock:InvokeModel(WithResponseStream)` on `anthropic.*` + inference-profile；`bedrock-agentcore:InvokeAgentRuntime` on `source_truth_agent*`；CloudWatch logs on `/source-truth/*`。
+  - 运行期这套与默认流程里 `provision_iam.sh` 给 `source-truth-index-role` 配的 5 条 inline policy（s3-artifacts / secrets-read / cloudwatch-logs / agentcore-invoke / bedrock-invoke）等价——可直接抄给本机角色，再加上部署期建资源的权限。部署只做 fail-loud 预检（有角色 + 能读 S3 artifact），其余缺失由首次提问 / e2e 探针暴露。
+
+跑法（在那台 EC2 上）：
+
+```bash
+# 克隆仓库后
+./scripts/install.sh                      # 交互式（同样可选 git / local 仓）
+# 或直接：
+./scripts/deploy-all.sh --region <r> --local
+```
+
+说明：`--local` 下不新建 VPC/NAT（复用本机所在 VPC/子网），新建一个专用安全组（仅 8080-8099 自引用）附加到本机、并作为 runtime 的 SG；`bootstrap` 在本机同步跑完再继续。**AgentCore Runtime 仍是 AWS 托管的**（不占这台机器、免运维）——「单台 EC2」指你只需开/运维这一台。**总耗时**：bootstrap（apt/pip/npm/网关构建）与镜像构建在同机串行，比双机路径慢，首次约 10–20 分钟（视机型）。
 
 ---
 
@@ -352,6 +378,31 @@ refreshIntervalSec?}`，**git-only**）。顶层 `refreshIntervalSec` 是全局�
 - **密钥**：飞书 `App Secret`、`App ID` 等绝不入仓库（gitleaks pre-commit 守）；走环境变量 / Secrets Manager / SSM。
 - **越界能力后置**：多分支、设计文档读取、写回、第二引擎等均为 post-MVP，详见
   [`../README.md`](../README.md) 的「MVP 边界」与设计权威依据 [`design/`](design/)。
+
+### 本地仓上传（local 源）
+
+无法 push 到 git 远端的代码，用 local 源：在 `projects.json` 里声明 `{subdir, source:"local"}`（`install.sh` 添加项目时选「本地仓」即可），部署后在**你自己的机器**上推送：
+
+```bash
+./scripts/push-local-repo.sh --host <ec2-ssh-host> [--identity <key>] <subdir> <本地仓路径>
+```
+
+流程：先把代码 rsync 到索引主机的暂存目录 `/data/repo/<subdir>.incoming`（此时 bot 仍在线），再由主机脚本**停该项目 bot → 切换代码 → 重建图 → 起 bot**。要点：
+
+- **重建期间该项目的 bot 会离线几分钟**（与首次建图同量级），**同项目的其他仓（含 git 仓）也会一并离线**（共用一个 bot 进程）。重建失败会**自动回滚到上一版**，bot 不会服务到坏代码。
+- 「刷新」= 重跑这条命令（local 仓不自动更新，**不是**最新主干）。代码变了就再推一次。
+- `--delete` 镜像语义（主机副本与本地一致）、自动排除 `.git`、软链不会被同步进仓（`--safe-links --no-links`）、**不支持自由 `--ssh-opts`**（防注入，只认 `--identity <key>`）。
+- **首次推送前**：用带外渠道核对 EC2 的 SSH host key 指纹（脚本首连用 `accept-new`，会信任首次见到的指纹），或预置 `known_hosts`，以防中间人截获源码。
+- 术语表（中文词→符号）MVP 不随推送刷新；问答靠 codegraph 直接定位即可。需刷新 local 仓术语表时，对该项目重新执行 `install.sh` 的「重新部署」。
+
+**最小 sudoers**——只授权这一个脚本（建/授暂存目录、切换、重建都在脚本内做，参数已被脚本内 `^[a-z0-9][a-z0-9-]*$` 校验、unit 名固定）：
+
+```
+# /etc/sudoers.d/source-truth-push  (仅推送用户)
+<pushuser> ALL=(root) NOPASSWD: /bin/bash /opt/idx/app/reindex_local_repo.sh *
+```
+
+`/bin/bash <固定脚本路径> *` 把可执行体钉死在这一个脚本上、`*` 只放开它的参数；**不可**写成裸 `/bin/bash *`（等于任意命令），也不要把 `systemctl`/`mkdir`/`chown` 等通用命令放进 NOPASSWD（通配会被 `-R`/`..` 滥用提权）。
 
 ---
 

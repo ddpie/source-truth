@@ -36,8 +36,9 @@ index-service/          Standalone CodeGraph index service + MCP-over-HTTP bridg
   codegraph_client.py   codegraph-server client wrapper (dormant: tests only, single-writer tripwire-guarded, never on the resident serving path)
   perf.py               Structured latency logging
   bootstrap.sh          EC2 user-data: install deps + codegraph binary + claude(cc) CLI for glossary build + gateway build + systemd templates (base host, no project bound)
-  activate_project.sh   Per-project attach (invoked over SSM): write manifest / git clone each repo / build graph / start index-bridge-<projectId> + refresh timers
+  activate_project.sh   Per-project attach (invoked over SSM): write manifest / git clone (git repos) or verify pushed (local repos) / build graph / start index-bridge-<projectId> + refresh timers (git repos only) / old-manifest orphan cleanup
   git_fetch.sh          Single-repo git clone/pull (credential + ref + fail-loud GIT_FETCH_FAILED; shared by bootstrap and the refresh timer)
+  reindex_local_repo.sh Local-repo swap+rebuild orchestration (stop bridge→swap→build→start, atomic rollback on failure; --prepare makes the staging dir)
   tests/                pytest (invoked by scripts/test.sh)
 infra/                  Infrastructure as code (MVP starts with agentcore toolkit / boto3, CDK-ified incrementally)
   README.md             IaC split: CDK owns the stable layer / deploy-all.sh provisions AgentCore Runtime via boto3
@@ -60,8 +61,9 @@ scripts/                Operational lifecycle
   test.sh               Single tiered test entrypoint (offline default / --full)
   check-versions.sh     Pinned-version drift guard (base digest / requirements pin / Node / claude-code npm)
   get.sh                One-line bootstrap (fetch via curl/gh and run): clones the repo into ./source-truth then hands off to install.sh; re-runnable (git pull if it already exists)
-  install.sh            Interactive one-click install (check deps→Feishu creds→config→confirm→deploy-all; pre-fills on re-run)
-  deploy-all.sh         Canonical one-click deploy (artifacts→IAM→network→index-service→image→Runtime→gateway; idempotent)
+  install.sh            Interactive one-click install (check deps→Feishu creds→config→confirm→deploy-all; pre-fills on re-run; add-project picks git or local repo source)
+  push-local-repo.sh    Operator-side: rsync a local repo to the index host's staging dir and trigger a rebuild (local-repo refresh entry; no git)
+  deploy-all.sh         Canonical one-click deploy (artifacts→IAM→network→index-service→image→Runtime→gateway; idempotent; --local single-host bootstrap)
   lib/provision_*.sh + deploy_runtime.py + wait_index_health.sh  deploy-all.sh phase implementations
   lib/deploy_project.sh + wait_base_host.sh + delete_runtime.py  Multi-project orchestration: build base / await base ready / delete per-project runtime
   lib/resolve_model.sh  Query Bedrock list-inference-profiles to pick a profile that actually exists in the region (no prefix guessing; geo profiles vary by region)

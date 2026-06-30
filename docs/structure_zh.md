@@ -36,8 +36,9 @@ index-service/          常驻 CodeGraph 索引服务 + MCP-over-HTTP 接口
   codegraph_client.py   codegraph-server 客户端封装（休眠：仅测试用，独占写入 tripwire 守护，绝不进常驻服务路径）
   perf.py               结构化耗时日志
   bootstrap.sh          EC2 user-data：装依赖 + codegraph 二进制 + 术语表构建用的 claude(cc) CLI + 网关构建 + systemd 模板（base host，不挂项目）
-  activate_project.sh   按项目挂载（SSM 调用）：写清单 / git clone 各仓 / 建图 / 起 index-bridge-<项目> + 刷新 timer
+  activate_project.sh   按项目挂载（SSM 调用）：写清单 / git 仓 clone、local 仓校验已推 / 建图 / 起 index-bridge-<项目> + 刷新 timer（仅 git 仓）/ old-manifest 孤儿清理
   git_fetch.sh          单仓 git clone/pull（凭证 + ref + 失败 GIT_FETCH_FAILED 告警；bootstrap 与刷新 timer 共用）
+  reindex_local_repo.sh local 仓切换+重建编排（停 bridge→切换→建图→起 bridge，失败原子回滚；--prepare 建暂存目录）
   tests/                pytest（由 scripts/test.sh 调用）
 infra/                  基础设施即代码（MVP 先 agentcore toolkit / boto3，渐进 CDK 化）
   README.md             IaC 分工：CDK 管稳定层 / deploy-all.sh 用 boto3 配 AgentCore Runtime
@@ -60,8 +61,9 @@ scripts/                运维生命周期
   test.sh               单一分层测试入口（离线默认 / --full）
   check-versions.sh     版本固定防漂移守卫（base digest / requirements pin / Node / claude-code npm）
   get.sh                一行引导脚本（curl/gh 取来跑）：把仓库 clone 到 ./source-truth 再交给 install.sh；可重跑（已存在则 git pull）
-  install.sh            交互式一键安装（查依赖→飞书凭证→配置→确认→调 deploy-all；重跑预填）
-  deploy-all.sh         一键部署 canonical（artifacts→IAM→network→index-service→镜像→Runtime→gateway；幂等）
+  install.sh            交互式一键安装（查依赖→飞书凭证→配置→确认→调 deploy-all；重跑预填；添加项目可选 git 仓或 local 仓）
+  push-local-repo.sh    客户机侧：rsync 直推本地仓到索引主机暂存目录并触发重建（local 仓刷新入口；不经 git）
+  deploy-all.sh         一键部署 canonical（artifacts→IAM→network→index-service→镜像→Runtime→gateway；幂等；--local 单台自举）
   lib/provision_*.sh + deploy_runtime.py + wait_index_health.sh  deploy-all.sh 的各阶段实现
   lib/deploy_project.sh + wait_base_host.sh + delete_runtime.py  多项目编排：建底座 / 等底座就绪 / 删 per-project runtime
   lib/resolve_model.sh  查 Bedrock list-inference-profiles 选区域真实存在的推理配置（不猜前缀；geo profile 因区域而异）
