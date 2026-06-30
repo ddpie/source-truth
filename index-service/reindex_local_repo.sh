@@ -72,12 +72,17 @@ date -u +%Y-%m-%dT%H:%M:%SZ > "$WS/.snapshot-time" 2>/dev/null || true
 
 echo "reindex: building graph at live path (bridge stopped, flock free)"
 systemctl reset-failed "index-build@${SUBDIR}.service" 2>/dev/null || true
-systemctl start "index-build@${SUBDIR}.service"
+# `|| true`: a failed oneshot returns non-zero from `start`; without it `set -e` would exit here
+# (still rolling back via the EXIT trap, but skipping the Result check + journalctl diagnostic).
+# Let the explicit Result gate below own the decision so the failure log actually prints.
+systemctl start "index-build@${SUBDIR}.service" || true
 R="$(systemctl show "index-build@${SUBDIR}.service" --value -p Result 2>/dev/null || echo unknown)"
 [ "$R" = "success" ] || { echo "REINDEX_FAILED: index-build@${SUBDIR} Result=$R — rolling back"; journalctl -u "index-build@${SUBDIR}.service" --no-pager | tail -30 || true; exit 1; }
 
-# Success: start bridge, drop the old copy, disarm rollback.
-systemctl start "$BRIDGE"
+# Build succeeded → the new code+graph IS the final state. Disarm rollback BEFORE starting the
+# bridge: a transient `systemctl start "$BRIDGE"` hiccup must NOT trip the EXIT trap and throw away
+# the freshly-built new graph to restore the old one. Restart issues are recoverable on their own.
 trap - EXIT
 rm -rf "$OLD"
+systemctl start "$BRIDGE" || { echo "REINDEX_WARN: graph rebuilt OK but bridge restart returned non-zero — check: systemctl status $BRIDGE"; }
 echo "REINDEX_DONE subdir=${SUBDIR} project=${PID}"

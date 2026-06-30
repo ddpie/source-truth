@@ -47,8 +47,10 @@ structure）描述系统*是什么*；本文描述*一次提问如何在系统�
 
 ## 数据面：代码如何进入 index-service、索引如何更新
 
-代码以 **git 为唯一来源**：每个仓库 `git clone` 到 index-service 本地，定时 `git pull` 保持新鲜，常驻
-codegraph 的 file-watcher 增量重建内存图。
+每个仓库的代码落到 index-service 本地，常驻 codegraph 的 file-watcher 增量重建内存图。来源分两种：
+**git 仓**（默认）`git clone` 到本地、定时 `git pull` 保持最新主分支；**本地仓**（`source:"local"`，
+推不到 git 远端时）由运维经 `scripts/push-local-repo.sh` 用 rsync 直推一份快照、手动刷新。下文先讲 git
+仓的自动刷新链路，本地仓的手动链路见末尾「刷新方式（本地仓，手动）」。
 
 ![数据面管线：activate_project 用只读 git 凭证 clone 各仓到本地，index-build@ 每仓建图，index-bridge-<projectId> 每项目常驻只读，index-refresh timer 定时 git pull + watcher 增量重建内存图，会话 microVM 经 HTTP 远程读代码](../assets/data-plane.svg)
 
@@ -60,8 +62,14 @@ codegraph 的 file-watcher 增量重建内存图。
 
 **刷新方式（git，自动）**：每个仓库一个 systemd timer `index-refresh-<subdir>.timer`（默认 300 秒，
 可经 `projects.json` 的 `refreshIntervalSec` 配置）周期性 `git pull`；常驻 codegraph（`--mcp --graph-only`）
-进程的 file-watcher 在数秒内对内存图做增量重建——无须重启、无第二个写者、无服务抖动。代码新鲜度因此是
-分钟级，无需重新部署。
+进程的 file-watcher 在数秒内对内存图做增量重建——无须重启、无第二个写者、无服务抖动。主分支的改动因此
+分钟级内即反映到问答，无需重新部署。
+
+**刷新方式（本地仓，手动）**：`source:"local"` 的仓没有 git 远端，因此**不挂 refresh timer**。运维在自己
+机器上跑 `scripts/push-local-repo.sh` 把代码 rsync 到主机暂存目录，再由 `index-service/reindex_local_repo.sh`
+**停该项目 bridge → 切换代码 → 重建该仓 graph → 起 bridge**（失败原子回滚到上一版）。它是手动推送的**快照**，
+更新时机由运维决定、可能滞后于真实主分支——重新推送后才更新。单写者不变量靠「重建期间 bridge 已停、flock
+空闲」保证。
 
 **术语表（构建期引擎，离线）**：同一刷新链上，index 主机用本地 `claude` (cc) CLI 扫自有代码副本，产出
 「中文词→英文符号」术语表（per-repo slice `/data/glossary/<项目>/<subdir>.jsonl`），供上面取证通道作旁路
@@ -77,7 +85,7 @@ git diff 增量。完整工作原理、grounding 把关与价值边界见 `docs/
 | 内容 | 项目代码（主分支）+ CodeGraph 索引 | Agent 产生的临时文件 |
 | 载体 | index-service 本地副本，经 HTTP 接口服务给所有会话 | AgentCore Session Storage `/mnt/workspace` |
 | 可见性 | 所有会话 | 仅本 microVM |
-| 生命周期 | 持久（定时 git pull 刷新，分钟级新鲜） | 每会话独占（约 14 天空闲过期） |
+| 生命周期 | 持久（git 仓定时 pull 刷新，分钟级反映；本地仓手动推送） | 每会话独占（约 14 天空闲过期） |
 
 ![会话隔离：多个按会话独立的 microVM（各自独占 /mnt/workspace 临时文件）共享同一个只读 index-service 代码副本](../assets/session-isolation.svg)
 

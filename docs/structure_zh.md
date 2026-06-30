@@ -67,7 +67,7 @@ scripts/                运维生命周期
   lib/provision_*.sh + deploy_runtime.py + wait_index_health.sh  deploy-all.sh 的各阶段实现
   lib/deploy_project.sh + wait_base_host.sh + delete_runtime.py  多项目编排：建底座 / 等底座就绪 / 删 per-project runtime
   lib/resolve_model.sh  查 Bedrock list-inference-profiles 选区域真实存在的推理配置（不猜前缀；geo profile 因区域而异）
-  lib/resolve_repo.sh   多来源 repo 解析（本地 / git / s3）；现仅单测引用，主链路已改 git-only
+  lib/resolve_repo.sh   多来源 repo 解析（本地 / git / s3）；现仅单测引用，主链路按 source 走 git clone 或 local 推送
   lib/activate_gateway.sh  经 SSM 写 /etc/bot-gateway-<项目>.env + 启动 bot-gateway@<项目>（gateway 与索引同主机）
   lib/stop_gateway.sh   经 SSM 停止旧实例 gateway（蓝绿换实例 break-before-make，避免双网关抢占飞书长连接）
   deploy.sh             已废弃兼容垫片（转发到 deploy-all.sh）

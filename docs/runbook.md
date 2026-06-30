@@ -44,7 +44,7 @@
    自动挑最优（地域档 `us.`/`eu.`/`jp.`/`au.` 优先，没有就用 `global.`；如默认模型在东京解析为 `jp.…`、在新加坡保留 `global.…`）。
    仅当查不到匹配档时 preflight 会 WARN 并列出该区域可用的档。
 4. **目标代码仓**：要被问答的游戏代码仓，两种来源（同项目可混用）：
-   - **git 仓**（推荐，配置里写 `source: "git"`，默认值）：`https://github.com/org/repo.git`、`https://gitlab.com/org/repo.git`、`git@host:org/repo.git`，可选分支 / 标签 / 提交。index-service clone 到本地、定时 `git pull` 保持「最新主分支」分钟级新鲜。私有仓需本机有 `git` 与一份只读访问凭证。
+   - **git 仓**（推荐，配置里写 `source: "git"`，默认值）：`https://github.com/org/repo.git`、`https://gitlab.com/org/repo.git`、`git@host:org/repo.git`，可选分支 / 标签 / 提交。index-service clone 到本地、定时 `git pull`，主分支改动分钟级内反映到问答。私有仓需一份只读访问凭证（写入 Secrets Manager，由索引主机取用）。
    - **本地仓**（配置里写 `source: "local"`，适用于代码只在本地、无法推送到任何 git 远端的情况）：部署后用 `scripts/push-local-repo.sh` 经 rsync 直推到索引主机（见[第九节末「本地仓上传」](#本地仓上传)）。它是手动推送的快照，不会自动刷新——代码变更后需重跑一次上传命令。
 5. **飞书应用**（见第三节，可与部署并行准备）。
 
@@ -326,8 +326,8 @@ aws ssm start-session --region <r> --target <INDEX_SERVICE_INSTANCE>
 项目间逻辑隔离（各自进程 + 端口 + 服务端 scope，A 档），同团队互信项目共机即可；互不信任的项目仍应分机器。
 
 **唯一声明处**是 `.local/projects.json`（不入库）。每个项目一条：`port`（该项目 bridge 端口，全机唯一）、
-`feishuSecretId`（由「添加项目」自动生成，**勿手填**）、`repos`（每个仓 `{subdir, git, ref?,
-refreshIntervalSec?}`，**git-only**）。顶层 `refreshIntervalSec` 是全局默认刷新间隔。
+`feishuSecretId`（由「添加项目」自动生成，**勿手填**）、`repos`（每个仓 `{subdir, source?, git, ref?,
+refreshIntervalSec?}`，`source` 默认 `git`、本地仓写 `local`）。顶层 `refreshIntervalSec` 是全局默认刷新间隔。
 
 全部操作走 `./scripts/install.sh` 的箭头菜单：
 
@@ -409,7 +409,7 @@ refreshIntervalSec?}`，**git-only**）。顶层 `refreshIntervalSec` 是全局�
 ## 附录 A：手动 deploy-all.sh
 
 `install.sh` 是 `deploy-all.sh` 的交互式前端。代码仓库**不再走命令行**——它们在 `.local/projects.json` 里声明
-（git-only），由 deploy-all 起底座后遍历部署。直接调用：
+（每仓 git 或本地两种来源），由 deploy-all 起底座后遍历部署。直接调用：
 
 ```bash
 # 起底座 + 部署 .local/projects.json 里的每个项目。幂等、可重复、新账号可跑。
