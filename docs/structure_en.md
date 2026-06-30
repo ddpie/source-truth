@@ -90,7 +90,7 @@ docs/
     architecture.md     Mental model: how one question crosses the system
     glossary.md         Term bridge: Chinese question → English code symbol (build/query time, grounding, value boundary)
     invariants.md       source → generated map + change-X-must-change-Y couplings (9 invariants)
-    playbooks.md        ordered change recipes (7 recipes)
+    playbooks.md        change playbooks (7 change scenarios)
     *-spike.md          Research notes (cardkit streaming / indexing perf / storage selection / perf comparison / template)
   assets/               Doc diagrams (hand-authored SVG: architecture / data-plane / session-isolation / glossary / glossary-build / glossary-confidence / security-defense / sequence; plus demo-qa.gif, a real Q&A screen recording)
 .local/                 (gitignored) account-specific deploy state: deploy-config, projects.json (project routing)

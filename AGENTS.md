@@ -123,7 +123,7 @@ pre-push 跑离线套件。结构自检 `./scripts/check-invariants.sh` 由 lint
 - 术语表（把中文提问映射到英文代码符号）：`docs/agent/glossary.md`
 - CardKit 流式答案卡调研（`bot-gateway` 核心能力）：`docs/agent/cardkit-streaming-spike.md`
 - 不变量与权威依据映射：`docs/agent/invariants.md`
-- 变更配方：`docs/agent/playbooks.md`
+- 变更手册：`docs/agent/playbooks.md`
 - 部署 / 连飞书 / 运维 / 排错：`docs/runbook.md`
 - 目录结构：`docs/structure_zh.md` · `docs/structure_en.md`
 - 需求 / 架构设计权威依据：`docs/design/requirements_zh.md` · `docs/design/architecture-overview_zh.md`

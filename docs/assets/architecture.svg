@@ -59,7 +59,7 @@
   <line x1="555" y1="238" x2="555" y2="270" stroke="#5b6573" stroke-width="1.2" marker-end="url(#arrow)"/>
 
   <!-- read-only evidence label between lanes and shared host -->
-  <text x="380" y="358" text-anchor="middle" font-size="10" fill="#3b7d4f" font-weight="600">只读不改：会话不挂文件系统，全程用 HTTP 读代码取证</text>
+  <text x="380" y="358" text-anchor="middle" font-size="10" fill="#3b7d4f" font-weight="600">只读不改：会话不挂文件系统，全程用 HTTP 读代码核对</text>
   <!-- edges: sessions -> shared index host -->
   <line x1="205" y1="316" x2="205" y2="372" stroke="#3b7d4f" stroke-width="1.3" marker-end="url(#arrowgreen)"/>
   <line x1="555" y1="316" x2="555" y2="372" stroke="#3b7d4f" stroke-width="1.3" marker-end="url(#arrowgreen)"/>

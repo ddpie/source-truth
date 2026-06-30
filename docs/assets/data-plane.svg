@@ -35,7 +35,7 @@
 
   <!-- stage 5 (consumer, accent green) -->
   <rect x="120" y="400" width="520" height="52" rx="8" fill="#eef6ef" stroke="#9cc6a8" stroke-width="1.2"/>
-  <text x="140" y="424" font-size="13.5" font-weight="600" fill="#1f2733">⑤ 会话 microVM 经 HTTP 端点远程取证</text>
+  <text x="140" y="424" font-size="13.5" font-weight="600" fill="#1f2733">⑤ 会话 microVM 经 HTTP 端点远程读代码</text>
   <text x="140" y="443" font-size="10" fill="#3b7d4f">symbol_search / get_callers / analyze_impact / search_files / read_file / glob_files / read_table</text>
 
   <!-- connectors centered at x=380 -->

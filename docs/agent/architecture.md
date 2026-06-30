@@ -50,7 +50,7 @@ structure）描述系统*是什么*；本文描述*一次提问如何在系统�
 代码以 **git 为唯一来源**：每个仓库 `git clone` 到 index-service 本地，定时 `git pull` 保持新鲜，常驻
 codegraph 的 file-watcher 增量重建内存图。
 
-![数据面管线：activate_project 用只读 git 凭证 clone 各仓到本地，index-build@ 每仓建图，index-bridge-<projectId> 每项目常驻只读，index-refresh timer 定时 git pull + watcher 增量重建内存图，会话 microVM 经 HTTP 远程取证](../assets/data-plane.svg)
+![数据面管线：activate_project 用只读 git 凭证 clone 各仓到本地，index-build@ 每仓建图，index-bridge-<projectId> 每项目常驻只读，index-refresh timer 定时 git pull + watcher 增量重建内存图，会话 microVM 经 HTTP 远程读代码](../assets/data-plane.svg)
 
 **唯一一份代码、本地副本**：仓库只在 index-service 的**本地磁盘** `/data/repo/<subdir>`，由
 `index-service/activate_project.sh` 用单一**只读 git 凭证**（Secrets Manager

@@ -27,7 +27,7 @@
     <text x="424" y="91">AgentCore</text><text x="424" y="105" font-size="9" font-weight="400" fill="#7a8493">microVM Agent</text>
 
     <rect x="494" y="72" width="108" height="40" rx="7" fill="#eef6ef" stroke="#9cc6a8"/>
-    <text x="548" y="91">index-service</text><text x="548" y="105" font-size="9" font-weight="400" fill="#7a8493">取证 · 读文件</text>
+    <text x="548" y="91">index-service</text><text x="548" y="105" font-size="9" font-weight="400" fill="#7a8493">查证 · 读文件</text>
 
     <rect x="646" y="72" width="92" height="40" rx="7" fill="#fdf5e9" stroke="#e4c896"/>
     <text x="692" y="91">CardKit</text><text x="692" y="105" font-size="9" font-weight="400" fill="#7a8493">流式卡片</text>
@@ -108,5 +108,5 @@
     <text x="374" y="558" text-anchor="middle" fill="#2f7a47">成品卡片 · 可继续追问（经飞书推送）</text>
   </g>
 
-  <text x="380" y="600" text-anchor="middle" font-size="10.5" fill="#7a8493">全程只读、读代码取证 · 会话 microVM 不挂任何文件系统 · 工作原理见 docs/agent/architecture.md</text>
+  <text x="380" y="600" text-anchor="middle" font-size="10.5" fill="#7a8493">全程只读、读代码核对 · 会话 microVM 不挂任何文件系统 · 工作原理见 docs/agent/architecture.md</text>
 </svg>

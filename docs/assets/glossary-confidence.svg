@@ -73,7 +73,7 @@
 
   <!-- verify -->
   <rect x="408" y="350" width="248" height="54" rx="10" fill="#e3f3e8" stroke="#9cc6a8" stroke-width="1.5"/>
-  <text x="532" y="374" text-anchor="middle" font-size="12" font-weight="700" fill="#2f7a47">获得符号 → 实际查看代码取证</text>
+  <text x="532" y="374" text-anchor="middle" font-size="12" font-weight="700" fill="#2f7a47">获得符号 → 实际查看代码核对</text>
   <text x="532" y="391" text-anchor="middle" font-size="9.5" fill="#5b6573">术语表只是线索，从不替代看代码</text>
 
   <!-- both layers feed verify via a bus on the far right, clear of every box -->

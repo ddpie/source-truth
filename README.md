@@ -10,7 +10,7 @@
 
 ## 系统全貌
 
-飞书客户端 → 网关 → 会话隔离的 microVM → 共享只读代码副本，中间是三个常驻组件。每个会话在各自的 microVM 里互不可见，又都向同一份只读副本取证。同一项目下的多仓库联合检索已支持，一台机器可承载多个项目（各自独立进程与端口）。
+飞书客户端 → 网关 → 会话隔离的 microVM → 共享只读代码副本，中间是三个常驻组件。每个会话在各自的 microVM 里互不可见，又都向同一份只读副本读代码核对。同一项目下的多仓库联合检索已支持，一台机器可承载多个项目（各自独立进程与端口）。
 
 ![source-truth 架构图：飞书客户端 → bot-gateway → 多个各自隔离的会话 microVM → 共享只读的 index-service 代码副本，答案流式回填](docs/assets/architecture.svg)
 
@@ -55,7 +55,7 @@
 
 | 目录 | 职责 | 语言 |
 |------|------|------|
-| [`agent-container/`](agent-container/) | 会话 microVM 内运行的 Claude Code Agent：推理 + 编排 + 取证 | Python |
+| [`agent-container/`](agent-container/) | 会话 microVM 内运行的 Claude Code Agent：推理 + 编排 + 查代码 | Python |
 | [`bot-gateway/`](bot-gateway/) | 飞书 Bot 长连接事件网关 + CardKit 流式卡片渲染 | TypeScript |
 | [`index-service/`](index-service/) | 常驻 CodeGraph 索引服务 + MCP-over-HTTP 接口（定位 + 读文件） | Python |
 | [`infra/`](infra/) | IaC：AgentCore Runtime / 索引服务 / 网关 | boto3 + CDK（渐进） |
@@ -141,7 +141,7 @@ git 为唯一来源：每个仓库 clone 到 index-service 本地，systemd time
 | **架构** | 术语表怎么来的：构建 / 产物 / 可信依据（面向人） | [`docs/glossary.md`](docs/glossary.md) |
 | **规范** | AI 协作约定 | [`AGENTS.md`](AGENTS.md) |
 | **规范** | 不变量与权威依据映射（含安全不变量逐条） | [`docs/agent/invariants.md`](docs/agent/invariants.md) |
-| **规范** | 变更配方（改 X 怎么做 / 怎么验 / 怎么上线） | [`docs/agent/playbooks.md`](docs/agent/playbooks.md) |
+| **规范** | 变更手册（改 X 怎么做 / 怎么验 / 怎么上线） | [`docs/agent/playbooks.md`](docs/agent/playbooks.md) |
 | **设计权威依据** | 需求 / 架构设计原件（导入，仅中文） | [`docs/design/`](docs/design/README.md) |
 | **调研** | CardKit 流式卡片 | [`docs/agent/cardkit-streaming-spike.md`](docs/agent/cardkit-streaming-spike.md) |
 | **调研** | 索引性能基准 | [`docs/agent/indexing-performance-spike.md`](docs/agent/indexing-performance-spike.md) |
