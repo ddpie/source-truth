@@ -65,11 +65,11 @@
     <line x1="300" y1="256" x2="422" y2="256" stroke="#5b6573" stroke-width="1.3" marker-end="url(#arrow)"/>
     <text x="361" y="250" text-anchor="middle">④ SigV4 invoke</text>
 
-    <!-- 5 glossary -->
-    <line x1="424" y1="286" x2="546" y2="286" stroke="#5b6573" stroke-width="1.3" marker-end="url(#arrow)"/>
-    <text x="485" y="280" text-anchor="middle">⑤ 查术语表</text>
-    <line x1="548" y1="310" x2="426" y2="310" stroke="#3b7d4f" stroke-width="1.3" marker-end="url(#arrowback)"/>
-    <text x="487" y="304" text-anchor="middle" fill="#2f7a47">中文 → 英文符号</text>
+    <!-- 5 glossary (auxiliary, not a mandatory serial gate — dashed) -->
+    <line x1="424" y1="286" x2="546" y2="286" stroke="#9aa3b0" stroke-width="1.3" stroke-dasharray="4,3" marker-end="url(#arrow)"/>
+    <text x="485" y="280" text-anchor="middle" fill="#7a8493">⑤ 查术语表（辅助·命中中文词才查）</text>
+    <line x1="548" y1="310" x2="426" y2="310" stroke="#9aa3b0" stroke-width="1.3" stroke-dasharray="4,3" marker-end="url(#arrowback)"/>
+    <text x="487" y="304" text-anchor="middle" fill="#7a8493">中文 → 英文符号（与自有检索词并用）</text>
 
     <!-- 6 locate -->
     <line x1="424" y1="340" x2="546" y2="340" stroke="#5b6573" stroke-width="1.3" marker-end="url(#arrow)"/>

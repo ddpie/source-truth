@@ -6,7 +6,7 @@
   </defs>
 
   <rect x="0" y="0" width="760" height="478" fill="#ffffff"/>
-  <text x="380" y="34" text-anchor="middle" font-size="18" font-weight="700" fill="#1f2733">安全设计：纵深防御</text>
+  <text x="380" y="34" text-anchor="middle" font-size="18" font-weight="700" fill="#1f2733">安全设计</text>
   <text x="380" y="56" text-anchor="middle" font-size="12.5" fill="#7a8493">不只靠提示词约束 · 代码本身强制执行 · 三道相互独立的防线</text>
 
   <!-- ===== 防越权 ===== -->
