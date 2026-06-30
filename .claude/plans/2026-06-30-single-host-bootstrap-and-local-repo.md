@@ -686,8 +686,11 @@ RSYNC=(rsync -az --delete --safe-links --no-links
   -e "$(printf '%q ' "${SSH[@]}")" "$SRC" "${HOST}:${STAGE}/")
 # The host script (run via a SINGLE sudo-authorized entry) creates+owns the stage dir, then later
 # does the swap+rebuild. push never runs raw `sudo mkdir/chown` — so sudoers authorizes ONE script.
-REMOTE_PREPARE="sudo ${REINDEX} --prepare ${SUBDIR}"
-REMOTE_REINDEX="sudo ${REINDEX} ${SUBDIR}"
+# Invoke via `bash <script>` (not direct exec) so it works even if the +x bit isn't set yet — the
+# chmod happens at activate time, but a first push could precede a re-activate. sudoers must then
+# authorize `/bin/bash /opt/idx/app/reindex_local_repo.sh *` (see runbook).
+REMOTE_PREPARE="sudo bash ${REINDEX} --prepare ${SUBDIR}"
+REMOTE_REINDEX="sudo bash ${REINDEX} ${SUBDIR}"
 
 if [ "$DRY" = true ]; then
   say info "[dry-run] prepare stage: ${SSH[*]} ${HOST} ${REMOTE_PREPARE}"
@@ -861,6 +864,11 @@ if [[ "$LOCAL_MODE" == "true" ]]; then
   # Skip the call entirely if the dedicated SG is already attached (idempotent re-run).
   mapfile -t CUR_SGS < <(Q describe-instances --instance-ids "$SELF_ID" \
     --query 'Reservations[0].Instances[0].SecurityGroups[].GroupId' --output text | tr '\t' '\n' | grep -E '^sg-')
+  # GUARD: a running instance ALWAYS has ≥1 SG. An empty read means an IAM/throttle/race glitch —
+  # NOT "no SGs". Bail rather than call modify-instance-attribute with just "$SG", which (REPLACE
+  # semantics) would STRIP the operator's existing SGs (lose their 22/business ingress) — the
+  # opposite of the additive intent.
+  [[ ${#CUR_SGS[@]} -gt 0 ]] || { log err "local mode: read 0 current SGs for $SELF_ID (transient API glitch?) — refusing to modify groups; re-run"; exit 1; }
   _has_sg=false; for g in "${CUR_SGS[@]}"; do [[ "$g" == "$SG" ]] && _has_sg=true; done
   if [[ "$_has_sg" != true ]]; then
     Q modify-instance-attribute --instance-id "$SELF_ID" --groups "${CUR_SGS[@]}" "$SG"
@@ -1045,10 +1053,11 @@ git commit -m "feat(deploy): --local mode (ARM64 guard, reuse VPC/subnet, in-pla
 
 ```
 # /etc/sudoers.d/source-truth-push  (deploy/push user only)
-<pushuser> ALL=(root) NOPASSWD: /opt/idx/app/reindex_local_repo.sh
+# push 脚本以 `sudo bash /opt/idx/app/reindex_local_repo.sh ...` 调用（不依赖 +x 位）。
+<pushuser> ALL=(root) NOPASSWD: /bin/bash /opt/idx/app/reindex_local_repo.sh *
 ```
 
-明确禁止把 `systemctl`、`mkdir`、`chown` 等通用命令放进 NOPASSWD（通配会被 `-R`/`..` 滥用提权）。
+明确禁止把 `systemctl`、`mkdir`、`chown` 等通用命令放进 NOPASSWD（通配会被 `-R`/`..` 滥用提权）。注意：`/bin/bash <固定脚本路径> *` 把可执行体钉死在这一个脚本上，`*` 只放开它的参数（参数已被脚本内 `^[a-z0-9][a-z0-9-]*$` 校验）；**不可**写成裸 `/bin/bash *`（那等于任意命令）。
 
 - [ ] **Step 2: invariants 改原文 + 加条目**
 
