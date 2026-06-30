@@ -82,9 +82,11 @@ docs/
   structure_en.md       英文对照
   runbook.md            部署 / 连飞书 / 运维 / 排错（中性名，不参与双语配对）
   glossary.md           术语表怎么来的：构建流程 / 产物结构 / 可信依据 / 成本运维（面向人，中性名）
-  deploy/               --local 模式的 IAM 预建资源（运维一次性跑）
-    source-truth-iam.yaml       CloudFormation：建两个角色（实例角色 + AgentCore 运行角色）+ 实例 profile
-    create-iam.sh               包装脚本：选 AWS profile / region 后调上面的 CFN（运维交互选，不手敲参数）
+  deploy/               --local（单台 EC2）模式的引导脚本与 IAM 模板（运维一次性跑）
+    README.md                   本目录索引：三文件各自用途 + 入口
+    launch-host.sh              入口（运维本地跑）：选 profile → 建 IAM → 选 VPC/子网/密钥/机型 → 起 ARM64 EC2 挂好实例角色
+    create-iam.sh               选 profile / region 后调下面的 CFN 建实例角色（一般由 launch-host.sh 内部调用）
+    source-truth-iam.yaml       CloudFormation：建一个 EC2 实例角色（部署期 + 运行期权限合一）+ 实例 profile
   design/               设计权威依据（仅中文，暂不翻译）
     README.md                   目录说明 + 与架构 / 不变量文档的关系
     requirements_zh.md          需求与方案评审纪要（导入）

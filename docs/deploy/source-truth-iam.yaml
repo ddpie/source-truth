@@ -118,7 +118,7 @@ Resources:
               - Effect: Allow                # 解析区域可用的推理档（resolve_model.sh）
                 Action: [ bedrock:ListInferenceProfiles, bedrock:GetInferenceProfile ]
                 Resource: "*"
-        - PolicyName: deploy-secrets        # 建/写飞书 + git + 日志盐 密钥
+        - PolicyName: deploy-secrets        # 建/写/删飞书 + git + 日志盐 密钥（删项目时会删飞书密钥）
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
@@ -127,7 +127,7 @@ Resources:
                   - secretsmanager:CreateSecret
                   - secretsmanager:PutSecretValue
                   - secretsmanager:DescribeSecret
-                  - secretsmanager:TagResource
+                  - secretsmanager:DeleteSecret
                 Resource: !Sub "arn:aws:secretsmanager:*:${AWS::AccountId}:secret:source-truth/*"
         - PolicyName: deploy-iam            # provision_iam.sh 建 runtime 角色 + 给本角色补运行期策略 + PassRole
           PolicyDocument:
@@ -159,7 +159,7 @@ Resources:
             Version: "2012-10-17"
             Statement:
               - Effect: Allow                # 上传部署产物到 S3 + 建产物桶
-                Action: [ s3:PutObject, s3:CreateBucket, s3:PutBucketPolicy, s3:GetBucketLocation, s3:ListAllMyBuckets ]
+                Action: [ s3:PutObject, s3:CreateBucket, s3:GetBucketLocation, s3:ListAllMyBuckets ]
                 Resource: "*"
               - Effect: Allow                # 经 SSM 在本机跑 activate/gateway 命令
                 Action: [ ssm:SendCommand, ssm:GetCommandInvocation ]

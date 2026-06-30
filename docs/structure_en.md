@@ -82,9 +82,11 @@ docs/
   structure_en.md       This file (English counterpart)
   runbook.md            Deploy / connect-Feishu / ops / troubleshooting (neutral name, exempt from bilingual pairing)
   glossary.md           How the term bridge is built: build flow / output structure / trust basis / cost & ops (human-facing, neutral name)
-  deploy/               IAM resources to pre-create for --local mode (operator runs once)
-    source-truth-iam.yaml       CloudFormation: two roles (instance role + AgentCore runtime role) + instance profile
-    create-iam.sh               Wrapper: pick AWS profile / region, then invoke the CFN above (interactive, no flags to type)
+  deploy/               Bootstrap scripts + IAM template for --local (single-EC2) mode (operator runs once)
+    README.md                   Index of this dir: what each file does + the entry point
+    launch-host.sh              Entry (run on your machine): pick profile → create IAM → pick VPC/subnet/key/type → launch the ARM64 EC2 with the instance role attached
+    create-iam.sh               Pick profile / region, then deploy the CFN below to create the instance role (usually called by launch-host.sh)
+    source-truth-iam.yaml       CloudFormation: one EC2 instance role (deploy-time + runtime perms) + instance profile
   design/               Design source of truth (Chinese only, not yet translated)
     README.md                   Directory notes + relation to architecture / invariants docs
     requirements_zh.md          Requirements & solution review notes (imported)

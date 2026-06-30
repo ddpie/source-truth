@@ -3,7 +3,7 @@
 #
 # It chains the steps that come before `deploy-all.sh --local`:
 #   1. pick an AWS profile (SELECT from your configured profiles — no credentials typed)
-#   2. create the two IAM roles via create-iam.sh (CloudFormation)
+#   2. create the EC2 instance role + profile via create-iam.sh (CloudFormation)
 #   3. pick VPC / subnet / key pair / instance type interactively
 #   4. launch ONE ARM64 Ubuntu 24.04 EC2 with the instance profile attached + IMDSv2 required
 #   5. print the SSH + deploy commands to run next
@@ -58,6 +58,18 @@ echo "• profile=$PROFILE  account=$ACCOUNT  region=$REGION"
 echo "▶ ensuring IAM roles (create-iam.sh) ..."
 "$HERE/create-iam.sh" --profile "$PROFILE" --region "$REGION"
 
+# Only one host is meant to exist (it holds the deploy state); warn before launching a second.
+mapfile -t RUNNING < <(aws ec2 describe-instances \
+  --filters "Name=tag:Name,Values=source-truth-host" "Name=instance-state-name,Values=running,pending" \
+  --query 'Reservations[].Instances[].[InstanceId,PublicIpAddress]' --output text 2>/dev/null | grep -v '^$' || true)
+if [ "${#RUNNING[@]}" -gt 0 ]; then
+  echo "⚠ already running a source-truth-host:" >&2
+  printf '    %s\n' "${RUNNING[@]}" >&2
+  echo "  这台机器应只有一台（部署状态存在它的 .local/，升级是 SSH 回这台重跑，不是新起一台）。" >&2
+  read -rp "  仍要再起一台？/ launch ANOTHER one anyway? [y/N]: " more || true
+  [[ "${more:-}" =~ ^[Yy] ]] || { echo "已取消 / cancelled"; exit 0; }
+fi
+
 # --- 3. pick VPC / subnet / key pair / instance type --------------------------------------------
 mapfile -t VPCS < <(aws ec2 describe-vpcs --query 'Vpcs[].VpcId' --output text 2>/dev/null | tr '\t' '\n')
 [ "${#VPCS[@]}" -gt 0 ] || { echo "✗ no VPC in $REGION." >&2; exit 1; }
@@ -78,16 +90,31 @@ mapfile -t SGS < <(aws ec2 describe-security-groups --filters "Name=vpc-id,Value
 [ "${#SGS[@]}" -gt 0 ] || { echo "✗ no security group in $VPC." >&2; exit 1; }
 SG="$(pick_one "选择安全组（需放行你的 SSH 22 端口）/ pick a security group (must allow your SSH on 22):" "${SGS[@]}")"
 SG="${SG%% *}"
+# Soft-check the SG actually opens 22 (FromPort<=22<=ToPort, or all-traffic -1) — wrong SG = can't SSH in.
+HAS22="$(aws ec2 describe-security-groups --group-ids "$SG" \
+  --query "SecurityGroups[0].IpPermissions[?(IpProtocol=='-1') || (FromPort<=\`22\` && ToPort>=\`22\`)] | [0]" \
+  --output text 2>/dev/null || true)"
+if [ -z "$HAS22" ] || [ "$HAS22" = None ]; then
+  echo "⚠ 所选安全组 $SG 似乎没放行 22 端口入站——起好后可能 SSH 连不上。" >&2
+  read -rp "  仍用它？/ use it anyway? [y/N]: " sgok || true
+  [[ "${sgok:-}" =~ ^[Yy] ]] || { echo "请先在该安全组放行你的 IP 的 22 端口再重跑 / open 22 first, then re-run"; exit 1; }
+fi
 
 ITYPE="$(pick_one "选择机型（ARM/Graviton）/ pick an instance type (ARM):" \
   "t4g.large" "t4g.xlarge" "m7g.large" "m7g.xlarge" "m7g.2xlarge")"
 read -rp "根卷大小 GiB / root volume GiB [30]: " DISK || true; DISK="${DISK:-30}"
+[[ "$DISK" =~ ^[0-9]+$ ]] && (( DISK>=8 )) || { echo "✗ 根卷需为 >=8 的整数 GiB / root volume must be an integer GiB >= 8." >&2; exit 2; }
 
 # Latest Ubuntu 24.04 ARM64 AMI (Canonical owner id), same source as the default deploy path.
 AMI="$(aws ec2 describe-images --owners 099720109477 \
   --filters "Name=name,Values=ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-arm64-server-*" "Name=state,Values=available" \
   --query 'reverse(sort_by(Images,&CreationDate))[0].ImageId' --output text 2>/dev/null)"
-[ -n "$AMI" ] && [ "$AMI" != None ] || { echo "✗ no Ubuntu 24.04 arm64 AMI in $REGION (try the SSM parameter, see runbook)." >&2; exit 1; }
+if [ -z "$AMI" ] || [ "$AMI" = None ]; then
+  echo "✗ no Ubuntu 24.04 arm64 AMI found in $REGION via describe-images. Try the Canonical SSM parameter:" >&2
+  echo "    aws ssm get-parameter --region $REGION --name /aws/service/canonical/ubuntu/server/24.04/stable/current/arm64/hvm/ebs-gp3/ami-id --query Parameter.Value --output text" >&2
+  echo "  then pass it as --image-id to run-instances manually (see runbook)." >&2
+  exit 1
+fi
 
 # --- 4. confirm + launch ------------------------------------------------------------------------
 cat >&2 <<SUMMARY
