@@ -45,7 +45,7 @@
    仅当查不到匹配档时 preflight 会 WARN 并列出该区域可用的档。
 4. **目标代码仓**：要被问答的游戏代码仓，两种来源（同项目可混用）：
    - **git 仓**（推荐，配置里写 `source: "git"`，默认值）：`https://github.com/org/repo.git`、`https://gitlab.com/org/repo.git`、`git@host:org/repo.git`，可选分支 / 标签 / 提交。index-service clone 到本地、定时 `git pull`，主分支改动分钟级内反映到问答。私有仓需一份只读访问凭证（写入 Secrets Manager，由索引主机取用）。
-   - **本地仓**（配置里写 `source: "local"`，适用于代码只在本地、无法推送到任何 git 远端的情况）：部署后用 `scripts/push-local-repo.sh` 经 rsync 直推到索引主机（见[第九节末「本地仓上传」](#本地仓上传)）。它是手动推送的快照，不会自动刷新——代码变更后需重跑一次上传命令。
+   - **本地仓**（配置里写 `source: "local"`，用于代码只在本地、推不到任何 git 远端的情况）：部署后用 `scripts/push-local-repo.sh` 经 rsync 直推到索引主机（见[第九节末「本地仓上传」](#本地仓上传)）。推上去的是某一刻的快照，不会自动跟代码变化——改了代码就重跑一次上传命令。
 5. **飞书应用**（见第三节，可与部署并行准备）。
 
 ---
@@ -143,12 +143,12 @@ cd source-truth && ./scripts/install.sh        # 或 ./scripts/deploy-all.sh --r
 
 - **EC2 必须是 ARM64（aarch64）、Ubuntu 24.04**：镜像在本机构建、codegraph-server 也是 ARM64；脚本一开始就检查，x86 直接拦下。`launch-host.sh` 会设置 IMDSv2 required + hop-limit 1。
 - 部署用户需**免密 sudo**（或以 root 运行）——`bootstrap.sh` 与本地仓 `reindex` 都用 `sudo`。
-- **`--local` 部署用的是这台机器的实例角色**（不是你本地的 profile，那个 profile 进了 EC2 就不在了）。因此这台机器的角色既要建资源（VPC/EC2/ECR/AgentCore/Secrets）、又要运行期那几类，**是一个权限较大的角色**——这台机器应**专机专用、不与其它业务共用**。角色由 `launch-host.sh`（内部调 [`create-iam.sh`](deploy/create-iam.sh) + CloudFormation 模板 [`source-truth-iam.yaml`](deploy/source-truth-iam.yaml)）一次性建好。建角色那一步用你本地选定的 profile（要有建 IAM 的权限）。
+- **`--local` 部署调用 AWS 用的是这台机器的实例角色**，不是你本地的 profile（profile 只在你自己机器上，SSH 进 EC2 后就用不上了）。所以这个角色既要有建资源的权限（VPC/EC2/ECR/AgentCore/Secrets），也要有运行期的权限，**权限比较大**——这台机器应**专机专用，不跟其它业务混跑**。角色由 `launch-host.sh` 一次性建好（它内部调 [`create-iam.sh`](deploy/create-iam.sh) 跑 CloudFormation 模板 [`source-truth-iam.yaml`](deploy/source-truth-iam.yaml)）；建角色这一步用你本地选的 profile，该 profile 需有建 IAM 的权限。
 - 角色由 CloudFormation 管理（无状态、可重建）；EC2 独立长存（带着 `.local/` 状态），**不在任何 CloudFormation 栈里**——否则删栈会连部署状态一起删。
 
 `--local` 不新建 VPC/NAT，复用本机所在的 VPC 和子网；另建一个专用安全组附加到本机，runtime 也用它——该安全组只放行 8080-8099 端口、且只对组内成员（本机及其启动的 runtime）开放，外部访问不到 bridge。**AgentCore Runtime 仍由 AWS 托管**，不占用本机资源、也无需运维——「单台 EC2」指只需开通并维护这一台主机。首次部署约 10–20 分钟（视机型而定）：bootstrap 与镜像构建都在本机串行执行，比默认的双机方式略慢。
 
-**升级 source-truth（本地模式）**：默认（双机）模式靠 `--refresh-index` 蓝绿换一台新机升级底座；本地模式只有这一台主机，不走蓝绿，而是 SSH 回这台 EC2、`cd source-truth && git pull && ./scripts/deploy-all.sh --region <r> --local` 就地升级——`.local/` 状态还在，脚本据此增量更新：重新下发底座代码、重建并推送镜像、更新 runtime，各项目的网关与索引随之重启到新版本。升级有一段服务中断（与首次部署同量级，主要是镜像重建 + 索引重启），低峰期操作。
+**升级 source-truth（本地模式）**：默认（双机）模式靠 `--refresh-index` 起一台新机蓝绿切换来升级底座；本地模式只有这一台主机，不走蓝绿，而是 SSH 回这台 EC2 就地升级：`cd source-truth && git pull && ./scripts/deploy-all.sh --region <r> --local`。`.local/` 里的状态还在，脚本读它就知道该更新哪些：重新下发底座代码、重建并推送镜像、更新 runtime，各项目的网关与索引随之重启到新版本。升级期间会有一段服务中断（时长和首次部署差不多，主要花在镜像重建 + 索引重启），挑低峰期做。
 
 ## 三、接入飞书（connect 清单）
 
@@ -389,14 +389,14 @@ refreshIntervalSec?}`，`source` 默认 `git`、本地仓写 `local`）。顶层
 ./scripts/push-local-repo.sh --host <ec2-ssh-host> [--identity <key>] <subdir> <本地仓路径>
 ```
 
-本地仓在主机上有两个目录：`/data/repo/<subdir>` 是索引服务**正在用的代码**，`/data/repo/<subdir>.incoming` 是推送时的**暂存目录**。流程分两步：先把代码经网络 rsync 到暂存目录（这一步较慢、可能中断，但不碰正在用的代码，网关照常服务）；传完后主机脚本再在本地把暂存目录同步到 `/data/repo/<subdir>`，常驻索引进程的 file-watcher 几秒内增量更新——**网关不停、不全量重建**，与 git 仓 `git pull` 走同一条路径。要点：
+本地仓在主机上有两个目录：`/data/repo/<subdir>` 是索引服务**正在用的代码**，`/data/repo/<subdir>.incoming` 是推送时的**暂存目录**。流程分两步：先把代码经网络 rsync 到暂存目录（这一步较慢、可能中断，但碰不到正在用的代码，网关照常服务）；传完后，主机上的脚本在本机内部把暂存目录同步到 `/data/repo/<subdir>`，常驻索引进程的 file-watcher 几秒内增量更新——**网关不停、不全量重建**，和 git 仓 `git pull` 走同一条路径。要点：
 
-- **常规推送不停服务**：同步用 `rsync --delay-updates`，变更文件先就位、最后统一切换，正在用的代码出现"新旧文件混合、提问可能读到不一致结果"的窗口被压到切换瞬间，watcher 随后即补齐（与 git 仓 `git pull` 行为一致）。**唯一例外是首次推送**：此时还没有索引图，需先停该项目网关、全量建一次图再启动，期间该项目（含同进程的其它仓）短暂离线。
+- **常规推送不停服务**：同步用 `rsync --delay-updates`——更新的文件先逐个传到位，最后一起切换。这样"新旧文件混在一起、提问可能读到不一致结果"的时间窗只剩切换那一下，watcher 随即补齐索引（和 git 仓 `git pull` 一样）。**只有首次推送是例外**：那时还没建过索引图，得先停掉该项目网关、全量建一次图再启动，这期间该项目（连同跑在同一进程里的其它仓）会短暂离线。
 - 「刷新」即重跑本命令（本地仓不会自动更新，**不反映**实时主分支）。代码变更后再推送一次即可。
 - 使用 `rsync --delete`，主机副本与本地保持一致（本地删除的文件，主机上同样删除）；自动排除 `.git`；符号链接不会被同步进仓（`--safe-links --no-links`）；不接受任意 `--ssh-opts`，仅认 `--identity <key>`（防止注入 `ProxyCommand` 等）。
 - **首次推送前**先核对 EC2 的 SSH host key 指纹：脚本首次连接用 `accept-new`，会信任第一次见到的指纹。建议通过其它渠道（如 AWS 控制台的实例 system log）单独核对一次，或预先写入 `known_hosts`，以防有人冒充主机窃取源码。
 - 术语表（中文词→代码符号）随推送增量刷新：脚本用本次同步出的变更文件清单，只重建这些文件的术语，后台进行、不阻塞推送（git 仓是按 `git diff` 算变更、本地仓改用 rsync 算变更，之后走同一套增量逻辑）。主机若未开通 Bedrock（构建引擎不可用），则跳过术语表、只更新索引，问答仍可经 codegraph 直接定位。
-- **推送中断的影响**：网络传输阶段（客户机 → 暂存目录）中断不碰正在用的代码，重跑即可。把暂存目录同步到 `/data/repo/<subdir>` 这一步用 `rsync --delay-updates`——变更文件先就位、最后统一切换，中断绝大多数落在切换前（正在用的代码不动），极小概率落在切换瞬间（留下部分更新）；两种情况暂存目录都还在，重跑推送即可让它重新对齐，不会不可恢复。
+- **推送中断了会怎样**：网络传输那一段（你的机器 → 暂存目录）中断，碰不到正在用的代码，重跑一次就好。把暂存目录同步到 `/data/repo/<subdir>` 这一段用 `rsync --delay-updates`：更新的文件先传到位、最后一起切换，所以中断绝大多数发生在切换之前（正在用的代码原封不动），只有极小概率正好赶在切换那一下（留下没切完的半成品）。无论哪种，暂存目录都还在，重跑一次推送就能对齐，不会留下无法恢复的损坏。
 
 **排查（推了却没生效 / 怀疑中断）：**
 - 推送本身成功的标志：push 命令退出码 0、主机上 reindex 打印 `REINDEX_DONE subdir=<sub> ...`（在 reindex 的 SSM/SSH 输出里）。
@@ -410,7 +410,7 @@ refreshIntervalSec?}`，`source` 默认 `git`、本地仓写 `local`）。顶层
 <pushuser> ALL=(root) NOPASSWD: /bin/bash /opt/idx/app/reindex_local_repo.sh *
 ```
 
-这里 `/bin/bash <固定脚本路径> *` 把可执行对象限定为这一个脚本，`*` 只放开其后的参数。**不要**写成裸 `/bin/bash *`（等于放行任意命令），也不要把 `systemctl`/`mkdir`/`chown` 这类通用命令加入 NOPASSWD——它们的通配可被 `-R`、`..` 等绕过，从而提权为 root。
+这里 `/bin/bash <固定脚本路径> *` 把能跑的只限定成这一个脚本，`*` 只放开它后面的参数。**不要**写成裸 `/bin/bash *`（那等于放行任意命令），也不要把 `systemctl`/`mkdir`/`chown` 这类通用命令加进 NOPASSWD——它们的通配能被 `-R`、`..` 之类绕过，从而提权到 root。
 
 ---
 

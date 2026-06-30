@@ -1,10 +1,10 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
   source-truth --local 模式的 EC2 实例角色（运维一次性预建）。
-  --local 把整套部署放在这一台 EC2 上跑，部署调用 AWS 用的就是这台机器的实例角色，因此该角色既要
-  「部署期建资源」的权限，也要「运行期」的权限——是一个权限较大的角色。**这台机器应专机专用、不与其它业务
-  共用**（IMDSv2 + hop-limit 1 已由 launch-host.sh 设置以降低被借用风险）。
-  默认（双机）模式不需要这个模板：那条路由 scripts/lib/provision_iam.sh 用运维的 admin 凭证自动建角色。
+  --local 把整套部署放在这一台 EC2 上跑，调用 AWS 用的就是这台机器的实例角色，所以它既要有建资源的
+  权限，也要有运行期的权限——权限比较大。**这台机器应专机专用，不跟其它业务混跑**（launch-host.sh 已开启
+  IMDSv2 + hop-limit 1，让别的进程更难盗用这个角色的临时凭证）。
+  默认（双机）模式用不到这个模板：那条路由 scripts/lib/provision_iam.sh 用运维的 admin 凭证自动建角色。
 
 Resources:
 
