@@ -102,10 +102,14 @@ DEFCIDR="${MYIP:+$MYIP/32}"
 read -rp "允许 SSH(22) 的来源 CIDR / source CIDR allowed to SSH [${DEFCIDR:-必填/required}]: " SSHCIDR || true
 SSHCIDR="${SSHCIDR:-$DEFCIDR}"
 [[ "$SSHCIDR" =~ ^[0-9.]+/[0-9]+$ ]] || { echo "✗ 需要一个 CIDR（如 1.2.3.4/32）/ need a CIDR like 1.2.3.4/32." >&2; exit 2; }
+# Match any existing rule that already covers 22 for this CIDR — exact :22 OR a range OR all-traffic
+# (-1, no FromPort). Skipping only the exact-FromPort==22 case would re-authorize over a broader
+# rule and hit Duplicate. Belt-and-suspenders: also tolerate the Duplicate error itself.
 if ! aws ec2 describe-security-groups --group-ids "$SG" \
-     --query "SecurityGroups[0].IpPermissions[?FromPort==\`22\`].IpRanges[].CidrIp" --output text 2>/dev/null \
-     | tr '\t' '\n' | grep -qx "$SSHCIDR"; then
-  aws ec2 authorize-security-group-ingress --group-id "$SG" --protocol tcp --port 22 --cidr "$SSHCIDR" >/dev/null
+     --query "SecurityGroups[0].IpPermissions[?(IpProtocol=='-1') || (FromPort<=\`22\` && ToPort>=\`22\`)].IpRanges[].CidrIp" \
+     --output text 2>/dev/null | tr '\t' '\n' | grep -qx "$SSHCIDR"; then
+  auth_err="$(aws ec2 authorize-security-group-ingress --group-id "$SG" --protocol tcp --port 22 --cidr "$SSHCIDR" 2>&1 >/dev/null)" \
+    || { [[ "$auth_err" == *Duplicate* ]] || { echo "✗ failed to open SSH 22 for $SSHCIDR on $SG: $auth_err" >&2; exit 1; }; }
 fi
 
 mapfile -t KEYS < <(aws ec2 describe-key-pairs --query 'KeyPairs[].KeyName' --output text 2>/dev/null | tr '\t' '\n')

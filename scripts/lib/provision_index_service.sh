@@ -117,6 +117,14 @@ if [[ "$LOCAL_MODE" == "true" ]]; then
   [[ -n "$SELF_IP" && "$SELF_VPC" != None && -n "$SELF_SUBNET" ]] \
     || { log err "local mode: could not read IP/VPC/subnet for $SELF_ID"; exit 1; }
 
+  # VPC DNS attributes MUST be on, or index.source-truth.internal (the Route53 private zone the
+  # runtime resolves for CODEGRAPH_MCP_URL) returns NXDOMAIN → empty codegraph on EVERY question.
+  # launch-host's provision_network.sh sets these, but deploy-all --local does NOT re-run that phase
+  # (it derives VPC/subnet from this instance), so a host placed in a VPC by other means could have
+  # them off. Assert it here, in the phase that owns local mode — idempotent, closes the silent hole.
+  Q modify-vpc-attribute --vpc-id "$SELF_VPC" --enable-dns-support >/dev/null
+  Q modify-vpc-attribute --vpc-id "$SELF_VPC" --enable-dns-hostnames >/dev/null
+
   # DEDICATED SG (NOT the operator's primary SG): self-referencing 8080-8099 only, so only SG
   # members (this host + the runtimes we launch into it) reach the bridge — the bridge has no MCP
   # authn. Attach it ADDITIVELY to this instance (keep the operator's existing SGs).
@@ -173,14 +181,18 @@ ENV
   # public IP, so it can't reach Bedrock via an IGW — only via NAT. This host itself may sit in a
   # public subnet (it has a public IP for SSH). Take the source-truth-private subnet that
   # launch-host's network step (provision_network.sh) created in this VPC.
-  PRIV_SUBNET="$(Q describe-subnets --filters "Name=tag:Name,Values=source-truth-private" \
-    "Name=vpc-id,Values=$SELF_VPC" --query 'Subnets[0].SubnetId' --output text 2>/dev/null)"
-  if [[ "$PRIV_SUBNET" == None || -z "$PRIV_SUBNET" ]]; then
+  mapfile -t PRIV_SUBNETS < <(Q describe-subnets --filters "Name=tag:Name,Values=source-truth-private" \
+    "Name=vpc-id,Values=$SELF_VPC" --query 'Subnets[].SubnetId' --output text 2>/dev/null | tr '\t' '\n' | grep -E '^subnet-')
+  if [[ ${#PRIV_SUBNETS[@]} -eq 0 ]]; then
     log err "local mode: no source-truth-private subnet in $SELF_VPC — the AgentCore runtime needs a"
     log err "  private subnet with NAT egress to reach Bedrock. Run scripts/launch-host.sh (it builds"
     log err "  the network), or create the source-truth network in this VPC, then re-run."
     exit 1
   fi
+  PRIV_SUBNET="${PRIV_SUBNETS[0]}"
+  # provision_network.sh creates exactly one. >1 means a hand-built VPC with duplicate tags — we
+  # can't tell which has the NAT route, so warn rather than silently pick one that may have none.
+  [[ ${#PRIV_SUBNETS[@]} -gt 1 ]] && log warn "local mode: ${#PRIV_SUBNETS[@]} subnets tagged source-truth-private in $SELF_VPC — using $PRIV_SUBNET; verify it routes 0.0.0.0/0 → NAT"
   update_env "$CONFIG" PRIVATE_SUBNET "$PRIV_SUBNET"
   update_env "$CONFIG" VPC_ID "$SELF_VPC"
   update_env "$CONFIG" INDEX_SERVICE_SG "$SG"
