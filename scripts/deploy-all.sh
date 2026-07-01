@@ -59,7 +59,7 @@ IDLE_TIMEOUT=""          # AgentCore session idle timeout (s); gateway session T
 MAX_LIFETIME=""          # AgentCore microVM hard max age (s) before forced recycle
 DEFAULT_INSTANCE_TYPE="t4g.large"
 DEFAULT_MAX_FILES="10000"
-DEFAULT_GLOSSARY_MAX_FILES="400"   # cc scans this many files per glossary build; 0 = no cap (whole repo)
+DEFAULT_GLOSSARY_MAX_FILES="0"   # 0 = no cap (scan whole repo — full 中文→符号 coverage); set >0 to cap cost
 DEFAULT_MODEL="global.anthropic.claude-opus-4-8"
 DEFAULT_ROOT_VOLUME_GB="30"
 # Idle timeout default = AWS's own default (900s/15min). The gateway derives its
@@ -96,7 +96,7 @@ Options:
                       project (init-env). Add projects later via ./scripts/install.sh.
   --instance-type <t> index host EC2 type, ARM (default: t4g.large)
   --max-files <n>     codegraph max files to index per repo (default: 10000)
-  --glossary-max-files <n>  term-glossary build file cap per repo (default: 400; 0 = no cap)
+  --glossary-max-files <n>  term-glossary build file cap per repo (default: 0 = no cap; set >0 to cap cost)
   --root-volume-gb <n> index host root EBS size in GiB (default: 30). Grow for large repos:
                       it holds every project's repo clones + graph.db.
   --model <id>        default Bedrock model id (a project may override it in projects.json)

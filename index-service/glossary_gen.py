@@ -60,13 +60,14 @@ _BINARY_EXTS = (
     # game/binary asset blobs
     ".dbc", ".m2", ".blp", ".mdx", ".unity3d", ".asset", ".fbx", ".prefab",
 )
-# Hard cap on files handed to cc in ONE build, so even a huge repo (or a giant commit) can't
-# launch an unbounded scan. Beyond this we log a dropped-count (never silently truncate).
-# Default 400 (a one-time full build; cost scales with file count — order of $10 at 400 files on
-# a large Chinese game codebase used for testing, more for larger caps).
-# Overridable per project: env GLOSSARY_MAX_FILES, or --max-files (flag wins). Raise it to trade
-# Bedrock cost for coverage on a big repo; 0/negative means "no cap" (whole candidate set).
-MAX_BUILD_FILES = int(os.environ.get("GLOSSARY_MAX_FILES", "400") or "400")
+# Optional cap on files handed to cc in ONE build. DEFAULT 0 = NO CAP (scan the whole candidate
+# set) — a 400-file cap truncated by path order dropped the Chinese-dense files (config tables,
+# deep business code), leaving a glossary with 0 Chinese terms; the whole point of the glossary is
+# 中文→英文符号, so full coverage is the right default. Cost scales with file count (order of $10
+# per few hundred files on a large Chinese game repo, more for a full scan).
+# Overridable per project: env GLOSSARY_MAX_FILES, or --max-files (flag wins). Set a positive value
+# to cap coverage and save Bedrock cost; 0/negative means "no cap" (whole candidate set).
+MAX_BUILD_FILES = int(os.environ.get("GLOSSARY_MAX_FILES", "0") or "0")
 
 
 def _is_term_file(path: str) -> bool:
