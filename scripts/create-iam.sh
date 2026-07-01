@@ -144,7 +144,8 @@ aws iam put-role-policy --role-name "$ROLE" --policy-name deploy-misc --policy-d
     {"Effect":"Allow","Action":["ssm:SendCommand","ssm:GetCommandInvocation"],"Resource":"*"},
     {"Effect":"Allow","Action":[
       "route53:ListHostedZonesByVPC","route53:ListHostedZones","route53:ChangeResourceRecordSets",
-      "route53:CreateHostedZone","route53:GetChange"],"Resource":"*"},
+      "route53:CreateHostedZone","route53:GetChange","route53:GetHostedZone",
+      "route53:AssociateVPCWithHostedZone","route53:DisassociateVPCFromHostedZone"],"Resource":"*"},
     {"Effect":"Allow","Action":"sts:GetCallerIdentity","Resource":"*"}]}' >/dev/null
 
 # --- instance profile (create if missing; attach role if not already on it) --------------------
