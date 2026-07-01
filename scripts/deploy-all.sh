@@ -153,6 +153,12 @@ if [[ "$LOCAL_MODE" == true && "$(uname -m)" != "aarch64" ]]; then
   exit 1
 fi
 
+# skip <phase> : true if --skip <phase> was given. Defined HERE (before preflight) because
+# preflight_docker consults `skip image` — it used to be defined further down, after the preflight
+# call, so `skip` was "command not found" at preflight time (harmless-looking but it silently made
+# preflight_docker's early-return misfire).
+skip() { [[ -n "${SKIP[$1]:-}" ]]; }
+
 # --- preflight ---
 say step "Phase 0: preflight"
 require_cmd aws || exit 1
@@ -374,7 +380,6 @@ det_tar() {  # caller sets cwd; args = files/dirs to include
     tar -cf - "$@"
   fi
 }
-skip() { [[ -n "${SKIP[$1]:-}" ]]; }
 
 # ============================================================
 # Phase 1: artifacts → S3
