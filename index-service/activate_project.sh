@@ -235,9 +235,20 @@ systemctl daemon-reload 2>/dev/null || true
 systemctl enable --now "index-bridge-${PROJECT_ID}.service"
 for SUBDIR in $SUBDIRS; do
   SRC="$(python3 "$RENDER_MANIFEST" --repo-field source "$SUBDIR" "$MANIFEST" 2>/dev/null || echo git)"
-  repo_uses_git "${SRC:-git}" || { echo "activate: skip refresh timer for local repo $SUBDIR"; continue; }
+  if ! repo_uses_git "${SRC:-git}"; then
+    # Local repo: no git timer. If this subdir was PREVIOUSLY a git source, a stale
+    # index-refresh-<sub>.timer would keep git-pulling a dir that no longer has a remote and fail
+    # forever — so tear it down here (idempotent; a no-op when there was never a timer). This makes
+    # a git→local source flip converge, not just a full repo removal (which reconcile above handles).
+    systemctl disable --now "index-refresh-${SUBDIR}.timer" 2>/dev/null || true
+    systemctl reset-failed "index-refresh-${SUBDIR}.timer" "index-refresh-${SUBDIR}.service" 2>/dev/null || true
+    rm -f "/etc/systemd/system/index-refresh-${SUBDIR}.service" "/etc/systemd/system/index-refresh-${SUBDIR}.timer" 2>/dev/null || true
+    echo "activate: local repo $SUBDIR — no refresh timer (removed any stale git timer)"
+    continue
+  fi
   systemctl enable --now "index-refresh-${SUBDIR}.timer"
 done
+systemctl daemon-reload 2>/dev/null || true
 
 # Initial FULL glossary build per repo. Detached + best-effort: a full cc scan can take minutes
 # (build-time engine on Bedrock), and the bridge already serves an EMPTY glossary until the slice

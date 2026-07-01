@@ -41,6 +41,14 @@ if [ "$MODE" = "prepare" ]; then
   exit 0
 fi
 
+# Serialize apply runs per subdir. Two concurrent reindexes would run `rsync -a --delete` against the
+# SAME live dir and delete each other's half-transferred files. Hold a non-blocking per-subdir lock
+# for the rest of the script (fd 9 stays open until we exit, releasing it); a second concurrent push
+# fails fast with a clear message rather than corrupting the live tree.
+LOCKFILE="$LOCAL_REPO_ROOT/.$SUBDIR.reindex.lock"
+exec 9>"$LOCKFILE"
+flock -n 9 || { echo "REINDEX_FAILED: another reindex for '$SUBDIR' is in progress (lock $LOCKFILE) — re-run after it finishes"; exit 1; }
+
 [ -d "$STAGE" ] || { echo "REINDEX_FAILED: no staged code at $STAGE (run push-local-repo.sh first)"; exit 1; }
 [ -n "$(ls -A "$STAGE" 2>/dev/null)" ] || { echo "REINDEX_FAILED: staged dir $STAGE is empty"; exit 1; }
 

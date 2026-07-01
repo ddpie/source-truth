@@ -29,6 +29,8 @@ grep -q 'mode=incremental' "$S"; check "has incremental (watcher) path" $?
 # First-build path: stop bridge, build, start bridge.
 grep -q 'mode=initial-build' "$S"; check "has first-build path" $?
 grep -q 'systemctl stop "\$BRIDGE"' "$S"; check "first build stops the bridge (single-writer)" $?
+# Concurrent apply on the same subdir must be serialized (rsync --delete would fight otherwise).
+grep -q 'flock -n 9' "$S"; check "serializes concurrent reindex via a per-subdir flock" $?
 
 # In-place apply must protect the live graph dirs from rsync --delete.
 grep -q "filter=.P .codegraph" "$S" && grep -q "filter=.P .home" "$S"; check "apply protects .codegraph/.home from --delete" $?
