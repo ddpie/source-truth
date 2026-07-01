@@ -23,6 +23,20 @@ Q() { aws ec2 "$@" --region "$REGION"; }
 QS() { aws s3api "$@" --region "$REGION"; }
 log() { say "$@" >&2; }
 
+LOCAL_MODE="${ST_LOCAL_MODE:-false}"
+
+# IMDSv2 helpers (token-first). Used ONLY in local mode to learn THIS instance's id; VPC/subnet/SG
+# are then read via describe-instances (authoritative, no fragile mac-path scraping).
+imds_token() {
+  curl -fsS -X PUT "http://169.254.169.254/latest/api/token" \
+    -H "X-aws-ec2-metadata-token-ttl-seconds: 60" 2>/dev/null || echo ""
+}
+imds_field() {
+  local tok; tok="$(imds_token)"
+  curl -fsS -H "X-aws-ec2-metadata-token: $tok" \
+    "http://169.254.169.254/latest/meta-data/$1" 2>/dev/null || echo ""
+}
+
 # A signature of the BASE-HOST artifacts an instance bootstraps from: the ETags of the
 # index-service code tarball + the bot-gateway tarball in S3. Repos are NO LONGER part of
 # this — they arrive via git (activate_project.sh git-clones + a refresh timer git-pulls),
@@ -93,6 +107,106 @@ reconcile_index_sg_ingress() { # <sg>
 #     deploy is never a SILENT no-op (the operator is told their changes aren't
 #     live and how to apply them).
 CURRENT_SIG="$(artifact_signature)"
+
+if [[ "$LOCAL_MODE" == "true" ]]; then
+  log step "local mode: this host IS the index host — provisioning in place"
+  SELF_ID="$(imds_field instance-id)"
+  [[ -n "$SELF_ID" ]] || { log err "local mode: IMDS unavailable (need an EC2 with IMDSv2 reachable)"; exit 1; }
+  read -r SELF_IP SELF_VPC SELF_SUBNET < <(Q describe-instances --instance-ids "$SELF_ID" \
+    --query 'Reservations[0].Instances[0].[PrivateIpAddress,VpcId,SubnetId]' --output text)
+  [[ -n "$SELF_IP" && "$SELF_VPC" != None && -n "$SELF_SUBNET" ]] \
+    || { log err "local mode: could not read IP/VPC/subnet for $SELF_ID"; exit 1; }
+
+  # VPC DNS attributes MUST be on, or index.source-truth.internal (the Route53 private zone the
+  # runtime resolves for CODEGRAPH_MCP_URL) returns NXDOMAIN → empty codegraph on EVERY question.
+  # launch-host's provision_network.sh sets these, but deploy-all --local does NOT re-run that phase
+  # (it derives VPC/subnet from this instance), so a host placed in a VPC by other means could have
+  # them off. Assert it here, in the phase that owns local mode — idempotent, closes the silent hole.
+  Q modify-vpc-attribute --vpc-id "$SELF_VPC" --enable-dns-support >/dev/null
+  Q modify-vpc-attribute --vpc-id "$SELF_VPC" --enable-dns-hostnames >/dev/null
+
+  # DEDICATED SG (NOT the operator's primary SG): self-referencing 8080-8099 only, so only SG
+  # members (this host + the runtimes we launch into it) reach the bridge — the bridge has no MCP
+  # authn. Attach it ADDITIVELY to this instance (keep the operator's existing SGs).
+  SG="$(Q describe-security-groups --filters "Name=group-name,Values=source-truth-index-svc" "Name=vpc-id,Values=$SELF_VPC" --query 'SecurityGroups[0].GroupId' --output text 2>/dev/null)"
+  if [[ "$SG" == "None" || -z "$SG" ]]; then
+    SG="$(Q create-security-group --group-name source-truth-index-svc --description "index-service codegraph bridge" --vpc-id "$SELF_VPC" --query GroupId --output text)"
+  fi
+  reconcile_index_sg_ingress "$SG"
+  # Collect the instance's current SGs into an ARRAY and filter "None"/empty, so --groups is never
+  # malformed. modify-instance-attribute --groups is REPLACE-semantics → pass existing + new together
+  # to ADD without dropping any. Skip entirely if the dedicated SG is already attached (idempotent).
+  mapfile -t CUR_SGS < <(Q describe-instances --instance-ids "$SELF_ID" \
+    --query 'Reservations[0].Instances[0].SecurityGroups[].GroupId' --output text | tr '\t' '\n' | grep -E '^sg-')
+  # GUARD: a running instance ALWAYS has ≥1 SG. An empty read means an IAM/throttle/race glitch —
+  # bail rather than call modify-instance-attribute with just "$SG" (which would STRIP the operator's
+  # existing SGs — the opposite of the additive intent).
+  [[ ${#CUR_SGS[@]} -gt 0 ]] || { log err "local mode: read 0 current SGs for $SELF_ID (transient API glitch?) — refusing to modify groups; re-run"; exit 1; }
+  _has_sg=false; for g in "${CUR_SGS[@]}"; do [[ "$g" == "$SG" ]] && _has_sg=true; done
+  if [[ "$_has_sg" != true ]]; then
+    Q modify-instance-attribute --instance-id "$SELF_ID" --groups "${CUR_SGS[@]}" "$SG"
+  fi
+
+  # INSTANCE-ROLE PRECHECK (A2 — else gateway 403s every answer, glossary silently empty, no logs).
+  # We do NOT grant IAM here (that needs the deploy identity to hold iam:PutRolePolicy on the
+  # operator's role); the runbook lists the policies the role must carry. Just fail loud if the box
+  # has no role or can't read the artifact bucket — before bootstrap dies opaquely on the S3 pull.
+  SELF_ROLE="$(Q describe-instances --instance-ids "$SELF_ID" --query 'Reservations[0].Instances[0].IamInstanceProfile.Arn' --output text 2>/dev/null || echo None)"
+  if [[ -z "$SELF_ROLE" || "$SELF_ROLE" == None ]]; then
+    log err "local mode: this EC2 has NO IAM instance profile — it cannot read S3 artifacts, invoke"
+    log err "  Bedrock, or invoke the AgentCore runtime. Attach the role from the runbook spec and re-run."
+    exit 1
+  fi
+  if ! sudo aws s3 ls "s3://${BUCKET}/" --region "$REGION" >/dev/null 2>&1; then
+    log err "local mode: this instance's role cannot read s3://${BUCKET} — check the instance role"
+    log err "  created via scripts/create-iam.sh (see runbook), then re-run."
+    exit 1
+  fi
+  log info "local mode: instance role present + S3 artifact read OK ($SELF_ROLE)"
+
+  sudo tee /etc/index-service.env >/dev/null <<ENV
+BUCKET='$BUCKET'
+REGION='$REGION'
+MAX_FILES='$MAX_FILES'
+MODEL='$MODEL'
+GLOSSARY_MAX_FILES='$GLOSSARY_MAX_FILES'
+ENV
+  # Synchronous bootstrap, but bounded: a hung apt/pip must not wedge the deploy forever.
+  log info "local mode: running bootstrap.sh in place (bounded 1800s) ..."
+  # --foreground: GNU timeout normally puts the command in a NEW process group (to kill the whole
+  # tree on expiry) — but a background process group that touches the controlling tty gets
+  # SIGTTIN/SIGTTOU and is STOPPED by the kernel. With bootstrap now streaming to the operator's
+  # terminal (tee), apt's post-install steps (needrestart) hit exactly that and hung forever in
+  # do_signal_stop. --foreground keeps the command in OUR (foreground) process group so tty access
+  # is legal; </dev/null belts-and-suspenders any stray stdin read.
+  timeout --foreground 1800 sudo -E bash "$ROOT/index-service/bootstrap.sh" </dev/null >&2 \
+    || { log err "local-mode bootstrap.sh failed/timed out — see /var/log/index-svc-bootstrap.log"; exit 1; }
+
+  # PRIVATE_SUBNET feeds the AgentCore runtime ENI (deploy_project.sh → deploy_runtime.py). It must
+  # be a PRIVATE subnet with NAT egress, NOT this host's own subnet: a VPC-mode runtime ENI gets no
+  # public IP, so it can't reach Bedrock via an IGW — only via NAT. This host itself may sit in a
+  # public subnet (it has a public IP for SSH). Take the source-truth-private subnet that
+  # launch-host's network step (provision_network.sh) created in this VPC.
+  mapfile -t PRIV_SUBNETS < <(Q describe-subnets --filters "Name=tag:Name,Values=source-truth-private" \
+    "Name=vpc-id,Values=$SELF_VPC" --query 'Subnets[].SubnetId' --output text 2>/dev/null | tr '\t' '\n' | grep -E '^subnet-')
+  if [[ ${#PRIV_SUBNETS[@]} -eq 0 ]]; then
+    log err "local mode: no source-truth-private subnet in $SELF_VPC — the AgentCore runtime needs a"
+    log err "  private subnet with NAT egress to reach Bedrock. Run scripts/launch-host.sh (it builds"
+    log err "  the network), or create the source-truth network in this VPC, then re-run."
+    exit 1
+  fi
+  PRIV_SUBNET="${PRIV_SUBNETS[0]}"
+  # provision_network.sh creates exactly one. >1 means a hand-built VPC with duplicate tags — we
+  # can't tell which has the NAT route, so warn rather than silently pick one that may have none.
+  [[ ${#PRIV_SUBNETS[@]} -gt 1 ]] && log warn "local mode: ${#PRIV_SUBNETS[@]} subnets tagged source-truth-private in $SELF_VPC — using $PRIV_SUBNET; verify it routes 0.0.0.0/0 → NAT"
+  update_env "$CONFIG" PRIVATE_SUBNET "$PRIV_SUBNET"
+  update_env "$CONFIG" VPC_ID "$SELF_VPC"
+  update_env "$CONFIG" INDEX_SERVICE_SG "$SG"
+  update_env "$CONFIG" INDEX_SERVICE_INSTANCE "$SELF_ID"
+  log info "local mode: index host ready at $SELF_IP (instance $SELF_ID, dedicated sg $SG)"
+  echo "$SELF_IP"; exit 0
+fi
+
 # RECONCILE a stale blue-green leftover — CAREFULLY. INDEX_OLD_INSTANCE is the prior
 # instance recorded during a --refresh-index, normally terminated LAST by deploy-all
 # after the new one is healthy + DNS cut over. If that refresh FAILED the health gate,
@@ -107,7 +221,13 @@ if [[ -n "${INDEX_OLD_INSTANCE:-}" ]]; then
   st="$(Q describe-instances --instance-ids "$INDEX_OLD_INSTANCE" --query 'Reservations[0].Instances[0].State.Name' --output text 2>/dev/null || echo "")"
   old_ip="$(Q describe-instances --instance-ids "$INDEX_OLD_INSTANCE" --query 'Reservations[0].Instances[0].PrivateIpAddress' --output text 2>/dev/null || echo "")"
   dns_ip="$(aws route53 list-resource-record-sets --hosted-zone-id "${INDEX_DNS_ZONE_ID:-}" --query "ResourceRecordSets[?Name=='${INDEX_DNS_NAME:-none}.'].ResourceRecords[0].Value | [0]" --output text 2>/dev/null || echo "")"
-  if [[ ( "$st" == "running" || "$st" == "pending" || "$st" == "stopping" ) && -n "$old_ip" && "$old_ip" != "$dns_ip" ]]; then
+  [[ "$dns_ip" == "None" ]] && dns_ip=""
+  # FAIL-CLOSED on an EMPTY dns_ip: a Route53 query that errored (throttle / transient /
+  # missing INDEX_DNS_ZONE_ID) is swallowed to "" above — that means "couldn't look", NOT
+  # "DNS points elsewhere". Terminating on unknown would kill the live host the DNS may
+  # still point at (the terminate-first outage this reconcile exists to prevent). Only GC
+  # when the lookup POSITIVELY returned a different IP.
+  if [[ ( "$st" == "running" || "$st" == "pending" || "$st" == "stopping" ) && -n "$old_ip" && -n "$dns_ip" && "$old_ip" != "$dns_ip" ]]; then
     log warn "reconcile: terminating stale blue-green leftover $INDEX_OLD_INSTANCE ($old_ip, state=$st; DNS points elsewhere at ${dns_ip:-?} so it's safe)"
     Q terminate-instances --instance-ids "$INDEX_OLD_INSTANCE" >/dev/null 2>&1 || true
     update_env "$CONFIG" INDEX_OLD_INSTANCE ""

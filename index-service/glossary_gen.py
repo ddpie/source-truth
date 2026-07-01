@@ -4,16 +4,24 @@ Wires the pieces in glossary_build + glossary into a single command the
 activate_project / index-refresh units invoke. Two modes:
 
   full         scan the whole repo with cc (first activation / fallback)
-  incremental  scan only files a git-diff changed (the default on refresh)
+  incremental  scan only the changed files (the default on refresh)
 
 Usage:
   python3 -m glossary_gen --project <id> --repo-root <dir> --out <entries.jsonl> \
-      --model <bedrock-model-id> --region <r> [--old <sha> --new <sha>] [--full]
+      --model <bedrock-model-id> --region <r> \
+      [--old <sha> --new <sha>] [--changed-list <f> --deleted-list <f>] [--full]
 
-TOKEN FRUGALITY: incremental hands cc only the changed files; an EMPTY diff exits 0
-WITHOUT calling cc (nothing to do). On first build (no --old, or --full) it does a
-full scan. The git diff is computed here from --old/--new (which git_fetch records
-around its reset) so this script stays self-contained.
+The incremental change set comes from one of two sources:
+  - git repos: --old/--new shas (git_fetch records them around its reset); the diff is
+    computed here via `git diff`, so this script stays self-contained.
+  - local repos (no git): --changed-list / --deleted-list files of repo-relative paths,
+    derived by reindex_local_repo.sh from the rsync that applied the pushed snapshot.
+Either source feeds the SAME merge (merge_incremental); only where the path set comes
+from differs.
+
+TOKEN FRUGALITY: incremental hands cc only the changed files; an EMPTY change set exits 0
+WITHOUT calling cc (nothing to do). On first build (no change source, or --full) it does
+a full scan.
 
 EXIT CODES: 0 ok (incl. no-op empty diff); 2 bad args / unusable repo. A cc failure
 during refresh is logged and treated as a SKIP (keep the existing glossary) — never
@@ -112,6 +120,30 @@ def changed_files(repo_root: str, old: str, new: str) -> tuple[set[str], set[str
     return _filt(changed), _filt(deleted)
 
 
+def _read_path_list(path: str) -> set[str]:
+    """Read a file of repo-relative paths (one per line) into a set; skip blanks + VCS/vendored.
+    Missing file → empty set (caller treats it as 'no changes / no deletions').
+
+    DEFENSE IN DEPTH: these paths are scoped to repo-root and handed to cc (Read/Glob are allowed).
+    Today the list is produced by reindex_local_repo.sh from rsync --itemize-changes, which only
+    ever emits in-tree, relative paths — so nothing escapes. But to keep that true regardless of the
+    caller, fail closed here: normalize and drop any absolute path or one that climbs out via '..'."""
+    if not path or not os.path.isfile(path):
+        return set()
+    out: set[str] = set()
+    with open(path, encoding="utf-8") as fh:
+        for line in fh:
+            rel = line.strip()
+            if not rel or rel.startswith(_SKIP_PREFIXES):
+                continue
+            norm = os.path.normpath(rel)
+            if os.path.isabs(norm) or norm == ".." or norm.startswith(".." + os.sep):
+                logger.warning(json.dumps({"event": "glossary_gen_dropped_unsafe_path", "path": rel}))
+                continue
+            out.add(norm)
+    return out
+
+
 def _write_atomic(path: str, entries: list[glossary.Entry]) -> None:
     """Write entries to a temp file then rename — a reader never sees a half-written index
     (the refresh unit and a live read can race), and the live slice is only swapped by the
@@ -139,6 +171,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--region", required=True)
     p.add_argument("--old", default="", help="git sha BEFORE refresh (omit => full scan)")
     p.add_argument("--new", default="HEAD", help="git sha AFTER refresh")
+    # LOCAL repos have no git/sha; reindex_local_repo.sh derives the change set from the rsync
+    # report and passes it as files (one repo-relative path per line). Same incremental merge as a
+    # git diff, just a different source. --changed-list wins over --old/--new when given.
+    p.add_argument("--changed-list", default="",
+                   help="file of changed (added/modified) repo-relative paths, one per line "
+                        "(local-repo incremental; alternative to --old/--new)")
+    p.add_argument("--deleted-list", default="",
+                   help="file of deleted repo-relative paths, one per line (pairs with --changed-list)")
     p.add_argument("--full", action="store_true", help="force a full scan")
     p.add_argument("--strict", action="store_true", help="treat a cc build failure as fatal")
     p.add_argument("--timeout", type=int, default=glossary_build.DEFAULT_TIMEOUT_S)
@@ -161,19 +201,27 @@ def main(argv: list[str] | None = None) -> int:
     cap = args.max_files if args.max_files is not None else MAX_BUILD_FILES
     uncapped = cap <= 0
 
-    incremental = bool(args.old) and not args.full
+    # Incremental source: an explicit change LIST (local repos, no git) wins over git --old/--new.
+    use_list = bool(args.changed_list or args.deleted_list) and not args.full
+    incremental = (use_list or bool(args.old)) and not args.full
     files: list[str] | None = None
     deleted: set[str] = set()
     existing: list[glossary.Entry] = []
 
     if incremental:
-        try:
-            chg, deleted = changed_files(args.repo_root, args.old, args.new)
-        except subprocess.CalledProcessError as exc:
-            logger.warning(json.dumps({"event": "glossary_gen_diff_failed_fallback_full",
-                                       "detail": str(exc)[:200]}))
-            incremental = False
+        diff_ok = True
+        if use_list:
+            chg = _read_path_list(args.changed_list)
+            deleted = _read_path_list(args.deleted_list)
         else:
+            try:
+                chg, deleted = changed_files(args.repo_root, args.old, args.new)
+            except subprocess.CalledProcessError as exc:
+                logger.warning(json.dumps({"event": "glossary_gen_diff_failed_fallback_full",
+                                           "detail": str(exc)[:200]}))
+                incremental = False
+                diff_ok = False
+        if diff_ok:
             if not chg and not deleted:
                 logger.info(json.dumps({"event": "glossary_gen_noop_empty_diff",
                                         "project": args.project, "old": args.old, "new": args.new}))

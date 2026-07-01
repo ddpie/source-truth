@@ -13,9 +13,10 @@
 #       repo copies + removes it from projects.json (keeps secrets by default; never the global
 #       git credential).
 #
-# Code repos are git-only (R1) and live in .local/projects.json — never on the CLI. The single
-# read-only git credential (R-cred-1) is shared across projects. Re-runs pre-fill region/spec
-# from .local/deploy-config.
+# Code repos live in .local/projects.json — never on the CLI. Each repo is either a git source
+# (cloned + auto-pulled) or a local source (pushed via push-local-repo.sh); add-project asks which.
+# The single read-only git credential (R-cred-1) is shared across git-source repos. Re-runs pre-fill
+# region/spec from .local/deploy-config.
 #
 # Non-interactive: --yes accepts pre-filled/default answers; flows needing human-only input
 # (first Feishu/git secret) still hard-stop.
@@ -28,23 +29,51 @@ source "$SCRIPT_DIR/lib/env-utils.sh"
 
 CONFIG_FILE="$ROOT/.local/deploy-config"
 ASSUME_YES=false
+LOCAL_MODE=false
+LOCAL_FLAG=()   # forwarded to deploy-all.sh: (--local) in single-host mode, else empty
+
+# _imds_region / _is_index_host : is THIS machine the source-truth index host? (IMDSv2). Used to
+# auto-enter single-host mode — see the LOCAL_MODE auto-detect below.
+_imds_get() {   # _imds_get <metadata-path>
+  local tok
+  tok="$(curl -fsS -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 60" 2>/dev/null || true)"
+  curl -fsS ${tok:+-H "X-aws-ec2-metadata-token: $tok"} "http://169.254.169.254/latest/meta-data/$1" 2>/dev/null || true
+}
+_imds_region() { _imds_get "placement/region"; }
+_is_index_host() { [[ "$(_imds_get "iam/security-credentials/")" == *source-truth-index* ]]; }
+
 for a in "$@"; do
   case "$a" in
     -y|--yes) ASSUME_YES=true ;;
+    --local) LOCAL_MODE=true; LOCAL_FLAG=(--local) ;;
     -h|--help)
       cat <<EOF
-Usage: ./scripts/install.sh [--yes]
+Usage: ./scripts/install.sh [--yes] [--local]
 
 Interactive installer. Shows an arrow-key menu: init environment / add a project /
-redeploy a project / remove a project. Code repos are git-only and live in
+redeploy a project / remove a project. Code repos (git or local source) live in
 .local/projects.json; per-project Feishu + the shared git credential are created in
 Secrets Manager. Re-runs pre-fill region/spec from .local/deploy-config.
 
-  --yes   Accept all pre-filled/default answers without prompting (headless).
+  --yes     Accept all pre-filled/default answers without prompting (headless).
+  --local   Single-host mode: deploy onto THIS EC2 (reuse its VPC/role), don't
+            create a separate index host. Forwarded to deploy-all.sh. Auto-enabled
+            when run ON the index host, so re-runs (add-project / redeploy) don't
+            need it. Normally set for you by prepare-local-host.sh / launch-host.sh.
 EOF
       exit 0 ;;
   esac
 done
+
+# Auto-enter single-host mode when running ON the index host itself, even without --local. Operators
+# re-run install by hand there for add-project / redeploy; without this the base-deploy would take
+# the two-machine path (create VPC/NAT, ReplaceRoute) under the instance role and fail — and it must
+# reuse this box, not build a second network. A plain operator laptop isn't the index host, so the
+# two-machine path is unaffected.
+if [[ "$LOCAL_MODE" != true ]] && _is_index_host; then
+  LOCAL_MODE=true; LOCAL_FLAG=(--local)
+  say info "检测到本机即索引主机 —— 自动进入单机模式（--local）"
+fi
 
 # ---- tiny prompt helpers -------------------------------------------------------
 # ask <var> <prompt> <default> : read a value, showing the default in [brackets];
@@ -272,21 +301,25 @@ fi
 # VPC/NAT/EC2 are already created) fails with a docker.sock connect error. Catch it
 # here so the operator isn't billed for half a deploy before hitting it. `docker info`
 # is the standard daemon-liveness check; run_timeout guards a hung daemon.
-if have_cmd docker && ! run_timeout 20 docker info >/dev/null 2>&1; then
+# In --local prepare-local-host.sh just started docker + runs us under `sg docker`, and deploy-all's
+# own preflight_docker re-checks right after — so this check is redundant there; skip it.
+if [[ "$LOCAL_MODE" != true ]] && have_cmd docker && ! run_timeout 20 docker info >/dev/null 2>&1; then
   say err "Docker 已安装但守护进程未运行 / docker is installed but its daemon isn't running."
   say info "  启动 Docker Desktop（或 dockerd），等它就绪后重试。验证：docker info"
   say info "  start Docker Desktop (or dockerd), wait until ready, then re-run. Verify with: docker info"
   exit 1
 fi
-# gh is OPTIONAL — only needed to auto-download codegraph-server from a PRIVATE repo's
-# Release (gh carries auth). Not required if the repo is public, or if you already have
-# the binary locally (CODEGRAPH_SERVER_BIN / PATH / ~/.local/bin). Warn, don't block.
-if have_cmd gh && gh auth status >/dev/null 2>&1; then
-  say ok "gh (authenticated — can fetch codegraph-server from a private Release)"
-else
-  say info "gh 未安装或未登录 / gh absent or not logged in — fine if the repo is public or"
-  say info "  codegraph-server is already local. For a PRIVATE repo's auto-download, run"
-  say info "  'gh auth login', or set CODEGRAPH_SERVER_BIN=/path/to/codegraph-server."
+# gh is OPTIONAL — only needed to auto-download codegraph-server from a PRIVATE repo's Release (gh
+# carries auth). In --local the index host fetches the binary itself (S3 → Release) and prepare has
+# already run `gh auth login`, so this hint is just noise there — skip it. Otherwise warn, don't block.
+if [[ "$LOCAL_MODE" != true ]]; then
+  if have_cmd gh && gh auth status >/dev/null 2>&1; then
+    say ok "gh (authenticated — can fetch codegraph-server from a private Release)"
+  else
+    say info "gh 未安装或未登录 / gh absent or not logged in — fine if the repo is public or"
+    say info "  codegraph-server is already local. For a PRIVATE repo's auto-download, run"
+    say info "  'gh auth login', or set CODEGRAPH_SERVER_BIN=/path/to/codegraph-server."
+  fi
 fi
 # AWS identity (also proves credentials work before we collect anything).
 if ! ACCOUNT="$(aws sts get-caller-identity --query Account --output text 2>/dev/null)"; then
@@ -300,8 +333,20 @@ safe_source_env "$CONFIG_FILE"
 
 PROJECTS_CFG="$ROOT/.local/projects.json"
 
-# ask_region <var> : the region menu is shared by every flow (pre-selects persisted).
+# ask_region <var> : the region menu is shared by every flow (pre-selects persisted). In single-host
+# mode (LOCAL_MODE — set explicitly or auto-detected up top) region is NOT a choice: we deploy onto
+# THIS EC2, whose region is fixed. Read it from IMDS; asking would just invite the wrong pick (e.g.
+# a stale Tokyo default while the box is in us-east-1). Otherwise (operator laptop) show the menu.
 ask_region() {
+  if [[ "$LOCAL_MODE" == true ]]; then
+    local imds_region; imds_region="$(_imds_region)"
+    if [[ -n "$imds_region" ]]; then
+      printf -v "$1" '%s' "$imds_region"
+      say info "区域 / region: $imds_region（本机所在区域，自动检测）"
+      return
+    fi
+    say warn "无法从实例元数据读取区域；回退到手动选择。"
+  fi
   pick_field "$1" "AWS 区域 / region (↑/↓ 选择，回车确认)" \
     "${DEPLOY_REGION:-ap-northeast-1}" "AWS 区域代码 / region code" "${REGION_OPTIONS[@]}"
 }
@@ -320,16 +365,31 @@ except Exception: pass' "$PROJECTS_CFG"
 flow_init_env() {
   echo; say step "初始化环境（不挂项目）/ init environment only"
   local REGION INSTANCE_TYPE ROOT_VOLUME_GB GLOSSARY_MAX_FILES
+  local HW_FLAGS=()   # --instance-type/--root-volume-gb — only meaningful when WE create the host
   ask_region REGION
-  pick_field INSTANCE_TYPE "索引主机机型 (ARM·决定 CPU/内存) / index host type" \
-    "${DEPLOY_INSTANCE_TYPE:-t4g.large}" "EC2 机型 (ARM)" "${INSTANCE_OPTIONS[@]}"
-  pick_field ROOT_VOLUME_GB "索引主机磁盘 / index host disk GiB" \
-    "${DEPLOY_ROOT_VOLUME_GB:-30}" "磁盘大小 GiB" "${DISK_OPTIONS[@]}"
-  while ! [[ "$ROOT_VOLUME_GB" =~ ^[0-9]+$ ]] || (( ROOT_VOLUME_GB < 8 )); do
-    [[ "$ASSUME_YES" == true ]] && { say err "磁盘大小无效 / invalid disk size '$ROOT_VOLUME_GB'"; exit 1; }
-    say warn "磁盘大小需为 ≥8 的整数 GiB / disk must be an integer GiB ≥ 8."
-    ask ROOT_VOLUME_GB "磁盘大小 GiB" "30"
-  done
+  if [[ "$LOCAL_MODE" == true ]]; then
+    # --local deploys onto THIS existing EC2; its type/disk were fixed at launch (launch-host.sh),
+    # and deploy-all --local reuses the box in place — asking would just mislead. Skip, show actual.
+    say info "机型/磁盘 / type & disk: 沿用本机（$( (curl -fsS -H "X-aws-ec2-metadata-token: $(curl -fsS -X PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' 2>/dev/null)" http://169.254.169.254/latest/meta-data/instance-type 2>/dev/null) || echo '本机机型' ) ）—— 由 launch-host 起机时决定，如需变更请换机"
+  else
+    pick_field INSTANCE_TYPE "索引主机机型 (ARM·决定 CPU/内存) / index host type" \
+      "${DEPLOY_INSTANCE_TYPE:-t4g.large}" "EC2 机型 (ARM)" "${INSTANCE_OPTIONS[@]}"
+    pick_field ROOT_VOLUME_GB "索引主机磁盘 / index host disk GiB" \
+      "${DEPLOY_ROOT_VOLUME_GB:-30}" "磁盘大小 GiB" "${DISK_OPTIONS[@]}"
+    while ! [[ "$ROOT_VOLUME_GB" =~ ^[0-9]+$ ]] || (( ROOT_VOLUME_GB < 8 )); do
+      [[ "$ASSUME_YES" == true ]] && { say err "磁盘大小无效 / invalid disk size '$ROOT_VOLUME_GB'"; exit 1; }
+      say warn "磁盘大小需为 ≥8 的整数 GiB / disk must be an integer GiB ≥ 8."
+      ask ROOT_VOLUME_GB "磁盘大小 GiB" "30"
+    done
+    HW_FLAGS=(--instance-type "$INSTANCE_TYPE" --root-volume-gb "$ROOT_VOLUME_GB")
+  fi
+  # Glossary cap is a build-cost knob (not machine-specific). In --local, don't make the operator
+  # stop and choose on first run — take the safe default (400, cost-controlled) and just show it.
+  # To change it later: re-run install without --local, or set GLOSSARY_MAX_FILES / edit the env.
+  if [[ "$LOCAL_MODE" == true ]]; then
+    GLOSSARY_MAX_FILES="${DEPLOY_GLOSSARY_MAX_FILES:-400}"
+    say info "术语表构建文件上限 / glossary build cap: ${GLOSSARY_MAX_FILES}（默认，控成本；改需重设 GLOSSARY_MAX_FILES）"
+  else
   pick_field GLOSSARY_MAX_FILES "术语表构建文件上限 (中文→代码符号·控成本) / glossary build cap" \
     "${DEPLOY_GLOSSARY_MAX_FILES:-400}" "文件数 (0=不限)" "${GLOSSARY_OPTIONS[@]}"
   while ! [[ "$GLOSSARY_MAX_FILES" =~ ^[0-9]+$ ]]; do
@@ -337,12 +397,12 @@ flow_init_env() {
     say warn "需为非负整数 (0=不限) / must be a non-negative integer (0 = no cap)."
     ask GLOSSARY_MAX_FILES "文件数 (0=不限)" "400"
   done
+  fi
   echo; say info "将只起共享底座（VPC/NAT/EC2/镜像），不挂任何项目。之后用「添加项目」上线机器人。"
   confirm "开始初始化环境？/ Initialize the base environment now?" || { say info "已取消"; exit 0; }
   say step "部署底座 / Deploying base host (several minutes)"
-  exec "$SCRIPT_DIR/deploy-all.sh" --region "$REGION" \
-    --instance-type "$INSTANCE_TYPE" --root-volume-gb "$ROOT_VOLUME_GB" \
-    --glossary-max-files "$GLOSSARY_MAX_FILES" --skip-projects
+  exec "$SCRIPT_DIR/deploy-all.sh" --region "$REGION" "${HW_FLAGS[@]}" \
+    --glossary-max-files "$GLOSSARY_MAX_FILES" --skip-projects "${LOCAL_FLAG[@]}"
 }
 
 # ============================================================
@@ -364,19 +424,31 @@ flow_add_project() {
   # repos: loop git URL + subdir + ref until blank. N counts repos ALREADY added, so the
   # prompt announces which repo you're entering ("第 1 个仓库" first, then 2, 3, …) — without
   # it a multi-repo project gives no signal of how many are in or which one you're on.
-  local REPOS_JSON="[]" RGIT RSUB RREF N=0
-  say info "逐个添加该项目的代码仓库（git 地址留空结束）/ add repos (blank git URL = done):"
+  local REPOS_JSON="[]" RGIT RSUB RREF RSRC SRC_CHOICE N=0
+  say info "逐个添加该项目的代码仓库（仓库名留空结束）/ add repos (blank subdir = done):"
   while true; do
-    ask RGIT "  第 $((N + 1)) 个仓库 · git 地址 / repo #$((N + 1)) git URL (blank=done)" ""
-    [[ -z "$RGIT" ]] && break
-    ask RSUB "    on-host 子目录名 / subdir (^[a-z0-9-]+$)" ""
-    [[ "$RSUB" =~ ^[a-z0-9][a-z0-9-]*$ ]] || { say warn "subdir 非法，跳过该仓 / invalid subdir, skipped"; continue; }
-    ask RREF "    分支/标签（留空=默认分支）/ ref (blank=default)" ""
-    REPOS_JSON="$(RGIT="$RGIT" RSUB="$RSUB" RREF="$RREF" python3 -c '
+    ask RSUB "  第 $((N + 1)) 个仓库 · on-host 子目录名 / repo #$((N + 1)) subdir (^[a-z0-9-]+$, blank=done)" ""
+    [[ -z "$RSUB" ]] && break
+    [[ "$RSUB" =~ ^[a-z0-9][a-z0-9-]*$ ]] || { say warn "subdir 非法，跳过 / invalid subdir, skipped"; continue; }
+    pick SRC_CHOICE 0 \
+      "git    远程 git 仓（自动定时刷新）/ remote git repo (auto-refresh)" \
+      "local  本地仓（rsync 直推 + 手动刷新）/ local repo (rsync push + manual refresh)"
+    RSRC="${SRC_CHOICE%%[[:space:]]*}"
+    if [[ "$RSRC" == "git" ]]; then
+      ask RGIT "    git 地址 / repo git URL" ""
+      [[ -n "$RGIT" ]] || { say warn "git 仓必须有地址，跳过 / git repo needs a URL, skipped"; continue; }
+      ask RREF "    分支/标签（留空=默认分支）/ ref (blank=default)" ""
+      REPOS_JSON="$(RGIT="$RGIT" RSUB="$RSUB" RREF="$RREF" python3 -c '
 import json,os,sys
-a=json.loads(sys.argv[1]); a.append({"subdir":os.environ["RSUB"],"git":os.environ["RGIT"],"ref":os.environ["RREF"]}); print(json.dumps(a))' "$REPOS_JSON")"
+a=json.loads(sys.argv[1]); a.append({"subdir":os.environ["RSUB"],"source":"git","git":os.environ["RGIT"],"ref":os.environ["RREF"]}); print(json.dumps(a))' "$REPOS_JSON")"
+      say ok "    已加入 git 仓 / git repo: $RSUB ← $RGIT${RREF:+ @$RREF}"
+    else
+      REPOS_JSON="$(RSUB="$RSUB" python3 -c '
+import json,os,sys
+a=json.loads(sys.argv[1]); a.append({"subdir":os.environ["RSUB"],"source":"local"}); print(json.dumps(a))' "$REPOS_JSON")"
+      say ok "    已加入本地仓 / local repo: $RSUB （装服务会先起好后端，之后本机跑 scripts/push-local-repo.sh 推代码即建图上线）"
+    fi
     N=$((N + 1))
-    say ok "    已加入第 $N 个仓库 / repo #$N added: $RSUB ← $RGIT${RREF:+ @$RREF}"
   done
   [[ "$REPOS_JSON" != "[]" ]] || { say err "至少要一个仓库 / need at least one repo"; exit 1; }
 
@@ -414,7 +486,16 @@ print(free[0] if free else "")' "$PROJECTS_CFG")"
   if ! [[ "$PORT" =~ ^[0-9]+$ ]] || (( PORT < 8080 || PORT > 8099 )); then
     say err "端口必须在 8080-8099（安全组只放行这一段）/ port must be 8080-8099 (only this range is open in the SG); got '$PORT'"; exit 1
   fi
-  if project_ids | while read -r p; do python3 -c 'import json,sys; d=json.load(open(sys.argv[1]))["projects"]; sys.exit(0 if d.get(sys.argv[2],{}).get("port")==int(sys.argv[3]) else 1)' "$PROJECTS_CFG" "$p" "$PORT" && echo "$p"; done | grep -q .; then
+  # 一次 python3 遍历判冲突（同上面 subdir 冲突检查的写法）。不要用 while+&& 管道：
+  # 循环体末条命令对不匹配项目返回 1，会在 set -e + pipefail 下把整条管道判非零，
+  # 让「已占用」误报成「空闲」——两个项目共用一个 bridge 端口，后启动的起不来。
+  if ! python3 -c 'import json,sys
+try: projects=json.load(open(sys.argv[1])).get("projects",{})
+except Exception: projects={}
+clash=[pid for pid,p in projects.items() if p.get("port")==int(sys.argv[2])]
+if clash:
+    sys.stderr.write("port used by: "+", ".join(clash)+"\n"); sys.exit(1)
+' "$PROJECTS_CFG" "$PORT"; then
     say err "端口 $PORT 已被占用 / port already used by another project"; exit 1
   fi
 
@@ -507,7 +588,7 @@ json.dump(cfg,open(sys.argv[1],"w"),ensure_ascii=False,indent=2)' "$PROJECTS_CFG
   echo; confirm "现在部署项目 ${PID}？/ Deploy project $PID now?" || { say info "清单已保存，稍后可用「重新部署」/ saved; deploy later via redeploy"; exit 0; }
   # Ensure the shared base exists (idempotent no-op if already up), then deploy this project.
   say step "确保底座就绪 / ensuring shared base (idempotent)"
-  "$SCRIPT_DIR/deploy-all.sh" --region "$REGION" --skip-projects \
+  "$SCRIPT_DIR/deploy-all.sh" --region "$REGION" --skip-projects "${LOCAL_FLAG[@]}" \
     || { say err "底座部署失败 / base deploy failed — fix and re-run"; exit 1; }
   say step "部署项目 / deploying project $PID"
   exec bash "$SCRIPT_DIR/lib/deploy_project.sh" "$REGION" "$PID"
@@ -577,7 +658,7 @@ for d in \$SUBS; do
   systemctl disable --now index-refresh-\$d.timer index-refresh-\$d.service index-build@\$d.service 2>/dev/null
   systemctl reset-failed index-refresh-\$d.timer index-refresh-\$d.service index-build@\$d.service 2>/dev/null
   rm -f /etc/systemd/system/index-refresh-\$d.service /etc/systemd/system/index-refresh-\$d.timer
-  rm -rf /data/repo/\$d /data/repo/\$d.bridge.lock
+  rm -rf /data/repo/\$d /data/repo/\$d.incoming /data/repo/\$d.bridge.lock
 done
 rm -rf /data/glossary/${SEL}
 rm -f /etc/bot-gateway-${SEL}.env /etc/index-projects/${SEL}.json /etc/systemd/system/index-bridge-${SEL}.service

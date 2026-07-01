@@ -80,7 +80,7 @@ python3 "$RENDER" "$TMP/typo-ph.json" --region us-east-1 --namespace X/Y >/dev/n
 out_q="$(python3 "$RENDER" "$PROD" --region us-east-1 --namespace 'Ns"With/Quote' 2>/dev/null)"; rc=$?
 check "namespace with a quote still renders (escaped, rc 0)" "$rc"
 printf '%s' "$out_q" | python3 -c 'import json,sys; json.load(sys.stdin)' 2>/dev/null; check "escaped namespace yields valid JSON" $?
-printf '%s' "$out_q" | python3 -c 'import json,sys; d=json.load(sys.stdin); s=json.dumps(d); assert "Ns\"With/Quote".replace(chr(34),"") in s.replace(chr(92)+chr(34),"") or True'; check "escaped value present" $?
+printf '%s' "$out_q" | python3 -c 'import json,sys; d=json.load(sys.stdin); s=json.dumps(d); assert "Ns\"With/Quote".replace(chr(34),"") in s.replace(chr(92)+chr(34),"")'; check "escaped value present" $?
 
 # --- missing required flags ---
 python3 "$RENDER" "$PROD" --region us-east-1 >/dev/null 2>/dev/null; rc=$?

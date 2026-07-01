@@ -77,6 +77,7 @@ CODEGRAPH_SERVER_REPO="${CODEGRAPH_SERVER_REPO:-ddpie/source-truth}"
 CODEGRAPH_SERVER_TAG="${CODEGRAPH_SERVER_TAG:-codegraph-server-v0.18.5}"
 CODEGRAPH_SERVER_URL_DEFAULT="https://github.com/${CODEGRAPH_SERVER_REPO}/releases/download/${CODEGRAPH_SERVER_TAG}/codegraph-server"
 REFRESH_INDEX=false       # --refresh-index: replace a running index instance if its artifacts are stale
+LOCAL_MODE=false          # --local: this EC2 IS the index host; bootstrap in place, reuse its VPC/subnet
 declare -A SKIP=()
 
 usage() {
@@ -105,6 +106,9 @@ Options:
   --skip <phase>      Skip a phase: artifacts|iam|network|index-svc|image|runtime|gateway|monitoring (repeatable)
   --refresh-index     Replace the index host if this run staged newer BASE code (bridge/gateway).
                       Repo code is NOT a reason to refresh — repos refresh live via git pull.
+  --local             This EC2 IS the index host: bootstrap in place, reuse its VPC/subnet, attach
+                      a dedicated SG. No second EC2 is created. ARM64 host only; needs an instance
+                      role with the index-host policies (see runbook) + passwordless sudo.
   --dry-run           Print the plan and resolved IDs, make no changes
   -h, --help
 
@@ -134,11 +138,26 @@ while [[ $# -gt 0 ]]; do
     --max-lifetime) MAX_LIFETIME="$2"; shift 2 ;;
     --skip) SKIP["$2"]=1; shift 2 ;;
     --refresh-index) REFRESH_INDEX=true; shift ;;
+    --local) LOCAL_MODE=true; shift ;;
     --dry-run) DRY_RUN=true; shift ;;
     -h|--help) usage; exit 0 ;;
     *) say err "Unknown flag: $1"; usage >&2; exit 2 ;;
   esac
 done
+
+# --local requires an ARM64 host: the agent image + codegraph-server are aarch64-only, and the
+# image is built on THIS host. An x86 host would push a wrong-arch image that AgentCore can't run —
+# and that failure only surfaces at runtime. Fail loud up front instead.
+if [[ "$LOCAL_MODE" == true && "$(uname -m)" != "aarch64" ]]; then
+  say err "--local requires an ARM64 (aarch64) host (the agent image + codegraph-server are ARM64-only); this host is $(uname -m)."
+  exit 1
+fi
+
+# skip <phase> : true if --skip <phase> was given. Defined HERE (before preflight) because
+# preflight_docker consults `skip image` — it used to be defined further down, after the preflight
+# call, so `skip` was "command not found" at preflight time (harmless-looking but it silently made
+# preflight_docker's early-return misfire).
+skip() { [[ -n "${SKIP[$1]:-}" ]]; }
 
 # --- preflight ---
 say step "Phase 0: preflight"
@@ -322,7 +341,13 @@ preflight_quota() {
   fi
   return 0
 }
-if [[ "$DRY_RUN" != true ]]; then preflight_boto3; preflight_docker; preflight_model_access; preflight_agentcore; preflight_quota; fi
+if [[ "$DRY_RUN" != true ]]; then
+  preflight_boto3; preflight_docker; preflight_model_access; preflight_agentcore
+  # preflight_quota checks EIP/VPC/vCPU headroom — all for resources we're about to CREATE. --local
+  # creates none of them (reuses this host's VPC/subnet, doesn't run-instances or allocate an EIP),
+  # so the checks are irrelevant and their warnings just mislead. Skip in --local.
+  [[ "$LOCAL_MODE" == true ]] || preflight_quota
+fi
 
 # Persist resolved config — but NOT on --dry-run (dry-run must make no changes,
 # including no writes to deploy-config).
@@ -338,7 +363,12 @@ if [[ "$DRY_RUN" != true ]]; then
   update_env "$CONFIG_FILE" DEPLOY_MAX_FILES "$MAX_FILES"
   update_env "$CONFIG_FILE" DEPLOY_GLOSSARY_MAX_FILES "$GLOSSARY_MAX_FILES"
   update_env "$CONFIG_FILE" DEPLOY_ROOT_VOLUME_GB "$ROOT_VOLUME_GB"
+  # idle-timeout / max-lifetime 的消费方是 deploy_project.sh（读 DEPLOY_IDLE_TIMEOUT /
+  # DEPLOY_MAX_LIFETIME）。必须持久化+export，否则 --idle-timeout 只解析不生效（死旗子）。
+  update_env "$CONFIG_FILE" DEPLOY_IDLE_TIMEOUT "$IDLE_TIMEOUT"
+  update_env "$CONFIG_FILE" DEPLOY_MAX_LIFETIME "$MAX_LIFETIME"
 fi
+export DEPLOY_IDLE_TIMEOUT="$IDLE_TIMEOUT" DEPLOY_MAX_LIFETIME="$MAX_LIFETIME"
 
 run() { if [[ "$DRY_RUN" == true ]]; then say info "[dry-run] $*"; else "$@"; fi; }
 
@@ -361,7 +391,6 @@ det_tar() {  # caller sets cwd; args = files/dirs to include
     tar -cf - "$@"
   fi
 }
-skip() { [[ -n "${SKIP[$1]:-}" ]]; }
 
 # ============================================================
 # Phase 1: artifacts → S3
@@ -505,6 +534,9 @@ fi
 # Phase 1b: IAM (instance profile + runtime role) — fresh-account safe
 # ============================================================
 if skip iam; then say warn "skip iam"; else
+  # --local note: the EC2's instance role (pre-created via scripts/create-iam.sh) carries
+  # IAM-write perms, so this phase runs the same as the default path — provision_iam.sh creates the
+  # AgentCore runtime role and (re)asserts the index role's runtime policies (idempotent).
   say step "Phase 1b: IAM"
   run "$SCRIPT_DIR/lib/provision_iam.sh" "$REGION" "$CONFIG_FILE" "$BUCKET"
   safe_source_env "$CONFIG_FILE"
@@ -513,7 +545,13 @@ fi
 # ============================================================
 # Phase 2: network (VPC/subnets/IGW/NAT — fully idempotent, reconciles by tag)
 # ============================================================
-if skip network; then say warn "skip network"; else
+if [[ "$LOCAL_MODE" == true ]]; then
+  say step "Phase 2: network (local mode — reuse this host's VPC/subnet, no VPC/NAT created)"
+  # In local mode we don't create a VPC/NAT. VPC_ID/PRIVATE_SUBNET are derived inside the index-svc
+  # phase (provision_index_service.sh reads them from this instance via describe-instances) and
+  # written to deploy-config; Phase 5 picks them up after the safe_source_env below the Phase 3 call.
+  say info "local mode: VPC/subnet derived from this instance in the index-svc phase"
+elif skip network; then say warn "skip network"; else
   say step "Phase 2: network"
   if [[ "$DRY_RUN" == true ]]; then
     say info "[dry-run] provision_network.sh (VPC/subnets/IGW/NAT) — discovers + reconciles by tag"
@@ -538,7 +576,7 @@ if skip index-svc; then say warn "skip index-svc"; elif [[ "$DRY_RUN" == true ]]
   say info "[dry-run] provision_index_service.sh (ARM EC2 + bootstrap, reuse if running) + /health wait"
 else
   say step "Phase 3: index-service EC2 (BASE host — no project bound)"
-  INDEX_IP="$("$SCRIPT_DIR/lib/provision_index_service.sh" \
+  INDEX_IP="$(ST_LOCAL_MODE="$LOCAL_MODE" "$SCRIPT_DIR/lib/provision_index_service.sh" \
     "$REGION" "$CONFIG_FILE" "$BUCKET" "$MAX_FILES" "$INSTANCE_TYPE" "$REFRESH_INDEX" "$ROOT_VOLUME_GB" "$MODEL" "$GLOSSARY_MAX_FILES")"
   update_env "$CONFIG_FILE" INDEX_SERVICE_IP "$INDEX_IP"
   safe_source_env "$CONFIG_FILE"
@@ -546,7 +584,13 @@ else
   # has NO bridge yet (projects attach later via deploy_project.sh), so we wait for SSM-online
   # + the BOOTSTRAP_DONE marker, NOT a bridge /health (per-project bridge health is gated inside
   # deploy_project.sh after activation). The instance is private, so we poll via SSM.
-  if [[ "$DRY_RUN" != true ]] && [[ -n "${INDEX_SERVICE_INSTANCE:-}" ]]; then
+  if [[ "$LOCAL_MODE" == true ]]; then
+    # bootstrap ran synchronously inside the provisioner (local mode); just confirm its done-marker.
+    # The log is written by root via sudo, so read it with sudo.
+    sudo grep -q BOOTSTRAP_DONE /var/log/index-svc-bootstrap.log 2>/dev/null \
+      || { say err "local-mode bootstrap did not finish (no BOOTSTRAP_DONE) — sudo tail /var/log/index-svc-bootstrap.log"; exit 1; }
+    say ok "local-mode base host bootstrap confirmed"
+  elif [[ "$DRY_RUN" != true ]] && [[ -n "${INDEX_SERVICE_INSTANCE:-}" ]]; then
     say info "waiting for base-host bootstrap (apt + codegraph bin + gateway build, ~3-8 min) ..."
     # Hard-fail: never attach a project to an unconfirmed base host. Re-run after fixing.
     "$SCRIPT_DIR/lib/wait_base_host.sh" "$REGION" "$INDEX_SERVICE_INSTANCE" || {

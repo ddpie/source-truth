@@ -20,7 +20,7 @@
 
 设计文档回答「做什么 / 为什么」；面向 AI 的文档回答「一次提问如何在系统里流转 / 改代码时不能破坏什么」：
 
-- 一次提问的生命周期、数据面、会话隔离 → [`../agent/architecture.md`](../agent/architecture.md)（面向 AI 的工作原理）
+- 一次提问的生命周期、代码如何进入与刷新、会话隔离 → [`../agent/architecture.md`](../agent/architecture.md)（面向 AI 的工作原理）
 - 可执行的不变量与权威依据映射 → [`../agent/invariants.md`](../agent/invariants.md)
 - 常见改动的操作手册 → [`../agent/playbooks.md`](../agent/playbooks.md)
 - 从零部署 / 连飞书 / 运维 / 排错 → [`../runbook.md`](../runbook.md)

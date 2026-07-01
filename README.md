@@ -109,17 +109,27 @@ bash <(gh api repos/ddpie/source-truth/contents/scripts/get.sh --jq '.content' |
 ./scripts/test.sh       # 离线套件：lint + unit + typecheck
 ```
 
-完整部署流程（前置条件、`deploy-all.sh` 分阶段控参、连飞书、运维、排错）见
+两种部署拓扑：
+
+- **默认（两台）**：在一台部署机上跑脚本，由它新建并配置索引主机 EC2。
+- **单台 EC2（`--local`）**：一台机器既跑部署、又常驻索引与网关，不再单开部署机。在本地跑 `./scripts/launch-host.sh` 一步完成：自动建网 + 建 IAM + 创建 ARM64 EC2，然后问你 SSH 私钥、自动把部署脚本传上机执行（装依赖 → 登录 GitHub → 克隆 → 进入 `install.sh` 交互填代码仓/模型/飞书凭证）。AgentCore Runtime 仍由 AWS 托管，不占本机。
+
+完整部署流程（前置条件、`deploy-all.sh` 各阶段的命令行参数、`--local` 的角色与权限要求、连飞书、运维、排错）见
 [`docs/runbook.md`](docs/runbook.md)。飞书凭证走 Secrets Manager，不落盘、不入仓库。
 
 ## 代码怎么进入系统、怎么刷新
 
-git 为唯一来源：每个仓库 clone 到 index-service 本地，systemd timer 定时 `git pull`，file-watcher 增量重建索引，新鲜度分钟级、无需重部署、无需手动操作。刷新机制与「为何必须建索引」的实测见 [`docs/agent/architecture.md`](docs/agent/architecture.md) 的「数据面」。
+每个仓库 clone 到 index-service 本地，file-watcher 增量重建索引。两种代码来源：
+
+- **git 仓**（默认）：systemd timer 定时 `git pull`，主分支改动分钟级内反映到问答、无需重部署、无需手动操作。
+- **本地仓**（推不到 git 远端时）：用 `scripts/push-local-repo.sh` 经 rsync 把代码直推到主机，手动刷新——改了代码就重跑一次上传命令。
+
+刷新机制与「为何必须建索引」的实测见 [`docs/agent/architecture.md`](docs/agent/architecture.md) 的「代码如何进入与刷新」一节；本地仓上传与单台 EC2 就地部署（`--local`）见 [`docs/runbook.md`](docs/runbook.md)。
 
 ## 安全设计
 
 安全面有三类，且不只靠提示词约束、代码本身会强制执行：**防越权**（Agent 连写工具都不在上下文里，
-服务端只注册一组只读工具）、**防泄露**（进群字段全过脱敏，密钥 / 内网拓扑不进群；凭证走 Secrets Manager 不入库）、
+服务端只注册一组只读工具）、**防泄露**（进群的字段全部脱敏，密钥 / 内网拓扑不进群；凭证走 Secrets Manager 不入库）、
 **防注入**（工具读到的代码 / 注释一律当待分析数据，只信打包进镜像的 system prompt）。
 
 ![安全设计图：防越权、防泄露、防注入三道由代码强制执行的防线，三栏并列](docs/assets/security-defense.svg)
@@ -260,11 +270,21 @@ With the repo already cloned, just run the scripts; offline tests need no Docker
 ./scripts/test.sh       # offline suite: lint + unit + typecheck
 ```
 
-Full deployment flow (prerequisites, `deploy-all.sh` staged options, connecting Feishu, ops, troubleshooting): [`docs/runbook.md`](docs/runbook.md). Feishu credentials go through Secrets Manager — never written to disk, never committed.
+Two deployment topologies:
+
+- **Default (two machines)**: run the script on a deploy box, which creates and configures the index-host EC2.
+- **Single EC2 (`--local`)**: one machine both deploys and then resides as the index + gateway host, with no separate deploy box. Run `./scripts/launch-host.sh` locally to bring the box up (auto-builds the network + IAM + an ARM64 EC2), then SSH in per the command it prints and run `./scripts/install.sh` (interactive repo/model/Feishu prompts; install calls `deploy-all --local`). The AgentCore Runtime is still AWS-managed and off this host.
+
+Full deployment flow (prerequisites, `deploy-all.sh` staged options, the `--local` role/permission requirements, connecting Feishu, ops, troubleshooting): [`docs/runbook.md`](docs/runbook.md). Feishu credentials go through Secrets Manager — never written to disk, never committed.
 
 ## How code enters the system and refreshes
 
-git is the single source: each repo is cloned to index-service locally, a systemd timer runs `git pull` periodically, and a file-watcher rebuilds the index incrementally — freshness is minute-level, with no redeploy and no manual steps. The refresh mechanism and the measured "why an index is required" are in the "data plane" section of [`docs/agent/architecture.md`](docs/agent/architecture.md).
+Each repo is cloned to index-service locally and a file-watcher rebuilds the index incrementally. Two code sources:
+
+- **git repos** (default): a systemd timer runs `git pull` periodically — freshness is minute-level, with no redeploy and no manual steps.
+- **local repos** (when there's no git remote to push to): a snapshot pushed to the host via `scripts/push-local-repo.sh` over rsync, refreshed manually — re-run the upload command after the code changes.
+
+The refresh mechanism and the measured "why an index is required" are in the "how code enters and refreshes" section of [`docs/agent/architecture.md`](docs/agent/architecture.md); local-repo upload and single-host bootstrap (`--local`) are in [`docs/runbook.md`](docs/runbook.md).
 
 ## Security design
 

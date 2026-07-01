@@ -1324,9 +1324,10 @@ async function main(): Promise<void> {
     // Defer prompt composition to turn-start so a reply to a still-streaming parent
     // replays the parent's NOW-settled answer (the parent runs first on this shared
     // session). Re-collects the chain at invoke time; falls back to the eager prompt.
-    const composePrompt = parentId
+    const chainKey = parentId;
+    const composePrompt = chainKey
       ? () => {
-          const chain = collectChain(parentId!);
+          const chain = collectChain(chainKey);
           if (chain.length === 0) return prompt; // still nothing — keep eager (bare)
           log({ event: "reply_context_replayed_deferred", turns: chain.length });
           return composeFollowUpPrompt(question, chain);
@@ -1541,13 +1542,14 @@ async function main(): Promise<void> {
           // composer re-collects the chain at invoke time, by when the parent (same
           // session, runs first) has finalized + stored its answer. Skipped for a
           // fresh retry (no context wanted).
+          const fuText = value.text;
           const composeBtn = fresh
             ? undefined
             : () => {
                 const c = collectChain(fuKey);
                 if (c.length === 0) return prompt; // still nothing — keep eager (bare)
                 log({ event: "followup_context_replayed_deferred", turns: c.length });
-                return composeFollowUpPrompt(value.text!, c);
+                return composeFollowUpPrompt(fuText, c);
               };
           // The new follow-up card's PARENT is the card being followed up, so a
           // follow-up-of-this-follow-up keeps walking the chain.

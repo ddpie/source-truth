@@ -147,7 +147,6 @@ const USER_LEVEL_EVENTS: ReadonlySet<string> = new Set<UserLevelEvent>([
  *  gateway's log()), which CloudWatch Logs Insights filters on `metric:true`. */
 export type MetricSink = (record: Record<string, unknown>) => void;
 let sink: MetricSink = (record) => {
-  // eslint-disable-next-line no-console
   console.log(JSON.stringify(record));
 };
 

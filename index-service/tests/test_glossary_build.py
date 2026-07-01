@@ -365,5 +365,137 @@ def test_build_emits_per_batch_progress(monkeypatch, caplog):
         glossary_build.build(files, project="p", cwd="/tmp", model="m", region="r")
     events = [json.loads(r.message) for r in caplog.records
               if r.name == "glossary-build" and "glossary_build_batch" in r.message]
-    assert [e["batch"] for e in events] == [1, 2, 3]
+    # Batches run concurrently now, so the log ORDER isn't deterministic; assert the SET of
+    # batch numbers (one heartbeat per batch, all three present) rather than their sequence.
+    assert sorted(e["batch"] for e in events) == [1, 2, 3]
     assert all(e["batches"] == 3 and e["project"] == "p" for e in events)
+
+
+# --- concurrency + backoff: throttle-aware retry around each cc batch ----------
+import subprocess as _subp  # noqa: E402
+
+
+def _throttle_err():
+    return _subp.CalledProcessError(1, "claude", output="", stderr="ThrottlingException: rate exceeded")
+
+
+def _hard_err():
+    return _subp.CalledProcessError(2, "claude", output="", stderr="invalid --model foo")
+
+
+def test_is_throttle_error_matches_429_and_timeout():
+    assert glossary_build._is_throttle_error(_throttle_err()) is True
+    assert glossary_build._is_throttle_error(_subp.TimeoutExpired("claude", 1)) is True
+    assert glossary_build._is_throttle_error(_hard_err()) is False
+    assert glossary_build._is_throttle_error(ValueError("x")) is False
+
+
+def test_run_with_retry_retries_throttle_then_succeeds(monkeypatch):
+    monkeypatch.setenv("GLOSSARY_BUILD_MAX_RETRIES", "3")
+    monkeypatch.setenv("GLOSSARY_BUILD_RETRY_BASE_S", "1")
+    calls = {"n": 0}
+
+    def run(prompt, *, cwd, model, region, timeout):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            raise _throttle_err()
+        return '{"ok":1}'
+
+    slept = []
+    out = glossary_build._run_with_retry(
+        run, prompt="p", cwd="/x", model="m", region="r",
+        timeout=1, batch_idx=1, sleeper=slept.append, rng=lambda a, b: 0.0)
+    assert out == '{"ok":1}'
+    assert calls["n"] == 3
+    assert len(slept) == 2  # two backoffs before the 3rd success
+
+
+def test_run_with_retry_hard_error_no_retry(monkeypatch):
+    monkeypatch.setenv("GLOSSARY_BUILD_MAX_RETRIES", "3")
+    calls = {"n": 0}
+
+    def run(prompt, *, cwd, model, region, timeout):
+        calls["n"] += 1
+        raise _hard_err()
+
+    try:
+        glossary_build._run_with_retry(
+            run, prompt="p", cwd="/x", model="m", region="r",
+            timeout=1, batch_idx=1, sleeper=lambda s: None, rng=lambda a, b: 0.0)
+        assert False, "expected CalledProcessError"
+    except _subp.CalledProcessError:
+        pass
+    assert calls["n"] == 1  # hard error: no retry
+
+
+def test_run_with_retry_exhausts_then_raises(monkeypatch):
+    monkeypatch.setenv("GLOSSARY_BUILD_MAX_RETRIES", "2")
+    monkeypatch.setenv("GLOSSARY_BUILD_RETRY_BASE_S", "1")
+    calls = {"n": 0}
+
+    def run(prompt, *, cwd, model, region, timeout):
+        calls["n"] += 1
+        raise _throttle_err()
+
+    try:
+        glossary_build._run_with_retry(
+            run, prompt="p", cwd="/x", model="m", region="r",
+            timeout=1, batch_idx=1, sleeper=lambda s: None, rng=lambda a, b: 0.0)
+        assert False, "expected CalledProcessError after exhausting retries"
+    except _subp.CalledProcessError:
+        pass
+    assert calls["n"] == 3  # 1 initial + 2 retries
+
+
+def test_build_concurrency_env_fallback(monkeypatch):
+    monkeypatch.delenv("GLOSSARY_BUILD_CONCURRENCY", raising=False)
+    assert glossary_build._build_concurrency() == 8
+    monkeypatch.setenv("GLOSSARY_BUILD_CONCURRENCY", "not-a-number")
+    assert glossary_build._build_concurrency() == 8
+    monkeypatch.setenv("GLOSSARY_BUILD_CONCURRENCY", "0")
+    assert glossary_build._build_concurrency() == 8  # <=0 falls back
+    monkeypatch.setenv("GLOSSARY_BUILD_CONCURRENCY", "5")
+    assert glossary_build._build_concurrency() == 5
+
+
+def test_build_batches_preserve_order_under_concurrency(tmp_path, monkeypatch):
+    # 700 files -> 3 batches of 300/300/100. Runner tags output by first file in the
+    # batch so we can assert the concatenated raw is in batch order regardless of which
+    # thread finishes first. Each emits one valid symbol entry with a batch-ordinal concept.
+    monkeypatch.setenv("GLOSSARY_BUILD_CONCURRENCY", "4")
+    files = [f"src/f{i}.cs" for i in range(700)]
+
+    def run(prompt, *, cwd, model, region, timeout):
+        # the prompt lists the batch's files; find which batch by its first file index
+        first = next(i for i in range(700) if f"src/f{i}.cs" in prompt)
+        ordinal = first // 300
+        return json.dumps({"concept_id": f"c{ordinal}", "kind": "symbol",
+                           "value": f"Sym{ordinal}", "source": "src/f.cs",
+                           "line": 1, "confidence": "high"})
+
+    monkeypatch.setattr(glossary_build, "run_cc", run)
+    ents = glossary_build.build(files, project="p", cwd=str(tmp_path), model="m", region="r")
+    concepts = [e.concept_id for e in ents if e.kind == "symbol"]
+    assert concepts == ["c0", "c1", "c2"]  # strict batch order, not completion order
+
+
+def test_build_propagates_batch_failure_as_overall(monkeypatch, tmp_path):
+    # One batch throttles forever -> retries exhaust -> build() raises (=> upstream SKIP).
+    monkeypatch.setenv("GLOSSARY_BUILD_CONCURRENCY", "4")
+    monkeypatch.setenv("GLOSSARY_BUILD_MAX_RETRIES", "1")
+    monkeypatch.setenv("GLOSSARY_BUILD_RETRY_BASE_S", "1")
+    monkeypatch.setattr(glossary_build.time, "sleep", lambda s: None)
+    files = [f"src/f{i}.cs" for i in range(400)]  # 2 batches
+
+    def run(prompt, *, cwd, model, region, timeout):
+        if "src/f300.cs" in prompt:  # the second batch always throttles
+            raise _subp.CalledProcessError(1, "claude", stderr="ThrottlingException")
+        return json.dumps({"concept_id": "c0", "kind": "symbol", "value": "Sym0",
+                           "source": "src/f.cs", "line": 1, "confidence": "high"})
+
+    monkeypatch.setattr(glossary_build, "run_cc", run)
+    try:
+        glossary_build.build(files, project="p", cwd=str(tmp_path), model="m", region="r")
+        assert False, "expected build() to raise on a batch that never succeeds"
+    except _subp.CalledProcessError:
+        pass

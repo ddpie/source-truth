@@ -160,5 +160,23 @@ except ValueError:
     sys.exit(7)
 ' "$ROOT/scripts/lib"; [[ $? -eq 7 ]]; check "build_multi_manifest rejects a non-int port" $?
 
+# --- source field (git|local): local omits git+ref; absent defaults to git ---
+mk '{"projectId":"p","port":8080,"repos":[{"subdir":"localrepo","source":"local"}]}'
+out="$(python3 "$R" "$TMP/m.json" 2>"$TMP/err")"; rc=$?
+check "local-source repo parses without git (rc 0)" "$rc"
+printf '%s' "$out" | python3 -c 'import json,sys; r=json.loads(sys.stdin.readline()); assert r["source"]=="local" and r["git"]=="", r'; check "local repo: source=local, git empty" $?
+
+mk '{"projectId":"p","port":8080,"repos":[{"subdir":"g","git":"https://x/g.git"}]}'
+printf '%s' "$(python3 "$R" "$TMP/m.json")" | python3 -c 'import json,sys; r=json.loads(sys.stdin.readline()); assert r["source"]=="git", r'; check "absent source defaults to git" $?
+
+mk '{"projectId":"p","port":8080,"repos":[{"subdir":"g","source":"git"}]}'
+python3 "$R" "$TMP/m.json" >/dev/null 2>&1; rc=$?; [[ "$rc" -ne 0 ]]; check "git source without git url rejected" $?
+
+mk '{"projectId":"p","port":8080,"repos":[{"subdir":"g","source":"svn","git":"x"}]}'
+python3 "$R" "$TMP/m.json" >/dev/null 2>&1; rc=$?; [[ "$rc" -ne 0 ]]; check "unknown source value rejected" $?
+
+mk '{"projectId":"p","port":8080,"repos":[{"subdir":"loc","source":"local"}]}'
+[[ "$(python3 "$R" --repo-field source loc "$TMP/m.json")" == "local" ]]; check "--repo-field source prints local" $?
+
 echo "  ran=$_run failed=$_fail"
 [[ "$_fail" -eq 0 ]]

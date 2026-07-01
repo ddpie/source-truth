@@ -2,9 +2,9 @@
  * Project routing — the single trusted source mapping a project to its repo set and the
  * index-service endpoint serving them (multi-repo-isolation plan, stage 1).
  *
- * `config/projects.json` shape (JSON, not YAML — matches the existing config/i18n.json
- * convention and avoids a new yaml dependency; the plan's schema is what's load-bearing,
- * not the file extension):
+ * Config shape (deployment-specific `.local/projects.json`; committed template at
+ * `config/projects.example.json` — JSON, not YAML, matching the config/i18n.json
+ * convention and avoiding a new yaml dependency):
  *   {
  *     "projects": {
  *       "<projectId>": { "port": 8080,

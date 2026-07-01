@@ -61,11 +61,10 @@ export function currentLocale(): string {
  */
 export function t(key: string, vars?: Record<string, string | number>): string {
   if (bundle === null) initI18n();
-  let s = bundle![key];
+  let s = (bundle ?? {})[key];
   if (s === undefined) {
     if (!warned.has(key)) {
       warned.add(key);
-      // eslint-disable-next-line no-console
       console.log(JSON.stringify({ event: "i18n_missing_key", key, locale: activeLocale }));
     }
     return key;

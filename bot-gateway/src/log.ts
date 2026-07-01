@@ -23,7 +23,6 @@ import { createHash } from "node:crypto";
 const SALT_FALLBACK = "source-truth";
 const SALT = process.env.LOG_HASH_SALT ?? SALT_FALLBACK;
 if (SALT === SALT_FALLBACK) {
-  // eslint-disable-next-line no-console
   console.warn(JSON.stringify({
     event: "log_hash_salt_default",
     detail: "LOG_HASH_SALT unset — using the PUBLIC fallback salt; user-id hashes are weakly de-identified. Set LOG_HASH_SALT in the gateway env.",

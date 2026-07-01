@@ -152,4 +152,17 @@ describe("stripFollowUps", () => {
     ].join("\n");
     expect(extractFollowUps(answer)).toEqual(["真问题一？"]);
   });
+
+  it("a follow-up ITEM that merely mentions 供研发复核 is NOT a section boundary", () => {
+    // The boundary regex is heading-anchored (line start + >/🔍/** decorations);
+    // a list item whose TEXT contains the word must stay a real button — an
+    // unanchored substring match used to drop it AND every button after it.
+    const answer = [
+      "结论。",
+      "💡 你可能还想问：",
+      "- 供研发复核的证据在哪里？",
+      "- 另一个问题？",
+    ].join("\n");
+    expect(extractFollowUps(answer)).toEqual(["供研发复核的证据在哪里？", "另一个问题？"]);
+  });
 });

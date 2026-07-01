@@ -6,7 +6,7 @@
 > **本文是早期 POC 方案存档，记录当初的设计选型；落地后部分技术选择已调整，与现状不一致处以
 > [`../agent/architecture.md`](../agent/architecture.md) 为准。** 已知偏离：
 > - 代码刷新走 **systemd timer 定时 `git pull` + codegraph file-watcher 增量**，不用 push webhook / inotify；
-> - MVP 是**单引擎 Claude Code**（Codex 后置），代码来源**仅 git**（无本地目录 / S3），**仅主分支**（无 worktree 多分支）；
+> - MVP 是**单引擎 Claude Code**（Codex 后置），**仅主分支**（无 worktree 多分支）；代码来源以 git 仓为主（定时 `git pull` 跟主分支），并支持本地仓（`source:"local"`，rsync 手动推送的快照，详见 [`../runbook.md`](../runbook.md)）；
 > - 不读设计文档、不做数值模拟（均 post-MVP）；
 > - 取证经 SDK 原生 HTTP MCP 连接，**无需 stdio→HTTP 转换层**（mcp-proxy）。
 
@@ -83,7 +83,7 @@ sequenceDiagram
 |-|-|-|
 | AI 引擎 | Claude Code + Codex 双引擎 | 共享同一套索引和知识层。默认使用 Claude Code；Codex 作为备选，按管理员配置或任务特征路由 |
 | 运行环境 | AWS AgentCore Runtime | Firecracker microVM 隔离，托管扩缩容和生命周期，不自建 |
-| 代码索引 | 独立索引服务（非容器内） | 索引服务常驻持有一份 clone，靠 systemd timer 定时 `git pull` + codegraph file-watcher 增量（分钟级新鲜，见顶部偏离说明）；用户容器通过远程 MCP 查询，不占用用户侧资源 |
+| 代码索引 | 独立索引服务（非容器内） | 索引服务常驻持有一份 clone，靠 systemd timer 定时 `git pull` + codegraph file-watcher 增量（主分支改动分钟级反映，见顶部偏离说明）；用户容器通过远程 MCP 查询，不占用用户侧资源 |
 | 多分支 | git worktree | 共享对象库，每分支独立 worktree + 独立索引实例（CodeGraph 官方推荐的多分支模式），存储开销仅为工作区文件 |
 | 配置表 | AI 直接读文件 | 配置在代码仓库内（Excel/JSON/CSV），不引入中间数据库 |
 | 设计文档 | lark-cli 按需读取 | 容器内预装 lark-cli，需要时直接调用飞书 API 读文档，不预同步 |
@@ -96,7 +96,7 @@ sequenceDiagram
 
 ### 3.1 CodeGraph：为什么需要、如何工作
 
-大型代码库中，AI 仅靠 grep 逐文件搜索无法高效回答"改动会影响什么""从触发到生效经过哪些模块"这类结构性
+大型代码库中，AI 仅靠 grep 逐文件搜索很难答好"改动会影响什么""从触发到生效经过哪些模块"这类结构性
 问题。CodeGraph 预构建代码调用关系图（基于 Tree-sitter，支持 C#、C++、TypeScript、Python、Lua、Go、
 Java、Kotlin、Swift、Ruby 等主流语言），AI 通过 `codegraph_impact`（影响分析）/ `codegraph_callers`
 （调用链）/ `codegraph_search`（符号定位）等工具一次查询获取结果。
@@ -118,7 +118,7 @@ graph LR
 > MCP-over-HTTP 接口（`codegraph_read_file` / `codegraph_glob_files` / `codegraph_search_files` + 定位类）。
 
 - 会话容器与索引服务不共享挂载：索引服务在本地磁盘持唯一一份代码副本、监听变更构建索引——一份代码，
-  无副本同步问题；定位查询与文件读取都由索引服务经 HTTP 接口暴露给会话容器
+  无副本同步问题；定位查询与文件读取都由索引服务经 HTTP 接口提供给会话容器
 - AI 通过索引定位文件后，读取的是代码最新版本（非索引快照）
 - 刷新靠 systemd timer 定时 `git pull` + file-watcher 增量（HEAD 未变即跳过），无夜间全量重建兜底
 
@@ -207,7 +207,7 @@ MCP-over-HTTP 接口（定位 + 读文件工具）提供给所有会话容器，
 | AgentCore Session Storage | Preview | 会话级独占存储，14 天空闲过期；Preview 阶段，正式商用前需复核可用性 |
 | Claude Code Agent SDK | GA | 官方容器化方案 |
 | Codex CLI | GA | headless 模式 |
-| CodeGraph | 开源 | MCP server（stdio），经索引服务侧代理暴露 HTTP；文件监听增量 |
+| CodeGraph | 开源 | MCP server（stdio），经索引服务侧代理转成 HTTP 提供；文件监听增量 |
 | lark-cli | GA | 飞书文档读取 |
 | 飞书 CardKit 流式卡片 | GA | 客户端 7.20+ |
 | 飞书 CardKit 图表组件 | GA | VChart 规范，支持柱状/折线/饼图等，依赖较新客户端版本 |

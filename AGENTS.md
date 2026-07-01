@@ -38,7 +38,7 @@ Bash（`scripts/`）。会话容器 ARM64-only。
 规划中的命令（**尚未实现**，阶段标注见 `scripts/README.md`；不要当作已存在去调用）：
 
 ```bash
-./scripts/ops.sh status     # (p2) 运维：三组件健康 + 索引新鲜度
+./scripts/ops.sh status     # (p2) 运维：三组件健康 + 索引时效
 ```
 
 MVP 阶段 Runtime 用 `agentcore` starter toolkit / boto3 配，不强求 CDK——见

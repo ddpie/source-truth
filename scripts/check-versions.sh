@@ -70,9 +70,13 @@ if [[ -f "$DOCKERFILE" ]]; then
   # 5. claude-code npm: EXACT-pin OR @latest (operator choice 2026-06-19 — track
   #    latest, trading reproducibility for fastest upstream fixes). A bare
   #    `claude-code` with NO @tag is still an error (ambiguous).
-  if grep -qE '@anthropic-ai/claude-code@[0-9]' "$DOCKERFILE"; then
+  #    只看 npm install 行，不看注释——注释里的 @latest 曾可能掩盖安装行漏写 tag。
+  cc_install="$(grep -E 'npm install[^#]*@anthropic-ai/claude-code' "$DOCKERFILE" || true)"
+  if [[ -z "$cc_install" ]]; then
+    err "Dockerfile 未找到 @anthropic-ai/claude-code 的 npm install 行"
+  elif grep -qE '@anthropic-ai/claude-code@[0-9]' <<< "$cc_install"; then
     ok "@anthropic-ai/claude-code 已 EXACT-pin"
-  elif grep -qE '@anthropic-ai/claude-code@latest' "$DOCKERFILE"; then
+  elif grep -qE '@anthropic-ai/claude-code@latest' <<< "$cc_install"; then
     warn "@anthropic-ai/claude-code 用 @latest（按运维选择跟最新；牺牲可复现，回归时改回 @<version>）"
   else err "@anthropic-ai/claude-code 未带 @tag（应 @<version> 或 @latest）"; fi
 fi
