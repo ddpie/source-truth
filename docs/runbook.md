@@ -3,56 +3,44 @@
 从零部署 source-truth、接入飞书并完成日常运维的指引。工作原理见
 [`agent/architecture.md`](agent/architecture.md)；本文只讲**怎么做**。
 
-整套系统分为两部分：
+系统分两部分，由部署脚本一并启动：**后端**（S3 产物 → IAM → 网络 → index-service EC2 → 镜像 → AgentCore Runtime）和 **bot-gateway**（飞书长连接网关，与索引服务同主机，将群聊中 @ 机器人的消息路由到后端、答案流式写回卡片）。
 
-- **后端**：S3 产物 → IAM → 网络 → index-service(EC2) → 镜像(ECR) → AgentCore Runtime。
-- **bot-gateway**：飞书长连接网关，把群里的 @ 消息路由到后端，再把答案流式写回卡片。**网关与索引服务同主机**
-  （index-service 那台 EC2 上的第二个 systemd 服务），由部署脚本一并拉起。
-
-> **先定拓扑（用几台机器）**：
-> - **默认（双机）**：在一台部署机上跑脚本，由它新建并配置一台索引主机 EC2。网络全自动、机器职责清晰——首次交付推荐。走第二节。
-> - **单机（`--local`）**：只用一台 EC2，在这台机器上既完成部署又常驻运行，省去单独的部署机。见[第二节末「在单台 EC2 上就地部署」](#在单台-ec2-上就地部署--local)。
->
-> **再定入口（两种拓扑都适用）**：
-> - **`install.sh`（推荐）**：交互式，问区域 / 代码仓 / 飞书凭证，写进 Secrets Manager，一次把后端和网关都装好。
-> - **`deploy-all.sh`（进阶）**：直接传参（CI、可复现、可跳过某阶段）。见 [附录 A](#附录-a手动-deploy-allsh)。
->
-> 两者都**幂等**：失败后重新运行会从未完成的部分继续。`install.sh` 重新运行时，上次填过的内容会自动填入作为默认值。
+部署入口有 `install.sh`（交互式，推荐）与 `deploy-all.sh`（命令行传参，适合 CI）；拓扑分双机与单机（`--local`）。「快速开始」给出各自的命令，选型细节见[第二节](#二一键安装交互式推荐)。所有部署均**幂等**，中断后重新运行将从断点继续。
 
 ## 快速开始
 
-本节给出最简部署步骤，后续各节是对应的详细说明与运维参考。前提：本机装好 `aws` CLI 并配好可部署的凭证；飞书应用先按[第三节](#三接入飞书connect-清单)建好，拿到 `App ID` / `App Secret` / 机器人 `open_id`。
+最简部署步骤，详细说明见后续各节。前提：本机已安装 `aws` CLI 并配置好凭证；飞书应用已按[第三节](#三接入飞书)创建，取得 `App ID` / `App Secret` / 机器人 `open_id`。
 
-**默认（双机）**——在你的部署机上：
+**默认（双机）**——在部署机上执行：
 
 ```bash
 git clone https://github.com/ddpie/source-truth.git && cd source-truth
-./scripts/install.sh          # 交互填区域 / 代码仓 / 飞书凭证，一次装好后端和网关
+./scripts/install.sh          # 按交互提示填写区域 / 代码仓 / 飞书凭证，一次装好后端与网关
 ```
-详见[第二节](#二一键安装交互式推荐)；装完照[第五节](#五验证端到端冒烟)验证。
+详见[第二节](#二一键安装交互式推荐)；完成后按[第五节](#五验证端到端冒烟)验证。
 
-**单机（`--local`）**——三步走：**起机器 → 装服务 → 推代码**。
+**单机（`--local`）**——分三步：**创建主机 → 部署服务 → 推送代码**。
 
-**第一步 · 起机器**（本机）：创建 EC2；命令跑完会打印一条登录用的 `ssh` 命令，下一步要用。
+**第一步 · 创建主机**（本机执行）：创建 EC2 实例，脚本结束时会输出一条登录用的 `ssh` 命令，供下一步使用。
 
 ```bash
 git clone https://github.com/ddpie/source-truth.git && cd source-truth
 ./scripts/launch-host.sh
 ```
 
-**第二步 · 装服务**（用上一步的 `ssh` 命令登录机器后运行）：跟着 `install.sh` 交互填代码仓 / 模型 / 飞书凭证，装完后端（bridge + runtime + gateway）就都起来了。
+**第二步 · 部署服务**（用上一步输出的 `ssh` 命令登录实例后执行）：按 `install.sh` 的交互提示填写代码仓 / 模型 / 飞书凭证，完成后后端三个组件（bridge、runtime、gateway）全部就绪。
 
 ```bash
-bash /tmp/prepare-local-host.sh   # 直接用 launch-host 打印的那条即可
+bash /tmp/prepare-local-host.sh   # 建议直接复制 launch-host 输出的命令
 ```
 
-**第三步 · 推代码**（回本机，仅本地仓需要）：本地仓要先把代码推上去，机器人才能开始回答；之后代码有改动，再推一次即可刷新。
+**第三步 · 推送代码**（本机执行，仅本地仓需要）：本地仓须先推送代码，机器人方可应答；此后每次代码变更，重新推送即完成刷新。
 
 ```bash
 ./scripts/push-local-repo.sh --host <ssh-host> [--identity <key>] <子目录> <本地路径>
 ```
 
-每步的细节（SSH 私钥、私有仓凭证、首推建图等）见[第二节末「在单台 EC2 上就地部署」](#在单台-ec2-上就地部署--local)与[第九节末「本地仓上传」](#本地仓上传)；首次部署后照[附录 C](#附录-c首次部署后的真机核对清单)逐项核对。
+各步细节（SSH 私钥、私有仓凭证、首次推送建立索引等）见[第二节末「在单台 EC2 上就地部署」](#在单台-ec2-上就地部署--local)与[第九节末「本地仓上传」](#本地仓上传)；首次部署完成后按[附录 C](#附录-c首次部署后的真机核对清单)逐项核对。
 
 **目录**
 
@@ -60,7 +48,7 @@ bash /tmp/prepare-local-host.sh   # 直接用 launch-host 打印的那条即可
 1. [前置条件（一次性）](#一前置条件一次性)
 2. [一键安装（交互式，推荐）](#二一键安装交互式推荐)
    - [在单台 EC2 上就地部署（`--local`）](#在单台-ec2-上就地部署--local)
-3. [接入飞书（connect 清单）](#三接入飞书connect-清单)
+3. [接入飞书](#三接入飞书)
 4. [网关运行位置](#四网关运行位置)
 5. [验证（端到端冒烟）](#五验证端到端冒烟)
 6. [日常运维（day-2）](#六日常运维day-2)
@@ -70,6 +58,7 @@ bash /tmp/prepare-local-host.sh   # 直接用 launch-host 打印的那条即可
 - [附录 A：手动 deploy-all.sh](#附录-a手动-deploy-allsh)
 - [附录 B：本地手动启动网关（开发调试）](#附录-b本地手动启动网关开发调试)
 - [附录 C：首次部署后的真机核对清单](#附录-c首次部署后的真机核对清单)
+- [附录 D：手动刷新监控](#附录-d手动刷新监控)
 
 ---
 
@@ -86,7 +75,7 @@ bash /tmp/prepare-local-host.sh   # 直接用 launch-host 打印的那条即可
    仅当查不到匹配档时 preflight 会 WARN 并列出该区域可用的档。
 4. **目标代码仓**：要被问答的游戏代码仓，两种来源（同项目可混用）：
    - **git 仓**（推荐，配置里写 `source: "git"`，默认值）：`https://github.com/org/repo.git`、`https://gitlab.com/org/repo.git`、`git@host:org/repo.git`，可选分支 / 标签 / 提交。index-service clone 到本地、定时 `git pull`，主分支改动分钟级内反映到问答。私有仓需一份只读访问凭证（写入 Secrets Manager，由索引主机取用）。
-   - **本地仓**（配置里写 `source: "local"`，用于代码只在本地、推不到任何 git 远端的情况）：部署后用 `scripts/push-local-repo.sh` 经 rsync 直推到索引主机（见[第九节末「本地仓上传」](#本地仓上传)）。推上去的是某一刻的快照，不会自动跟代码变化——改了代码就重跑一次上传命令。
+   - **本地仓**（配置里写 `source: "local"`，用于代码只在本地、推不到任何 git 远端的情况）：部署后用 `scripts/push-local-repo.sh` 经 rsync 直推到索引主机（见[第九节末「本地仓上传」](#本地仓上传)）。推送的是某一时刻的快照，不会自动跟随代码变化——代码变更后需重新运行一次上传命令。
 5. **飞书应用**（见第三节，可与部署并行准备）。
 
 ---
@@ -124,11 +113,11 @@ bash <(gh api repos/ddpie/source-truth/contents/scripts/get.sh --jq '.content' |
 > 若想先把 AWS 环境建好、之后再配 git，选「**初始化环境（不挂项目）**」：只起共享底座，机型/磁盘见下表。
 
 索引主机是整套系统唯一一台 EC2（同机跑 codegraph 索引 + 各项目 bridge + 各项目 bot-gateway，全 ARM）。
-codegraph 索引吃内存、随仓库增大而增长，按仓库规模选机型；磁盘存放各仓 git 副本与 `graph.db`，按总体积选容量：
+codegraph 索引占用内存较高，且随仓库增大而增长，按仓库规模选机型；磁盘存放各仓 git 副本与 `graph.db`，按总体积选容量：
 
 | 机型 | vCPU / 内存 | 适用 |
 |---|---|---|
-| `t4g.large`（默认） | 2C / 8G | 小中仓，突发型省钱 |
+| `t4g.large`（默认） | 2C / 8G | 小中型仓库，突发型实例更省成本 |
 | `t4g.xlarge` | 4C / 16G | 中大仓 |
 | `m7g.large` | 2C / 8G | 内存型，持续负载更稳 |
 | `m7g.xlarge` | 4C / 16G | 大仓·稳定 |
@@ -136,23 +125,24 @@ codegraph 索引吃内存、随仓库增大而增长，按仓库规模选机型�
 
 磁盘默认 30 GiB，可选 50 / 100 / 200 GiB 或自定义容量。
 
-**术语表构建上限**（初始化环境时会问一次「术语表构建文件上限」）：术语表把中文业务词对应到代码里
-真实出现的英文符号，让策划用中文也能命中英文代码——它在 index 主机后台离线构建（首启会自动装一个
-本地 `claude` CLI 作为构建引擎），不在问答路径上。这个上限控制每次构建扫多少文件：
+**术语表构建上限**（初始化环境时会询问一次「术语表构建文件上限」）：术语表将中文业务词对应到代码中
+真实出现的英文符号，使策划用中文也能命中英文代码——它在 index 主机后台离线构建（首次启动时自动安装
+本地 `claude` CLI 作为构建引擎），不在问答路径上。该上限控制每次构建扫描的文件数：
 
-| 选项 | 适用 | 成本量级（一次性） |
+| 选项 | 适用场景 | 成本量级（一次性） |
 |---|---|---|
-| `400`（默认） | 日常够用，覆盖高频概念 | 约 $10 量级 |
-| `1000` / `4000` | 想要更广 / 大仓深覆盖 | 随文件数线性增长 |
+| `400`（默认） | 覆盖高频概念，适用于日常问答 | 约 $10 量级 |
+| `1000` / `4000` | 覆盖更广 / 大仓深度覆盖 | 随文件数线性增长 |
 | `0`（不限） | 全量、最高覆盖 | 大仓可达数百美元 |
 
-成本随文件数线性增长（首次全量是一次性，之后只扫代码变更的增量、成本很低）。**纯英文 / 无中文项目
-保持默认即可**——术语表会自动为空、零开销、不影响问答。改这个上限需重新初始化主机才生效（见第六节
-「改术语表构建上限」），日常无需调整。
+成本随文件数线性增长（首次全量为一次性开销，之后仅扫描代码变更的增量，成本很低）。**纯英文 / 无中文
+项目建议保持默认**——术语表会自动为空、零开销、不影响问答功能。调整该上限需重新初始化主机方可生效
+（见第六节「改术语表构建上限」），常规运维中无需调整。
 
-> 术语表是**后台异步**构建：部署完成后问答立即可用；大仓首次全量可能要几十分钟，**这段时间问答正常**，
-> 只是中文冷僻词可能还没对应上。构建进度/结果在主机日志里（`journalctl` 找 `glossary_gen_done` /
-> `glossary_gen_cc_failed`）。构建失败（如 cc 没装上）只让术语表暂时为空，**不影响问答**。
+> 术语表为**后台异步**构建：部署完成后问答功能立即可用；大仓首次全量构建可能耗时数十分钟，其间问答
+> 功能不受影响，仅中文冷僻词可能尚未对应。构建进度与结果记录在主机日志中（`journalctl` 查
+> `glossary_gen_done` / `glossary_gen_cc_failed`）。构建失败（例如 cc 未成功安装）仅导致术语表暂时为
+> 空，不影响问答功能。
 
 成功后应看到：
 
@@ -172,44 +162,44 @@ codegraph 索引吃内存、随仓库增大而增长，按仓库规模选机型�
 ./scripts/launch-host.sh          # 也可 --profile <名> --region <r> 跳过前两个提问；--dry-run 先预览计划
 ```
 
-它按顺序执行（全自动、每步幂等）：选 profile → 建/复用 IAM 角色 → 若是私有仓，取你本机 `gh` 的 token 存进 Secrets Manager（见下「GitHub 凭证」）→ **自动创建一套 source-truth 专用网络**（VPC + 公私子网 + IGW + NAT，账号中已有则复用，无需手动选 VPC/子网）→ 创建安全组（只放行你当前出口 IP 的 22 端口）→ 选密钥/机型/磁盘 → 在公有子网创建一台 ARM64 EC2、挂好实例角色。
+它按顺序执行（全自动、每步幂等）：选择 profile → 创建 / 复用 IAM 角色 → 若为私有仓，取本机 `gh` 的 token 存入 Secrets Manager（见下「GitHub 凭证」）→ **自动创建 source-truth 专用网络**（VPC + 公私子网 + IGW + NAT，账号中已有则复用，无需手动选择 VPC / 子网）→ 创建安全组（仅放行当前出口 IP 的 22 端口）→ 选择密钥 / 机型 / 磁盘 → 在公有子网创建一台 ARM64 EC2 并挂载实例角色。
 
-创建好后，它会**问你 SSH 私钥路径**（默认猜 `~/.ssh/<你选的 key pair>.pem`），用它把部署脚本 [`scripts/prepare-local-host.sh`](../scripts/prepare-local-host.sh) 传到 EC2，然后**打印一条 `ssh` 登录命令**。你照它登录机器，运行那条脚本：装好 install.sh 需要的依赖（`aws` / `docker` / `git` / boto3）、用第一步存好的凭证登录 GitHub、克隆仓库，最后进入 `install.sh --local` 交互（填代码仓 / 模型 / 飞书凭证）。**故意不替你自动跑**——脚本在你眼前一步步执行，哪一步卡住（比如 preflight 提示某依赖）能当场处理，断了重连再跑即可。
+创建完成后，脚本会**提示输入 SSH 私钥路径**（默认推断为 `~/.ssh/<所选 key pair>.pem`），据此将部署脚本 [`scripts/prepare-local-host.sh`](../scripts/prepare-local-host.sh) 传至 EC2，并**输出一条 `ssh` 登录命令**。按该命令登录实例并运行脚本：安装 install.sh 所需依赖（`aws` / `docker` / `git` / boto3）、用第一步存入的凭证登录 GitHub、克隆仓库，最后进入 `install.sh --local` 交互（填写代码仓 / 模型 / 飞书凭证）。**脚本刻意不自动执行**——执行过程逐步可见，若某一步中断（如 preflight 报告依赖缺失），可当场排查；连接断开后重连再次运行即可从中断处继续。
 
-> 私钥留空、或连不上（私钥不对、机器还没起好）时，launch-host 会改为打印三条命令（`scp` 上传 + `ssh` 登录 + 登录后运行）让你手动完成——同样不含 token。
+> 私钥留空、或无法连接（私钥不匹配、实例尚未启动完成）时，launch-host 改为输出三条命令（`scp` 上传 + `ssh` 登录 + 登录后运行）供手动完成——同样不含 token。
 
-首次部署约 10–20 分钟（bootstrap 与镜像构建都在本机串行执行，比双机略慢）。
+首次部署约 10–20 分钟（bootstrap 与镜像构建均在本机串行执行，比双机略慢）。
 
-**失败后重跑**：每一步都幂等，**从中断的地方重新运行即可，不必从头开始**。脚本已在机器上时，直接 SSH 进去重跑 `bash /tmp/prepare-local-host.sh`（或 `cd source-truth && ./scripts/install.sh --local`）即可续。若机器已创建、之后才中断，重新运行 `launch-host.sh` 会**自动复用它**（已停止的会先启动），照常问 SSH 私钥、重新传脚本并打印登录命令，不会再创建一台；确需一台全新的，加 `--new-host`。
+**中断后重新运行**：每一步均幂等，从中断处重新运行即可，无需从头执行。脚本已在实例上时，SSH 登录后重新运行 `bash /tmp/prepare-local-host.sh`（或 `cd source-truth && ./scripts/install.sh --local`）即可从中断处继续。若实例已创建、之后才中断，重新运行 `launch-host.sh` 会**自动复用该实例**（已停止的先启动），照常提示 SSH 私钥、重新传脚本并输出登录命令，不会重复创建；确需全新实例时加 `--new-host`。
 
 **四点需要注意**
 
-- **GitHub 凭证（私有仓必看）**：这台 EC2 要自己克隆仓库、下载 codegraph 二进制（私有 Release）、将来 `git pull` 升级，因此需要访问 GitHub。`launch-host.sh` 会取你本机 `gh` 的登录 token（没有则提示你粘贴一个只读 PAT，scope 仅需 repo:read），存进 Secrets Manager；上机执行的 `prepare-local-host.sh` 用实例角色取回、在机器上 `gh auth login` 持久化（存于该机 `~/.config/gh`，权限 600）。之后升级与 Release 下载都自动带凭证，无需再传。**公开仓可跳过**（提示 token 时留空即可）。换机或停用时记得吊销该 token。
+- **GitHub 凭证（私有仓必看）**：该 EC2 需自行克隆仓库、下载 codegraph 二进制（私有 Release）、后续 `git pull` 升级，因此需访问 GitHub。`launch-host.sh` 取本机 `gh` 的登录 token（若无则提示粘贴一个只读 PAT，scope 仅需 repo:read）存入 Secrets Manager；在实例上执行的 `prepare-local-host.sh` 通过实例角色取回，并在实例上 `gh auth login` 持久化（存于该机 `~/.config/gh`，权限 600）。后续升级与 Release 下载均自动携带凭证，无需再次传入。**公开仓可跳过**（提示 token 时留空即可）。更换实例或停用时，请及时吊销该 token。
 - **机器规格**：必须为 ARM64（aarch64）、Ubuntu 24.04（镜像与 codegraph-server 均为 ARM，x86 会被拦下）；部署用户需具备免密 sudo。launch-host 已设置 IMDSv2 与 hop-limit 1。
 - **权限较大、建议专机专用**：`--local` 调用 AWS 用的是这台机器的**实例角色**（不是你本地的 profile——登录 EC2 后即不再可用），它既需建资源的权限，也需运行期权限，**范围偏大，这台机器不建议与其它业务共用**。角色名 `source-truth-index-role` 与默认部署共用（IAM 角色为账号级、不分区域）：`create-iam.sh` 幂等复用、只补权限不重建；但需注意，**若同账号已有默认部署在使用该角色，补上部署期权限后那台机器也会一并获得**——如需让默认部署保持最小权限，请换一个账号运行 `--local`。
-- **NAT 不可省略**：机器位于公有子网（有公网 IP 供 SSH），但 AgentCore Runtime 位于私有子网、经 **NAT** 访问 Bedrock——Runtime 的网卡由 AWS 托管、无公网 IP，无法经 IGW 出网，因此必须有 NAT（固定费用约每月 $32 起）。bridge 端口（8080-8099）只对同一安全组内成员开放，外部无法访问。
+- **NAT 不可省略**：实例位于公有子网（有公网 IP 供 SSH），但 AgentCore Runtime 位于私有子网、经 **NAT** 访问 Bedrock——Runtime 的网卡由 AWS 托管、无公网 IP，无法经 IGW 访问外网，因此必须配置 NAT（固定费用约每月 $32 起）。bridge 端口（8080-8099）仅对同一安全组内成员开放，外部无法访问。
 
-**升级**：登录**同一台机器**（部署状态 `.local/` 都在它上面），运行 `cd source-truth && git pull && ./scripts/deploy-all.sh --region <r> --local`。不走双机的蓝绿换机，而是就地重建镜像、更新 runtime、重启网关与索引；期间有一段服务中断（与首次部署相当），建议在低峰期操作。
+**升级**：登录**同一台实例**（部署状态 `.local/` 均保存于其上），运行 `cd source-truth && git pull && ./scripts/deploy-all.sh --region <r> --local`。此模式不采用双机的蓝绿换机，而是就地重建镜像、更新 runtime、重启网关与索引服务；其间会有一段服务中断（时长与首次部署相当），建议在低峰期操作。
 
-## 三、接入飞书（connect 清单）
+## 三、接入飞书
 
-在[飞书开放平台](https://open.feishu.cn)按顺序配置应用（后面的步骤依赖前面的：先有机器人才能开
-发消息权限，权限/事件/机器人都配好后才发布生效）：
+在[飞书开放平台](https://open.feishu.cn)按顺序配置应用（后续步骤依赖前序：须先启用机器人才能开通
+发消息权限，权限 / 事件 / 机器人均配置完成后再发布生效）：
 
 1. **创建企业自建应用**：「开发者后台」→「创建应用」→「企业自建应用」。建好后在「凭证与基础信息」页
    记下 `App ID`（`cli_...`）和 `App Secret`。
 2. **启用机器人**：在「机器人」页打开机器人能力，记下它的 `open_id`（`ou_...`）——即 `FEISHU_BOT_OPEN_ID`
-   （用于判断群里 @ 的是不是它）。**先有机器人，下一步的发消息权限才有意义。**
-3. **权限（scope）**：在「权限管理」开通以下（少一个，对应功能就静默失效）：
+   （用于判断群里 @ 的是否为该机器人）。**须先启用机器人，后续的发消息权限才能生效。**
+3. **权限（scope）**：在「权限管理」开通以下权限（缺少任一项，对应功能将静默失效）：
    - `im:message`、`im:message.group_at_msg`：读群里 @ 机器人的消息；
    - `im:message:send_as_bot`：以机器人身份发消息 / 回复 / 加「处理中」表情（调 `im/v1/messages` 及其
      `reactions` 子接口——表情回应由消息收发权限覆盖，无需单独的资源 scope）；
-   - **CardKit 卡片**：在「权限管理」搜「卡片」，按 `cardkit/v1/cards` 接口的依赖项勾选；缺它卡片建不出来。
+   - **CardKit 卡片**：在「权限管理」搜索「卡片」，按 `cardkit/v1/cards` 接口的依赖项勾选；缺少该权限将无法创建卡片。
 4. **事件订阅**：选**长连接**模式（不是 webhook——本系统是长驻订阅，不暴露公网回调），订阅两个事件：
    - `im.message.receive_v1`：收到群消息；
    - `card.action.trigger`：卡片按钮点击（停止 / 追问 / 澄清）。
-5. **创建版本并发布**：第 2–4 步的改动都要发布后才对线上生效（企业内部可走自助审批）。只存草稿不发布，
-   机器人不响应。
+5. **创建版本并发布**：第 2–4 步的改动均需发布后才对线上生效（企业内部可走自助审批）。仅保存草稿而不发布，
+   机器人不会响应。
 
 发布之后，还有两件事（与飞书后台无关，顺序不限）：
 
@@ -226,7 +216,7 @@ codegraph 索引吃内存、随仓库增大而增长，按仓库规模选机型�
 
 ## 四、网关运行位置
 
-走 `install.sh`（或 `deploy-all.sh` 的 gateway 阶段）后，每个项目的网关都作为 **`bot-gateway@<项目>.service`**
+经 `install.sh`（或 `deploy-all.sh` 的 gateway 阶段）部署后，每个项目的网关都作为 **`bot-gateway@<项目>.service`**
 （systemd 模板单元，如 `bot-gateway@mangos.service`）在 index-service 那台 EC2 上长驻运行——无需单独启动进程。
 常用运维（把 `<项目>` 换成实际 projectId）：
 
@@ -238,7 +228,7 @@ aws ssm start-session --region <r> --target <INDEX_SERVICE_INSTANCE>
 ```
 
 > **只能有一个网关实例连接同一个飞书应用**：飞书长连接是集群模式，每个事件只投给一个 client，
-> 同一 app 运行两个网关（例如本地又启动一个）会互相争抢事件、表现异常。本地调试时先停掉实例上的服务。
+> 同一 app 运行两个网关（例如本地额外启动一个）会互相争夺事件、导致行为异常。本地调试时应先停止实例上的对应服务。
 
 本地启动网关（开发调试用）见 [附录 B](#附录-b本地手动启动网关开发调试)。
 
@@ -266,7 +256,7 @@ aws ssm start-session --region <r> --target <INDEX_SERVICE_INSTANCE>
 
 ## 六、日常运维（day-2）
 
-> 运维聚合命令 `ops.sh status` 尚未实现（规划中，p2）；当前用下面的手动命令。
+> 运维聚合命令 `ops.sh status` 尚未实现（规划中，p2）；当前请使用下列手动命令。
 
 **代码更新了，刷新索引**：**无需手动操作**。每个仓库按 `refreshIntervalSec`（默认 300 秒）由 systemd timer
 定时 `git pull`，常驻 codegraph 的 file-watcher 在几秒内增量重建该仓的内存图——不重启、无中断。改频率就改
@@ -274,16 +264,16 @@ aws ssm start-session --region <r> --target <INDEX_SERVICE_INSTANCE>
 用于**换索引服务自身的代码/机型**（蓝绿换整机），不再用于刷新业务代码。多项目部署见第七节。
 
 **改术语表构建上限（`GLOSSARY_MAX_FILES`）**：该值在主机首次启动时写入 `/etc/index-service.env`，**对已在
-运行的主机改了重跑不会生效**（复用实例不重写该文件）。要让新上限生效，用 `--refresh-index` 蓝绿换整机；或
+运行的主机上修改后重新部署不会生效**（复用实例不重写该文件）。要让新上限生效，用 `--refresh-index` 蓝绿换整机；或
 临时进实例手改 `/etc/index-service.env` 的 `GLOSSARY_MAX_FILES`，等下一轮刷新构建按新值跑。日常无需调整。
 
-**只重部署 runtime**（改了 agent 镜像 / system prompt 后）：重跑 `deploy-all.sh`（镜像与 runtime 阶段幂等）。
+**只重部署 runtime**（修改 agent 镜像 / system prompt 后）：重新运行 `deploy-all.sh`（镜像与 runtime 阶段幂等）。
 注意仍存活的 microVM 会使用旧镜像约 15 分钟，直到被回收。
 
 **调整 microVM 存活时长（追问命中率 vs 成本）**：`deploy-all.sh --idle-timeout <秒>`（默认 900，即 15 分钟，
 范围 60–28800）。该参数同时设置 AgentCore 的 `idleRuntimeSessionTimeout` 与网关的 session 复用 TTL，二者自动对齐。
 AgentCore 空闲时 CPU 免费、内存照常计费。调大延长 microVM 存活、提高追问命中存活实例的概率，代价是多付这段空闲期的内存。
-多数会话一次问答就结束，所以默认 15 分钟；追问密集（如客服式高频问答）可调大，要省钱则调小。
+多数会话在一次问答后即结束，故默认 15 分钟；追问密集（如客服式高频问答）可调大，需控制成本则调小。
 详见 [`agent/architecture.md`](agent/architecture.md)「Runtime 调参与成本权衡」。
 
 **查看网关日志**（每项目一个 `bot-gateway@<项目>.service`，结构化 JSON 日志进 journald）：
@@ -317,35 +307,13 @@ cache_read）。后端 403/超时这类「卡片失败但不知卡在哪一段�
 
 ```bash
 aws ssm start-session --region <r> --target <INDEX_SERVICE_INSTANCE>
-# 实例内：journalctl -u index-bridge-<项目> -f   （建图日志：index-build@<仓> 单元）
+# 实例内：journalctl -u index-bridge-<项目> -f   （建立索引的日志：index-build@<仓> 单元）
 ```
 
-**重启网关**（实例内）：`sudo systemctl restart bot-gateway@<项目>`。改了飞书凭证后，重跑
+**重启网关**（实例内）：`sudo systemctl restart bot-gateway@<项目>`。修改飞书凭证后，重新运行
 `install.sh`（或 deploy 的 gateway 阶段）会重写 `/etc/bot-gateway-<项目>.env` 并重启服务。
 
-**监控：指标 / 看板 / 告警**（CloudWatch 侧，部署期身份需 `logs:PutMetricFilter` /
-`cloudwatch:PutDashboard,PutMetricAlarm` / `sns:CreateTopic`；不是运行时角色）。
-
-> **`deploy-all.sh` 的 Phase 7（monitoring）已自动执行这四步**（best-effort：网关日志组尚未创建时只告警，
-> 不中断部署；重跑 deploy 即可补齐）。**正常一键部署无需手动执行**；下面的手动命令用于：单独刷新看板/阈值、
-> deploy 时 monitoring 被 `--skip monitoring`、或首次部署网关刚启动且尚未写入第一行日志（log group 未生成）后的补跑。
-
-幂等、可重跑、换区域只改 `--region`。**顺序固定：先指标 filter，再看板/告警**（告警引用 metric，metric 由 filter 产出）：
-
-```bash
-# 1. A 类指标 filter（看板读的计数/分位/分布）
-./scripts/apply-metric-filters.sh --region <r>            # --dry-run 先看计划
-# 2. 看板（三页：产品用量 + SRE 健康（顶部告警）+ 分项目拆分）
-./scripts/apply-dashboards.sh --region <r>
-# 3. 告警 + SNS（apply-alarms 会先自动应用告警专用 dense filter，再建 alarm——顺序内建，避免引用空指标）
-./scripts/apply-alarms.sh --region <r>
-#    告警阈值在 config/alarm-thresholds.json（运维可调，改完重跑本步即可）。
-#    订阅是手动一步（邮件需点确认链接）：
-#    aws sns subscribe --region <r> --topic-arn <脚本打印的 ARN> --protocol email --notification-endpoint you@example.com
-# 4. DAU 预聚合 Lambda + 每日调度（产品看板的「日活」widget 读它产出的 SourceTruth/Gateway DAU 指标）
-./scripts/apply-dau-lambda.sh --region <r>
-#    每日运行一次，查询前一天的去重活跃用户数。不运行这步则看板 DAU widget 持续为空（其余 widget 不受影响）。
-```
+**监控：指标 / 看板 / 告警**——`deploy-all.sh` 的 Phase 7 已自动部署整套（CloudWatch 指标 filter、三页看板、告警 + SNS、DAU 预聚合 Lambda），**正常无需手动干预**。只在单独刷新看板/阈值、或 deploy 时 `--skip monitoring` 后需要补充执行时才手动运行——命令见[附录 D](#附录-d手动刷新监控)。告警的 SNS 订阅需手动确认一次（邮件点确认链接）。
 
 关键告警：`ToolcallLeakDetected`（工具调用指令文本漏进卡片）、`FinalizeFailed`（卡片未正常结束、停在「分析中」）、
 `AnswerFailedBurst`（回答失败率激增）、`LogPipelineStalled`（网关每 60 秒发一次 `gateway_heartbeat` 心跳日志，
@@ -375,13 +343,13 @@ refreshIntervalSec?}`，`source` 默认 `git`、本地仓写 `local`）。顶层
 
 全部操作走 `./scripts/install.sh` 的箭头菜单：
 
-- **初始化环境（不挂项目）**：只起共享底座（VPC/NAT/EC2/镜像），不挂任何项目。适合先把 AWS 环境拉起来、
-  之后再凭 git 地址与凭证挂项目（即「先部署环境、后配置 git」）。
+- **初始化环境（不挂项目）**：只启动共享底座（VPC/NAT/EC2/镜像），不挂任何项目。适合先搭建 AWS 环境、
+  之后再凭 git 地址与凭证挂载项目（即「先部署环境、后配置 git」）。
 - **添加项目**：交互填 projectId → 逐个加仓库（每个仓选 git 或本地：git 仓填地址 + 分支，本地仓选 local 后用 push-local-repo.sh 推送）→ 索引服务端口（自动建议下一个未用值）
   → 飞书 App 凭证（自动写入 `source-truth/feishu-<项目>`）→ 首次还会收一个**只读 git 凭证**写入全局
   `source-truth/git-credentials`（后续项目复用）。随后写入清单并部署该项目（其余项目不受影响）。
-- **重新部署现有项目**：改了某项目的仓库集合 / 端口 / 刷新间隔后，选它重跑（幂等）。
-- **删除项目**（破坏性，需打项目名二次确认）：停并删除该项目的 bridge/gateway/runtime、各仓代码副本（含本地仓的 `.incoming` 暂存目录）与术语表，从清单移除；
+- **重新部署现有项目**：修改某项目的仓库集合 / 端口 / 刷新间隔后，选择该项目重新部署（幂等）。
+- **删除项目**（破坏性，需输入项目名二次确认）：停止并删除该项目的 bridge/gateway/runtime、各仓代码副本（含本地仓的 `.incoming` 暂存目录）与术语表，并从清单移除；
   飞书密钥默认保留（会单独问是否删），**全局 git 凭证绝不删**；其余项目不受影响。
 
 **代码来源**：git 仓与本地仓两种（见[前置条件 4](#一前置条件一次性)、[本地仓上传](#本地仓上传)）；S3 不支持。git 私有仓需要那一份只读
@@ -401,15 +369,15 @@ refreshIntervalSec?}`，`source` 默认 `git`、本地仓写 `local`）。顶层
 
 | 症状 | 可能原因 | 处置 |
 |------|----------|------|
-| 卡片一直「正在分析…」不结束 | 后端流被中断 / finalize 异常 | 查看网关日志 `finalize_error` / `card_closed failed:true`；偶发则重问；持续则查 runtime/index 健康 |
+| 卡片一直「正在分析…」不结束 | 后端流被中断 / finalize 异常 | 查看网关日志 `finalize_error` / `card_closed failed:true`；偶发时重新提问，持续出现则检查 runtime / index 健康 |
 | 卡片里出现异常的 `<invoke>` 代码标记 | 冷启动那次问答，底层的代码检索工具尚未就绪，agent 就提前作答 | 网关会自动重试一次，预热后不再出现。查日志 `num_turns`/`cache_read` 确认是否冷启动 |
 | 机器人在群里**完全无响应** | 网关未启动 / 未 @ 到机器人 / 同一 app 运行了两个网关争抢事件 | 进实例 `systemctl status 'bot-gateway@*'` 确认 active + 日志 `sdk_wsclient_connected`；确认 @ 的是 `FEISHU_BOT_OPEN_ID`；停止多余网关，只保留一个 |
-| 网关 `condition failed` 未启动 | `/etc/bot-gateway-<项目>.env` 尚未写入（runtime 未就绪 / gateway 阶段被跳过） | 重跑 `install.sh` 或 `deploy-all.sh`（不跳 gateway）；确认 `FEISHU_SECRET_ID` 已配 |
+| 网关 `condition failed` 未启动 | `/etc/bot-gateway-<项目>.env` 尚未写入（runtime 未就绪 / gateway 阶段被跳过） | 重新运行 `install.sh` 或 `deploy-all.sh`（不跳 gateway）；确认 `FEISHU_SECRET_ID` 已配 |
 | 卡片回「查询失败」/ 日志 `AccessDenied` | 部署身份缺 `bedrock:InvokeModel`，或该模型在此区域无可用推理档 | 给部署身份补 `bedrock:InvokeModel`；模型档由部署按区域自动解析，查不到时 preflight 会列出该区域可用的档（见前置条件 3） |
-| 部署在 index-service 阶段超时 | 全新账号 NAT 路由未收敛 / 实例仍在冷启动建索引 | 多等一轮（bootstrap 对网络操作有重试）；查看 `/var/log/` 与 `journalctl -u 'index-build@*'` |
+| 部署在 index-service 阶段超时 | 全新账号 NAT 路由未收敛 / 实例仍在冷启动建立索引 | 再等待一轮（bootstrap 对网络操作有重试）；查看 `/var/log/` 与 `journalctl -u 'index-build@*'` |
 | `/health` 长期非 200 | 索引损坏 / graph.db 空 / worker 反复重启 | 进实例查看 index-bridge-<项目> 日志；必要时 `--refresh-index` 重建（蓝绿，不破坏运行中实例）。注：本地仓在首次 `push-local-repo.sh` 之前本就是空图、`/health` 非 200，属正常，推代码后恢复 |
-| 重新部署后行为仍是旧版本 | 仍存活的 microVM 持旧镜像（约 15 分钟）/ 网关未重启 | 等待该 microVM 回收；重启网关确保运行新代码 |
-| 中文问答没用上项目专属命名 / 术语表像是空的 | 术语表后台构建未完成或失败（cc 没装上 / Bedrock 调不通或无权限） | 进实例看 `journalctl` 与 `/var/log/glossary-build-*`，找 `glossary_gen_done`（成功）/ `glossary_gen_cc_failed`（构建失败）；不影响问答，问答会自动退回常规检索 |
+| 重新部署后行为仍是旧版本 | 仍存活的 microVM 继续使用旧镜像（约 15 分钟）/ 网关未重启 | 等待该 microVM 回收；重启网关以确保运行新代码 |
+| 中文问答未用上项目专属命名 / 术语表疑似为空 | 术语表后台构建未完成或失败（cc 未成功安装 / Bedrock 不可达或无权限） | 进实例查看 `journalctl` 与 `/var/log/glossary-build-*`，查 `glossary_gen_done`（成功）/ `glossary_gen_cc_failed`（构建失败）；不影响问答，问答会自动退回常规检索 |
 
 > 独占写入约束：index-service 的 graph.db 同一时刻只能有一个进程写入，并发写会导致 0 节点损坏。
 > 服务层已用 flock + 进程内锁 + orphan reaper 守护；**不要**在实例上手动再跑一个 codegraph-server 写同一份图。
@@ -425,25 +393,22 @@ refreshIntervalSec?}`，`source` 默认 `git`、本地仓写 `local`）。顶层
 
 ### 本地仓上传
 
-无法推送到 git 远端的代码，声明为本地仓：在 `projects.json` 里写 `{subdir, source:"local"}`（用 `install.sh` 添加项目时选「本地仓」即可），部署后在**你自己的机器**上推送：
+无法推送到 git 远端的代码，声明为本地仓（`projects.json` 里 `{subdir, source:"local"}`，`install.sh` 添加项目时选「本地仓」即可）。代码不自动同步，**改一次推一次**——推送就是刷新。在**你自己的机器**上：
 
 ```bash
 ./scripts/push-local-repo.sh --host <ec2-ssh-host> [--identity <key>] <subdir> <本地仓路径>
 ```
 
-本地仓在主机上有两个目录：`/data/repo/<subdir>` 是索引服务**正在用的代码**，`/data/repo/<subdir>.incoming` 是推送时的**暂存目录**。流程分两步：先把代码经网络 rsync 到暂存目录（这一步较慢、可能中断，但碰不到正在用的代码，网关照常服务）；传完后，主机上的脚本把暂存目录同步到 `/data/repo/<subdir>`——**这一步不阻塞你的推送命令**：脚本把重活（应用代码 + 建图 + 术语表）交给一个后台 systemd 单元，随即返回 `REINDEX_LAUNCHED`，**ssh 断开也不影响后台继续跑**。常规推送下常驻索引进程的 file-watcher 几秒内增量更新——**网关不停、不全量重建**，和 git 仓 `git pull` 走同一条路径。要点：
+**如何确认成功**：命令输出 `REINDEX_LAUNCHED`，表示代码已上传、重建已转入后台（不阻塞命令，ssh 断开亦不影响后台执行）。重建完成的标志是后台日志中的 `REINDEX_DONE`：
 
-- **常规推送不停服务**：同步用 `rsync --delay-updates`——更新的文件先逐个传到位，最后一起切换。这样"新旧文件混在一起、提问可能读到不一致结果"的时间窗只剩切换那一下，watcher 随即补齐索引（和 git 仓 `git pull` 一样）。**只有首次推送是例外**：那时还没建过索引图（`--local` 装服务时本地仓的建图是延迟的），得先停掉该项目网关、全量建一次图再启动——**首次的建图与术语表构建在后台并行进行**；这期间该项目（连同跑在同一进程里的其它仓）会短暂离线，首推建完才第一次上线。
-- 「刷新」即重跑本命令（本地仓不会自动更新，**不反映**实时主分支）。代码变更后再推送一次即可。
-- 使用 `rsync --delete`，主机副本与本地保持一致（本地删除的文件，主机上同样删除）；自动排除 `.git`；符号链接不会被同步进仓（`--safe-links --no-links`）；不接受任意 `--ssh-opts`，仅认 `--identity <key>`（防止注入 `ProxyCommand` 等）。
-- **首次推送前**先核对 EC2 的 SSH host key 指纹：脚本首次连接用 `accept-new`，会信任第一次见到的指纹。建议通过其它渠道（如 AWS 控制台的实例 system log）单独核对一次，或预先写入 `known_hosts`，以防有人冒充主机窃取源码。
-- 术语表（中文词→代码符号）随推送增量刷新：脚本用本次同步出的变更文件清单，只重建这些文件的术语，后台进行、不阻塞推送（git 仓是按 `git diff` 算变更、本地仓改用 rsync 算变更，之后走同一套增量逻辑）。主机若未开通 Bedrock（构建引擎不可用），则跳过术语表、只更新索引，问答仍可经 codegraph 直接定位。
-- **推送中断了会怎样**：网络传输那一段（你的机器 → 暂存目录）中断，不会影响正在使用的代码，重新推送一次即可。把暂存目录同步到 `/data/repo/<subdir>` 这一段用 `rsync --delay-updates`：更新的文件先全部传到位、最后一次性切换，所以中断绝大多数发生在切换之前（正在使用的代码原封不动），只有极小概率恰好发生在切换的一瞬间（留下部分更新）。无论哪种，暂存目录都还在，重新推送一次就能恢复到完整状态，不会造成无法恢复的损坏。
+```bash
+sudo journalctl -u reindex-<subdir> -f          # 或 sudo tail -f /var/log/reindex-<subdir>.log
+```
 
-**排查（推了却没生效 / 怀疑中断）：**
-- 推送命令成功、只代表代码已上传并转入后台重建：push 输出里看到 `REINDEX_LAUNCHED`（不会打印 `REINDEX_DONE`——那是重建完成的标志，在后台日志里）。确认真正建完：`sudo journalctl -u reindex-<subdir> -f` 或 `sudo tail -f /var/log/reindex-<subdir>.log`，看到 `REINDEX_DONE subdir=<sub> ...` 即完成。
-- **怀疑更新只完成了一半**：看 `sudo ls -d /data/repo/<subdir>.incoming` —— **暂存目录还在，说明上次没跑完**（正常跑完会删掉它），重新运行一次 `push-local-repo.sh` 即可恢复到完整状态。`sudo cat /data/repo/<subdir>/.snapshot-time` 是上次成功推送的时间戳，可对照。
-- **术语表是否刷新**：术语表在后台跑，日志在主机 `/var/log/glossary-build-<projectId>-<subdir>.log`，看末尾的 `glossary_gen_done`（成功）或 `glossary_gen_cc_failed`（cc 失败，索引不受影响、问答仍可用）。Bedrock 未开通时 reindex 会在输出里打印 `Bedrock not invokable — skipping glossary refresh`、只更新索引。
+- **常规推送不中断服务**：代码就地增量同步，watcher 在数秒内更新索引，网关全程保持在线（与 git 仓的 `git pull` 走同一流程）。**首次推送例外**：此前尚未建立索引（`--local` 部署时本地仓的索引构建被延迟），需先停止网关、完整建立一次索引后再启动，索引构建与术语表构建并行进行；其间该项目短暂离线，索引构建完成后首次对外提供服务。
+- **推送中断可恢复**：中断仅会遗留暂存目录 `/data/repo/<subdir>.incoming`，不影响正在使用的代码。`sudo ls -d` 该目录仍在，即表示上次未完成，重新推送即可恢复；`sudo cat /data/repo/<subdir>/.snapshot-time` 为上次成功推送的时间戳。
+- **术语表**（中文词 → 代码符号）随推送在后台增量刷新，日志见 `/var/log/glossary-build-<projectId>-<subdir>.log`（`glossary_gen_done` 表示成功，`glossary_gen_cc_failed` 表示 cc 失败但不影响问答）。主机未开通 Bedrock 时跳过术语表，仅更新索引。
+- **安全约束**：`rsync --delete` 使主机副本与本地保持一致（本地删除的文件在主机上同样删除）；排除 `.git`；拒绝符号链接（`--safe-links --no-links`）；仅接受 `--identity <key>`，不支持任意 `--ssh-opts`（防止命令注入）。首次连接以 `accept-new` 信任主机公钥，建议预先通过其它渠道（如 AWS 控制台的 system log）核对指纹，以防主机被冒充、源码泄露。
 
 **最小 sudoers**——只放行这一个脚本（建暂存目录、切换、重建都在脚本里完成，参数先经 `^[a-z0-9][a-z0-9-]*$` 校验、systemd 单元名固定写死）：
 
@@ -452,7 +417,7 @@ refreshIntervalSec?}`，`source` 默认 `git`、本地仓写 `local`）。顶层
 <pushuser> ALL=(root) NOPASSWD: /bin/bash /opt/idx/app/reindex_local_repo.sh *
 ```
 
-这里 `/bin/bash <固定脚本路径> *` 把能跑的只限定成这一个脚本，`*` 只放开它后面的参数。**不要**写成裸 `/bin/bash *`（那等于放行任意命令），也不要把 `systemctl`/`mkdir`/`chown` 这类通用命令加进 NOPASSWD——它们的通配能被 `-R`、`..` 之类绕过，从而提权到 root。
+此处 `/bin/bash <固定脚本路径> *` 将可执行范围限定为这一个脚本，`*` 仅放开其后的参数。**请勿**写成裸 `/bin/bash *`（等同于放行任意命令），也不要将 `systemctl`/`mkdir`/`chown` 等通用命令加入 NOPASSWD——其通配符可被 `-R`、`..` 之类绕过，进而提权至 root。
 
 ---
 
@@ -500,7 +465,7 @@ export FEISHU_BOT_OPEN_ID=ou_xxx
 node_modules/.bin/ts-node --transpile-only src/index.ts
 ```
 
-> 注意：同一飞书 app 只能有一个网关连接。本地启动前，先停掉 index 主机上对应项目的服务
+> 注意：同一飞书 app 只能有一个网关连接。本地启动前，先停止 index 主机上对应项目的服务
 > （`sudo systemctl stop bot-gateway@<项目>`），否则两个网关会争抢同一批事件。
 
 ## 附录 C：首次部署后的真机核对清单
@@ -520,7 +485,7 @@ node_modules/.bin/ts-node --transpile-only src/index.ts
 
 | 项目 | 确认方式 | 说明 |
 |---|---|---|
-| **本地仓首次推送**（停 bridge、全量建图） | 运行 `push-local-repo.sh`，输出 `REINDEX_LAUNCHED`；再看后台日志 `sudo journalctl -u reindex-<subdir>`（或 `/var/log/reindex-<subdir>.log`）出现 `REINDEX_DONE ... mode=initial-build`，`graph.db` 不小于 64KiB，bridge 已启动 | 建图与术语表在后台并行；中文仓的 GBK 编码问题也会在这一步首次显现 |
+| **本地仓首次推送**（停 bridge、完整建立索引） | 运行 `push-local-repo.sh`，输出 `REINDEX_LAUNCHED`；再看后台日志 `sudo journalctl -u reindex-<subdir>`（或 `/var/log/reindex-<subdir>.log`）出现 `REINDEX_DONE ... mode=initial-build`，`graph.db` 不小于 64KiB，bridge 已启动 | 索引构建与术语表构建在后台并行；中文仓的 GBK 编码问题也会在这一步首次显现 |
 | **本地仓增量推送**（不停 bridge） | 修改几个文件再推送，后台日志显示 `mode=incremental`，几秒后问答即用上新代码 | 网关全程不中断；术语表在后台增量刷新（查看 `/var/log/glossary-build-*`） |
 | **中断后能恢复** | 推送过程中断网或 Ctrl-C，`.incoming` 暂存目录仍在，重新推送一次即可恢复到完整状态 | 详见第九节「本地仓上传」的中断说明 |
 | **codegraph 二进制可用** | bootstrap 日志中 `codegraph-server --version` 通过 | 架构或 glibc 版本不匹配会直接报错退出（东京已验证，风险低） |
@@ -531,3 +496,26 @@ node_modules/.bin/ts-node --transpile-only src/index.ts
 - **复用与清理**：`launch-host` 复用一台已停止的机器时会先将其启动；本地仓从项目中移除后，下次部署会清除它的代码副本与 `.incoming`（调整仓库集合并重新部署后，用 `sudo ls /data/repo/` 确认无残留即可）。
 
 > **真机上最易出问题的两处，交付前务必亲自确认**：一是私有 DNS 解析失败——部署显示成功，问答却答不出内容，最难自行发现；二是安全组 22 端口放行的出口 IP 不对——无法登录刚创建的机器。
+
+---
+
+## 附录 D：手动刷新监控
+
+`deploy-all.sh` 的 Phase 7 已自动部署整套监控，此处命令仅用于单独刷新看板/阈值、或 deploy 时 `--skip monitoring` 后补充执行。部署期身份需 `logs:PutMetricFilter`、`cloudwatch:PutDashboard`、`cloudwatch:PutMetricAlarm`、`sns:CreateTopic`（非运行时角色）。四步幂等、可重复运行，换区域改 `--region` 即可。
+
+**顺序固定：先建指标 filter，再建看板与告警**（告警引用指标，指标由 filter 产出）：
+
+```bash
+# 1. A 类指标 filter（看板读取的计数 / 分位 / 分布）
+./scripts/apply-metric-filters.sh --region <r>     # 加 --dry-run 先看计划
+# 2. 看板（三页：产品用量、SRE 健康、分项目拆分）
+./scripts/apply-dashboards.sh --region <r>
+# 3. 告警 + SNS（脚本先应用告警专用 filter 再建 alarm，避免引用空指标）
+./scripts/apply-alarms.sh --region <r>
+# 4. DAU 预聚合 Lambda + 每日调度（产品看板「日活」widget 的数据来源）
+./scripts/apply-dau-lambda.sh --region <r>
+```
+
+- 告警阈值在 `config/alarm-thresholds.json`，可调整，修改后重新运行第 3 步。
+- SNS 订阅需手动确认一次：`aws sns subscribe --region <r> --topic-arn <脚本打印的 ARN> --protocol email --notification-endpoint you@example.com`（邮件点确认链接）。
+- 不跑第 4 步则看板「日活」widget 持续为空，其余 widget 不受影响。
