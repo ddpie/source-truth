@@ -14,29 +14,29 @@
 > - **单机（`--local`）**：只开一台 EC2，在它上面既部署又常驻，省去单独的部署机。见[第二节末「在单台 EC2 上就地部署」](#二一键安装交互式推荐)。
 >
 > **再定入口（两种拓扑都适用）**：
-> - **`install.sh`（推荐）**：交互式，问区域 / 代码仓 / 飞书凭证，写进 Secrets Manager，端到端起后端 **+ 网关**。
+> - **`install.sh`（推荐）**：交互式，问区域 / 代码仓 / 飞书凭证，写进 Secrets Manager，一次把后端和网关都装好。
 > - **`deploy-all.sh`（进阶）**：直接传参（CI、可复现、可跳过某阶段）。见 [附录 A](#附录-a手动-deploy-allsh)。
 >
 > 全部**幂等**：失败后重跑会继续未完成部分。`install.sh` 重跑会预填上次的答案。
 
 ## 最短路径
 
-急着跑起来看这里，细节按需翻后面。前提：本机装好 `aws` CLI 并配好可部署的凭证；飞书应用先按[第三节](#三接入飞书connect-清单)建好，拿到 `App ID` / `App Secret` / 机器人 `open_id`。
+本节给出最简部署路径，后续各节是对应的详细说明与运维参考。前提：本机装好 `aws` CLI 并配好可部署的凭证；飞书应用先按[第三节](#三接入飞书connect-清单)建好，拿到 `App ID` / `App Secret` / 机器人 `open_id`。
 
 **默认（双机）**——在你的部署机上：
 
 ```bash
 git clone --depth 1 https://github.com/ddpie/source-truth.git && cd source-truth
-./scripts/install.sh          # 交互填区域 / 代码仓 / 飞书凭证，端到端起后端 + 网关
+./scripts/install.sh          # 交互填区域 / 代码仓 / 飞书凭证，一次装好后端和网关
 ```
-详见[第二节](#二一键安装交互式推荐)；跑完照[第五节](#五验证端到端冒烟)验证。
+详见[第二节](#二一键安装交互式推荐)；装完照[第五节](#五验证端到端冒烟)验证。
 
-**单机（`--local`）**——先在本机起机，再进 EC2 部署：
+**单机（`--local`）**——先在本机开一台 EC2，再进去部署：
 
 ```bash
 git clone --depth 1 https://github.com/ddpie/source-truth.git && cd source-truth
-./scripts/launch-host.sh      # 自动建网 + IAM，起一台 ARM64 EC2，末尾打印下一步命令
-# 照抄它打印的那条 ssh 命令进机器，跑 ./scripts/install.sh
+./scripts/launch-host.sh      # 自动建好网络和 IAM，开一台 ARM64 EC2，末尾打印下一步命令
+# 照它打印的那条 ssh 命令进机器，跑 ./scripts/install.sh
 ```
 详见[第二节末「在单台 EC2 上就地部署」](#在单台-ec2-上就地部署--local)；首次部署后建议照[附录 C](#附录-c首次部署后的真机核对清单)逐项核对。
 
@@ -152,9 +152,9 @@ codegraph 索引吃内存、随仓库增大而增长，按仓库规模选机型�
 
 **只开一台 EC2、在它上面既部署又常驻**（省去单独的部署机），用 `--local` 模式。这台 EC2 长期保留：部署状态存在它的 `.local/` 里，升级就是 SSH 回这台、重跑。
 
-分两步——**在你本地起机**，**再进 EC2 部署**。命令都由 [`scripts/launch-host.sh`](../scripts/launch-host.sh) 末尾打印，照抄即可。
+分两步——**先在本机开一台 EC2**，**再进这台机器部署**。命令都由 [`scripts/launch-host.sh`](../scripts/launch-host.sh) 末尾打印，照抄即可。
 
-**① 本地起机**
+**① 在本机开机器**
 
 ```bash
 ./scripts/launch-host.sh          # 也可 --profile <名> --region <r> 跳过前两问；--dry-run 先看计划
