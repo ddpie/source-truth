@@ -359,14 +359,28 @@ def build(files: list[str] | None, *, project: str, cwd: str, model: str, region
     # observable; cc's JSONL product still goes only to the runner's captured stdout, unpolluted.
     real_batches = [b for b in batches if b != []]
     total = len(real_batches)
-    raw_parts: list[str] = []
-    for idx, batch in enumerate(real_batches, start=1):
+
+    def _one_batch(idx: int, batch: list[str] | None) -> str:
         nfiles = "full-repo" if batch is None else len(batch)
         logger.info(json.dumps({"event": "glossary_build_batch", "project": project,
                                  "batch": idx, "batches": total, "files": nfiles}))
         prompt = build_prompt(batch, project=project)
-        raw_parts.append(run(prompt, cwd=cwd, model=model, region=region, timeout=timeout))
-    raw = "\n".join(raw_parts)
+        return _run_with_retry(run, prompt=prompt, cwd=cwd, model=model, region=region,
+                               timeout=timeout, batch_idx=idx)
+
+    # Concurrency capped at the batch count (no idle threads for a small incremental set).
+    # Results are keyed by batch index and reassembled IN ORDER, so output is identical to
+    # the old serial join regardless of completion order. A batch whose retries are exhausted
+    # raises here; we surface the FIRST such error (and stop consuming) so build() fails as a
+    # whole -> glossary_gen keeps the old slice (SKIP). No partial slice is ever written.
+    max_workers = min(_build_concurrency(), total) if total else 1
+    raw_by_idx: dict[int, str] = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futs = {pool.submit(_one_batch, idx, batch): idx
+                for idx, batch in enumerate(real_batches, start=1)}
+        for fut in concurrent.futures.as_completed(futs):
+            raw_by_idx[futs[fut]] = fut.result()  # re-raises this batch's exhausted error
+    raw = "\n".join(raw_by_idx[i] for i in sorted(raw_by_idx))
 
     repo_base = os.path.basename(root)
 
