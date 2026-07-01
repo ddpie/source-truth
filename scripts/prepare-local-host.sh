@@ -22,18 +22,21 @@ TOKEN_SECRET="${TOKEN_SECRET:-source-truth/deploy-github-token}"
 REPO_DIR="${REPO_DIR:-source-truth}"
 
 step() { printf '\n▶ %s\n' "$*"; }
+# apt-get wrapper: wait up to 5 min for the dpkg lock. A freshly-booted EC2 usually has
+# unattended-upgrades / cloud-init holding it; a bare apt-get fails instantly on "Could not get lock".
+apti() { sudo apt-get -o DPkg::Lock::Timeout=300 "$@"; }
 
 # --- 1. AWS CLI v2 (needed to read the token from Secrets Manager, and by install/deploy) --------
 # Refresh the apt index once up front — a fresh image may have a stale/empty one, and the bare
 # `apt-get install` calls below (unzip / git) would otherwise fail with "Unable to locate package".
 step "apt update"
-sudo apt-get update
+apti update
 
 step "AWS CLI"
 if command -v aws >/dev/null; then
   echo "• already present: $(aws --version 2>&1)"
 else
-  command -v unzip >/dev/null || sudo apt-get install -y unzip
+  command -v unzip >/dev/null || apti install -y unzip
   curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-$(uname -m).zip" -o /tmp/awscliv2.zip
   ( cd /tmp && unzip -oq awscliv2.zip && sudo ./aws/install --update )
   rm -rf /tmp/aws /tmp/awscliv2.zip
@@ -42,14 +45,14 @@ fi
 
 # --- 2. git (clone needs it; fresh minimal images may lack it) ----------------------------------
 step "git"
-command -v git >/dev/null && echo "• already present" || sudo apt-get install -y git
+command -v git >/dev/null && echo "• already present" || apti install -y git
 
 # --- 2b. boto3/botocore recent enough for AgentCore ---------------------------------------------
 # deploy-all Phase 5 drives AgentCore via boto3 (lib/deploy_runtime.py); an old apt/pip botocore
 # lacks the 'bedrock-agentcore-control' service and deploy-all's preflight HARD-fails. Ubuntu 24.04
 # is PEP-668 externally-managed, so --break-system-packages (same as bootstrap.sh's pip install).
 step "boto3/botocore (for AgentCore)"
-command -v pip3 >/dev/null || sudo apt-get install -y python3-pip
+command -v pip3 >/dev/null || apti install -y python3-pip
 if python3 -c 'import boto3,sys; sys.exit(0 if "bedrock-agentcore-control" in boto3.Session().get_available_services() else 1)' 2>/dev/null; then
   echo "• already recent enough"
 else
@@ -62,7 +65,7 @@ step "docker"
 if command -v docker >/dev/null; then
   echo "• already present"
 else
-  sudo apt-get update && sudo apt-get install -y docker.io docker-buildx
+  apti update && apti install -y docker.io docker-buildx
 fi
 sudo systemctl enable --now docker
 # Let this user drive docker without sudo. The new group only applies to NEW logins, so we run
@@ -79,7 +82,7 @@ if [ -n "$T" ]; then
     sudo chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
     echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
       | sudo tee /etc/apt/sources.list.d/github-cli.list >/dev/null
-    sudo apt-get update && sudo apt-get install -y gh
+    apti update && apti install -y gh
   fi
   gh auth login --with-token <<<"$T"       # here-string, not argv — token never hits the process list
   gh auth setup-git

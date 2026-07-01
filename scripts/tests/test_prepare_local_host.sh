@@ -14,7 +14,9 @@ grep -q 'REGION' "$P" && grep -q 'is required' "$P"; check "REGION required (fai
 # installs the deps install.sh checks for
 grep -q 'awscli-exe-linux' "$P"; check "installs AWS CLI v2" $?
 grep -q 'docker.io' "$P"; check "installs docker" $?
-grep -q 'apt-get install -y git' "$P"; check "ensures git" $?
+grep -qE '(apti|apt-get.*) install -y git' "$P"; check "ensures git" $?
+# apt calls wait for the dpkg lock (fresh boot: unattended-upgrades holds it)
+grep -q 'DPkg::Lock::Timeout' "$P"; check "apt waits for the dpkg lock" $?
 # deploy-all Phase 5 needs a boto3 new enough to know bedrock-agentcore-control
 grep -q 'bedrock-agentcore-control' "$P" && grep -q 'pip3 install .*boto3' "$P"; check "ensures boto3/botocore recent enough for AgentCore" $?
 # token via Secrets Manager + here-string (not argv), never in the process list

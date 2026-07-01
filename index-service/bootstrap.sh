@@ -94,8 +94,13 @@ retry_net() {
 }
 
 # --- base packages (retry: apt mirrors flap AND the NAT route may not be up yet) ---
-retry_net apt-get update -y
-retry_net apt-get install -y python3-pip python3-venv unzip curl
+# DPkg::Lock::Timeout=300: on a fresh boot, unattended-upgrades / cloud-init's apt often hold the
+# dpkg lock. Without this, apt-get FAILS INSTANTLY on "Could not get lock" and we bounce through
+# retry_net's coarse 20s sleeps; with it, apt itself WAITS up to 5 min for the lock — smoother and
+# far less likely to burn all retries during boot-time contention.
+APT_OPTS=(-o DPkg::Lock::Timeout=300)
+retry_net apt-get "${APT_OPTS[@]}" update -y
+retry_net apt-get "${APT_OPTS[@]}" install -y python3-pip python3-venv unzip curl
 # awscli v2 (Ubuntu 24.04 has no apt awscli)
 if ! command -v aws >/dev/null; then
   retry_net curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip" -o /tmp/awscliv2.zip
@@ -140,7 +145,7 @@ python3 -m pip check >/dev/null 2>&1 || { echo "BOOTSTRAP_FAILED: pip dependency
 # never a 2nd concurrent writer). SINGLE-WRITER (不变量2): build flock + bridge flock lock the
 # SAME file per repo (/data/repo/<subdir>/.codegraph/.writer.lock). NO `Conflicts=` (systemd
 # silently drops a contradictory transaction on reboot; the flock is the real guard).
-ripgrep_install() { command -v rg >/dev/null || apt-get install -y ripgrep || true; }
+ripgrep_install() { command -v rg >/dev/null || apt-get "${APT_OPTS[@]}" install -y ripgrep || true; }
 ripgrep_install   # fast, .gitignore-aware search the bridge's file tools use
 
 # --- Node + claude (cc) CLI: the build-time glossary engine -----------------------------
@@ -158,7 +163,7 @@ ensure_node() {
   # Node 24 — same MAJOR as the agent container's CLI subprocess. Pin major only
   # (setup_24.x): NodeSource GCs old patch debs, so an exact patch pin breaks later.
   retry_net curl -fsSL https://deb.nodesource.com/setup_24.x -o /tmp/nodesetup.sh \
-    && bash /tmp/nodesetup.sh && retry_net apt-get install -y nodejs
+    && bash /tmp/nodesetup.sh && retry_net apt-get "${APT_OPTS[@]}" install -y nodejs
 }
 # @latest (NOT pinned), matching agent-container/Dockerfile + the 2026-06-19 ops decision
 # (AGENTS.md): take upstream fixes faster, trade reproducibility; check-versions.sh allows it.
@@ -275,7 +280,7 @@ UNIT
   # regional bucket, write a minimal config tailing the gateway log file, start it.
   CW_DEB=/tmp/amazon-cloudwatch-agent.deb
   if retry_net curl -fsSL "https://amazoncloudwatch-agent-${REGION}.s3.${REGION}.amazonaws.com/ubuntu/arm64/latest/amazon-cloudwatch-agent.deb" -o "$CW_DEB"; then
-    dpkg -i -E "$CW_DEB" || apt-get install -f -y || true
+    dpkg -i -E "$CW_DEB" || apt-get "${APT_OPTS[@]}" install -f -y || true
     rm -f "$CW_DEB"
     mkdir -p /opt/aws/amazon-cloudwatch-agent/etc
     # collect_list tails the gateway log → /source-truth/bot-gateway (leading slash: matches
