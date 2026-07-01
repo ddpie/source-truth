@@ -118,7 +118,8 @@ aws iam put-role-policy --role-name "$ROLE" --policy-name deploy-secrets --polic
   \"Version\":\"2012-10-17\",
   \"Statement\":[{\"Effect\":\"Allow\",\"Action\":[
     \"secretsmanager:CreateSecret\",\"secretsmanager:PutSecretValue\",
-    \"secretsmanager:DescribeSecret\",\"secretsmanager:DeleteSecret\"],
+    \"secretsmanager:DescribeSecret\",\"secretsmanager:DeleteSecret\",
+    \"secretsmanager:GetSecretValue\"],
     \"Resource\":\"arn:aws:secretsmanager:*:${ACCOUNT}:secret:source-truth/*\"}]}" >/dev/null
 
 aws iam put-role-policy --role-name "$ROLE" --policy-name deploy-iam --policy-document "{
