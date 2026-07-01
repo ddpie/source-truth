@@ -66,6 +66,7 @@ scripts/                运维生命周期
   deploy-all.sh         一键部署的权威入口（artifacts→IAM→network→index-service→镜像→Runtime→gateway；幂等；--local 在本机就地部署）
   launch-host.sh        --local（单台 EC2）模式入口（运维本地跑）：选 profile → 建 IAM → 自动建净网（VPC/公私子网/IGW/NAT，复用 provision_network.sh）+ host 安全组（只放行运维 IP 的 22）→ 起公有子网 ARM64 EC2 挂好实例角色 → 打印后续步骤
   create-iam.sh         建/复用 --local 模式实例角色 + instance profile，并补部署期权限（幂等；一般由 launch-host.sh 内部调用）
+  prepare-local-host.sh --local 全新 EC2 的开局脚本（由 launch-host scp 上机执行）：装 aws/docker/git + gh 登录 + clone + 进 install.sh
   lib/provision_*.sh + deploy_runtime.py + wait_index_health.sh  deploy-all.sh 的各阶段实现
   lib/deploy_project.sh + wait_base_host.sh + delete_runtime.py  多项目编排：建底座 / 等底座就绪 / 删 per-project runtime
   lib/resolve_model.sh  查 Bedrock list-inference-profiles 选区域真实存在的推理配置（不猜前缀；geo profile 因区域而异）

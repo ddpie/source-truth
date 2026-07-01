@@ -66,6 +66,7 @@ scripts/                Operational lifecycle
   deploy-all.sh         Canonical one-click deploy (artifacts→IAM→network→index-service→image→Runtime→gateway; idempotent; --local single-host bootstrap)
   launch-host.sh        --local (single-EC2) mode entry (run on your machine): pick profile → create IAM → auto-build the network (VPC/public+private subnets/IGW/NAT, reuses provision_network.sh) + a host SG (SSH 22 from the operator only) → launch a public-subnet ARM64 EC2 with the instance role attached → print next steps
   create-iam.sh         Create or reuse the --local instance role + profile and add the deploy-time policies (idempotent; usually called by launch-host.sh)
+  prepare-local-host.sh First-run script for the --local EC2 (scp'd up + run by launch-host): install aws/docker/git + gh login + clone + hand off to install.sh
   lib/provision_*.sh + deploy_runtime.py + wait_index_health.sh  deploy-all.sh phase implementations
   lib/deploy_project.sh + wait_base_host.sh + delete_runtime.py  Multi-project orchestration: build base / await base ready / delete per-project runtime
   lib/resolve_model.sh  Query Bedrock list-inference-profiles to pick a profile that actually exists in the region (no prefix guessing; geo profiles vary by region)

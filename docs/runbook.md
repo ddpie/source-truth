@@ -31,17 +31,13 @@ git clone https://github.com/ddpie/source-truth.git && cd source-truth
 ```
 详见[第二节](#二一键安装交互式推荐)；装完照[第五节](#五验证端到端冒烟)验证。
 
-**单机（`--local`）**——先在本机创建一台 EC2，再登录部署：
+**单机（`--local`）**——在本机跑一条命令，其余由脚本完成：
 
 ```bash
-# 第一步：在本机运行，创建并配置好 EC2
 git clone https://github.com/ddpie/source-truth.git && cd source-truth
-./scripts/launch-host.sh      # 自动建好网络和 IAM，创建一台 ARM64 EC2，末尾打印第二步命令
-
-# 第二步：照 launch-host 末尾打印的命令登录机器部署（下面是公开仓的形态）
-ssh -t ubuntu@<launch-host 打印的 IP> 'git clone https://github.com/ddpie/source-truth.git; cd source-truth && ./scripts/install.sh'
+./scripts/launch-host.sh      # 选 profile → 建网络/IAM → 创建 ARM64 EC2 → 问你 SSH 私钥 → 自动上机部署
 ```
-`launch-host.sh` 会做完选 profile、建网络、建 IAM、创建 EC2 的全过程；第二步登录后由 `install.sh` 交互填代码仓 / 模型 / 飞书凭证并完成部署。**私有仓时** launch-host 打印的命令会多一段：从 Secrets Manager 取回 GitHub 凭证并配置 `gh`（第一步会引导你提供，命令里不含 token），照抄整条即可。详见[第二节末「在单台 EC2 上就地部署」](#在单台-ec2-上就地部署--local)；首次部署后建议照[附录 C](#附录-c首次部署后的真机核对清单)逐项核对。
+`launch-host.sh` 建好 EC2 后会问你 SSH 私钥路径，然后自动把部署脚本传上去执行：装依赖、（私有仓）登录 GitHub、克隆仓库，进入 `install.sh` 交互填代码仓 / 模型 / 飞书凭证。你只需在本机跑这一条、输一次私钥。详见[第二节末「在单台 EC2 上就地部署」](#在单台-ec2-上就地部署--local)；首次部署后建议照[附录 C](#附录-c首次部署后的真机核对清单)逐项核对。
 
 **目录**
 
@@ -155,33 +151,25 @@ codegraph 索引吃内存、随仓库增大而增长，按仓库规模选机型�
 
 `--local` 模式只用一台 EC2，在这台机器上既完成部署又常驻运行（省去单独的部署机）。这台 EC2 长期保留：部署状态保存在它的 `.local/` 目录中，升级时登录同一台机器重新运行即可。
 
-分两步——**先在本机创建一台 EC2**，**再登录该机器部署**。两步命令都由 [`scripts/launch-host.sh`](../scripts/launch-host.sh) 末尾打印，照此运行即可。
-
-**① 在本机创建机器**
+**一条命令起步**——其余交给 [`scripts/launch-host.sh`](../scripts/launch-host.sh)：
 
 ```bash
 ./scripts/launch-host.sh          # 也可 --profile <名> --region <r> 跳过前两个提问；--dry-run 先预览计划
 ```
 
-它按顺序执行（全自动、每步幂等）：选 profile → 建/复用 IAM 角色 → **自动创建一套 source-truth 专用网络**（VPC + 公私子网 + IGW + NAT，账号中已有则复用，无需手动选 VPC/子网）→ 创建安全组（只放行你当前出口 IP 的 22 端口）→ 选密钥/机型/磁盘 → 在公有子网创建一台 ARM64 EC2、挂好实例角色 → 打印第二步命令。
+它按顺序执行（全自动、每步幂等）：选 profile → 建/复用 IAM 角色 → 若是私有仓，取你本机 `gh` 的 token 存进 Secrets Manager（见下「GitHub 凭证」）→ **自动创建一套 source-truth 专用网络**（VPC + 公私子网 + IGW + NAT，账号中已有则复用，无需手动选 VPC/子网）→ 创建安全组（只放行你当前出口 IP 的 22 端口）→ 选密钥/机型/磁盘 → 在公有子网创建一台 ARM64 EC2、挂好实例角色。
 
-**② 登录 EC2 部署**——直接运行 launch-host 末尾打印的那条 `ssh -t ...` 命令即可（它已把下面的步骤拼好）：
+创建好后，它会**问你 SSH 私钥路径**（默认猜 `~/.ssh/<你选的 key pair>.pem`），然后自动把部署脚本 [`scripts/prepare-local-host.sh`](../scripts/prepare-local-host.sh) 传到 EC2 并执行——这一步在机器上装好 install.sh 需要的依赖（`aws` / `docker` / `git`）、用第一步存好的凭证登录 GitHub、克隆仓库，最后进入 `install.sh` 交互（填区域 / 代码仓 / 模型 / 飞书凭证）。全程你只需在本机跑一条命令、输一次私钥路径，不用手粘任何长命令。
 
-```bash
-# launch-host 打印的形态（公开仓）：登录 → 克隆/更新仓库 → install.sh
-ssh -t ubuntu@<脚本打印的 IP> 'if [ -d source-truth/.git ]; then git -C source-truth pull --ff-only; else git clone https://github.com/ddpie/source-truth.git; fi && cd source-truth && ./scripts/install.sh'
-#   密钥不在 ssh-agent 中时，加 -i <你的 key>.pem
-```
+> 私钥留空、或连不上（私钥不对、机器还没起好）时，launch-host 会改为打印两条短命令（`scp` 脚本 + `ssh` 执行）让你手动完成——同样不含 token。
 
-私有仓时，launch-host 打印的命令会**多一段前置**：从 Secrets Manager 取回第一步存好的 GitHub 凭证（用这台机器的实例角色，**命令里不含 token 明文**），装好 `gh` 并登录，再克隆。你照抄整条即可，无需手动配 git 凭证。
-
-登录后 `install.sh` 交互填区域 / 代码仓 / 模型 / 飞书凭证，随后内部调用 `deploy-all --local` 完成整套部署。使用的是**这台机器的实例角色**，EC2 上无需配置 profile。首次约 10–20 分钟（bootstrap 与镜像构建都在本机串行执行，比双机略慢）。
+首次部署约 10–20 分钟（bootstrap 与镜像构建都在本机串行执行，比双机略慢）。
 
 **失败后重跑**：每一步都幂等，**从中断的地方重新运行即可，不必从头开始**。若机器已创建、之后才中断，重新运行 `launch-host.sh` 会**自动复用它**（已停止的会先启动），并直接打印第二步命令，不会再创建一台；确需一台全新的，加 `--new-host`。
 
 **四点需要注意**
 
-- **GitHub 凭证（私有仓必看）**：这台 EC2 要自己克隆仓库、下载 codegraph 二进制（私有 Release）、将来 `git pull` 升级，因此需要访问 GitHub。第一步 `launch-host.sh` 会取你本机 `gh` 的登录 token（没有则提示你粘贴一个只读 PAT，scope 仅需 repo:read），存进 Secrets Manager；第二步命令用实例角色取回、在机器上 `gh auth login` 持久化（存于该机 `~/.config/gh`，权限 600）。之后升级与 Release 下载都自动带凭证，无需再传。**公开仓可跳过**（第一步留空即可）。换机或停用时记得吊销该 token。
+- **GitHub 凭证（私有仓必看）**：这台 EC2 要自己克隆仓库、下载 codegraph 二进制（私有 Release）、将来 `git pull` 升级，因此需要访问 GitHub。`launch-host.sh` 会取你本机 `gh` 的登录 token（没有则提示你粘贴一个只读 PAT，scope 仅需 repo:read），存进 Secrets Manager；上机执行的 `prepare-local-host.sh` 用实例角色取回、在机器上 `gh auth login` 持久化（存于该机 `~/.config/gh`，权限 600）。之后升级与 Release 下载都自动带凭证，无需再传。**公开仓可跳过**（提示 token 时留空即可）。换机或停用时记得吊销该 token。
 - **机器规格**：必须为 ARM64（aarch64）、Ubuntu 24.04（镜像与 codegraph-server 均为 ARM，x86 会被拦下）；部署用户需具备免密 sudo。launch-host 已设置 IMDSv2 与 hop-limit 1。
 - **权限较大、建议专机专用**：`--local` 调用 AWS 用的是这台机器的**实例角色**（不是你本地的 profile——登录 EC2 后即不再可用），它既需建资源的权限，也需运行期权限，**范围偏大，这台机器不建议与其它业务共用**。角色名 `source-truth-index-role` 与默认部署共用（IAM 角色为账号级、不分区域）：`create-iam.sh` 幂等复用、只补权限不重建；但需注意，**若同账号已有默认部署在使用该角色，补上部署期权限后那台机器也会一并获得**——如需让默认部署保持最小权限，请换一个账号运行 `--local`。
 - **NAT 不可省略**：机器位于公有子网（有公网 IP 供 SSH），但 AgentCore Runtime 位于私有子网、经 **NAT** 访问 Bedrock——Runtime 的网卡由 AWS 托管、无公网 IP，无法经 IGW 出网，因此必须有 NAT（固定费用约每月 $32 起）。bridge 端口（8080-8099）只对同一安全组内成员开放，外部无法访问。
