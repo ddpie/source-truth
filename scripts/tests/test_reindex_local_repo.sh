@@ -19,11 +19,15 @@ grep -q 'REINDEX_PREPARED' "$S"; check "has --prepare mode" $?
 grep -q '\[ "\$SRC" = "local" \]' "$S"; check "refuses non-local (git) repos" $?
 grep -q 'not local' "$S"; check "fail-loud message explains git vs local" $?
 
-# Two update paths keyed on whether a VALID graph exists — same >=64KiB threshold index-build@'s
-# ExecStartPost enforces, so a killed first build's partial graph.db re-triggers a full rebuild
-# rather than a wrong incremental.
-grep -q 'GRAPH_SZ.*du -sb "\$GRAPH"' "$S"; check "sizes the graph to decide incremental vs first build" $?
-grep -q '"\${GRAPH_SZ:-0}" -ge 65536' "$S"; check "uses the 64KiB validity threshold (matches build guard)" $?
+# Two update paths keyed on a BUILD-OK MARKER, not graph.db size: a 0-node placeholder store also
+# clears 64KiB, so a size threshold wrongly picked incremental and the graph stayed empty forever.
+grep -q 'BUILD_MARKER=' "$S"; check "defines a build-ok marker path" $?
+grep -q '\[ -f "\$BUILD_MARKER" \]' "$S"; check "picks incremental vs full by marker presence" $?
+# The marker is written ONLY when the build log proves a non-empty graph (Persisted N nodes, N>0).
+grep -q "Persisted \[0-9\]" "$S"; check "verifies non-empty graph before marking built" $?
+grep -q 'touch "\$BUILD_MARKER"' "$S"; check "writes the marker after a verified build" $?
+# index-build@ is oneshot+RemainAfterExit → must restart (start is a no-op once run).
+grep -q 'systemctl restart "index-build@' "$S"; check "uses restart (not start) to force a rebuild" $?
 # Incremental path: in-place apply, NO bridge stop (watcher picks it up).
 grep -q 'mode=incremental' "$S"; check "has incremental (watcher) path" $?
 # First-build path: stop bridge, build, start bridge.
@@ -65,7 +69,7 @@ grep -q 'exec 9>&-' "$S"; check "launcher releases fd9 lock so the bg unit can r
 # PARALLEL on first push: kick the glossary build off BEFORE the blocking graph build so the two
 # overlap (glossary writes its own slice lock, never graph.db — safe concurrently). Assert the
 # `refresh_glossary full` call precedes `index-build@` start in the first-build branch.
-awk '/----- FIRST push/{f=1} f&&/refresh_glossary full/{g=NR} f&&/systemctl start "index-build@/{b=NR} END{exit !(g&&b&&g<b)}' "$S"; check "first push launches glossary BEFORE the graph build (parallel)" $?
+awk '/----- FIRST push/{f=1} f&&/refresh_glossary full/{g=NR} f&&/systemctl restart "index-build@/{b=NR} END{exit !(g&&b&&g<b)}' "$S"; check "first push launches glossary BEFORE the graph build (parallel)" $?
 # $0 must be resolved to an ABSOLUTE path before the re-exec: the transient unit runs with cwd=/,
 # so a relative $0 would not be found by the child.
 grep -q 'SELF="$0"' "$S" && grep -qE '/bin/bash "\$SELF" __build' "$S"; check "re-exec uses an absolute-resolved \$0 (SELF)" $?
