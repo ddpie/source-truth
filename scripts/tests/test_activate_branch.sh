@@ -15,4 +15,12 @@ repo_uses_git git;   rc=$?; [[ $rc -eq 0 ]]; check "git source uses git" $?
 repo_uses_git "";    rc=$?; [[ $rc -eq 0 ]]; check "empty source defaults to git" $?
 repo_uses_git local; rc=$?; [[ $rc -ne 0 ]]; check "local source does NOT use git" $?
 
+# The initial glossary build MUST detach via systemd-run, not `nohup … &`. activate_project.sh runs
+# over SSM RunCommand, which does not return until every process holding the command's stdout has
+# exited; a nohup child inherits that pipe and blocks the whole deploy (the gateway never starts)
+# on the multi-minute cc scan. Guard the regression: systemd-run present, no ACTUAL nohup command.
+A="$ROOT/index-service/activate_project.sh"
+grep -q 'systemd-run' "$A"; check "initial glossary build detaches via systemd-run" $?
+! grep -vE '^\s*#' "$A" | grep -qE '\bnohup\b'; check "no nohup-backgrounded glossary build under SSM" $?
+
 [[ "$_fail" -eq 0 ]]; exit $?

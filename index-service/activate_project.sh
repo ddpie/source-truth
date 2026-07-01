@@ -285,27 +285,35 @@ else
     WS="$LOCAL_REPO_ROOT/$SUBDIR"
     mkdir -p "$GLOSSARY_ROOT/${PROJECT_ID}"
     LOG="/var/log/glossary-build-${PROJECT_ID}-${SUBDIR}.log"
+    # DETACH VIA systemd-run, NOT `nohup … &`. This script is driven over SSM RunCommand, and SSM
+    # does not return until EVERY process still holding the command's stdout pipe has exited. A
+    # `nohup … &` child stays in our session and inherits the `exec > >(tee …)` pipe fd from the top
+    # of this script, so it keeps that pipe open — SSM (and therefore the deploy step that then
+    # starts the gateway) blocks on the whole multi-minute cc scan. systemd-run hands the build to
+    # PID 1 as a transient unit in its own session/cgroup with its own fds; this call returns at
+    # once and the build outlives our SSM session. --collect reaps the unit when it finishes (even
+    # on failure) so a later re-activate can reuse the same unit name.
     # flock on a per-slice lock SHARED with the refresh unit (glossary_refresh.sh takes the same
     # lock), so the initial full build and the first scheduled incremental can't write the slice
-    # concurrently (last-writer-wins corruption). nohup-detached so activation doesn't block; the
-    # log + the glossary_gen_done/cc_failed JSON line in it are the success/failure signal.
-    # GLOSSARY_MAX_FILES: `source`d from /etc/index-service.env is NOT exported, and this build
-    # uses an explicit env prefix — so pass it through explicitly or glossary_gen falls back to its
-    # own default (400). The refresh timer gets it differently (systemd EnvironmentFile exports it).
-    # All vars are carried by `env` (KEY=VAL args), NOT a bare command prefix: a conditional
-    # `${VAR:+KEY=VAL}` prefix expands AFTER the shell has already decided which words are
-    # assignments, so the expanded `KEY=VAL` lands in command position and bash tries to run it
-    # ("GLOSSARY_MAX_FILES=0: command not found", killing the build). `env` parses KEY=VAL at
-    # runtime, so the conditional works for any value (0 / 400 / empty).
-    ( cd "$APP" && nohup env GLOSSARY_ROOT="$GLOSSARY_ROOT" AWS_REGION="$REGION" \
-        ${GLOSSARY_MAX_FILES:+GLOSSARY_MAX_FILES="$GLOSSARY_MAX_FILES"} \
+    # concurrently (last-writer-wins corruption). The log + the glossary_gen_done/cc_failed JSON
+    # line in it are the success/failure signal.
+    # GLOSSARY_MAX_FILES: `source`d from /etc/index-service.env is NOT exported — pass it through
+    # explicitly (via --setenv) or glossary_gen falls back to its own default (400). The refresh
+    # timer gets it differently (systemd EnvironmentFile exports it). The conditional
+    # `${VAR:+--setenv=…}` word simply vanishes when GLOSSARY_MAX_FILES is unset, so no empty arg.
+    systemctl reset-failed "glossary-build-${PROJECT_ID}-${SUBDIR}.service" 2>/dev/null || true
+    systemd-run --collect --unit="glossary-build-${PROJECT_ID}-${SUBDIR}" \
+        -p WorkingDirectory="$APP" \
+        -p "StandardOutput=append:$LOG" -p "StandardError=append:$LOG" \
+        --setenv=GLOSSARY_ROOT="$GLOSSARY_ROOT" --setenv=AWS_REGION="$REGION" \
+        ${GLOSSARY_MAX_FILES:+--setenv=GLOSSARY_MAX_FILES="$GLOSSARY_MAX_FILES"} \
         flock "$GLOSSARY_ROOT/${PROJECT_ID}/.${SUBDIR}.lock" \
           python3 -m glossary_gen --project "${PROJECT_ID}" --repo-root "$WS" \
             --out "$GLOSSARY_ROOT/${PROJECT_ID}/${SUBDIR}.jsonl" \
             --model "$MODEL" --region "$REGION" --full \
-            >>"$LOG" 2>&1 & ) || true
+      || echo "glossary: systemd-run launch failed for $SUBDIR (non-fatal — bridge serves empty glossary)"
   done
-  echo "glossary: initial full build launched (detached) for [${NEED_BUILD}]"
+  echo "glossary: initial full build launched (detached via systemd-run) for [${NEED_BUILD}]"
 fi
 
 echo "ACTIVATE_DONE project=${PROJECT_ID} port=${BRIDGE_PORT} repos=[${SUBDIRS//$'\n'/ }]"

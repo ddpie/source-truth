@@ -145,11 +145,22 @@ refresh_glossary() {
     else
       args+=(--full)
     fi
-    ( cd "$APP" && nohup env GLOSSARY_ROOT="$groot" AWS_REGION="${REGION:-}" \
-        ${GLOSSARY_MAX_FILES:+GLOSSARY_MAX_FILES="$GLOSSARY_MAX_FILES"} \
+    # DETACH VIA systemd-run, NOT `nohup … &`: this script runs over SSH (push-local-repo.sh),
+    # and an SSH channel stays open until every process holding its stdout has exited — a
+    # `nohup … &` child inherits that stdout fd and would keep the operator's push command hanging
+    # on the full cc scan. systemd-run hands the build to PID 1 (own session/cgroup/fds) and returns
+    # at once. --collect reaps the unit on completion so a later refresh reuses the same unit name.
+    # ${GLOSSARY_MAX_FILES:+--setenv=…} simply vanishes when unset (no empty arg).
+    systemctl reset-failed "glossary-build-${PID}-${SUBDIR}.service" 2>/dev/null || true
+    systemd-run --collect --unit="glossary-build-${PID}-${SUBDIR}" \
+        -p WorkingDirectory="$APP" \
+        -p "StandardOutput=append:$glog" -p "StandardError=append:$glog" \
+        --setenv=GLOSSARY_ROOT="$groot" --setenv=AWS_REGION="${REGION:-}" \
+        ${GLOSSARY_MAX_FILES:+--setenv=GLOSSARY_MAX_FILES="$GLOSSARY_MAX_FILES"} \
         flock "$groot/${PID}/.${SUBDIR}.lock" \
-        python3 -m glossary_gen "${args[@]}" >>"$glog" 2>&1 & ) || true
-    echo "reindex: glossary slice refresh launched (detached, $mode) for $SUBDIR"
+        python3 -m glossary_gen "${args[@]}" \
+      || echo "reindex: systemd-run launch failed for $SUBDIR (non-fatal — slice left as-is)"
+    echo "reindex: glossary slice refresh launched (detached via systemd-run, $mode) for $SUBDIR"
   ) || true
 }
 

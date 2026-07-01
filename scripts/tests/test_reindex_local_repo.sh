@@ -45,4 +45,10 @@ grep -q 'refresh_glossary incremental' "$S"; check "incremental path refreshes g
 grep -q 'refresh_glossary full' "$S"; check "first build refreshes glossary with --full" $?
 grep -q -- '--changed-list' "$S" && grep -q -- '--deleted-list' "$S"; check "feeds glossary_gen change/deleted lists" $?
 grep -q 'bedrock-runtime converse' "$S"; check "glossary refresh gated by Bedrock precheck" $?
+# The glossary build MUST detach via systemd-run, not `nohup … &`: this script runs over SSH, and a
+# backgrounded child that inherits the channel's stdout keeps the operator's push hanging on the
+# whole cc scan (the same trap that stalled the first --local deploy via SSM). Guard the regression.
+grep -q 'systemd-run' "$S"; check "glossary build detaches via systemd-run (not nohup under SSH)" $?
+# no ACTUAL nohup command (strip comment lines first — the rationale comment names the old pattern).
+! grep -vE '^\s*#' "$S" | grep -qE '\bnohup\b'; check "no nohup-backgrounded glossary build" $?
 [[ "$_fail" -eq 0 ]]; exit $?
