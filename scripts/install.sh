@@ -308,7 +308,21 @@ safe_source_env "$CONFIG_FILE"
 PROJECTS_CFG="$ROOT/.local/projects.json"
 
 # ask_region <var> : the region menu is shared by every flow (pre-selects persisted).
+# In --local mode the region is NOT a choice — we're deploying onto THIS EC2, whose region is fixed.
+# Read it from IMDS and skip the menu (asking would just invite the wrong pick, e.g. a stale Tokyo
+# default while the box is in us-east-1). IMDSv2: fetch a token first (launch-host sets it required).
 ask_region() {
+  if [[ "$LOCAL_MODE" == true ]]; then
+    local tok imds_region
+    tok="$(curl -fsS -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 60" 2>/dev/null || true)"
+    imds_region="$(curl -fsS ${tok:+-H "X-aws-ec2-metadata-token: $tok"} "http://169.254.169.254/latest/meta-data/placement/region" 2>/dev/null || true)"
+    if [[ -n "$imds_region" ]]; then
+      printf -v "$1" '%s' "$imds_region"
+      say info "区域 / region: $imds_region（本机所在区域，--local 自动检测）"
+      return
+    fi
+    say warn "无法从实例元数据读取区域（--local）；回退到手动选择。"
+  fi
   pick_field "$1" "AWS 区域 / region (↑/↓ 选择，回车确认)" \
     "${DEPLOY_REGION:-ap-northeast-1}" "AWS 区域代码 / region code" "${REGION_OPTIONS[@]}"
 }
