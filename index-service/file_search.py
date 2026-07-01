@@ -72,7 +72,7 @@ def build_command(pattern: str, root: str, *, glob: str | None, max_matches: int
             "--glob", "!.git/",            # …but never the VCS metadata dir
             "--glob", "!node_modules/",    # nor vendored deps (huge, not the project's code)
             "--max-count", str(MAX_PER_FILE),  # per-file hit ceiling (dense data tables need >5)
-            "--max-filesize", "20M",       # allow searching large config/data tables
+            "--max-filesize", "100M",      # allow searching large config/data tables
             "-e", pattern,
         ]
         if glob:
