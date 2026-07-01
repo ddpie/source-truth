@@ -55,9 +55,11 @@ DEFAULT_EXCLUDES = ("node_modules", ".venv", ".git")
 # _healthy never flips, /health lies 200, and the self-heal never fires. A timeout
 # converts that permanent wedge into a TimeoutError → unhealthy → worker exits →
 # _needs_restart() respawns a fresh process (single-writer preserved by the join
-# guard). WARMUP is generous (cold graph load from EFS ~20s, headroom to 90s);
+# guard). WARMUP covers first-time indexing of large repos (9000+ Java files can take
+# 10+ minutes); once graph.db is persisted, subsequent startups load it in seconds.
+# Override via CODEGRAPH_WARMUP_TIMEOUT_S in /etc/index-service.env for extreme repos.
 # QUERY bounds a pathological traversal; LIVENESS is short so health tracks reality.
-WARMUP_TIMEOUT_S = 90.0
+WARMUP_TIMEOUT_S = float(os.environ.get("CODEGRAPH_WARMUP_TIMEOUT_S", "10800"))
 QUERY_TIMEOUT_S = 30.0
 LIVENESS_TIMEOUT_S = 8.0
 # A SINGLE failed liveness probe must NOT end the worker: an 8s probe can be lost
