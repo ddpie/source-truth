@@ -29,19 +29,25 @@ source "$SCRIPT_DIR/lib/env-utils.sh"
 
 CONFIG_FILE="$ROOT/.local/deploy-config"
 ASSUME_YES=false
+LOCAL_MODE=false
+LOCAL_FLAG=()   # forwarded to deploy-all.sh: (--local) in single-host mode, else empty
 for a in "$@"; do
   case "$a" in
     -y|--yes) ASSUME_YES=true ;;
+    --local) LOCAL_MODE=true; LOCAL_FLAG=(--local) ;;
     -h|--help)
       cat <<EOF
-Usage: ./scripts/install.sh [--yes]
+Usage: ./scripts/install.sh [--yes] [--local]
 
 Interactive installer. Shows an arrow-key menu: init environment / add a project /
 redeploy a project / remove a project. Code repos (git or local source) live in
 .local/projects.json; per-project Feishu + the shared git credential are created in
 Secrets Manager. Re-runs pre-fill region/spec from .local/deploy-config.
 
-  --yes   Accept all pre-filled/default answers without prompting (headless).
+  --yes     Accept all pre-filled/default answers without prompting (headless).
+  --local   Single-host mode: deploy onto THIS EC2 (reuse its VPC/role), don't
+            create a separate index host. Forwarded to deploy-all.sh. Normally
+            set for you by prepare-local-host.sh / launch-host.sh.
 EOF
       exit 0 ;;
   esac
@@ -343,7 +349,7 @@ flow_init_env() {
   say step "部署底座 / Deploying base host (several minutes)"
   exec "$SCRIPT_DIR/deploy-all.sh" --region "$REGION" \
     --instance-type "$INSTANCE_TYPE" --root-volume-gb "$ROOT_VOLUME_GB" \
-    --glossary-max-files "$GLOSSARY_MAX_FILES" --skip-projects
+    --glossary-max-files "$GLOSSARY_MAX_FILES" --skip-projects "${LOCAL_FLAG[@]}"
 }
 
 # ============================================================
@@ -520,7 +526,7 @@ json.dump(cfg,open(sys.argv[1],"w"),ensure_ascii=False,indent=2)' "$PROJECTS_CFG
   echo; confirm "现在部署项目 ${PID}？/ Deploy project $PID now?" || { say info "清单已保存，稍后可用「重新部署」/ saved; deploy later via redeploy"; exit 0; }
   # Ensure the shared base exists (idempotent no-op if already up), then deploy this project.
   say step "确保底座就绪 / ensuring shared base (idempotent)"
-  "$SCRIPT_DIR/deploy-all.sh" --region "$REGION" --skip-projects \
+  "$SCRIPT_DIR/deploy-all.sh" --region "$REGION" --skip-projects "${LOCAL_FLAG[@]}" \
     || { say err "底座部署失败 / base deploy failed — fix and re-run"; exit 1; }
   say step "部署项目 / deploying project $PID"
   exec bash "$SCRIPT_DIR/lib/deploy_project.sh" "$REGION" "$PID"

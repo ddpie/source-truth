@@ -80,7 +80,10 @@ else
   git clone "$REPO_URL" "$REPO_DIR"
 fi
 
-# --- 6. hand off to the installer, inside the docker group (usermod above needs a new login else) -
-step "installer"
+# --- 6. hand off to the installer in --local mode, inside the docker group -----------------------
+# --local tells install.sh (and the deploy-all it calls) to deploy onto THIS EC2 and reuse its
+# VPC/role, instead of creating a separate index host. sg docker -c makes the freshly-added docker
+# group live in this same session (usermod alone would need a new login).
+step "installer (--local)"
 cd "$REPO_DIR"
-exec sg docker -c './scripts/install.sh'
+exec sg docker -c './scripts/install.sh --local'

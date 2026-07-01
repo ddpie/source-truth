@@ -20,9 +20,19 @@ grep -q 'secretsmanager get-secret-value' "$P"; check "reads token from Secrets 
 grep -q 'gh auth login --with-token <<<"\$T"' "$P"; check "gh login via here-string (token not in argv)" $?
 grep -q 'gh auth setup-git' "$P"; check "wires gh into git for private clone" $?
 # docker group takes effect via sg (usermod alone needs a fresh login)
-grep -q "sg docker -c './scripts/install.sh'" "$P"; check "runs install under sg docker (group live now)" $?
+grep -q "sg docker -c './scripts/install.sh --local'" "$P"; check "runs install --local under sg docker (group live now)" $?
 # it clones (or pulls) the repo
 grep -qE 'git clone|git -C .* pull' "$P"; check "clones or pulls the repo" $?
+# hands off to install in --local mode (else install would build a SECOND index host)
+grep -q "install.sh --local" "$P"; check "runs install.sh --local (single-host, not two-machine)" $?
+
+echo "test_install_local_flag:"
+I="$ROOT/scripts/install.sh"
+bash -n "$I"; check "install parses" $?
+grep -q '\-\-local) LOCAL_MODE=true' "$I"; check "install accepts --local" $?
+# both deploy-all invocations forward the flag (init-env + add-project base)
+n=$(grep -c '"\${LOCAL_FLAG\[@\]}"' "$I")
+[ "$n" -ge 2 ]; check "both deploy-all calls forward LOCAL_FLAG (got $n)" $?
 
 echo "test_launch_host_deploy_flow:"
 bash -n "$L"; check "launch-host parses" $?
