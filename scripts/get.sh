@@ -33,14 +33,15 @@ fi
 # Clone helper. Prefer `gh repo clone` when gh is installed + authenticated: it carries the
 # operator's token, so a PRIVATE repo clones without an interactive password prompt. Fall back
 # to plain `git clone` (works for a public repo, or when the user has git credentials cached).
-# Shallow clone keeps the one-liner fast; the installer never needs history.
+# Full clone (not shallow): this checkout is long-lived — upgrades pull into it with `git pull`,
+# and a shallow history can trip that up. The one-time clone cost is negligible for a host we keep.
 do_clone() {
   if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
     bold "• cloning $SLUG ($REF) via gh → $DIR"
-    gh repo clone "$SLUG" "$DIR" -- --depth 1 --branch "$REF"
+    gh repo clone "$SLUG" "$DIR" -- --branch "$REF"
   else
     bold "• cloning $REPO ($REF) → $DIR"
-    git clone --depth 1 --branch "$REF" "$REPO" "$DIR"
+    git clone --branch "$REF" "$REPO" "$DIR"
   fi
 }
 

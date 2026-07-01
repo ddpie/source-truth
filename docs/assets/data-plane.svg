@@ -9,14 +9,14 @@
   </defs>
 
   <rect x="0" y="0" width="760" height="486" fill="#ffffff"/>
-  <text x="380" y="34" text-anchor="middle" font-size="18" font-weight="700" fill="#1f2733">数据面：代码如何进入 index-service、索引如何刷新</text>
-  <text x="380" y="56" text-anchor="middle" font-size="12.5" fill="#7a8493">git 为唯一来源 · 定时 git pull + 常驻 watcher 增量重建 · 分钟级新鲜，无需重部署</text>
+  <text x="380" y="34" text-anchor="middle" font-size="18" font-weight="700" fill="#1f2733">代码如何进入 index-service、索引如何刷新</text>
+  <text x="380" y="56" text-anchor="middle" font-size="12.5" fill="#7a8493">git 仓定时 pull · 本地仓手动推送 · 常驻 watcher 增量重建 · 分钟级反映，无需重部署</text>
 
   <!-- 5 stacked stages, x=120 w=520 -->
   <!-- stage 1 -->
   <rect x="120" y="78" width="520" height="52" rx="8" fill="#eef3fb" stroke="#b9c9e6" stroke-width="1.2"/>
   <text x="140" y="102" font-size="13.5" font-weight="600" fill="#1f2733">① activate_project.sh（经 SSM，按项目）</text>
-  <text x="140" y="121" font-size="11.5" fill="#5b6573">用只读 git 凭证 git clone 各仓 → index-service 本地磁盘 /data/repo/&lt;subdir&gt;</text>
+  <text x="140" y="121" font-size="11.5" fill="#5b6573">git 仓用只读凭证 clone（本地仓经 rsync 推送）→ index-service 本地磁盘 /data/repo/&lt;subdir&gt;</text>
 
   <!-- stage 2 -->
   <rect x="120" y="154" width="520" height="52" rx="8" fill="#eef3fb" stroke="#b9c9e6" stroke-width="1.2"/>
@@ -26,12 +26,12 @@
   <!-- stage 3 -->
   <rect x="120" y="230" width="520" height="52" rx="8" fill="#eef3fb" stroke="#b9c9e6" stroke-width="1.2"/>
   <text x="140" y="254" font-size="13.5" font-weight="600" fill="#1f2733">③ index-bridge-&lt;projectId&gt;.service · 每项目一个常驻只读</text>
-  <text x="140" y="273" font-size="11.5" fill="#5b6573">codegraph-server --mcp（内存图）+ http_bridge 暴露 HTTP；各占独立端口，仅服务本项目仓库</text>
+  <text x="140" y="273" font-size="11.5" fill="#5b6573">codegraph-server --mcp（内存图）+ http_bridge 提供 HTTP；各占独立端口，仅服务本项目仓库</text>
 
   <!-- stage 4 (refresh, accent amber) -->
   <rect x="120" y="306" width="520" height="52" rx="8" fill="#fbf4e8" stroke="#e0c48f" stroke-width="1.2"/>
   <text x="140" y="330" font-size="13.5" font-weight="600" fill="#1f2733">④ index-refresh-&lt;subdir&gt;.timer · 定时刷新（默认 300s）</text>
-  <text x="140" y="349" font-size="11.5" fill="#8a6520">git pull → 常驻进程的 file-watcher 数秒内增量重建内存图（无重启 / 无第二写者）</text>
+  <text x="140" y="349" font-size="11.5" fill="#8a6520">git pull → 常驻进程的 file-watcher 数秒内增量重建内存图（无重启 / 不会两个进程同时写）</text>
 
   <!-- stage 5 (consumer, accent green) -->
   <rect x="120" y="400" width="520" height="52" rx="8" fill="#eef6ef" stroke="#9cc6a8" stroke-width="1.2"/>
@@ -49,5 +49,5 @@
   <text x="58" y="296" text-anchor="middle" font-size="10" fill="#c98a2b" transform="rotate(-90 58 296)">每 300s 拉新 → 增量重建</text>
 
   <!-- right note -->
-  <text x="664" y="268" text-anchor="middle" font-size="11" fill="#9aa3b0" transform="rotate(-90 664 268)">唯一代码副本只在本地磁盘 · git pull 刷新</text>
+  <text x="664" y="268" text-anchor="middle" font-size="11" fill="#9aa3b0" transform="rotate(-90 664 268)">唯一代码副本只在本地磁盘 · git pull / 手动推送刷新</text>
 </svg>

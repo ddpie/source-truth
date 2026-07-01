@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # test_test_sh.sh — scripts/test.sh 自身行为的单元测试。
-# 只调 test.sh 的轻量子命令（--help / --list / --lint），不触发完整 unit 层（避免自递归）。
+# 只调 test.sh 的轻量子命令（--help / --list / --lint），不触发完整 unit 层。
+# _TEST_SH_SELF=1 让 test.sh 的发现逻辑排除本文件，防递归。
 set -uo pipefail
+export _TEST_SH_SELF=1
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TEST_SH="$ROOT/scripts/test.sh"
@@ -45,6 +47,22 @@ check "--list-py 退出码 0" "$listpy_rc"
 # 未知参数应报错退出非零
 "$TEST_SH" --bogus-flag >/dev/null 2>&1; bogus_rc=$?
 [[ "$bogus_rc" -ne 0 ]]; check "未知参数退出非零" $?
+
+# --lint 聚合：check-invariants 失败时必须非零（守卫失败曾被后一步的退出码掩盖）。
+# 用最小假仓复现：真 test.sh + 真 common.sh + 一失败一成功的守卫桩。
+TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+mkdir -p "$TMP/scripts/lib" "$TMP/scripts/tests"
+cp "$TEST_SH" "$TMP/scripts/test.sh"
+cp "$ROOT/scripts/lib/common.sh" "$TMP/scripts/lib/common.sh"
+printf '#!/usr/bin/env bash\nexit 1\n' > "$TMP/scripts/check-invariants.sh"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$TMP/scripts/check-versions.sh"
+bash "$TMP/scripts/test.sh" --lint >/dev/null 2>&1; lintfail_rc=$?
+[[ "$lintfail_rc" -ne 0 ]]; check "--lint 在 check-invariants 失败时退出非零" $?
+# 对称：后一步守卫失败同样必须非零。
+printf '#!/usr/bin/env bash\nexit 0\n' > "$TMP/scripts/check-invariants.sh"
+printf '#!/usr/bin/env bash\nexit 1\n' > "$TMP/scripts/check-versions.sh"
+bash "$TMP/scripts/test.sh" --lint >/dev/null 2>&1; lintfail2_rc=$?
+[[ "$lintfail2_rc" -ne 0 ]]; check "--lint 在 check-versions 失败时退出非零" $?
 
 echo "  ran=$_run failed=$_fail"
 [[ "$_fail" -eq 0 ]]

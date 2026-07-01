@@ -17,15 +17,29 @@ TOKEN FRUGALITY (engineering, by request):
     extract_entries() still salvages valid lines if cc adds chatter anyway.
   * Empty diff -> no cc call at all (caller skips).
 
+CONCURRENCY (wall-clock, not token count):
+  * A full scan loops MANY cc batches; build() runs them on a ThreadPoolExecutor
+    (default 8, env GLOSSARY_BUILD_CONCURRENCY) instead of serially. Output is
+    reassembled in batch order, so results are identical to the old serial path.
+  * Each batch retries on Bedrock throttle/timeout with bounded exponential backoff
+    + jitter (env GLOSSARY_BUILD_RETRY_BASE_S / GLOSSARY_BUILD_MAX_RETRIES); a hard
+    error or an exhausted retry fails the whole build -> glossary_gen keeps the old
+    slice (SKIP), never a partial write. Cross-repo parallelism (systemd-run per
+    subdir) is unchanged and stacks on top of this.
+
 The cc invocation is injected (``runner``) so the orchestration is unit-testable
 without shelling out; run_cc() is the default subprocess runner.
 """
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import logging
+import os
+import random
 import subprocess
+import time
 from dataclasses import replace
 from typing import Callable
 
@@ -245,6 +259,86 @@ def run_cc(prompt: str, *, cwd: str, model: str, region: str,
     return proc.stdout or ""
 
 
+# --- concurrency + backoff for the batch loop -------------------------------
+# Env-tunable knobs (illegal / non-positive values fall back to the default).
+_DEFAULT_CONCURRENCY = 8
+_DEFAULT_RETRY_BASE_S = 4.0
+_DEFAULT_MAX_RETRIES = 3
+
+# Bedrock throttle signatures. cc surfaces these on stderr when the model endpoint
+# rate-limits; we retry ONLY these (plus timeouts), never hard errors (bad args,
+# AccessDenied, non-throttle 4xx) — retrying those just wastes time and tokens.
+_THROTTLE_MARKERS = ("throttl", "429", "too many requests", "rate exceeded")
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        v = int(os.environ.get(name, "") or default)
+    except ValueError:
+        return default
+    return v if v > 0 else default
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        v = float(os.environ.get(name, "") or default)
+    except ValueError:
+        return default
+    return v if v > 0 else default
+
+
+def _build_concurrency() -> int:
+    return _env_int("GLOSSARY_BUILD_CONCURRENCY", _DEFAULT_CONCURRENCY)
+
+
+def _retry_base_s() -> float:
+    return _env_float("GLOSSARY_BUILD_RETRY_BASE_S", _DEFAULT_RETRY_BASE_S)
+
+
+def _max_retries() -> int:
+    return _env_int("GLOSSARY_BUILD_MAX_RETRIES", _DEFAULT_MAX_RETRIES)
+
+
+def _is_throttle_error(exc: BaseException) -> bool:
+    """True iff exc is a retriable throttle/timeout. Timeouts count (a batch that timed
+    out is usually the endpoint being slow under load). A CalledProcessError counts only
+    when its stderr carries a throttle marker — a hard error (bad flag, AccessDenied) does
+    NOT, so it bubbles up immediately without burning retries."""
+    if isinstance(exc, subprocess.TimeoutExpired):
+        return True
+    if isinstance(exc, subprocess.CalledProcessError):
+        stderr = exc.stderr or ""
+        low = stderr.lower() if isinstance(stderr, str) else ""
+        return any(m in low for m in _THROTTLE_MARKERS)
+    return False
+
+
+def _run_with_retry(run: Callable[..., str], *, prompt: str, cwd: str, model: str,
+                    region: str, timeout: int, batch_idx: int,
+                    sleeper: Callable[[float], None] = time.sleep,
+                    rng: Callable[[float, float], float] = random.uniform) -> str:
+    """Call `run` for one batch with bounded exponential backoff on throttle/timeout.
+    Backoff is base*2**attempt + jitter to de-correlate concurrent batches (avoid
+    back-to-back retries all hammering the endpoint at once). Hard errors and a final
+    exhausted throttle both raise — the caller (build) turns that into an overall failure
+    so glossary_gen keeps the old slice (SKIP)."""
+    base = _retry_base_s()
+    max_retries = _max_retries()
+    attempt = 0
+    while True:
+        try:
+            return run(prompt, cwd=cwd, model=model, region=region, timeout=timeout)
+        except Exception as exc:  # noqa: BLE001 - classify then re-raise
+            if not _is_throttle_error(exc) or attempt >= max_retries:
+                raise
+            wait = base * (2 ** attempt) + rng(0.0, base)
+            logger.warning(json.dumps({"event": "glossary_build_retry", "batch": batch_idx,
+                                        "attempt": attempt + 1, "max": max_retries,
+                                        "wait_s": round(wait, 2), "detail": str(exc)[:120]}))
+            sleeper(wait)
+            attempt += 1
+
+
 def build(files: list[str] | None, *, project: str, cwd: str, model: str, region: str,
           runner: Callable[..., str] | None = None, timeout: int = DEFAULT_TIMEOUT_S) -> list[glossary.Entry]:
     """Run cc for the given scope and parse its output into entries. `files` None =>
@@ -275,14 +369,28 @@ def build(files: list[str] | None, *, project: str, cwd: str, model: str, region
     # observable; cc's JSONL product still goes only to the runner's captured stdout, unpolluted.
     real_batches = [b for b in batches if b != []]
     total = len(real_batches)
-    raw_parts: list[str] = []
-    for idx, batch in enumerate(real_batches, start=1):
+
+    def _one_batch(idx: int, batch: list[str] | None) -> str:
         nfiles = "full-repo" if batch is None else len(batch)
         logger.info(json.dumps({"event": "glossary_build_batch", "project": project,
                                  "batch": idx, "batches": total, "files": nfiles}))
         prompt = build_prompt(batch, project=project)
-        raw_parts.append(run(prompt, cwd=cwd, model=model, region=region, timeout=timeout))
-    raw = "\n".join(raw_parts)
+        return _run_with_retry(run, prompt=prompt, cwd=cwd, model=model, region=region,
+                               timeout=timeout, batch_idx=idx)
+
+    # Concurrency capped at the batch count (no idle threads for a small incremental set).
+    # Results are keyed by batch index and reassembled IN ORDER, so output is identical to
+    # the old serial join regardless of completion order. A batch whose retries are exhausted
+    # raises here; we surface the FIRST such error (and stop consuming) so build() fails as a
+    # whole -> glossary_gen keeps the old slice (SKIP). No partial slice is ever written.
+    max_workers = min(_build_concurrency(), total) if total else 1
+    raw_by_idx: dict[int, str] = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futs = {pool.submit(_one_batch, idx, batch): idx
+                for idx, batch in enumerate(real_batches, start=1)}
+        for fut in concurrent.futures.as_completed(futs):
+            raw_by_idx[futs[fut]] = fut.result()  # re-raises this batch's exhausted error
+    raw = "\n".join(raw_by_idx[i] for i in sorted(raw_by_idx))
 
     repo_base = os.path.basename(root)
 

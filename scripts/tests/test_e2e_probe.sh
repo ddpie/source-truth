@@ -38,6 +38,23 @@ assert p2 == {"prompt": "Q?", "traceId": "st-x"}, p2
 assert "repos" not in p2, "empty repos must be omitted, not []"
 # never leaks fields the agent does not read (e.g. projectId)
 assert set(p2.keys()) <= {"prompt", "traceId", "repos"}, p2.keys()
+
+# --- _resolve_repos MUST understand the object schema {subdir, git, ref} ---
+# (real bug: it only kept plain strings, so the current projects.json shape was
+# silently dropped and the probe sent no repos field at all)
+import json, tempfile, os
+with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+    json.dump({"projects": {"demo": {"port": 8080, "repos": [
+        {"subdir": "repo-a", "git": "https://x/y.git", "ref": "main"},
+        "legacy-string-repo",
+    ]}}}, fh)
+    tmp = fh.name
+try:
+    m.PROJECTS_JSON = tmp
+    repos = m._resolve_repos(None)
+    assert repos == ["repo-a", "legacy-string-repo"], repos
+finally:
+    os.unlink(tmp)
 print("PYOK")
 PYEOF
 )

@@ -37,6 +37,14 @@ APP=/opt/idx/app
 BIN=/opt/idx/bin/codegraph-server
 LOCAL_REPO_ROOT=/data/repo
 RENDER_MANIFEST="$APP/render_manifest.py"
+
+# repo_uses_git <source>: rc 0 if this repo is fetched via git (default), non-zero for local.
+# Local repos are pushed to /data/repo/<subdir> out-of-band (scripts/push-local-repo.sh) and
+# refreshed manually — no git_fetch, no refresh timer.
+repo_uses_git() {
+  [ "${1:-git}" != "local" ]
+}
+
 GIT_FETCH="$APP/git_fetch.sh"
 GLOSSARY_REFRESH="$APP/glossary_refresh.sh"
 [ -f "$RENDER_MANIFEST" ] || { echo "ACTIVATE_FAILED: render_manifest.py not in app bundle"; exit 1; }
@@ -52,6 +60,21 @@ GLOSSARY_REFRESH="$APP/glossary_refresh.sh"
 
 mkdir -p /etc/index-projects "$LOCAL_REPO_ROOT"
 MANIFEST="/etc/index-projects/${PROJECT_ID}.json"
+# Capture the project's PREVIOUS subdirs BEFORE overwriting the manifest — the authoritative
+# "what this project owned last time" set for orphan reconcile (independent of timers/slices,
+# which may not exist for local repos or on a no-glossary-engine host).
+# Explicit `if` (NOT `[ -f ] && OLD_SUBDIRS=...`): the && form's exit code on a first activate
+# (no manifest yet) is non-zero, and as a bare statement that can trip `set -e` on some readings.
+OLD_SUBDIRS=""
+if [ -f "$MANIFEST" ]; then
+  # A present-but-unparseable old manifest would silently yield an empty set → orphan cleanup
+  # skipped (leaking repo copies / glossary slices). Warn loudly so it's not invisible; the prior
+  # manifest was written by us and should always parse, so this is a "should never happen" tripwire.
+  if ! OLD_SUBDIRS="$(python3 "$RENDER_MANIFEST" --field subdir "$MANIFEST" 2>/dev/null)"; then
+    echo "WARN: existing manifest $MANIFEST did not parse — orphan reconcile may miss removed repos"
+    OLD_SUBDIRS=""
+  fi
+fi
 printf '%s' "$REPO_MANIFEST_JSON" > "$MANIFEST"
 
 # Validate with the SHIPPED parser; fail loud before touching any repo/unit.
@@ -89,34 +112,53 @@ fi
 # --- clone each repo + build its graph + write a concrete per-repo refresh unit+timer ----------
 BUILD_UNITS=""
 SERVE_FLOCKS=""
+# Local repos whose code hasn't been pushed yet: "装服务" stands up the bridge/runtime/gateway now
+# and DEFERS the graph build to the first `scripts/push-local-repo.sh`. Tracked here so the build
+# loop + initial glossary build skip them (they'd otherwise fail / waste a Bedrock precheck on an
+# empty dir). The bridge still serves them (empty, unhealthy) until the first push builds the graph.
+DEFERRED_SUBDIRS=""
 while IFS= read -r SUBDIR; do
   : "${SUBDIR:?ACTIVATE_FAILED: empty subdir (refusing git op on repo root)}"
   WS="$LOCAL_REPO_ROOT/$SUBDIR"
-  GIT_URL="$(python3 "$RENDER_MANIFEST" --repo-field git "$SUBDIR" "$MANIFEST")" \
-    || { echo "ACTIVATE_FAILED: no git url for $SUBDIR"; exit 1; }
-  GIT_REF="$(python3 "$RENDER_MANIFEST" --repo-field ref "$SUBDIR" "$MANIFEST" || echo "")"
-  IV="$(python3 "$RENDER_MANIFEST" --repo-field refreshIntervalSec "$SUBDIR" "$MANIFEST" 2>/dev/null || echo "")"
-  [ -n "$IV" ] && [ "$IV" != "None" ] || IV=300
-
-  bash "$GIT_FETCH" "$SUBDIR" "$GIT_URL" "$GIT_REF" "$WS" \
-    || { echo "ACTIVATE_FAILED: git fetch $SUBDIR"; exit 1; }
-  # graph dirs INSIDE $WS (proven layout); created after clone, git-untracked so reset --hard keeps them.
+  SRC="$(python3 "$RENDER_MANIFEST" --repo-field source "$SUBDIR" "$MANIFEST" 2>/dev/null || echo git)"
+  [ -n "$SRC" ] && [ "$SRC" != "None" ] || SRC=git
+  if repo_uses_git "$SRC"; then
+    GIT_URL="$(python3 "$RENDER_MANIFEST" --repo-field git "$SUBDIR" "$MANIFEST")" \
+      || { echo "ACTIVATE_FAILED: no git url for $SUBDIR"; exit 1; }
+    GIT_REF="$(python3 "$RENDER_MANIFEST" --repo-field ref "$SUBDIR" "$MANIFEST" || echo "")"
+    IV="$(python3 "$RENDER_MANIFEST" --repo-field refreshIntervalSec "$SUBDIR" "$MANIFEST" 2>/dev/null || echo "")"
+    [ -n "$IV" ] && [ "$IV" != "None" ] || IV=300
+    bash "$GIT_FETCH" "$SUBDIR" "$GIT_URL" "$GIT_REF" "$WS" \
+      || { echo "ACTIVATE_FAILED: git fetch $SUBDIR"; exit 1; }
+  else
+    # LOCAL source: code is pushed out-of-band to $WS by scripts/push-local-repo.sh (+ host-side
+    # reindex_local_repo.sh). If it hasn't landed yet, DON'T fail — "装服务" should still stand up
+    # the bridge/runtime/gateway; the graph build is deferred to the first push (reindex's first-push
+    # path does the full build). Mark it deferred so the build + initial-glossary loops skip it.
+    mkdir -p "$WS"
+    if [ -z "$(ls -A "$WS" 2>/dev/null)" ]; then
+      echo "activate: local repo '$SUBDIR' has no code yet — deferring graph build to first push (scripts/push-local-repo.sh)"
+      DEFERRED_SUBDIRS="$DEFERRED_SUBDIRS $SUBDIR"
+    else
+      echo "activate: $SUBDIR is a LOCAL repo (no git fetch, no refresh timer)"
+    fi
+  fi
+  # graph dirs INSIDE $WS (proven layout); created after fetch/push, git-untracked so reset --hard keeps them.
   mkdir -p "$WS/.codegraph" "$WS/.home/.codegraph"
 
   BUILD_UNITS="$BUILD_UNITS index-build@${SUBDIR}.service"
   SERVE_FLOCKS="$SERVE_FLOCKS /usr/bin/flock $WS/.codegraph/.writer.lock"
 
-  # Concrete refresh unit + timer for this repo. ExecStart re-reads git url/ref from THIS
-  # project's manifest at run time (via render_manifest --repo-field) rather than baking them
-  # into the unit text: that (a) preserves an EMPTY ref correctly — git_fetch treats "" as
-  # "default branch" — instead of an unquoted empty systemd arg collapsing and shifting the
-  # positional args (which made the DEST arg empty and every pull fail); and (b) keeps the git
-  # URL/ref out of the ExecStart line, so a value with whitespace or a leading dash can't become
-  # an extra/option arg. The whole command is one `bash -c` so the $(...) lookups run on the host.
-  # The refresh runs glossary_refresh.sh, which (a) does the authoritative git pull (its exit
-  # code fails the unit on a bad pull, unchanged), then (b) rebuilds THIS repo's glossary slice
-  # incrementally from the pull's old..new diff (best-effort, never fails the unit). MODEL/REGION
-  # come from /etc/index-service.env; the build-time cc engine uses them on Bedrock.
+  # Concrete refresh unit + timer — ONLY for git repos (local repos refresh manually via re-push).
+  # ExecStart re-reads git url/ref from THIS project's manifest at run time (via render_manifest
+  # --repo-field) rather than baking them into the unit text: that (a) preserves an EMPTY ref
+  # correctly — git_fetch treats "" as "default branch" — instead of an unquoted empty systemd arg
+  # collapsing and shifting the positional args; and (b) keeps the git URL/ref out of the ExecStart
+  # line, so a value with whitespace or a leading dash can't become an extra/option arg. The whole
+  # command is one `bash -c` so the $(...) lookups run on the host. The refresh runs
+  # glossary_refresh.sh, which (a) does the authoritative git pull (its exit code fails the unit on
+  # a bad pull), then (b) rebuilds THIS repo's glossary slice incrementally (best-effort).
+  if repo_uses_git "$SRC"; then
   cat > "/etc/systemd/system/index-refresh-${SUBDIR}.service" <<UNIT
 [Unit]
 Description=Scheduled git pull + glossary refresh for repo ${SUBDIR}
@@ -139,6 +181,7 @@ Unit=index-refresh-${SUBDIR}.service
 [Install]
 WantedBy=timers.target
 UNIT
+  fi
 done <<< "$SUBDIRS"
 
 # --- this project's CONCRETE resident bridge unit (index-bridge-<projectId>) -------------------
@@ -167,7 +210,14 @@ systemctl daemon-reload
 # Build each repo (sole writer per graph) BEFORE starting the bridge. If the bridge is already
 # running (re-activate), stop it first so the build's `flock -n` can take the writer lock.
 systemctl stop "index-bridge-${PROJECT_ID}.service" 2>/dev/null || true
+DEFERRED_MEMBER=" $(echo $DEFERRED_SUBDIRS) "   # space-delimited membership test
 for SUBDIR in $SUBDIRS; do
+  # A deferred (empty local) repo has no code to index yet — skip its build. The bridge starts and
+  # serves it empty (unhealthy) until the first `push-local-repo.sh` runs the full build.
+  case "$DEFERRED_MEMBER" in *" $SUBDIR "*)
+    echo "activate: skipping graph build for '$SUBDIR' (no code yet — deferred to first push)"
+    continue ;;
+  esac
   systemctl reset-failed "index-build@${SUBDIR}.service" 2>/dev/null || true
   systemctl start "index-build@${SUBDIR}.service" || true
   R="$(systemctl show "index-build@${SUBDIR}.service" --value -p Result 2>/dev/null || echo unknown)"
@@ -178,33 +228,43 @@ for SUBDIR in $SUBDIRS; do
   fi
 done
 
-# RECONCILE: a repo removed from this project's repos[] must not leave an orphan behind.
-# activate only ever (re)creates units/slices for the CURRENT $SUBDIRS, so a previously-activated
-# repo that's now gone would keep: (a) its index-refresh-<sub>.timer firing, and (b) its
-# /data/glossary/<project>/<sub>.jsonl slice — which glossary_read globs unconditionally, so its
-# stale concepts would pollute glossary_index forever. Tear down units + slice for any on-disk
-# <sub> not in the current manifest. (Repo working copies under /data/repo are left in place — a
-# stale graph isn't served once its bridge args drop it; only the glossary slice is globbed blindly.)
+# RECONCILE (old-manifest-driven): orphans = OLD_SUBDIRS − current SUBDIRS. Authoritative and
+# source-agnostic — works for local repos (no timer) AND on hosts with no glossary engine (no
+# slice). A timer-driven loop would never see a removed LOCAL repo (it has no timer) and would leak
+# its repo copy + glossary slice forever (glossary_read globs every <sub>.jsonl unconditionally).
+# Tear down each orphan's refresh unit (git repos only; disable is a no-op for local), its glossary
+# slice + lock, and its on-disk repo copy + graph.
 CUR_SUBDIRS=" $(echo $SUBDIRS) "   # space-delimited membership test
 GLOSSARY_ROOT="${GLOSSARY_ROOT:-/data/glossary}"
 PROJ_GLOSS_DIR="$GLOSSARY_ROOT/$PROJECT_ID"
-for unit in $(systemctl list-unit-files 'index-refresh-*.timer' --no-legend --plain 2>/dev/null | awk '{print $1}'); do
-  sub="${unit#index-refresh-}"; sub="${sub%.timer}"
-  # Only this project's repos are candidates; we can't tell ownership from the unit name alone,
-  # so only reconcile a unit whose matching slice lives under THIS project's glossary dir.
-  [ -f "$PROJ_GLOSS_DIR/${sub}.jsonl" ] || continue
+for sub in $OLD_SUBDIRS; do
   case "$CUR_SUBDIRS" in *" $sub "*) continue ;; esac   # still current → keep
-  echo "glossary: reconcile — repo '$sub' removed; tearing down its refresh unit + slice"
+  echo "reconcile: repo '$sub' removed from project $PROJECT_ID — tearing down unit + slice + repo copy"
   systemctl disable --now "index-refresh-${sub}.timer" 2>/dev/null || true
+  systemctl reset-failed "index-refresh-${sub}.timer" "index-refresh-${sub}.service" 2>/dev/null || true
   rm -f "/etc/systemd/system/index-refresh-${sub}.service" "/etc/systemd/system/index-refresh-${sub}.timer" 2>/dev/null || true
   rm -f "$PROJ_GLOSS_DIR/${sub}.jsonl" "$PROJ_GLOSS_DIR/.${sub}.lock" 2>/dev/null || true
+  rm -rf "$LOCAL_REPO_ROOT/${sub}" "$LOCAL_REPO_ROOT/${sub}.incoming" "$LOCAL_REPO_ROOT/${sub}.bridge.lock" 2>/dev/null || true
 done
 systemctl daemon-reload 2>/dev/null || true
 
 systemctl enable --now "index-bridge-${PROJECT_ID}.service"
 for SUBDIR in $SUBDIRS; do
+  SRC="$(python3 "$RENDER_MANIFEST" --repo-field source "$SUBDIR" "$MANIFEST" 2>/dev/null || echo git)"
+  if ! repo_uses_git "${SRC:-git}"; then
+    # Local repo: no git timer. If this subdir was PREVIOUSLY a git source, a stale
+    # index-refresh-<sub>.timer would keep git-pulling a dir that no longer has a remote and fail
+    # forever — so tear it down here (idempotent; a no-op when there was never a timer). This makes
+    # a git→local source flip converge, not just a full repo removal (which reconcile above handles).
+    systemctl disable --now "index-refresh-${SUBDIR}.timer" 2>/dev/null || true
+    systemctl reset-failed "index-refresh-${SUBDIR}.timer" "index-refresh-${SUBDIR}.service" 2>/dev/null || true
+    rm -f "/etc/systemd/system/index-refresh-${SUBDIR}.service" "/etc/systemd/system/index-refresh-${SUBDIR}.timer" 2>/dev/null || true
+    echo "activate: local repo $SUBDIR — no refresh timer (removed any stale git timer)"
+    continue
+  fi
   systemctl enable --now "index-refresh-${SUBDIR}.timer"
 done
+systemctl daemon-reload 2>/dev/null || true
 
 # Initial FULL glossary build per repo. Detached + best-effort: a full cc scan can take minutes
 # (build-time engine on Bedrock), and the bridge already serves an EMPTY glossary until the slice
@@ -217,6 +277,9 @@ GLOSSARY_ROOT="${GLOSSARY_ROOT:-/data/glossary}"
 # idempotent re-activation, and avoids re-blanking a working slice.
 NEED_BUILD=""
 for SUBDIR in $SUBDIRS; do
+  # Skip deferred (empty local) repos: no code → a cc scan finds nothing and would waste a Bedrock
+  # precheck + write an empty slice. The first push builds the graph AND refreshes the glossary.
+  case "$DEFERRED_MEMBER" in *" $SUBDIR "*) continue ;; esac
   SLICE="$GLOSSARY_ROOT/${PROJECT_ID}/${SUBDIR}.jsonl"
   if [ ! -s "$SLICE" ]; then
     NEED_BUILD="$NEED_BUILD $SUBDIR"
@@ -241,27 +304,35 @@ else
     WS="$LOCAL_REPO_ROOT/$SUBDIR"
     mkdir -p "$GLOSSARY_ROOT/${PROJECT_ID}"
     LOG="/var/log/glossary-build-${PROJECT_ID}-${SUBDIR}.log"
+    # DETACH VIA systemd-run, NOT `nohup … &`. This script is driven over SSM RunCommand, and SSM
+    # does not return until EVERY process still holding the command's stdout pipe has exited. A
+    # `nohup … &` child stays in our session and inherits the `exec > >(tee …)` pipe fd from the top
+    # of this script, so it keeps that pipe open — SSM (and therefore the deploy step that then
+    # starts the gateway) blocks on the whole multi-minute cc scan. systemd-run hands the build to
+    # PID 1 as a transient unit in its own session/cgroup with its own fds; this call returns at
+    # once and the build outlives our SSM session. --collect reaps the unit when it finishes (even
+    # on failure) so a later re-activate can reuse the same unit name.
     # flock on a per-slice lock SHARED with the refresh unit (glossary_refresh.sh takes the same
     # lock), so the initial full build and the first scheduled incremental can't write the slice
-    # concurrently (last-writer-wins corruption). nohup-detached so activation doesn't block; the
-    # log + the glossary_gen_done/cc_failed JSON line in it are the success/failure signal.
-    # GLOSSARY_MAX_FILES: `source`d from /etc/index-service.env is NOT exported, and this build
-    # uses an explicit env prefix — so pass it through explicitly or glossary_gen falls back to its
-    # own default (400). The refresh timer gets it differently (systemd EnvironmentFile exports it).
-    # All vars are carried by `env` (KEY=VAL args), NOT a bare command prefix: a conditional
-    # `${VAR:+KEY=VAL}` prefix expands AFTER the shell has already decided which words are
-    # assignments, so the expanded `KEY=VAL` lands in command position and bash tries to run it
-    # ("GLOSSARY_MAX_FILES=0: command not found", killing the build). `env` parses KEY=VAL at
-    # runtime, so the conditional works for any value (0 / 400 / empty).
-    ( cd "$APP" && nohup env GLOSSARY_ROOT="$GLOSSARY_ROOT" AWS_REGION="$REGION" \
-        ${GLOSSARY_MAX_FILES:+GLOSSARY_MAX_FILES="$GLOSSARY_MAX_FILES"} \
+    # concurrently (last-writer-wins corruption). The log + the glossary_gen_done/cc_failed JSON
+    # line in it are the success/failure signal.
+    # GLOSSARY_MAX_FILES: `source`d from /etc/index-service.env is NOT exported — pass it through
+    # explicitly (via --setenv) or glossary_gen falls back to its own default (400). The refresh
+    # timer gets it differently (systemd EnvironmentFile exports it). The conditional
+    # `${VAR:+--setenv=…}` word simply vanishes when GLOSSARY_MAX_FILES is unset, so no empty arg.
+    systemctl reset-failed "glossary-build-${PROJECT_ID}-${SUBDIR}.service" 2>/dev/null || true
+    systemd-run --collect --unit="glossary-build-${PROJECT_ID}-${SUBDIR}" \
+        -p WorkingDirectory="$APP" \
+        -p "StandardOutput=append:$LOG" -p "StandardError=append:$LOG" \
+        --setenv=GLOSSARY_ROOT="$GLOSSARY_ROOT" --setenv=AWS_REGION="$REGION" \
+        ${GLOSSARY_MAX_FILES:+--setenv=GLOSSARY_MAX_FILES="$GLOSSARY_MAX_FILES"} \
         flock "$GLOSSARY_ROOT/${PROJECT_ID}/.${SUBDIR}.lock" \
           python3 -m glossary_gen --project "${PROJECT_ID}" --repo-root "$WS" \
             --out "$GLOSSARY_ROOT/${PROJECT_ID}/${SUBDIR}.jsonl" \
             --model "$MODEL" --region "$REGION" --full \
-            >>"$LOG" 2>&1 & ) || true
+      || echo "glossary: systemd-run launch failed for $SUBDIR (non-fatal — bridge serves empty glossary)"
   done
-  echo "glossary: initial full build launched (detached) for [${NEED_BUILD}]"
+  echo "glossary: initial full build launched (detached via systemd-run) for [${NEED_BUILD}]"
 fi
 
 echo "ACTIVATE_DONE project=${PROJECT_ID} port=${BRIDGE_PORT} repos=[${SUBDIRS//$'\n'/ }]"

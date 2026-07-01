@@ -35,12 +35,14 @@ usage() {
 EOF
 }
 
-# 发现 shell unit 测试：scripts/tests/test_*.sh，排除自递归的 test_test_sh.sh。
+# 发现 shell unit 测试：scripts/tests/test_*.sh。
+# test_test_sh.sh 会再调本脚本（轻量子命令）——它调用时置 _TEST_SH_SELF=1，
+# 此处据此排除自身，防递归。
 discover_units() {
   local f
   for f in "$ROOT"/scripts/tests/test_*.sh; do
     [[ -e "$f" ]] || continue
-    [[ "$(basename "$f")" == "test_test_sh.sh" ]] && continue
+    [[ "${_TEST_SH_SELF:-}" == "1" && "$(basename "$f")" == "test_test_sh.sh" ]] && continue
     printf '%s\n' "$f"
   done
 }
@@ -56,10 +58,12 @@ discover_py_units() {
 }
 
 run_lint() {
+  local rc=0
   say step "lint：结构自检 check-invariants"
-  bash "$ROOT/scripts/check-invariants.sh"
+  bash "$ROOT/scripts/check-invariants.sh" || rc=1
   say step "lint：版本钉死防漂移 check-versions"
-  bash "$ROOT/scripts/check-versions.sh"
+  bash "$ROOT/scripts/check-versions.sh" || rc=1
+  return "$rc"
 }
 
 run_unit() {
@@ -89,6 +93,8 @@ run_unit() {
       say step "unit：TypeScript 单元测试（jest ${d}）"
       ran=$((ran + 1))
       ( cd "$ROOT/$d" && npx jest -c jest.config.cjs --no-coverage --passWithNoTests ) || rc=1
+    elif [[ -f "$ROOT/$d/jest.config.cjs" ]]; then
+      say warn "skip jest（${d} 依赖未安装）"
     fi
   done
   if [[ "$ran" -eq 0 ]]; then
@@ -119,6 +125,15 @@ run_typecheck() {
       ( cd "$ROOT/bot-gateway" && ./node_modules/.bin/tsc --noEmit ) || rc=1
     else
       say warn "skip tsc（bot-gateway 依赖未安装）"
+    fi
+  fi
+  # ESLint（bot-gateway）：AGENTS.md 约定「ESLint 即格式化器」，纳入离线套件。
+  if [[ -f "$ROOT/bot-gateway/eslint.config.mjs" ]]; then
+    if [[ -x "$ROOT/bot-gateway/node_modules/.bin/eslint" ]]; then
+      say info "eslint bot-gateway"
+      ( cd "$ROOT/bot-gateway" && ./node_modules/.bin/eslint src/ tests/ ) || rc=1
+    else
+      say warn "skip eslint（bot-gateway 依赖未安装）"
     fi
   fi
   return "$rc"

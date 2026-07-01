@@ -17,10 +17,13 @@ source "$SCRIPT_DIR/common.sh"
 REGION="$1"; IID="$2"
 [[ -n "$IID" && "$IID" != "None" ]] || { say info "stop_gateway: no instance id — nothing to stop"; exit 0; }
 
-say info "stop_gateway: stopping bot-gateway.service on $IID (drop Feishu long-connection before make)"
+say info "stop_gateway: stopping all bot-gateway@* on $IID (drop Feishu long-connections before make)"
+# 主机上跑的是 per-project 模板实例 bot-gateway@<projectId>（bootstrap.sh 只装 @ 模板，
+# 没有裸的 bot-gateway.service）——stop 必须枚举模板实例，停错名字会静默 no-op，
+# 旧网关继续持有飞书长连接、与新主机互抢事件。
 CID="$(aws ssm send-command --region "$REGION" --instance-ids "$IID" \
   --document-name AWS-RunShellScript \
-  --parameters 'commands=["systemctl stop bot-gateway.service 2>/dev/null || true; systemctl is-active bot-gateway.service || true"]' \
+  --parameters 'commands=["systemctl stop \"bot-gateway@*\" bot-gateway.service 2>/dev/null || true; systemctl list-units --state=active --plain --no-legend \"bot-gateway@*\" || true"]' \
   --query Command.CommandId --output text 2>/dev/null || echo "")"
 if [[ -z "$CID" ]]; then
   say warn "stop_gateway: send-command failed for $IID (SSM unreachable / instance already gone) — relying on instance terminate to drop the connection"

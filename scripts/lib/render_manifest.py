@@ -6,9 +6,10 @@ set of shell variables — a git URL / ref can contain characters (`@`, `:`) tha
 env file would mangle, and the project hit `|`-in-env crashes twice before adopting one JSON var.
 So bootstrap reads ONE `REPO_MANIFEST_JSON` and calls this to validate + iterate.
 
-Manifest shape (single-host multi-project + git refresh; code source is git-only, pre-launch):
+Manifest shape (single-host multi-project; per-repo source is git or local):
     { "projectId": "<id>", "port": <int>,
-      "repos": [ { "subdir": "<name>", "git": "<git url>", "ref": "<branch/tag?>",
+      "repos": [ { "subdir": "<name>", "source": "git"|"local"(opt, default git),
+                   "git": "<git url>"(git only), "ref": "<branch/tag?>"(git only),
                    "refreshIntervalSec": <int?> }, ... ] }
 
 Validation (fail-loud — a bad manifest must crash the deploy up front, never half-provision):
@@ -18,7 +19,9 @@ Validation (fail-loud — a bad manifest must crash the deploy up front, never h
   - each `subdir` matches ^[a-z0-9-]+$ (it becomes a useradd name / path / systemd unit /
     pgrep pattern — an unchecked name is a privileged-config injection);
   - `subdir` unique (two repos sharing a subdir would share graph.db/HOME → corruption);
-  - `git` present and non-empty (the ONLY source field — R1; no local/S3 fallback);
+  - `source` optional, one of git|local (default git); a `local` repo is pushed via
+    scripts/push-local-repo.sh (no git remote), so its `git` is forced to "";
+  - `git` present and non-empty for a git-source repo; absent/"" for a local one;
   - `ref` optional (defaults to "" → clone default branch);
   - `refreshIntervalSec` optional, integer if present (per-repo and top-level).
 
@@ -70,9 +73,17 @@ def parse_manifest(raw: str):
         if subdir in seen:
             raise ValueError(f"{where}: duplicate subdir '{subdir}' (would share graph.db/HOME → corruption)")
         seen.add(subdir)
+        source = r.get("source", "git")
+        if source not in ("git", "local"):
+            raise ValueError(f"{where}: 'source' must be 'git' or 'local' (got {source!r})")
         git = r.get("git")
-        if not isinstance(git, str) or not git.strip():
-            raise ValueError(f"{where}: 'git' must be a non-empty git URL (R1: code source is git-only)")
+        if source == "git":
+            if not isinstance(git, str) or not git.strip():
+                raise ValueError(f"{where}: 'git' must be a non-empty git URL for a git-source repo")
+        else:  # local: pushed via rsync (push-local-repo.sh), no git remote
+            if git is not None and not isinstance(git, str):
+                raise ValueError(f"{where}: 'git' must be a string if present")
+            git = ""
         ref = r.get("ref")
         if ref is not None and not isinstance(ref, str):
             raise ValueError(f"{where}: 'ref' must be a string if present")
@@ -82,8 +93,8 @@ def parse_manifest(raw: str):
         interval = r.get("refreshIntervalSec")
         if interval is not None and not isinstance(interval, int):
             raise ValueError(f"{where}: 'refreshIntervalSec' must be an integer seconds if present")
-        out.append({"subdir": subdir, "git": git, "ref": ref or "", "sig": sig or "",
-                    "refreshIntervalSec": interval})
+        out.append({"subdir": subdir, "source": source, "git": git, "ref": ref or "",
+                    "sig": sig or "", "refreshIntervalSec": interval})
     return out
 
 
@@ -157,7 +168,11 @@ def build_multi_manifest(project_id: str, port: int, repos, default_interval=Non
         raise ValueError(f"port must be an integer, got {port!r}")
     out_repos = []
     for r in repos:
-        entry = {"subdir": r["subdir"], "git": r["git"], "ref": r.get("ref") or ""}
+        src = r.get("source", "git")
+        entry = {"subdir": r["subdir"], "source": src}
+        if src == "git":
+            entry["git"] = r["git"]
+            entry["ref"] = r.get("ref") or ""
         iv = r.get("refreshIntervalSec")
         entry["refreshIntervalSec"] = iv if isinstance(iv, int) else default_interval
         out_repos.append(entry)
@@ -204,7 +219,7 @@ def main(argv):
         raw = sys.stdin.read()
 
     TOP_FIELDS = ("projectId", "port")
-    REPO_FIELDS = ("subdir", "git", "ref", "sig", "refreshIntervalSec")
+    REPO_FIELDS = ("subdir", "source", "git", "ref", "sig", "refreshIntervalSec")
 
     try:
         repos = parse_manifest(raw)

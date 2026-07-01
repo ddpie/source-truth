@@ -9,11 +9,12 @@
 # still invoking deploy.sh lands on the working path, and prints a deprecation note.
 #
 # Usage:
-#   ./scripts/deploy.sh [--region <r>] [--repo <path>] [--dry-run] [-h|--help]
+#   ./scripts/deploy.sh [--region <r>] [--dry-run] [-h|--help]
 #   (delegates to deploy-all.sh; idempotent = re-run updates in place / 幂等)
 #
-# Flags forwarded as-is: --region, --repo, --dry-run, --skip <phase>.
-# Legacy --only-* / --skip-* flags are mapped to deploy-all.sh's --skip <phase>.
+# Flags forwarded as-is: --region, --dry-run, --skip <phase>. The legacy --repo flag
+# is swallowed with a warning (repos now live in .local/projects.json — install.sh
+# adds them); legacy --only-* / --skip-* map to deploy-all.sh's --skip <phase>.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -29,10 +30,12 @@ scripts/deploy-all.sh (idempotent = upgrade / 幂等; --dry-run safe).
 
 Flags (forwarded to deploy-all.sh):
   --region <r>     AWS region
-  --repo <path>    Local repo to index + serve (required for a full deploy)
   --dry-run        Print the plan; make no changes
-  --skip <phase>   Skip a phase: artifacts|iam|network|index-svc|image|runtime
+  --skip <phase>   Skip a phase: artifacts|iam|network|index-svc|image|runtime|gateway|monitoring
   -h, --help       Show this help
+
+Legacy --repo is no longer a CLI flag: repos are declared in .local/projects.json
+(run ./scripts/install.sh to add them). The shim swallows --repo with a warning.
 
 See scripts/deploy-all.sh --help for the full, current interface.
 EOF
@@ -42,7 +45,10 @@ FWD=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -h|--help) usage; exit 0 ;;
-    --region|--repo|--skip) FWD+=("$1" "$2"); shift 2 ;;
+    --region|--skip) FWD+=("$1" "$2"); shift 2 ;;
+    # deploy-all.sh no longer takes --repo (repos live in .local/projects.json);
+    # swallow it with a pointer instead of forwarding a flag that hard-fails.
+    --repo) say warn "--repo is obsolete: repos are declared in .local/projects.json (run ./scripts/install.sh to add '$2')"; shift 2 ;;
     --dry-run) FWD+=("$1"); shift ;;
     # Legacy flag mappings → deploy-all.sh --skip <phase>.
     --only-agent)   FWD+=(--skip artifacts --skip iam --skip network --skip index-svc); shift ;;

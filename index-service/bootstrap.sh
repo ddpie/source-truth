@@ -40,15 +40,26 @@
 # Sets up the BASE host only — NO project is bound here. user-data runs once at first boot, so
 # it cannot add a project to a running host; projects are attached (and added/removed over the
 # host's life) by index-service/activate_project.sh, invoked per project over SSM by
-# deploy_project.sh. Code source is git-only (R1): activate_project.sh git-clones each repo to
-# /data/repo/<subdir>, writes that project's concrete bridge + per-repo refresh units, and a
-# read-only git credential is fetched host-side from Secrets Manager. codegraph's resident
-# file-watcher re-indexes in-place after each scheduled git pull (no second writer, no blip).
+# deploy_project.sh. Each repo is a git source or a local source: activate_project.sh git-clones a
+# git repo to /data/repo/<subdir> (read-only credential fetched host-side from Secrets Manager) and
+# writes its per-repo refresh unit; a local repo is pushed in via push-local-repo.sh + applied by
+# reindex_local_repo.sh (no refresh unit). Either way codegraph's resident file-watcher re-indexes
+# in-place after the working tree changes (no second writer, no blip).
 #
 # Inputs via environment (deploy-all.sh writes /etc/index-service.env first):
 #   BUCKET, REGION, MAX_FILES
 set -euxo pipefail
-exec > /var/log/index-svc-bootstrap.log 2>&1
+# Log to the file AND keep showing on the caller's stdout/stderr, via tee. The old `exec > file`
+# sent everything to the log ONLY — under --local (bootstrap runs synchronously in the operator's
+# ssh session) that left the terminal frozen at `+ exec` for minutes with no sign of progress. With
+# tee, --local streams live to the terminal; as EC2 user-data (no terminal) the extra copy just goes
+# to the cloud-init console, harmless. `tee` truncates the log fresh each run (matches old behavior).
+# CRITICAL: tee is a background process; deploy-all greps the log for BOOTSTRAP_DONE right after this
+# script returns, so we must let tee flush the final line first. Record its PID and wait on it at exit.
+exec > >(tee /var/log/index-svc-bootstrap.log) 2>&1
+_TEE_PID=$!
+# shellcheck disable=SC2154  # ec IS assigned (ec=$?) at the start of the same trap command
+trap 'ec=$?; exec 1>&- 2>&-; wait "$_TEE_PID" 2>/dev/null; exit $ec' EXIT
 
 # shellcheck disable=SC1091
 source /etc/index-service.env
@@ -83,8 +94,13 @@ retry_net() {
 }
 
 # --- base packages (retry: apt mirrors flap AND the NAT route may not be up yet) ---
-retry_net apt-get update -y
-retry_net apt-get install -y python3-pip python3-venv unzip curl
+# DPkg::Lock::Timeout=300: on a fresh boot, unattended-upgrades / cloud-init's apt often hold the
+# dpkg lock. Without this, apt-get FAILS INSTANTLY on "Could not get lock" and we bounce through
+# retry_net's coarse 20s sleeps; with it, apt itself WAITS up to 5 min for the lock — smoother and
+# far less likely to burn all retries during boot-time contention.
+APT_OPTS=(-o DPkg::Lock::Timeout=300)
+retry_net apt-get "${APT_OPTS[@]}" update -y
+retry_net apt-get "${APT_OPTS[@]}" install -y python3-pip python3-venv unzip curl
 # awscli v2 (Ubuntu 24.04 has no apt awscli)
 if ! command -v aws >/dev/null; then
   retry_net curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip" -o /tmp/awscliv2.zip
@@ -129,7 +145,7 @@ python3 -m pip check >/dev/null 2>&1 || { echo "BOOTSTRAP_FAILED: pip dependency
 # never a 2nd concurrent writer). SINGLE-WRITER (不变量2): build flock + bridge flock lock the
 # SAME file per repo (/data/repo/<subdir>/.codegraph/.writer.lock). NO `Conflicts=` (systemd
 # silently drops a contradictory transaction on reboot; the flock is the real guard).
-ripgrep_install() { command -v rg >/dev/null || apt-get install -y ripgrep || true; }
+ripgrep_install() { command -v rg >/dev/null || apt-get "${APT_OPTS[@]}" install -y ripgrep || true; }
 ripgrep_install   # fast, .gitignore-aware search the bridge's file tools use
 
 # --- Node + claude (cc) CLI: the build-time glossary engine -----------------------------
@@ -147,7 +163,7 @@ ensure_node() {
   # Node 24 — same MAJOR as the agent container's CLI subprocess. Pin major only
   # (setup_24.x): NodeSource GCs old patch debs, so an exact patch pin breaks later.
   retry_net curl -fsSL https://deb.nodesource.com/setup_24.x -o /tmp/nodesetup.sh \
-    && bash /tmp/nodesetup.sh && retry_net apt-get install -y nodejs
+    && bash /tmp/nodesetup.sh && retry_net apt-get "${APT_OPTS[@]}" install -y nodejs
 }
 # @latest (NOT pinned), matching agent-container/Dockerfile + the 2026-06-19 ops decision
 # (AGENTS.md): take upstream fixes faster, trade reproducibility; check-versions.sh allows it.
@@ -264,7 +280,7 @@ UNIT
   # regional bucket, write a minimal config tailing the gateway log file, start it.
   CW_DEB=/tmp/amazon-cloudwatch-agent.deb
   if retry_net curl -fsSL "https://amazoncloudwatch-agent-${REGION}.s3.${REGION}.amazonaws.com/ubuntu/arm64/latest/amazon-cloudwatch-agent.deb" -o "$CW_DEB"; then
-    dpkg -i -E "$CW_DEB" || apt-get install -f -y || true
+    dpkg -i -E "$CW_DEB" || apt-get "${APT_OPTS[@]}" install -f -y || true
     rm -f "$CW_DEB"
     mkdir -p /opt/aws/amazon-cloudwatch-agent/etc
     # collect_list tails the gateway log → /source-truth/bot-gateway (leading slash: matches

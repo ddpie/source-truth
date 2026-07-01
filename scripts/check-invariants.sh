@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # check-invariants.sh — 快速无网络结构 lint（pre-commit / test.sh --lint 调用）。
-# 校验 AGENTS.md 约定中可机检的子集：唯一依据、双语配对、顶层目录存在性
-# （注：只校验顶层组件目录存在，不做结构文档树逐项 diff）。
+# 校验 AGENTS.md 约定中可机检的子集：唯一依据、双语配对、顶层目录
+# 双向 diff（structure_zh.md 收录的顶层目录 ↔ 磁盘实际目录）。
 # 失败即非零退出，逐条打印问题。
 set -euo pipefail
 
@@ -17,8 +17,9 @@ echo "check-invariants: $ROOT"
 # 1. AGENTS.md 存在，CLAUDE.md 仅 import @AGENTS.md
 if [[ -f AGENTS.md ]]; then ok "AGENTS.md 存在"; else err "缺少 AGENTS.md（AI 约定的唯一依据）"; fi
 if [[ -f CLAUDE.md ]]; then
-  if grep -qx '@AGENTS.md' CLAUDE.md; then ok "CLAUDE.md import @AGENTS.md"
-  else err "CLAUDE.md 应仅含一行 '@AGENTS.md'"; fi
+  if grep -qx '@AGENTS.md' CLAUDE.md && [[ "$(grep -c -v '^[[:space:]]*$' CLAUDE.md)" -eq 1 ]]; then
+    ok "CLAUDE.md 仅 import @AGENTS.md"
+  else err "CLAUDE.md 应仅含一行 '@AGENTS.md'（不得追加其他内容，约定只写 AGENTS.md）"; fi
 else err "缺少 CLAUDE.md"; fi
 
 # 2. docs/agent/architecture.md 存在且被 AGENTS.md 引用
@@ -41,10 +42,25 @@ shopt -u nullglob
 [[ -f docs/structure_zh.md && -f docs/structure_en.md ]] \
   && ok "结构文档双语齐全" || err "缺少 docs/structure_{zh,en}.md"
 
-# 5. 顶层组件目录都在磁盘上存在（与 structure 文档对齐）
-for d in agent-container bot-gateway index-service infra config scripts docs; do
-  [[ -d "$d" ]] && ok "顶层目录存在: $d" || err "structure 引用的顶层目录缺失: $d"
-done
+# 5. 顶层目录 ↔ structure_zh.md 双向对齐（AGENTS.md：改顶层目录必须同步结构文档）
+#    文档侧：代码块里顶格的 `xxx/` 行；磁盘侧：仓库根的实际目录（.git 与 gitignore 的
+#    .local 除外——.local 在文档中有收录但不要求磁盘存在）。
+if [[ -f docs/structure_zh.md ]]; then
+  doc_dirs="$(grep -oE '^[A-Za-z0-9_.-]+/' docs/structure_zh.md | tr -d '/' | sort -u)"
+  disk_dirs="$(find . -maxdepth 1 -mindepth 1 -type d ! -name '.git' ! -name '.local' \
+    -printf '%f\n' 2>/dev/null | sort -u || ls -d */ 2>/dev/null | tr -d '/' | sort -u)"
+  struct_ok=1
+  while IFS= read -r d; do
+    [[ -z "$d" || "$d" == ".local" ]] && continue
+    [[ -d "$d" ]] || { err "structure_zh.md 收录的顶层目录磁盘上缺失: $d"; struct_ok=0; }
+  done <<< "$doc_dirs"
+  while IFS= read -r d; do
+    [[ -z "$d" || "$d" == .* ]] && continue
+    grep -qE "^${d}/" docs/structure_zh.md \
+      || { err "顶层目录未收录进 structure_zh.md: $d（改顶层目录须同步结构文档）"; struct_ok=0; }
+  done <<< "$disk_dirs"
+  [[ "$struct_ok" -eq 1 ]] && ok "顶层目录与 structure_zh.md 双向一致"
+fi
 
 # 6. 设计权威依据已导入（structure_*.md 收录的 design/ 权威依据；改名/删除须同步两处）
 for f in docs/design/requirements_zh.md docs/design/architecture-overview_zh.md \

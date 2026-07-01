@@ -21,8 +21,8 @@ bot-gateway ──InvokeAgentRuntime──▶ agent-container（本组件，micr
 
 ## 关键决策
 
-- **AI 在容器内**：用 `claude_agent_sdk`（`query` + `ClaudeAgentOptions`）运行 agent 循环，它既是推理主体，也是 MCP
-  消费端，而不是容器外的远程客户端。宿主是 `bedrock_agentcore.runtime.BedrockAgentCoreApp`，`@app.entrypoint`
+- **AI 在容器内**：用 `claude_agent_sdk`（`query` + `ClaudeAgentOptions`）运行 agent 循环，它既是推理主体，也直接调用 MCP
+  工具，而不是容器外的远程客户端。宿主是 `bedrock_agentcore.runtime.BedrockAgentCoreApp`，`@app.entrypoint`
   异步流式 handler。
 - **模型使用 Bedrock**：`CLAUDE_CODE_USE_BEDROCK=1`，microVM 内用 IAM role 鉴权（不传 bearer token）。模型 id
   默认 `global.anthropic.claude-opus-4-8`，可经 `deploy_runtime.py` 的 `--model` / `ANTHROPIC_MODEL` 覆盖。
@@ -41,7 +41,7 @@ bot-gateway ──InvokeAgentRuntime──▶ agent-container（本组件，micr
 | 出参 | 流式 `yield` `AssistantMessage` / `ResultMessage`，由网关渲染为 CardKit |
 | 代码/配置 | 经 index-service 文件工具读取（仓库副本只在 index-service 本地磁盘；microVM 不挂文件系统；路径为仓库相对，如 `Assets/Scripts/Foo.cs`） |
 | 临时文件 | Session Storage 可写挂载 `/mnt/workspace`（每会话，约 14 天过期） |
-| CodeGraph + 文件读取 | index-service 暴露的 MCP-over-HTTP 端点（env 注入）；定位与读文件都走此接口 |
+| CodeGraph + 文件读取 | index-service 提供的 MCP-over-HTTP 端点（env 注入）；定位与读文件都走此接口 |
 | 会话标识 | 经头 `X-Amzn-Bedrock-AgentCore-Runtime-Session-Id` 到达，仅用于审计关联 |
 
 ## 文件布局（p1 落地）

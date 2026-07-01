@@ -1,7 +1,7 @@
 # 架构：写给 AI 的系统工作原理
 
 先读本文，再改请求如何流转、代码在哪取证、CardKit 如何回传、会话如何隔离。面向人的文档（README、
-structure）描述系统*是什么*；本文描述*一次提问如何在系统里流转*——动手改之前真正该先读懂的就是这个。
+structure）描述系统*是什么*；本文描述*一次提问如何在系统里流转*——改之前应先读懂的正是这部分。
 
 下文代码指针用「组件 + 概念锚点」给出，请按名字 grep 定位，不要依赖行号（行号会随代码演进漂移）。
 
@@ -45,12 +45,14 @@ structure）描述系统*是什么*；本文描述*一次提问如何在系统�
       · 结构化日志 + hashUserId 脱敏（src/log.ts，用户/会话标识不落明文，MVP 仅防滥用）
 ```
 
-## 数据面：代码如何进入 index-service、索引如何更新
+## 代码如何进入 index-service、索引如何更新
 
-代码以 **git 为唯一来源**：每个仓库 `git clone` 到 index-service 本地，定时 `git pull` 保持新鲜，常驻
-codegraph 的 file-watcher 增量重建内存图。
+每个仓库的代码落到 index-service 本地，常驻 codegraph 的 file-watcher 增量重建内存图。来源分两种：
+**git 仓**（默认）`git clone` 到本地、定时 `git pull` 保持最新主分支；**本地仓**（`source:"local"`，
+推不到 git 远端时）由运维经 `scripts/push-local-repo.sh` 用 rsync 直推一份快照、手动刷新。下文先讲 git
+仓的自动刷新链路，本地仓的手动链路见末尾「刷新方式（本地仓，手动）」。
 
-![数据面管线：activate_project 用只读 git 凭证 clone 各仓到本地，index-build@ 每仓建图，index-bridge-<projectId> 每项目常驻只读，index-refresh timer 定时 git pull + watcher 增量重建内存图，会话 microVM 经 HTTP 远程读代码](../assets/data-plane.svg)
+![代码进入与索引刷新的流程：activate_project 用只读 git 凭证 clone 各仓到本地，index-build@ 每仓建图，index-bridge-<projectId> 每项目常驻只读，index-refresh timer 定时 git pull + watcher 增量重建内存图，会话 microVM 经 HTTP 远程读代码](../assets/data-plane.svg)
 
 **唯一一份代码、本地副本**：仓库只在 index-service 的**本地磁盘** `/data/repo/<subdir>`，由
 `index-service/activate_project.sh` 用单一**只读 git 凭证**（Secrets Manager
@@ -60,8 +62,21 @@ codegraph 的 file-watcher 增量重建内存图。
 
 **刷新方式（git，自动）**：每个仓库一个 systemd timer `index-refresh-<subdir>.timer`（默认 300 秒，
 可经 `projects.json` 的 `refreshIntervalSec` 配置）周期性 `git pull`；常驻 codegraph（`--mcp --graph-only`）
-进程的 file-watcher 在数秒内对内存图做增量重建——无须重启、无第二个写者、无服务抖动。代码新鲜度因此是
-分钟级，无需重新部署。
+进程的 file-watcher 在数秒内对内存图做增量重建——无须重启、不会有两个进程同时写同一张 graph.db、无服务抖动。
+主分支的改动因此分钟级内即反映到问答，无需重新部署。
+
+**刷新方式（本地仓，手动）**：`source:"local"` 的仓没有 git 远端，因此**不挂 refresh timer**。运维在自己机器上跑
+`scripts/push-local-repo.sh`，先把代码经网络 rsync 到主机的暂存目录 `/data/repo/<subdir>.incoming`（这一步较慢、
+可能中断，但不碰正在用的代码，bridge 照常服务）；传完后 `index-service/reindex_local_repo.sh` 再在主机本地把暂存目录
+**原地 rsync 到正在用的代码目录 `/data/repo/<subdir>`**——与 git 仓 `git pull` 用 `git reset --hard` 改写工作树是同一条路径：常驻 codegraph
+进程的 file-watcher 几秒内对内存图增量重建，**不停 bridge、不全量重建、也不会有两个进程同时写同一张 graph.db**
+（`.codegraph`/`.home` 图目录受 rsync protect 保护不被删）。本地这步加 `--delay-updates`：变更文件先就位、
+最后统一切换，把"新旧文件混合、查询可能读到不一致结果"的窗口压到切换瞬间——与 git 仓原地 `git pull` 的行为一致
+（见 [`design/multi-repo-isolation_zh.md`](../design/multi-repo-isolation_zh.md) §8）。**例外是首次推送**：此时正在用的代码目录
+还没有 graph，watcher 无从增量，故先停 bridge、跑一次 `index-build@` 全量建图、再起 bridge（与 git 仓首次 activate
+相同）。**术语表**也随推送增量刷新：脚本把本次同步的变更文件清单传给 `glossary_gen`（`--changed-list`/`--deleted-list`），
+只重建变更文件的条目——与 git 仓按 `git diff` 增量是同一条路径，只是变更集来自 rsync 而非 git。本地仓是手动推送的
+**快照**，更新时机由运维决定、可能滞后于真实主分支——重新推送后才更新。
 
 **术语表（构建期引擎，离线）**：同一刷新链上，index 主机用本地 `claude` (cc) CLI 扫自有代码副本，产出
 「中文词→英文符号」术语表（per-repo slice `/data/glossary/<项目>/<subdir>.jsonl`），供上面取证通道作旁路
@@ -77,7 +92,7 @@ git diff 增量。完整工作原理、grounding 把关与价值边界见 `docs/
 | 内容 | 项目代码（主分支）+ CodeGraph 索引 | Agent 产生的临时文件 |
 | 载体 | index-service 本地副本，经 HTTP 接口服务给所有会话 | AgentCore Session Storage `/mnt/workspace` |
 | 可见性 | 所有会话 | 仅本 microVM |
-| 生命周期 | 持久（定时 git pull 刷新，分钟级新鲜） | 每会话独占（约 14 天空闲过期） |
+| 生命周期 | 持久（git 仓定时 pull 刷新，分钟级反映；本地仓手动推送） | 每会话独占（约 14 天空闲过期） |
 
 ![会话隔离：多个按会话独立的 microVM（各自独占 /mnt/workspace 临时文件）共享同一个只读 index-service 代码副本](../assets/session-isolation.svg)
 
@@ -89,7 +104,7 @@ git diff 增量。完整工作原理、grounding 把关与价值边界见 `docs/
 基础设施**不全归 CDK**，且 MVP 阶段刻意先不 CDK 化：
 
 - **MVP（当前）**：用 `agentcore` starter toolkit / boto3 直接配置 AgentCore Runtime + 创建 index-service，
-  先打通主流程与 POC 性能基准。CodeGraph 召回率、经 HTTP 接口读文件的延迟是主要待验证点——验证前不固化 IaC，
+  先跑通主流程、建立 POC 性能基准。CodeGraph 召回率、经 HTTP 接口读文件的延迟是主要待验证点——验证前不固化 IaC，
   避免返工。「为何必须建索引而非让 Agent 逐文件搜索」已有实测基准，见
   [`indexing-performance-spike.md`](indexing-performance-spike.md)（全仓冷扫描约 127s，建索引后定位查询恒 1–5ms）。
 - **post-MVP（p2，渐进）**：CDK 管**稳定层**——会话容器镜像（DockerImageAsset，`Platform.LINUX_ARM64`）、
@@ -130,22 +145,22 @@ source-truth 不同于「在容器外把 AI 当远程 MCP 客户端」的常见�
 内，并围绕代码取证新增了两个有状态组件。四个核心选择：
 
 1. **AI 在容器内运行**——会话 microVM 内直接运行 Claude Code Agent SDK（`agent-container/agent.py` 的
-   agent 循环），AI 既是推理主体也是 MCP 消费端，而非外部 MCP 客户端。
+   agent 循环），AI 既是推理主体，也直接调用 MCP 工具，而不是容器外的 MCP 客户端。
 2. **飞书 Bot 网关**——机器人身份 + 长连接事件流 + 会话→runtimeSessionId 映射。MVP 不引入每用户
    OAuth 体系；上下文挂在飞书对话上、按需拉取。**部署形态**：网关与 index-service **同主机**（每个项目一个
    systemd 实例 `bot-gateway@<projectId>.service`），由 deploy 的 gateway 阶段经 SSM 写
    `/etc/bot-gateway-<projectId>.env` + 启动；飞书凭证运行时从 Secrets Manager 取（不落盘）。注意飞书长连接是**全局单例**（同 app 只能一个
    client，否则争抢事件）——故蓝绿换 index 实例时，gateway 走 **break-before-make**（先停旧实例网关、确认长连接断开，
    再启动新实例网关），与 index/codegraph 的 make-before-break 相反。
-3. **独立 CodeGraph 索引服务**——常驻服务，单写者独占 graph.db、stdio→streamable-HTTP 接口，对会话容器
-   暴露只读**定位 + 读文件**查询；每个项目一个 bridge 进程 `index-bridge-<projectId>`（各占独立端口
+3. **独立 CodeGraph 索引服务**——常驻服务，由唯一进程独占写 graph.db、stdio→streamable-HTTP 接口，对会话容器
+   提供只读**定位 + 读文件**查询；每个项目一个 bridge 进程 `index-bridge-<projectId>`（各占独立端口
    8080/8081/…，仅服务该项目的仓库，靠重复 `--workspace` 限定范围），其 file-watcher 对定时 git pull 的
-   变更做增量重建（详见「数据面」）。
+   变更做增量重建（详见上文「代码如何进入 index-service、索引如何更新」）。
 4. **代码仓只在 index-service 本地**——它在本地磁盘持唯一一份代码副本，由 `activate_project.sh` 用只读 git
    凭证 `git clone` 写入、systemd timer 定时 `git pull` 刷新，既供 codegraph 索引、又经 HTTP 接口的文件工具
    服务给会话容器；会话 microVM 不挂任何文件系统（无共享挂载）。
 
-通用运维惯例：ARM64 容器 + DockerImageAsset、CDK / boto3 混合 IaC 分工、飞书 SDK / CardKit 生态、
+其余沿用通用运维惯例：ARM64 容器 + DockerImageAsset、CDK / boto3 分两层管 IaC、飞书 SDK / CardKit 生态、
 空闲缩零按量计费、按游戏项目隔离机器人、结构化 JSON 日志 + hashUserId 脱敏、`deploy/ops/test` 三类脚本。
 
 ## 待验证技术点（POC 优先，影响架构定型）

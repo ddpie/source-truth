@@ -18,7 +18,7 @@ source-truth 的文档按**受众**分层：每类读者从自己的入口进，
 | 文档 | 什么时候读 |
 |------|-----------|
 | [`../AGENTS.md`](../AGENTS.md) | 动手前必读：项目约定、代码风格、边界、commit/PR 规范 |
-| [`agent/architecture.md`](agent/architecture.md) | 改请求流转 / 取证 / 卡片回传 / 会话隔离前：一次提问如何在系统里流转 |
+| [`agent/architecture.md`](agent/architecture.md) | 改请求流转 / 代码检索 / 卡片回传 / 会话隔离前：一次提问如何在系统里流转 |
 | [`agent/invariants.md`](agent/invariants.md) | 改代码前对照：9 条可执行不变量（是什么 / 以谁为准 / 怎么自动检查 / 违反后果） |
 | [`agent/playbooks.md`](agent/playbooks.md) | 做某类具体改动时：7 个变更场景（改哪 / 怎么验 / 怎么上线） |
 | [`agent/glossary.md`](agent/glossary.md) | 术语表在查询期怎么用：工具、规则、给 agent 的接入约定（构建与产物面向人的说明见 [`glossary.md`](glossary.md)） |
