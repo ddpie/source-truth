@@ -76,6 +76,9 @@ done
 [ "$SRC" = "local" ] || { echo "REINDEX_FAILED: '$SUBDIR' is a ${SRC:-git} repo, not local — push-local-repo.sh only applies to source:\"local\" repos (a git repo is refreshed by its own git pull)"; exit 1; }
 BRIDGE="index-bridge-${PID}.service"
 GRAPH="$WS/.home/.codegraph/graph.db"
+# Written only after a verified non-empty full build; its presence (not graph.db's size) is what
+# picks incremental over full. Lives under .home/ (rsync-protected), so a code push never drops it.
+BUILD_MARKER="$WS/.home/.codegraph/.build-ok"
 APP="${APP:-/opt/idx/app}"
 CHANGED_LIST="$(mktemp /tmp/reindex-changed.XXXXXX)"
 DELETED_LIST="$(mktemp /tmp/reindex-deleted.XXXXXX)"
@@ -176,13 +179,14 @@ refresh_glossary() {
 # OWN per-slice lock and never touches graph.db, so it's safe to run concurrently with the graph
 # build (which holds the per-repo .writer.lock) — 单写者 is per-graph.db, and these are different files.
 do_build() {
-  # Decide incremental vs full by graph VALIDITY, not mere non-emptiness. Use the SAME >=64KiB
-  # threshold index-build@'s ExecStartPost enforces (bootstrap.sh): a first build that was killed
-  # mid-write can leave a small partial graph.db — `[ -s ]` (non-empty) would then wrongly pick the
-  # incremental path and the watcher would serve a broken/stale graph forever. A sub-64KiB file means
-  # "no valid graph yet" → fall through to the full-build branch, which rebuilds it correctly.
-  GRAPH_SZ="$(du -sb "$GRAPH" 2>/dev/null | cut -f1 || echo 0)"
-  if [ "${GRAPH_SZ:-0}" -ge 65536 ]; then
+  # Decide incremental vs full by a BUILD-OK MARKER, not by graph.db size. A 0-node placeholder
+  # graph (built by index-build@ when the repo dir was still empty, before the first push) is a
+  # valid store WELL OVER 64KiB (~150-270K), so a size threshold wrongly classified it as
+  # "already built" → incremental → the watcher can't backfill thousands of never-indexed files →
+  # the graph stays empty forever. The marker is written ONLY after a full build whose log proves a
+  # non-empty graph was persisted, so its presence means "a real graph exists here". It lives under
+  # .home/ (rsync-protected in apply_staged), so a code push never removes it.
+  if [ -f "$BUILD_MARKER" ]; then
     # ----- SUBSEQUENT push: in-place update, watcher picks it up, bridge stays up -----
     echo "reindex: applying staged update in place (bridge stays up; watcher re-indexes incrementally)"
     apply_staged
@@ -191,7 +195,7 @@ do_build() {
     refresh_glossary incremental   # parallel: launches its own detached systemd unit, returns at once
     echo "REINDEX_DONE subdir=${SUBDIR} project=${PID} mode=incremental"
   else
-    # ----- FIRST push: no graph yet → full build with the bridge stopped (free the writer flock) -----
+    # ----- FIRST push (no build marker): full build with the bridge stopped (free the writer flock) -----
     echo "reindex: first build for $SUBDIR — stopping $BRIDGE to build the graph (single-writer)"
     systemctl stop "$BRIDGE" 2>/dev/null || true
     apply_staged
@@ -200,13 +204,30 @@ do_build() {
     # applied source files and is independent of graph.db, so the two run in parallel and total
     # wall-clock ≈ max(graph, glossary) instead of their sum.
     refresh_glossary full
+    # `restart` (not `start`): index-build@ is Type=oneshot + RemainAfterExit=yes, so once it has
+    # run in this boot it stays active(exited) and a plain `start` is a NO-OP (never rebuilds).
+    # `restart` forces it to actually run again. reset-failed first so a prior failed state doesn't
+    # block the transaction.
     systemctl reset-failed "index-build@${SUBDIR}.service" 2>/dev/null || true
-    systemctl start "index-build@${SUBDIR}.service" || true
+    systemctl restart "index-build@${SUBDIR}.service" || true
     R="$(systemctl show "index-build@${SUBDIR}.service" --value -p Result 2>/dev/null || echo unknown)"
     if [ "$R" != "success" ]; then
       echo "REINDEX_FAILED: index-build@${SUBDIR} Result=$R"; journalctl -u "index-build@${SUBDIR}.service" --no-pager | tail -30 || true
       systemctl start "$BRIDGE" 2>/dev/null || true   # bring the project back even on a failed first build
       exit 1
+    fi
+    # DON'T trust the unit's >=64KiB ExecStartPost check alone — a 0-node placeholder store also
+    # clears 64KiB. Confirm from the build log that a NON-EMPTY graph was actually persisted
+    # ("Persisted <N> nodes" with N>0) before dropping the marker. If it built empty (e.g. code
+    # somehow not present), leave NO marker so the next push retries a full build instead of getting
+    # stuck on an empty graph.
+    NODES="$(journalctl -u "index-build@${SUBDIR}.service" --no-pager 2>/dev/null \
+      | grep -oE 'Persisted [0-9]+ nodes' | tail -1 | grep -oE '[0-9]+' || echo 0)"
+    if [ "${NODES:-0}" -gt 0 ]; then
+      touch "$BUILD_MARKER" 2>/dev/null || true
+      echo "reindex: graph built with ${NODES} nodes — marker written"
+    else
+      echo "REINDEX_WARN: index-build@${SUBDIR} reported 0 nodes — NOT marking built; next push will retry full build"
     fi
     rm -rf "$STAGE"
     systemctl start "$BRIDGE" || { echo "REINDEX_WARN: graph built OK but bridge start returned non-zero — check: systemctl status $BRIDGE"; }
