@@ -31,6 +31,17 @@ CONFIG_FILE="$ROOT/.local/deploy-config"
 ASSUME_YES=false
 LOCAL_MODE=false
 LOCAL_FLAG=()   # forwarded to deploy-all.sh: (--local) in single-host mode, else empty
+
+# _imds_region / _is_index_host : is THIS machine the source-truth index host? (IMDSv2). Used to
+# auto-enter single-host mode — see the LOCAL_MODE auto-detect below.
+_imds_get() {   # _imds_get <metadata-path>
+  local tok
+  tok="$(curl -fsS -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 60" 2>/dev/null || true)"
+  curl -fsS ${tok:+-H "X-aws-ec2-metadata-token: $tok"} "http://169.254.169.254/latest/meta-data/$1" 2>/dev/null || true
+}
+_imds_region() { _imds_get "placement/region"; }
+_is_index_host() { [[ "$(_imds_get "iam/security-credentials/")" == *source-truth-index* ]]; }
+
 for a in "$@"; do
   case "$a" in
     -y|--yes) ASSUME_YES=true ;;
@@ -46,12 +57,23 @@ Secrets Manager. Re-runs pre-fill region/spec from .local/deploy-config.
 
   --yes     Accept all pre-filled/default answers without prompting (headless).
   --local   Single-host mode: deploy onto THIS EC2 (reuse its VPC/role), don't
-            create a separate index host. Forwarded to deploy-all.sh. Normally
-            set for you by prepare-local-host.sh / launch-host.sh.
+            create a separate index host. Forwarded to deploy-all.sh. Auto-enabled
+            when run ON the index host, so re-runs (add-project / redeploy) don't
+            need it. Normally set for you by prepare-local-host.sh / launch-host.sh.
 EOF
       exit 0 ;;
   esac
 done
+
+# Auto-enter single-host mode when running ON the index host itself, even without --local. Operators
+# re-run install by hand there for add-project / redeploy; without this the base-deploy would take
+# the two-machine path (create VPC/NAT, ReplaceRoute) under the instance role and fail — and it must
+# reuse this box, not build a second network. A plain operator laptop isn't the index host, so the
+# two-machine path is unaffected.
+if [[ "$LOCAL_MODE" != true ]] && _is_index_host; then
+  LOCAL_MODE=true; LOCAL_FLAG=(--local)
+  say info "检测到本机即索引主机 —— 自动进入单机模式（--local）"
+fi
 
 # ---- tiny prompt helpers -------------------------------------------------------
 # ask <var> <prompt> <default> : read a value, showing the default in [brackets];
@@ -311,36 +333,20 @@ safe_source_env "$CONFIG_FILE"
 
 PROJECTS_CFG="$ROOT/.local/projects.json"
 
-# ask_region <var> : the region menu is shared by every flow (pre-selects persisted).
-# On the SINGLE-HOST box, region is NOT a choice — we deploy onto THIS EC2, whose region is fixed;
-# asking just invites the wrong pick (e.g. a stale Tokyo default while the box is in us-east-1).
-# Auto-detect from IMDS whenever this machine IS the source-truth index host — i.e. --local was
-# passed, OR IMDS answers AND this instance carries source-truth-index-profile (so a plain operator
-# laptop, or an unrelated EC2, still gets the menu). This covers bare `install.sh` re-runs on the
-# host (add-project / redeploy), not just the first --local run.
-_imds_region() {
-  local tok
-  tok="$(curl -fsS -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 60" 2>/dev/null || true)"
-  curl -fsS ${tok:+-H "X-aws-ec2-metadata-token: $tok"} "http://169.254.169.254/latest/meta-data/placement/region" 2>/dev/null || true
-}
-_is_index_host() {
-  # true if this EC2's attached instance profile is source-truth-index-profile
-  local tok prof
-  tok="$(curl -fsS -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 60" 2>/dev/null || true)"
-  prof="$(curl -fsS ${tok:+-H "X-aws-ec2-metadata-token: $tok"} "http://169.254.169.254/latest/meta-data/iam/security-credentials/" 2>/dev/null || true)"
-  [[ "$prof" == *source-truth-index* ]]
-}
+# ask_region <var> : the region menu is shared by every flow (pre-selects persisted). In single-host
+# mode (LOCAL_MODE — set explicitly or auto-detected up top) region is NOT a choice: we deploy onto
+# THIS EC2, whose region is fixed. Read it from IMDS; asking would just invite the wrong pick (e.g.
+# a stale Tokyo default while the box is in us-east-1). Otherwise (operator laptop) show the menu.
 ask_region() {
-  local imds_region=""
-  if [[ "$LOCAL_MODE" == true ]] || _is_index_host; then
-    imds_region="$(_imds_region)"
+  if [[ "$LOCAL_MODE" == true ]]; then
+    local imds_region; imds_region="$(_imds_region)"
+    if [[ -n "$imds_region" ]]; then
+      printf -v "$1" '%s' "$imds_region"
+      say info "区域 / region: $imds_region（本机所在区域，自动检测）"
+      return
+    fi
+    say warn "无法从实例元数据读取区域；回退到手动选择。"
   fi
-  if [[ -n "$imds_region" ]]; then
-    printf -v "$1" '%s' "$imds_region"
-    say info "区域 / region: $imds_region（本机所在区域，自动检测）"
-    return
-  fi
-  [[ "$LOCAL_MODE" == true ]] && say warn "无法从实例元数据读取区域（--local）；回退到手动选择。"
   pick_field "$1" "AWS 区域 / region (↑/↓ 选择，回车确认)" \
     "${DEPLOY_REGION:-ap-northeast-1}" "AWS 区域代码 / region code" "${REGION_OPTIONS[@]}"
 }
