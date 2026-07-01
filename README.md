@@ -112,7 +112,7 @@ bash <(gh api repos/ddpie/source-truth/contents/scripts/get.sh --jq '.content' |
 两种部署拓扑：
 
 - **默认（两台）**：在一台部署机上跑脚本，由它新建并配置索引主机 EC2。
-- **单台 EC2（`--local`）**：一台机器既跑部署、又常驻索引与网关，不再单开部署机。在本地跑 `./scripts/launch-host.sh` 一条龙起机（自动建网 + 建 IAM + 起 ARM64 EC2），再按它打印的命令 SSH 进去跑 `./scripts/install.sh`（交互填代码仓/模型/飞书凭证，install 内部调 `deploy-all --local`）。AgentCore Runtime 仍由 AWS 托管，不占本机。
+- **单台 EC2（`--local`）**：一台机器既跑部署、又常驻索引与网关，不再单开部署机。在本地跑 `./scripts/launch-host.sh` 一步完成：自动建网 + 建 IAM + 创建 ARM64 EC2，然后问你 SSH 私钥、自动把部署脚本传上机执行（装依赖 → 登录 GitHub → 克隆 → 进入 `install.sh` 交互填代码仓/模型/飞书凭证）。AgentCore Runtime 仍由 AWS 托管，不占本机。
 
 完整部署流程（前置条件、`deploy-all.sh` 各阶段的命令行参数、`--local` 的角色与权限要求、连飞书、运维、排错）见
 [`docs/runbook.md`](docs/runbook.md)。飞书凭证走 Secrets Manager，不落盘、不入仓库。

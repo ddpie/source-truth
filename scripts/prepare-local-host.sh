@@ -21,6 +21,11 @@ REPO_DIR="${REPO_DIR:-source-truth}"
 step() { printf '\n▶ %s\n' "$*"; }
 
 # --- 1. AWS CLI v2 (needed to read the token from Secrets Manager, and by install/deploy) --------
+# Refresh the apt index once up front — a fresh image may have a stale/empty one, and the bare
+# `apt-get install` calls below (unzip / git) would otherwise fail with "Unable to locate package".
+step "apt update"
+sudo apt-get update
+
 step "AWS CLI"
 if command -v aws >/dev/null; then
   echo "• already present: $(aws --version 2>&1)"

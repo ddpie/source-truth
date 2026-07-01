@@ -9,12 +9,13 @@
 #   4. launch ONE ARM64 Ubuntu 24.04 EC2 in the PUBLIC subnet (public IP for SSH), instance profile
 #      attached + IMDSv2 required. The AgentCore runtime later lands in the PRIVATE subnet (NAT egress
 #      to Bedrock) — a VPC-mode runtime ENI has no public IP, so it can't reach Bedrock via the IGW.
-#   5. print the SSH + deploy command to run next
+#   5. ask for the SSH key, then scp prepare-local-host.sh to the box and run it (installs deps,
+#      logs gh in, clones, runs install.sh) — no long command to paste by hand
 #
 # The EC2 is LONG-LIVED and holds the deployment state in its repo's .local/ (deploy-config +
 # projects.json), so later upgrades = SSH back into the SAME box and re-run deploy-all --local.
 # If a source-truth-host already exists (e.g. a prior run died before deploy finished), this REUSES
-# it by default — ensures IAM, then prints the step-② command for that box. Pass --new-host to force
+# it by default — ensures IAM, then deploys onto that box the same way. Pass --new-host to force
 # launching another. Prior choices (region / type / disk / SSH CIDR / key) are remembered in
 # .local/launch-host.env and pre-filled on re-run.
 #
@@ -39,8 +40,8 @@ while [ $# -gt 0 ]; do
     --region)  REGION="${2:-}"; shift 2 ;;
     --new-host) NEW_HOST=true; shift ;;
     --dry-run) DRY_RUN=true; shift ;;
-    -h|--help) sed -n '2,24p' "$0"; exit 0 ;;
-    *) say err "unknown flag: $1"; sed -n '2,24p' "$0"; exit 2 ;;
+    -h|--help) sed -n '2,25p' "$0"; exit 0 ;;
+    *) say err "unknown flag: $1"; sed -n '2,25p' "$0"; exit 2 ;;
   esac
 done
 
@@ -187,7 +188,7 @@ fi
 
 # Only one host is meant to exist (it holds the deploy state). If one is already up — e.g. a prior
 # run that died after launch but before deploy finished — REUSE it by default: IAM is now ensured
-# above, so just hand back the step-② command to run on that box. Pass --new-host to force a second.
+# above, so we just deploy onto that box (scp + run the prepare script). Pass --new-host to force one.
 mapfile -t EXISTING < <(aws ec2 describe-instances \
   --filters "Name=tag:Name,Values=source-truth-host" "Name=instance-state-name,Values=running,pending,stopped,stopping" \
   --query 'Reservations[].Instances[].[InstanceId,State.Name,PublicIpAddress]' --output text 2>/dev/null | grep -v '^[[:space:]]*$' || true)
@@ -196,7 +197,7 @@ if [ "${#EXISTING[@]}" -gt 0 ] && [ "$NEW_HOST" != true ]; then
   printf '    %s\n' "${EXISTING[@]}" >&2
   read -r EX_ID EX_STATE EX_IP <<<"${EXISTING[0]}"
   if [ "$DRY_RUN" = true ]; then
-    say info "[dry-run] would reuse $EX_ID (state=$EX_STATE) and print its step-② command"
+    say info "[dry-run] would reuse $EX_ID (state=$EX_STATE) and deploy onto it (scp + run prepare-local-host.sh)"
     exit 0
   fi
   # A stopped box must be started before you can SSH in.
