@@ -11,17 +11,17 @@
 
 > **先定拓扑（用几台机器）**：
 > - **默认（双机）**：在一台部署机上跑脚本，由它新建并配置一台索引主机 EC2。网络全自动、机器职责清晰——首次交付推荐。走第二节。
-> - **单机（`--local`）**：只开一台 EC2，在它上面既部署又常驻，省去单独的部署机。见[第二节末「在单台 EC2 上就地部署」](#二一键安装交互式推荐)。
+> - **单机（`--local`）**：只用一台 EC2，在这台机器上既完成部署又常驻运行，省去单独的部署机。见[第二节末「在单台 EC2 上就地部署」](#在单台-ec2-上就地部署--local)。
 >
 > **再定入口（两种拓扑都适用）**：
 > - **`install.sh`（推荐）**：交互式，问区域 / 代码仓 / 飞书凭证，写进 Secrets Manager，一次把后端和网关都装好。
 > - **`deploy-all.sh`（进阶）**：直接传参（CI、可复现、可跳过某阶段）。见 [附录 A](#附录-a手动-deploy-allsh)。
 >
-> 全部**幂等**：失败后重跑会继续未完成部分。`install.sh` 重跑会预填上次的答案。
+> 两者都**幂等**：失败后重新运行会从未完成的部分继续。`install.sh` 重新运行时，上次填过的内容会自动填入作为默认值。
 
-## 最短路径
+## 快速开始
 
-本节给出最简部署路径，后续各节是对应的详细说明与运维参考。前提：本机装好 `aws` CLI 并配好可部署的凭证；飞书应用先按[第三节](#三接入飞书connect-清单)建好，拿到 `App ID` / `App Secret` / 机器人 `open_id`。
+本节给出最简部署步骤，后续各节是对应的详细说明与运维参考。前提：本机装好 `aws` CLI 并配好可部署的凭证；飞书应用先按[第三节](#三接入飞书connect-清单)建好，拿到 `App ID` / `App Secret` / 机器人 `open_id`。
 
 **默认（双机）**——在你的部署机上：
 
@@ -31,18 +31,21 @@ git clone --depth 1 https://github.com/ddpie/source-truth.git && cd source-truth
 ```
 详见[第二节](#二一键安装交互式推荐)；装完照[第五节](#五验证端到端冒烟)验证。
 
-**单机（`--local`）**——先在本机开一台 EC2，再进去部署：
+**单机（`--local`）**——先在本机创建一台 EC2，再登录部署：
 
 ```bash
+# 第一步：在本机运行，创建并配置好 EC2
 git clone --depth 1 https://github.com/ddpie/source-truth.git && cd source-truth
-./scripts/launch-host.sh      # 自动建好网络和 IAM，开一台 ARM64 EC2，末尾打印下一步命令
-# 照它打印的那条 ssh 命令进机器，跑 ./scripts/install.sh
+./scripts/launch-host.sh      # 自动建好网络和 IAM，创建一台 ARM64 EC2，末尾打印第二步命令
+
+# 第二步：照 launch-host 末尾打印的命令登录机器部署（下面是它打印的样子）
+ssh -t ubuntu@<launch-host 打印的 IP> 'git clone --depth 1 https://github.com/ddpie/source-truth.git; cd source-truth && ./scripts/install.sh'
 ```
-详见[第二节末「在单台 EC2 上就地部署」](#在单台-ec2-上就地部署--local)；首次部署后建议照[附录 C](#附录-c首次部署后的真机核对清单)逐项核对。
+`launch-host.sh` 会做完选 profile、建网络、建 IAM、创建 EC2 的全过程；第二步登录后由 `install.sh` 交互填代码仓 / 模型 / 飞书凭证并完成部署。详见[第二节末「在单台 EC2 上就地部署」](#在单台-ec2-上就地部署--local)；首次部署后建议照[附录 C](#附录-c首次部署后的真机核对清单)逐项核对。
 
 **目录**
 
-0. [最短路径](#最短路径)
+0. [快速开始](#快速开始)
 1. [前置条件（一次性）](#一前置条件一次性)
 2. [一键安装（交互式，推荐）](#二一键安装交互式推荐)
    - [在单台 EC2 上就地部署（`--local`）](#在单台-ec2-上就地部署--local)
@@ -81,7 +84,7 @@ git clone --depth 1 https://github.com/ddpie/source-truth.git && cd source-truth
 
 先准备好飞书应用（第三节），拿到 `App ID` / `App Secret` / 机器人 `open_id`。
 
-**一行命令拉起**（克隆仓库后进入交互式安装）：
+**一行命令安装**（克隆仓库后进入交互式安装）：
 
 ```bash
 # 仓库公开时
@@ -107,7 +110,7 @@ bash <(gh api repos/ddpie/source-truth/contents/scripts/get.sh --jq '.content' |
    凭证（写入全局 `source-truth/git-credentials`，后续项目复用）；
 3. 写入 `.local/projects.json` 并部署该项目（底座 + 该项目的 bridge + runtime + gateway）。
 
-> 想先把 AWS 环境拉起来、之后再配 git？选「**初始化环境（不挂项目）**」：只起共享底座，机型/磁盘见下表。
+> 若想先把 AWS 环境建好、之后再配 git，选「**初始化环境（不挂项目）**」：只起共享底座，机型/磁盘见下表。
 
 索引主机是整套系统唯一一台 EC2（同机跑 codegraph 索引 + 各项目 bridge + 各项目 bot-gateway，全 ARM）。
 codegraph 索引吃内存、随仓库增大而增长，按仓库规模选机型；磁盘存放各仓 git 副本与 `graph.db`，按总体积选容量：
@@ -150,36 +153,36 @@ codegraph 索引吃内存、随仓库增大而增长，按仓库规模选机型�
 
 ### 在单台 EC2 上就地部署（`--local`）
 
-**只开一台 EC2、在它上面既部署又常驻**（省去单独的部署机），用 `--local` 模式。这台 EC2 长期保留：部署状态存在它的 `.local/` 里，升级就是 SSH 回这台、重跑。
+`--local` 模式只用一台 EC2，在这台机器上既完成部署又常驻运行（省去单独的部署机）。这台 EC2 长期保留：部署状态保存在它的 `.local/` 目录中，升级时登录同一台机器重新运行即可。
 
-分两步——**先在本机开一台 EC2**，**再进这台机器部署**。命令都由 [`scripts/launch-host.sh`](../scripts/launch-host.sh) 末尾打印，照抄即可。
+分两步——**先在本机创建一台 EC2**，**再登录该机器部署**。两步命令都由 [`scripts/launch-host.sh`](../scripts/launch-host.sh) 末尾打印，照此运行即可。
 
-**① 在本机开机器**
+**① 在本机创建机器**
 
 ```bash
-./scripts/launch-host.sh          # 也可 --profile <名> --region <r> 跳过前两问；--dry-run 先看计划
+./scripts/launch-host.sh          # 也可 --profile <名> --region <r> 跳过前两个提问；--dry-run 先预览计划
 ```
 
-它依次（全自动、每步幂等）：选 profile → 建/复用 IAM 角色 → **自动建一套 source-truth 专用网络**（VPC + 公私子网 + IGW + NAT，账号里已有就复用，你不用挑 VPC/子网）→ 建安全组（只放行你当前出口 IP 的 22）→ 选密钥/机型/磁盘 → 在公有子网起一台 ARM64 EC2、挂好实例角色 → 打印第二步命令。
+它按顺序执行（全自动、每步幂等）：选 profile → 建/复用 IAM 角色 → **自动创建一套 source-truth 专用网络**（VPC + 公私子网 + IGW + NAT，账号中已有则复用，无需手动选 VPC/子网）→ 创建安全组（只放行你当前出口 IP 的 22 端口）→ 选密钥/机型/磁盘 → 在公有子网创建一台 ARM64 EC2、挂好实例角色 → 打印第二步命令。
 
-**② 进 EC2 部署**（照抄 launch-host 打印的那一条）
+**② 登录 EC2 部署**（照 launch-host 打印的命令运行）
 
 ```bash
 ssh -t ubuntu@<脚本打印的 IP> 'if [ -d source-truth/.git ]; then git -C source-truth pull --ff-only; else git clone --depth 1 https://github.com/ddpie/source-truth.git; fi && cd source-truth && ./scripts/install.sh'
-#   密钥不在 ssh-agent 里就加 -i <你的 key>.pem
+#   密钥不在 ssh-agent 中时，加 -i <你的 key>.pem
 ```
 
-进去后 `install.sh` 交互填区域 / 代码仓 / 模型 / 飞书凭证，随后内部调 `deploy-all --local` 跑完整部署。用的是**这台机器的实例角色**，EC2 上不用配 profile。首次约 10–20 分钟（bootstrap + 镜像构建都在本机串行，比双机略慢）。
+登录后 `install.sh` 交互填区域 / 代码仓 / 模型 / 飞书凭证，随后内部调用 `deploy-all --local` 完成整套部署。使用的是**这台机器的实例角色**，EC2 上无需配置 profile。首次约 10–20 分钟（bootstrap 与镜像构建都在本机串行执行，比双机略慢）。
 
-**失败与重跑**：每步都幂等，**断在哪重跑哪，不用从头来**。若已经起了机、之后才中断，重跑 `launch-host.sh` 会**自动复用那台**（停了的先帮你启动）、直接打印第二步命令，不会再起一台；确实想要一台全新的才加 `--new-host`。
+**失败后重跑**：每一步都幂等，**从中断的地方重新运行即可，不必从头开始**。若机器已创建、之后才中断，重新运行 `launch-host.sh` 会**自动复用它**（已停止的会先启动），并直接打印第二步命令，不会再创建一台；确需一台全新的，加 `--new-host`。
 
-**要知道的三件事**
+**三点需要注意**
 
-- **机器规格**：必须 ARM64（aarch64）、Ubuntu 24.04（镜像和 codegraph-server 都是 ARM，x86 会被拦下）；部署用户需免密 sudo。launch-host 已设 IMDSv2 + hop-limit 1。
-- **权限较大、专机专用**：`--local` 用这台机器的**实例角色**调 AWS（不是你本地 profile——SSH 进去就用不上了），它既要建资源权限也要运行期权限，**权限偏大，这台机器别跟其它业务混跑**。角色名 `source-truth-index-role` 与默认部署共用（IAM 账号级全局）：`create-iam.sh` 幂等复用、只补权限不重建，但**若同账号已有默认部署在用这个角色，补权限后那台也会一并拿到**——要让默认部署保持最小权限就换个账号跑 `--local`。
-- **NAT 省不掉**：机器在公有子网（有公网 IP 供 SSH），但 AgentCore Runtime 在私有子网、经 **NAT** 出网到 Bedrock——Runtime 的网卡由 AWS 托管、无公网 IP，走不了 IGW，所以必须有 NAT（固定费用约每月 $32 起）。bridge 端口（8080-8099）只对自引用安全组内成员开放，外部访问不到。
+- **机器规格**：必须为 ARM64（aarch64）、Ubuntu 24.04（镜像与 codegraph-server 均为 ARM，x86 会被拦下）；部署用户需具备免密 sudo。launch-host 已设置 IMDSv2 与 hop-limit 1。
+- **权限较大、建议专机专用**：`--local` 调用 AWS 用的是这台机器的**实例角色**（不是你本地的 profile——登录 EC2 后即不再可用），它既需建资源的权限，也需运行期权限，**范围偏大，这台机器不建议与其它业务共用**。角色名 `source-truth-index-role` 与默认部署共用（IAM 角色为账号级、不分区域）：`create-iam.sh` 幂等复用、只补权限不重建；但需注意，**若同账号已有默认部署在使用该角色，补上部署期权限后那台机器也会一并获得**——如需让默认部署保持最小权限，请换一个账号运行 `--local`。
+- **NAT 不可省略**：机器位于公有子网（有公网 IP 供 SSH），但 AgentCore Runtime 位于私有子网、经 **NAT** 访问 Bedrock——Runtime 的网卡由 AWS 托管、无公网 IP，无法经 IGW 出网，因此必须有 NAT（固定费用约每月 $32 起）。bridge 端口（8080-8099）只对同一安全组内成员开放，外部无法访问。
 
-**升级**：SSH 回**同一台**（`.local` 状态在它上面），`cd source-truth && git pull && ./scripts/deploy-all.sh --region <r> --local`。不走双机的蓝绿换机，而是就地重建镜像 + 更新 runtime + 重启网关/索引；有一段服务中断（与首次部署同量级），挑低峰期做。
+**升级**：登录**同一台机器**（部署状态 `.local/` 都在它上面），运行 `cd source-truth && git pull && ./scripts/deploy-all.sh --region <r> --local`。不走双机的蓝绿换机，而是就地重建镜像、更新 runtime、重启网关与索引；期间有一段服务中断（与首次部署相当），建议在低峰期操作。
 
 ## 三、接入飞书（connect 清单）
 
@@ -290,8 +293,8 @@ aws ssm start-session --region <r> --target <INDEX_SERVICE_INSTANCE>
 
 **按 traceId 查全链路（网关 + agent microVM 合并时间线）**：一次问答横跨两个 log group
 （网关 `/source-truth/bot-gateway` + agent 的 `/aws/bedrock-agentcore/runtimes/<runtime>-DEFAULT`），
-二者用同一 `traceId` 串联。一条命令把两侧查询 + 合并都包好——只需输入 traceId（区域、两个 log group、
-时间窗、查询、排序全自动）：
+二者用同一 `traceId` 关联。一条命令即可完成两侧查询与合并——只需提供 traceId（区域、两个 log group、
+时间范围、查询、排序均自动处理）：
 
 ```bash
 ./scripts/trace.sh st-731080073903468d83a0fbe1249b5dc3   # traceId 取自卡片底部或 answer_* 日志行
@@ -391,7 +394,7 @@ refreshIntervalSec?}`，`source` 默认 `git`、本地仓写 `local`）。顶层
 | 症状 | 可能原因 | 处置 |
 |------|----------|------|
 | 卡片一直「正在分析…」不结束 | 后端流被中断 / finalize 异常 | 查看网关日志 `finalize_error` / `card_closed failed:true`；偶发则重问；持续则查 runtime/index 健康 |
-| 卡片里冒出奇怪的 `<invoke>` 代码标记 | 冷启动那次问答，底层取证工具还没就绪 agent 就提前回了 | 网关会自动重试一次，暖机后消失。查日志 `num_turns`/`cache_read` 确认是否冷启动 |
+| 卡片里出现异常的 `<invoke>` 代码标记 | 冷启动那次问答，底层取证工具尚未就绪，agent 就提前作答 | 网关会自动重试一次，预热后不再出现。查日志 `num_turns`/`cache_read` 确认是否冷启动 |
 | 机器人在群里**完全无响应** | 网关未启动 / 未 @ 到机器人 / 同一 app 运行了两个网关争抢事件 | 进实例 `systemctl status 'bot-gateway@*'` 确认 active + 日志 `sdk_wsclient_connected`；确认 @ 的是 `FEISHU_BOT_OPEN_ID`；停止多余网关，只保留一个 |
 | 网关 `condition failed` 未启动 | `/etc/bot-gateway-<项目>.env` 尚未写入（runtime 未就绪 / gateway 阶段被跳过） | 重跑 `install.sh` 或 `deploy-all.sh`（不跳 gateway）；确认 `FEISHU_SECRET_ID` 已配 |
 | 卡片回「查询失败」/ 日志 `AccessDenied` | 部署身份缺 `bedrock:InvokeModel`，或该模型在此区域无可用推理档 | 给部署身份补 `bedrock:InvokeModel`；模型档由部署按区域自动解析，查不到时 preflight 会列出该区域可用的档（见前置条件 3） |
@@ -427,11 +430,11 @@ refreshIntervalSec?}`，`source` 默认 `git`、本地仓写 `local`）。顶层
 - 使用 `rsync --delete`，主机副本与本地保持一致（本地删除的文件，主机上同样删除）；自动排除 `.git`；符号链接不会被同步进仓（`--safe-links --no-links`）；不接受任意 `--ssh-opts`，仅认 `--identity <key>`（防止注入 `ProxyCommand` 等）。
 - **首次推送前**先核对 EC2 的 SSH host key 指纹：脚本首次连接用 `accept-new`，会信任第一次见到的指纹。建议通过其它渠道（如 AWS 控制台的实例 system log）单独核对一次，或预先写入 `known_hosts`，以防有人冒充主机窃取源码。
 - 术语表（中文词→代码符号）随推送增量刷新：脚本用本次同步出的变更文件清单，只重建这些文件的术语，后台进行、不阻塞推送（git 仓是按 `git diff` 算变更、本地仓改用 rsync 算变更，之后走同一套增量逻辑）。主机若未开通 Bedrock（构建引擎不可用），则跳过术语表、只更新索引，问答仍可经 codegraph 直接定位。
-- **推送中断了会怎样**：网络传输那一段（你的机器 → 暂存目录）中断，碰不到正在用的代码，重跑一次就好。把暂存目录同步到 `/data/repo/<subdir>` 这一段用 `rsync --delay-updates`：更新的文件先传到位、最后一起切换，所以中断绝大多数发生在切换之前（正在用的代码原封不动），只有极小概率正好赶在切换那一下（留下没切完的半成品）。无论哪种，暂存目录都还在，重跑一次推送就能对齐，不会留下无法恢复的损坏。
+- **推送中断了会怎样**：网络传输那一段（你的机器 → 暂存目录）中断，不会影响正在使用的代码，重新推送一次即可。把暂存目录同步到 `/data/repo/<subdir>` 这一段用 `rsync --delay-updates`：更新的文件先全部传到位、最后一次性切换，所以中断绝大多数发生在切换之前（正在使用的代码原封不动），只有极小概率恰好发生在切换的一瞬间（留下部分更新）。无论哪种，暂存目录都还在，重新推送一次就能恢复到完整状态，不会造成无法恢复的损坏。
 
 **排查（推了却没生效 / 怀疑中断）：**
 - 推送本身成功的标志：push 命令退出码 0、主机上 reindex 打印 `REINDEX_DONE subdir=<sub> ...`（在 reindex 的 SSM/SSH 输出里）。
-- **怀疑半更新**：看 `sudo ls -d /data/repo/<subdir>.incoming` —— **暂存目录还在，说明上次没跑完**（正常跑完会删掉它），重跑一次 `push-local-repo.sh` 即可对齐。`sudo cat /data/repo/<subdir>/.snapshot-time` 是上次成功推送的时间戳，可对照。
+- **怀疑更新只完成了一半**：看 `sudo ls -d /data/repo/<subdir>.incoming` —— **暂存目录还在，说明上次没跑完**（正常跑完会删掉它），重新运行一次 `push-local-repo.sh` 即可恢复到完整状态。`sudo cat /data/repo/<subdir>/.snapshot-time` 是上次成功推送的时间戳，可对照。
 - **术语表是否刷新**：术语表在后台跑，日志在主机 `/var/log/glossary-build-<projectId>-<subdir>.log`，看末尾的 `glossary_gen_done`（成功）或 `glossary_gen_cc_failed`（cc 失败，索引不受影响、问答仍可用）。Bedrock 未开通时 reindex 会在输出里打印 `Bedrock not invokable — skipping glossary refresh`、只更新索引。
 
 **最小 sudoers**——只放行这一个脚本（建暂存目录、切换、重建都在脚本里完成，参数先经 `^[a-z0-9][a-z0-9-]*$` 校验、systemd 单元名固定写死）：
@@ -493,29 +496,29 @@ node_modules/.bin/ts-node --transpile-only src/index.ts
 
 ## 附录 C：首次部署后的真机核对清单
 
-第五节的冒烟（`/health` + 群里问一句）确认了主流程通。这份清单更细，用于**首次在一个新账号或新区域部署之后**逐项确认——重点是几个静态检查和离线测试都发现不了、必须在真实机器上才能验的点，其中有的即使部署显示成功、实际也不一定能用（`--local` 单机模式尤其要注意）。日常重复部署不必每次跑。命令里 `<r>` = 区域、`<I>` = 索引主机实例 id（取自 `.local/deploy-config` 的 `INDEX_SERVICE_INSTANCE`）。
+第五节的冒烟测试（`/health` + 在群里提一个问题）确认了主流程可用。这份清单更细，用于**首次在一个新账号或新区域部署之后**逐项确认——重点是几项静态检查与离线测试都覆盖不到、必须在真实机器上验证的地方，其中有的即使部署显示成功、实际也未必可用（`--local` 单机模式尤其需要注意）。日常重复部署无需每次执行。命令中 `<r>` = 区域、`<I>` = 索引主机实例 id（取自 `.local/deploy-config` 的 `INDEX_SERVICE_INSTANCE`）。
 
-**必验（交付前）**
+**必须验证（交付前）**
 
-| 项目 | 确认方式 | 没通时的表现与处理 |
+| 项目 | 确认方式 | 未通过时的表现与处理 |
 |---|---|---|
-| **能 SSH 进新起的机器**（`--local`） | `ssh ubuntu@<公网IP>` 连得上 | 连不上/超时 → 安全组的 22 端口放行的不是你真实的出口 IP（`launch-host` 用 `curl checkip` 取，经 NAT 或代理时可能取错）。到控制台给该安全组补一条你当前 IP 的 22 |
+| **能 SSH 登录新建的机器**（`--local`） | `ssh ubuntu@<公网IP>` 可连接 | 连不上/超时 → 安全组放行的 22 端口来源不是你真实的出口 IP（`launch-host` 用 `curl checkip` 获取，经 NAT 或代理时可能不准）。在控制台给该安全组补一条你当前 IP 的 22 |
 | **Runtime 能解析索引主机的私有域名** | 进实例（`aws ssm start-session ... --target <I>`），实例内跑 `dig +short index.<r>.source-truth.internal`，应返回一个私有 IP | 返回空 → 每次问答都答不出内容，**而部署本身会显示成功**（健康检查只探本机 loopback，探不到这一层）。检查该 VPC 的 `enableDnsSupport` 和 `enableDnsHostnames` 是否都已打开 |
-| **Runtime 出网到 Bedrock、并连上 bridge** | 群里真问一句，卡片给出带 `文件:行号` 出处的答案 | 卡在「查询失败」或超时 → 私有子网到 NAT 的路由不通，或 runtime 用的那个安全组没放行 8080-8099 |
-| **部署身份的权限够用**（`--local` 复用角色后） | `deploy-all --local` 一路跑到 runtime 的 `InvokeAgentRuntime`，不报 AccessDenied | 卡在 runtime 阶段报 AccessDenied 或 PassRole 被拒 → 角色缺 `bedrock-agentcore:*` 或对 `SourceTruthAgentRuntimeRole` 的 `iam:PassRole`（见前置条件 3 与 `--local` 权限说明） |
+| **Runtime 访问 Bedrock、并连上 bridge** | 在群里提一个问题，卡片给出带 `文件:行号` 出处的答案 | 卡在「查询失败」或超时 → 私有子网到 NAT 的路由不通，或 runtime 使用的安全组未放行 8080-8099 |
+| **部署身份权限充足**（`--local` 复用角色后） | `deploy-all --local` 执行到 runtime 的 `InvokeAgentRuntime` 不报 AccessDenied | 卡在 runtime 阶段报 AccessDenied 或 PassRole 被拒 → 角色缺 `bedrock-agentcore:*` 或对 `SourceTruthAgentRuntimeRole` 的 `iam:PassRole`（见前置条件 3 与 `--local` 权限说明） |
 
-**接第一个新代码仓时验**
+**接入第一个新代码仓时验证**
 
 | 项目 | 确认方式 | 说明 |
 |---|---|---|
-| **本地仓首次推送**（停 bridge、全量建图） | 跑完 `push-local-repo.sh`，主机日志出现 `REINDEX_DONE ... mode=initial-build`，`graph.db` 不小于 64KiB，bridge 起来 | 中文仓的 GBK 编码问题也会在这一步第一次显现 |
-| **本地仓增量推送**（不停 bridge） | 改几个文件再推，日志显示 `mode=incremental`，几秒后问答就用上新代码 | 网关全程不中断；术语表在后台增量刷新（看 `/var/log/glossary-build-*`） |
-| **中断后能重跑对齐** | 推送途中断网或 Ctrl-C，`.incoming` 暂存目录还在，重跑一次即对齐 | 详见第九节「本地仓上传」的中断说明 |
-| **codegraph 二进制可用** | bootstrap 日志里 `codegraph-server --version` 通过 | 架构或 glibc 版本不匹配会直接报错退出（东京已验过，风险低） |
+| **本地仓首次推送**（停 bridge、全量建图） | 运行 `push-local-repo.sh` 后，主机日志出现 `REINDEX_DONE ... mode=initial-build`，`graph.db` 不小于 64KiB，bridge 已启动 | 中文仓的 GBK 编码问题也会在这一步首次显现 |
+| **本地仓增量推送**（不停 bridge） | 修改几个文件再推送，日志显示 `mode=incremental`，几秒后问答即用上新代码 | 网关全程不中断；术语表在后台增量刷新（查看 `/var/log/glossary-build-*`） |
+| **中断后能恢复** | 推送过程中断网或 Ctrl-C，`.incoming` 暂存目录仍在，重新推送一次即可恢复到完整状态 | 详见第九节「本地仓上传」的中断说明 |
+| **codegraph 二进制可用** | bootstrap 日志中 `codegraph-server --version` 通过 | 架构或 glibc 版本不匹配会直接报错退出（东京已验证，风险低） |
 
 **了解即可（不影响交付）**
 
-- **冷启动第一问**：新 microVM 第一次提问会慢一些，极偶尔会冒出 `<invoke>` 之类的原始标记——网关会自动重试一次，机器预热后就正常了（见第八节排错表）。
-- **复用与清理**：`launch-host` 复用一台已停的机器时会先帮你启动；本地仓从项目里移除后，下次部署会清掉它的代码副本和 `.incoming`（改完仓库集合重部署后，`sudo ls /data/repo/` 确认没有残留即可）。
+- **冷启动首次提问**：新 microVM 第一次提问会略慢，极偶尔出现 `<invoke>` 之类的原始标记——网关会自动重试一次，预热后即正常（见第八节排错表）。
+- **复用与清理**：`launch-host` 复用一台已停止的机器时会先将其启动；本地仓从项目中移除后，下次部署会清除它的代码副本与 `.incoming`（调整仓库集合并重新部署后，用 `sudo ls /data/repo/` 确认无残留即可）。
 
-> **最容易在真机上出问题的两处，交付前务必亲手确认**：① 私有 DNS 解析不出来——部署显示成功，问答却答不出内容，最难自己发现；② 安全组 22 端口放行的出口 IP 不对——连不上刚起的机器。
+> **真机上最易出问题的两处，交付前务必亲自确认**：① 私有 DNS 解析失败——部署显示成功，问答却答不出内容，最难自行发现；② 安全组 22 端口放行的出口 IP 不对——无法登录刚创建的机器。
