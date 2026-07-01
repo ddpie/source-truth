@@ -60,9 +60,20 @@ fi
 REGION="${REGION:-${DEPLOY_REGION:-}}"
 [[ -n "$REGION" ]] || { echo "ERROR: --region required (and not in $CONFIG)" >&2; exit 2; }
 
-# Derive the runtime id from the ARN (…:runtime/<id>) if not given.
+# Derive the runtime id from the ARN (…:runtime/<id>) if not given. The multi-project
+# deploy writes namespaced keys RUNTIME_ARN_<pid>; the legacy single AGENT_RUNTIME_ARN
+# is a fallback only. With several projects, pick the first namespaced key (best-effort;
+# pass --runtime to disambiguate) and say which one was picked.
 if [[ -z "$RUNTIME_ID" ]]; then
   ARN="${AGENT_RUNTIME_ARN:-${RUNTIME_ARN:-}}"
+  if [[ -z "$ARN" && -f "$CONFIG" ]]; then
+    _arn_line="$(grep -E '^RUNTIME_ARN_[A-Za-z0-9_]+=' "$CONFIG" | head -1 || true)"
+    if [[ -n "$_arn_line" ]]; then
+      ARN="${_arn_line#*=}"; ARN="${ARN#\'}"; ARN="${ARN%\'}"
+      _n="$(grep -cE '^RUNTIME_ARN_[A-Za-z0-9_]+=' "$CONFIG" || true)"
+      [[ "${_n:-1}" -gt 1 ]] && echo "note: multiple RUNTIME_ARN_* in config — using ${_arn_line%%=*} (pass --runtime to override)" >&2
+    fi
+  fi
   RUNTIME_ID="${ARN##*/}"
 fi
 

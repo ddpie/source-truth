@@ -76,6 +76,21 @@ def _region_from_arn(arn: str) -> str:
     return parts[3] if len(parts) > 3 else ""
 
 
+def _resolve_runtime_arn(cfg: dict, project: str | None) -> str:
+    """从 deploy-config 解析 runtime ARN。多项目部署链写的是命名空间键
+    RUNTIME_ARN_<projectId 的 - 转 _>（deploy_project.sh），不再写 AGENT_RUNTIME_ARN；
+    后者只作老配置兜底。--project 指定时取该项目的键；未指定且恰好只有一个
+    RUNTIME_ARN_* 键时取它；多个则返回 ""（调用方 skip 并提示 --project）。纯函数。"""
+    if project:
+        return cfg.get(f"RUNTIME_ARN_{project.replace('-', '_')}", "").strip()
+    keys = [k for k in cfg if k.startswith("RUNTIME_ARN_")]
+    if len(keys) == 1:
+        return cfg[keys[0]].strip()
+    if len(keys) > 1:
+        return ""  # 多项目且未指定 --project → 无法确定
+    return cfg.get("AGENT_RUNTIME_ARN", "").strip()  # 老单项目配置兜底
+
+
 def resolve_region(arn: str, explicit: str | None, env_region: str | None) -> str:
     """region 优先级：--region（显式）> ARN 自带 region（权威——runtime 就在那个区域）
     > AWS_REGION 环境变量（开发机默认值，可能与目标区域不符，故仅兜底）。
@@ -111,7 +126,15 @@ def _resolve_repos(project: str | None) -> list[str]:
     else:
         raise SystemExit(f"projects.json 有多个项目，请用 --project 指定：{list(projects)}")
     repos = entry.get("repos", [])
-    return [r for r in repos if isinstance(r, str)]
+    # projects.json 的 repos 是对象数组（{subdir, git, ref}）；gateway 只下发 subdir 列表
+    # （见 bot-gateway/src/project-routing.ts），这里保持同形。兼容早期纯字符串写法。
+    out: list[str] = []
+    for r in repos:
+        if isinstance(r, str):
+            out.append(r)
+        elif isinstance(r, dict) and isinstance(r.get("subdir"), str):
+            out.append(r["subdir"])
+    return out
 
 
 def _extract_answer(raw: str) -> str:
@@ -182,9 +205,10 @@ def main() -> int:
     args = ap.parse_args()
 
     cfg = _read_deploy_config()
-    arn = cfg.get("AGENT_RUNTIME_ARN", "").strip()
+    arn = _resolve_runtime_arn(cfg, args.project)
     if not arn:
-        print("SKIP: .local/deploy-config 无 AGENT_RUNTIME_ARN（未部署？）", file=sys.stderr)
+        print("SKIP: .local/deploy-config 无 RUNTIME_ARN_<project>（未部署？多项目时用 --project 指定）",
+              file=sys.stderr)
         return 2
     region = resolve_region(arn, args.region, os.environ.get("AWS_REGION"))
     if not region:
@@ -203,7 +227,13 @@ def main() -> int:
         print(f"SKIP: {e}", file=sys.stderr)
         return 2
 
-    client = boto3.client("bedrock-agentcore", region_name=region)
+    # --timeout 实际落到 boto3 的读超时（流式响应按块计时）；此前它只传进 run_probe
+    # 却无人消费——挂死的 runtime 会让 e2e 卡住而不是按 --timeout 失败。
+    from botocore.config import Config  # noqa: PLC0415
+    client = boto3.client(
+        "bedrock-agentcore", region_name=region,
+        config=Config(read_timeout=args.timeout, connect_timeout=30, retries={"max_attempts": 1}),
+    )
     print(f"e2e: runtime={arn.split('/')[-1]} region={region} repos={repos or '(none)'}")
 
     results = []

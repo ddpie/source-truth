@@ -47,7 +47,7 @@
   | `.venv/` | `requirements.txt` | `uv` / `pip install -r` |
   | 构建产物 / 镜像 | `agent-container/`（Dockerfile + 源） | `scripts/deploy-all.sh`（image 阶段） |
   | 本地仓库副本 `/data/repo/<subdir>` | git 仓：上游 git 仓库；本地仓：运维本地代码 | git 仓：`git_fetch.sh` clone + 定时 pull；本地仓：`push-local-repo.sh` rsync 推送 + `reindex_local_repo.sh` 切换重建，无 timer |
-  | 索引 `graph.db`（每仓一张，`<subdir>/.home/.codegraph/`） | 本地仓库副本 | `activate_project.sh` 起 `index-build@<subdir>` 建图（独占写入）+ 常驻 watcher 增量 |
+  | 索引 `graph.db`（每仓一张，`<subdir>/.home/.codegraph/`） | 本地仓库副本 | git 仓：`activate_project.sh` 起 `index-build@<subdir>` 建图（独占写入）+ 常驻 watcher 增量；本地仓：activate 时若无代码则延迟，首次 `push-local-repo.sh` → `reindex_local_repo.sh` 全量建图（后台单元），之后 watcher 增量 |
 
 - **机检**：暂无逐项 diff（依赖约定和 review）。`.gitignore` 排除大部分生成物。
 - **违反后果**：手改被下次重生成覆盖；或生成物与源漂移，行为不可解释。

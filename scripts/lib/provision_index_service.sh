@@ -221,7 +221,13 @@ if [[ -n "${INDEX_OLD_INSTANCE:-}" ]]; then
   st="$(Q describe-instances --instance-ids "$INDEX_OLD_INSTANCE" --query 'Reservations[0].Instances[0].State.Name' --output text 2>/dev/null || echo "")"
   old_ip="$(Q describe-instances --instance-ids "$INDEX_OLD_INSTANCE" --query 'Reservations[0].Instances[0].PrivateIpAddress' --output text 2>/dev/null || echo "")"
   dns_ip="$(aws route53 list-resource-record-sets --hosted-zone-id "${INDEX_DNS_ZONE_ID:-}" --query "ResourceRecordSets[?Name=='${INDEX_DNS_NAME:-none}.'].ResourceRecords[0].Value | [0]" --output text 2>/dev/null || echo "")"
-  if [[ ( "$st" == "running" || "$st" == "pending" || "$st" == "stopping" ) && -n "$old_ip" && "$old_ip" != "$dns_ip" ]]; then
+  [[ "$dns_ip" == "None" ]] && dns_ip=""
+  # FAIL-CLOSED on an EMPTY dns_ip: a Route53 query that errored (throttle / transient /
+  # missing INDEX_DNS_ZONE_ID) is swallowed to "" above — that means "couldn't look", NOT
+  # "DNS points elsewhere". Terminating on unknown would kill the live host the DNS may
+  # still point at (the terminate-first outage this reconcile exists to prevent). Only GC
+  # when the lookup POSITIVELY returned a different IP.
+  if [[ ( "$st" == "running" || "$st" == "pending" || "$st" == "stopping" ) && -n "$old_ip" && -n "$dns_ip" && "$old_ip" != "$dns_ip" ]]; then
     log warn "reconcile: terminating stale blue-green leftover $INDEX_OLD_INSTANCE ($old_ip, state=$st; DNS points elsewhere at ${dns_ip:-?} so it's safe)"
     Q terminate-instances --instance-ids "$INDEX_OLD_INSTANCE" >/dev/null 2>&1 || true
     update_env "$CONFIG" INDEX_OLD_INSTANCE ""

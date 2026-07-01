@@ -31,13 +31,28 @@ git clone https://github.com/ddpie/source-truth.git && cd source-truth
 ```
 详见[第二节](#二一键安装交互式推荐)；装完照[第五节](#五验证端到端冒烟)验证。
 
-**单机（`--local`）**——在本机跑一条命令，其余由脚本完成：
+**单机（`--local`）**——三步走：**起机器 → 装服务 → 推代码**。
+
+**第一步 · 起机器**（本机）：`launch-host.sh` 建好网络和 IAM、创建 EC2，把 `prepare-local-host.sh` 传上机，问你要 SSH 私钥路径，最后打印一条登录用的 `ssh` 命令。
 
 ```bash
 git clone https://github.com/ddpie/source-truth.git && cd source-truth
-./scripts/launch-host.sh      # 选 profile → 建网络/IAM → 创建 ARM64 EC2 → 问你 SSH 私钥 → 传部署脚本上机
+./scripts/launch-host.sh
 ```
-`launch-host.sh` 建好 EC2 后会问你 SSH 私钥路径，用它把部署脚本传上机，然后打印一条 `ssh` 命令。你照它登录机器、运行那条脚本——装依赖、（私有仓）登录 GitHub、克隆仓库、进入 `install.sh` 交互填代码仓 / 模型 / 飞书凭证，全在你眼前跑，卡住能就地处理。详见[第二节末「在单台 EC2 上就地部署」](#在单台-ec2-上就地部署--local)；首次部署后建议照[附录 C](#附录-c首次部署后的真机核对清单)逐项核对。
+
+**第二步 · 装服务**（用上一步打印的 `ssh` 命令登录机器，在机器上跑）：装依赖、（私有仓）登录 GitHub、克隆仓库，再进入 `install.sh` 交互填代码仓 / 模型 / 飞书凭证。脚本不替你自动执行，而是让你逐步看着它跑——哪一步卡住能当场处理，中途断了重连再跑即可。这一步把后端整套拉起来（bridge + runtime + gateway），**git 仓装完就能用**。
+
+```bash
+bash /tmp/prepare-local-host.sh
+```
+
+**第三步 · 推代码**（回本机，仅本地仓需要）：本地仓（`source: "local"`）装服务时不必先有代码——建图推迟到第一次推送，在那之前 bridge 空着运行、机器人还答不了。**第一次推送就会建图并让机器人上线**，之后每改一次代码、推一次，就刷新一次。
+
+```bash
+./scripts/push-local-repo.sh --host <ssh-host> [--identity <key>] <子目录> <本地路径>
+```
+
+详见[第二节末「在单台 EC2 上就地部署」](#在单台-ec2-上就地部署--local)与[第九节末「本地仓上传」](#本地仓上传)；首次部署后建议照[附录 C](#附录-c首次部署后的真机核对清单)逐项核对。
 
 **目录**
 
@@ -391,7 +406,7 @@ refreshIntervalSec?}`，`source` 默认 `git`、本地仓写 `local`）。顶层
 | 网关 `condition failed` 未启动 | `/etc/bot-gateway-<项目>.env` 尚未写入（runtime 未就绪 / gateway 阶段被跳过） | 重跑 `install.sh` 或 `deploy-all.sh`（不跳 gateway）；确认 `FEISHU_SECRET_ID` 已配 |
 | 卡片回「查询失败」/ 日志 `AccessDenied` | 部署身份缺 `bedrock:InvokeModel`，或该模型在此区域无可用推理档 | 给部署身份补 `bedrock:InvokeModel`；模型档由部署按区域自动解析，查不到时 preflight 会列出该区域可用的档（见前置条件 3） |
 | 部署在 index-service 阶段超时 | 全新账号 NAT 路由未收敛 / 实例仍在冷启动建索引 | 多等一轮（bootstrap 对网络操作有重试）；查看 `/var/log/` 与 `journalctl -u 'index-build@*'` |
-| `/health` 长期非 200 | 索引损坏 / graph.db 空 / worker 反复重启 | 进实例查看 index-bridge-<项目> 日志；必要时 `--refresh-index` 重建（蓝绿，不破坏运行中实例） |
+| `/health` 长期非 200 | 索引损坏 / graph.db 空 / worker 反复重启 | 进实例查看 index-bridge-<项目> 日志；必要时 `--refresh-index` 重建（蓝绿，不破坏运行中实例）。注：本地仓在首次 `push-local-repo.sh` 之前本就是空图、`/health` 非 200，属正常，推代码后恢复 |
 | 重新部署后行为仍是旧版本 | 仍存活的 microVM 持旧镜像（约 15 分钟）/ 网关未重启 | 等待该 microVM 回收；重启网关确保运行新代码 |
 | 中文问答没用上项目专属命名 / 术语表像是空的 | 术语表后台构建未完成或失败（cc 没装上 / Bedrock 调不通或无权限） | 进实例看 `journalctl` 与 `/var/log/glossary-build-*`，找 `glossary_gen_done`（成功）/ `glossary_gen_cc_failed`（构建失败）；不影响问答，问答会自动退回常规检索 |
 
@@ -415,9 +430,9 @@ refreshIntervalSec?}`，`source` 默认 `git`、本地仓写 `local`）。顶层
 ./scripts/push-local-repo.sh --host <ec2-ssh-host> [--identity <key>] <subdir> <本地仓路径>
 ```
 
-本地仓在主机上有两个目录：`/data/repo/<subdir>` 是索引服务**正在用的代码**，`/data/repo/<subdir>.incoming` 是推送时的**暂存目录**。流程分两步：先把代码经网络 rsync 到暂存目录（这一步较慢、可能中断，但碰不到正在用的代码，网关照常服务）；传完后，主机上的脚本在本机内部把暂存目录同步到 `/data/repo/<subdir>`，常驻索引进程的 file-watcher 几秒内增量更新——**网关不停、不全量重建**，和 git 仓 `git pull` 走同一条路径。要点：
+本地仓在主机上有两个目录：`/data/repo/<subdir>` 是索引服务**正在用的代码**，`/data/repo/<subdir>.incoming` 是推送时的**暂存目录**。流程分两步：先把代码经网络 rsync 到暂存目录（这一步较慢、可能中断，但碰不到正在用的代码，网关照常服务）；传完后，主机上的脚本把暂存目录同步到 `/data/repo/<subdir>`——**这一步不阻塞你的推送命令**：脚本把重活（应用代码 + 建图 + 术语表）交给一个后台 systemd 单元，随即返回 `REINDEX_LAUNCHED`，**ssh 断开也不影响后台继续跑**。常规推送下常驻索引进程的 file-watcher 几秒内增量更新——**网关不停、不全量重建**，和 git 仓 `git pull` 走同一条路径。要点：
 
-- **常规推送不停服务**：同步用 `rsync --delay-updates`——更新的文件先逐个传到位，最后一起切换。这样"新旧文件混在一起、提问可能读到不一致结果"的时间窗只剩切换那一下，watcher 随即补齐索引（和 git 仓 `git pull` 一样）。**只有首次推送是例外**：那时还没建过索引图，得先停掉该项目网关、全量建一次图再启动，这期间该项目（连同跑在同一进程里的其它仓）会短暂离线。
+- **常规推送不停服务**：同步用 `rsync --delay-updates`——更新的文件先逐个传到位，最后一起切换。这样"新旧文件混在一起、提问可能读到不一致结果"的时间窗只剩切换那一下，watcher 随即补齐索引（和 git 仓 `git pull` 一样）。**只有首次推送是例外**：那时还没建过索引图（`--local` 装服务时本地仓的建图是延迟的），得先停掉该项目网关、全量建一次图再启动——**首次的建图与术语表构建在后台并行进行**；这期间该项目（连同跑在同一进程里的其它仓）会短暂离线，首推建完才第一次上线。
 - 「刷新」即重跑本命令（本地仓不会自动更新，**不反映**实时主分支）。代码变更后再推送一次即可。
 - 使用 `rsync --delete`，主机副本与本地保持一致（本地删除的文件，主机上同样删除）；自动排除 `.git`；符号链接不会被同步进仓（`--safe-links --no-links`）；不接受任意 `--ssh-opts`，仅认 `--identity <key>`（防止注入 `ProxyCommand` 等）。
 - **首次推送前**先核对 EC2 的 SSH host key 指纹：脚本首次连接用 `accept-new`，会信任第一次见到的指纹。建议通过其它渠道（如 AWS 控制台的实例 system log）单独核对一次，或预先写入 `known_hosts`，以防有人冒充主机窃取源码。
@@ -425,7 +440,7 @@ refreshIntervalSec?}`，`source` 默认 `git`、本地仓写 `local`）。顶层
 - **推送中断了会怎样**：网络传输那一段（你的机器 → 暂存目录）中断，不会影响正在使用的代码，重新推送一次即可。把暂存目录同步到 `/data/repo/<subdir>` 这一段用 `rsync --delay-updates`：更新的文件先全部传到位、最后一次性切换，所以中断绝大多数发生在切换之前（正在使用的代码原封不动），只有极小概率恰好发生在切换的一瞬间（留下部分更新）。无论哪种，暂存目录都还在，重新推送一次就能恢复到完整状态，不会造成无法恢复的损坏。
 
 **排查（推了却没生效 / 怀疑中断）：**
-- 推送本身成功的标志：push 命令退出码 0、主机上 reindex 打印 `REINDEX_DONE subdir=<sub> ...`（在 reindex 的 SSM/SSH 输出里）。
+- 推送命令成功、只代表代码已上传并转入后台重建：push 输出里看到 `REINDEX_LAUNCHED`（不会打印 `REINDEX_DONE`——那是重建完成的标志，在后台日志里）。确认真正建完：`sudo journalctl -u reindex-<subdir> -f` 或 `sudo tail -f /var/log/reindex-<subdir>.log`，看到 `REINDEX_DONE subdir=<sub> ...` 即完成。
 - **怀疑更新只完成了一半**：看 `sudo ls -d /data/repo/<subdir>.incoming` —— **暂存目录还在，说明上次没跑完**（正常跑完会删掉它），重新运行一次 `push-local-repo.sh` 即可恢复到完整状态。`sudo cat /data/repo/<subdir>/.snapshot-time` 是上次成功推送的时间戳，可对照。
 - **术语表是否刷新**：术语表在后台跑，日志在主机 `/var/log/glossary-build-<projectId>-<subdir>.log`，看末尾的 `glossary_gen_done`（成功）或 `glossary_gen_cc_failed`（cc 失败，索引不受影响、问答仍可用）。Bedrock 未开通时 reindex 会在输出里打印 `Bedrock not invokable — skipping glossary refresh`、只更新索引。
 
@@ -503,8 +518,8 @@ node_modules/.bin/ts-node --transpile-only src/index.ts
 
 | 项目 | 确认方式 | 说明 |
 |---|---|---|
-| **本地仓首次推送**（停 bridge、全量建图） | 运行 `push-local-repo.sh` 后，主机日志出现 `REINDEX_DONE ... mode=initial-build`，`graph.db` 不小于 64KiB，bridge 已启动 | 中文仓的 GBK 编码问题也会在这一步首次显现 |
-| **本地仓增量推送**（不停 bridge） | 修改几个文件再推送，日志显示 `mode=incremental`，几秒后问答即用上新代码 | 网关全程不中断；术语表在后台增量刷新（查看 `/var/log/glossary-build-*`） |
+| **本地仓首次推送**（停 bridge、全量建图） | 运行 `push-local-repo.sh`，输出 `REINDEX_LAUNCHED`；再看后台日志 `sudo journalctl -u reindex-<subdir>`（或 `/var/log/reindex-<subdir>.log`）出现 `REINDEX_DONE ... mode=initial-build`，`graph.db` 不小于 64KiB，bridge 已启动 | 建图与术语表在后台并行；中文仓的 GBK 编码问题也会在这一步首次显现 |
+| **本地仓增量推送**（不停 bridge） | 修改几个文件再推送，后台日志显示 `mode=incremental`，几秒后问答即用上新代码 | 网关全程不中断；术语表在后台增量刷新（查看 `/var/log/glossary-build-*`） |
 | **中断后能恢复** | 推送过程中断网或 Ctrl-C，`.incoming` 暂存目录仍在，重新推送一次即可恢复到完整状态 | 详见第九节「本地仓上传」的中断说明 |
 | **codegraph 二进制可用** | bootstrap 日志中 `codegraph-server --version` 通过 | 架构或 glibc 版本不匹配会直接报错退出（东京已验证，风险低） |
 
@@ -513,4 +528,4 @@ node_modules/.bin/ts-node --transpile-only src/index.ts
 - **冷启动首次提问**：新 microVM 第一次提问会略慢，极偶尔出现 `<invoke>` 之类的原始标记——网关会自动重试一次，预热后即正常（见第八节排错表）。
 - **复用与清理**：`launch-host` 复用一台已停止的机器时会先将其启动；本地仓从项目中移除后，下次部署会清除它的代码副本与 `.incoming`（调整仓库集合并重新部署后，用 `sudo ls /data/repo/` 确认无残留即可）。
 
-> **真机上最易出问题的两处，交付前务必亲自确认**：① 私有 DNS 解析失败——部署显示成功，问答却答不出内容，最难自行发现；② 安全组 22 端口放行的出口 IP 不对——无法登录刚创建的机器。
+> **真机上最易出问题的两处，交付前务必亲自确认**：一是私有 DNS 解析失败——部署显示成功，问答却答不出内容，最难自行发现；二是安全组 22 端口放行的出口 IP 不对——无法登录刚创建的机器。

@@ -363,7 +363,12 @@ if [[ "$DRY_RUN" != true ]]; then
   update_env "$CONFIG_FILE" DEPLOY_MAX_FILES "$MAX_FILES"
   update_env "$CONFIG_FILE" DEPLOY_GLOSSARY_MAX_FILES "$GLOSSARY_MAX_FILES"
   update_env "$CONFIG_FILE" DEPLOY_ROOT_VOLUME_GB "$ROOT_VOLUME_GB"
+  # idle-timeout / max-lifetime 的消费方是 deploy_project.sh（读 DEPLOY_IDLE_TIMEOUT /
+  # DEPLOY_MAX_LIFETIME）。必须持久化+export，否则 --idle-timeout 只解析不生效（死旗子）。
+  update_env "$CONFIG_FILE" DEPLOY_IDLE_TIMEOUT "$IDLE_TIMEOUT"
+  update_env "$CONFIG_FILE" DEPLOY_MAX_LIFETIME "$MAX_LIFETIME"
 fi
+export DEPLOY_IDLE_TIMEOUT="$IDLE_TIMEOUT" DEPLOY_MAX_LIFETIME="$MAX_LIFETIME"
 
 run() { if [[ "$DRY_RUN" == true ]]; then say info "[dry-run] $*"; else "$@"; fi; }
 

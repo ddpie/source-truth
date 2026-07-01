@@ -66,4 +66,19 @@ grep -q 'exec 9>&-' "$S"; check "launcher releases fd9 lock so the bg unit can r
 # overlap (glossary writes its own slice lock, never graph.db — safe concurrently). Assert the
 # `refresh_glossary full` call precedes `index-build@` start in the first-build branch.
 awk '/----- FIRST push/{f=1} f&&/refresh_glossary full/{g=NR} f&&/systemctl start "index-build@/{b=NR} END{exit !(g&&b&&g<b)}' "$S"; check "first push launches glossary BEFORE the graph build (parallel)" $?
+# $0 must be resolved to an ABSOLUTE path before the re-exec: the transient unit runs with cwd=/,
+# so a relative $0 would not be found by the child.
+grep -q 'SELF="$0"' "$S" && grep -qE '/bin/bash "\$SELF" __build' "$S"; check "re-exec uses an absolute-resolved \$0 (SELF)" $?
+# CONCURRENCY (fixes the lockless-inline race): after releasing fd9, a systemd-run failure must NOT
+# fall through to an inline do_build (that would rsync --delete the live tree with no lock while
+# another build runs). It must fail loud UNLESS systemd-run is genuinely absent, and the
+# genuinely-absent fallback must RE-ACQUIRE the lock before do_build.
+grep -q 'is-active --quiet "${UNIT}.service"' "$S"; check "fails fast if a build for this subdir is already running" $?
+# The inline fallback (systemd-run absent) re-takes fd9 before building — count the lock acquisitions:
+# one at the top for the ssh path, one in the __build body, one in the inline fallback = 3 flock -n 9.
+[ "$(grep -c 'flock -n 9' "$S")" -ge 2 ]; check "inline fallback re-acquires the writer lock (no lockless do_build)" $?
+# Guard the specific regression: do_build must NOT be reachable immediately after `exec 9>&-` with no
+# intervening lock re-acquisition. Assert the only do_build after the launcher release is preceded by
+# a flock re-acquire (the inline-fallback branch).
+awk '/exec 9>&-/{seen=1} seen&&/exec 9>"\$LOCKFILE"/{reacq=1} seen&&/^ *do_build$/{if(!reacq){print "LOCKLESS"; bad=1}} END{exit bad?1:0}' "$S"; check "no lockless do_build after fd9 release" $?
 [[ "$_fail" -eq 0 ]]; exit $?

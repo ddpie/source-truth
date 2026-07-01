@@ -13,7 +13,24 @@ bash -n "$F"; check "parses" $?
 HELPER="$(sed -n '/^imds_field() {$/,/^}$/p' "$F"; sed -n '/^imds_token() {$/,/^}$/p' "$F")"
 [[ -n "$HELPER" ]]; check "imds helpers extractable" $?
 eval "$HELPER"
-curl() { case "$*" in *api/token*) echo TOKEN;; *instance-id*) echo i-abc;; *local-ipv4*) echo 10.1.2.3;; *) echo "";; esac; }
+# 桩校验完整 IMDSv2 契约：token 请求须 PUT 完整 URL；metadata 请求须带 token header
+# 且 URL 前缀正确——拼错 URL / 丢 header 都应失败，而不是按子串放行。
+curl() {
+  local args="$*"
+  case "$args" in
+    *"http://169.254.169.254/latest/api/token"*)
+      [[ "$args" == *"-X PUT"* ]] || return 22
+      echo TOKEN ;;
+    *"http://169.254.169.254/latest/meta-data/"*)
+      [[ "$args" == *"X-aws-ec2-metadata-token: TOKEN"* ]] || return 22
+      case "$args" in
+        *meta-data/instance-id*) echo i-abc ;;
+        *meta-data/local-ipv4*) echo 10.1.2.3 ;;
+        *) echo "" ;;
+      esac ;;
+    *) return 22 ;;
+  esac
+}
 [[ "$(imds_field instance-id)" == "i-abc" ]]; check "imds_field reads instance-id" $?
 [[ "$(imds_field local-ipv4)" == "10.1.2.3" ]]; check "imds_field reads local-ipv4" $?
 # local mode must derive VPC/subnet via describe-instances, NOT IMDS mac paths

@@ -224,24 +224,53 @@ fi
 
 # ssh-FACING PATH: hand the heavy work to a transient systemd unit (PID 1, own session/cgroup/fds)
 # and return immediately. This is why a first-push full build (minutes) survives the operator's ssh
-# disconnecting — systemd, not the ssh channel, owns the process. We RELEASE our own advisory lock
-# first (close fd 9): the background unit re-takes the SAME lock at its top, so serialization still
-# holds, but we mustn't hold it here or the child would deadlock on its own flock -n.
+# disconnecting — systemd, not the ssh channel, owns the process.
+#
+# Resolve $0 to an ABSOLUTE path before re-exec: the transient unit inherits PID 1's cwd (/), so a
+# relative $0 (e.g. invoked as `bash reindex_local_repo.sh`) would not be found by the child. The
+# real path (push-local-repo.sh runs `sudo bash /opt/idx/app/reindex_local_repo.sh`) is already
+# absolute; this just makes a manual relative invocation safe too.
+SELF="$0"; case "$SELF" in /*) : ;; *) SELF="$(cd "$(dirname "$SELF")" && pwd)/$(basename "$SELF")" ;; esac
 UNIT="reindex-${SUBDIR}"
-exec 9>&-   # drop the launcher's lock; the background unit re-acquires it
+
+# CONCURRENCY: we still hold the fd9 advisory lock here (taken at the top). Keep holding it across
+# the launch so a second concurrent same-subdir push blocks at the top's `flock -n 9` and fails fast
+# — NOT here. The background unit re-takes the SAME lock at its top, so we must release fd9 the
+# instant before systemd-run so the child doesn't deadlock on its own flock -n. But if the unit name
+# already exists (a prior push's __build still running), systemd-run FAILS — and we must NOT then run
+# do_build inline, because we've released the lock and would race that running build's rsync --delete.
+# So: on a systemd-run failure we distinguish "unit already exists" (fail fast, a build is in flight)
+# from "systemd-run truly unavailable" (non-systemd box → inline fallback, re-acquiring the lock).
 systemctl reset-failed "${UNIT}.service" 2>/dev/null || true
-if systemd-run --collect --unit="$UNIT" \
+if systemctl is-active --quiet "${UNIT}.service" 2>/dev/null; then
+  echo "REINDEX_FAILED: a reindex for '${SUBDIR}' is already running (unit ${UNIT}.service) — re-run after it finishes"
+  exit 1
+fi
+exec 9>&-   # drop the launcher's lock; the background unit re-acquires it
+run_err="$(systemd-run --collect --unit="$UNIT" \
      -p "StandardOutput=append:/var/log/reindex-${SUBDIR}.log" \
      -p "StandardError=append:/var/log/reindex-${SUBDIR}.log" \
-     /bin/bash "$0" __build "$SUBDIR" >/dev/null 2>&1; then
+     /bin/bash "$SELF" __build "$SUBDIR" 2>&1)"; run_rc=$?
+if [ "$run_rc" -eq 0 ]; then
   echo "REINDEX_LAUNCHED subdir=${SUBDIR} unit=${UNIT}.service"
-  echo "  代码已上传，建图+术语表在后台并行进行（ssh 断开不影响）。查看进度："
-  echo "    sudo journalctl -u ${UNIT}.service -f        # 建图/编排"
+  echo "  代码已上传，建图+术语表在后台并行进行（ssh 断开不影响）。"
+  echo "  这一步不会阻塞，也不会打印 REINDEX_DONE——重建完成的标志在后台日志里。查看进度/确认完成："
+  echo "    sudo journalctl -u ${UNIT}.service -f        # 建图/编排（看到 REINDEX_DONE 即完成）"
   echo "    sudo tail -f /var/log/reindex-${SUBDIR}.log  # 同上（文件）"
   echo "    sudo tail -f /var/log/glossary-build-*-${SUBDIR}.log  # 术语表"
+elif command -v systemd-run >/dev/null 2>&1; then
+  # systemd-run EXISTS but the launch failed (e.g. unit-name collision we didn't catch above, or a
+  # transient systemd error). Do NOT run inline — we've released the lock and another build may be
+  # writing the live tree. Fail loud so the operator re-runs rather than risk a concurrent rsync.
+  echo "REINDEX_FAILED: could not launch background build for '${SUBDIR}' (systemd-run rc=$run_rc): ${run_err}"
+  echo "  若上一次推送仍在后台跑，等它结束再重试：sudo systemctl status ${UNIT}.service"
+  exit 1
 else
-  # systemd-run unavailable/failed (e.g. non-systemd test box) — fall back to running inline so the
-  # push still works, just without detach (ssh disconnect would then interrupt it).
+  # systemd-run genuinely unavailable (non-systemd test box). Re-acquire the lock (we released fd9
+  # above) and run inline so the push still works — without detach, so an ssh disconnect would
+  # interrupt it. Re-acquiring is what keeps the single-writer guarantee on this fallback path.
   echo "reindex: systemd-run unavailable — running the build inline (ssh disconnect WOULD interrupt it)"
+  exec 9>"$LOCKFILE"
+  flock -n 9 || { echo "REINDEX_FAILED: another reindex for '$SUBDIR' is in progress (lock $LOCKFILE)"; exit 1; }
   do_build
 fi

@@ -177,3 +177,20 @@ PROJECT_ID="$PID" bash "$SCRIPT_DIR/activate_gateway.sh" \
   "${LOCALE:-zh}" "" "${FEISHU_API_BASE:-}" "${DEPLOY_IDLE_TIMEOUT:-900}" "${ARTIFACT_BUCKET:-}" \
   || { say err "gateway activation failed for $PID — backend is up; fix and re-run"; exit 1; }
 say ok "project $PID fully deployed (bridge:$PORT + runtime + gateway)"
+
+# Local repos come up with their graph DEFERRED (activate doesn't require code to be present). The
+# backend is live, but until the operator pushes code the bridge serves an empty graph and the bot
+# would answer "not found" rather than a real answer — so surface the required next step explicitly
+# here (the only place a redeploy / direct deploy-all run would see it; add-project already hints it).
+LOCAL_SUBS="$(REPO_MANIFEST_JSON="$REPO_MANIFEST_JSON" python3 -c '
+import json,os
+m=json.loads(os.environ["REPO_MANIFEST_JSON"])
+print(" ".join(r.get("subdir","") for r in m.get("repos",[]) if r.get("source")=="local" and r.get("subdir")))
+' 2>/dev/null || true)"
+if [[ -n "${LOCAL_SUBS// }" ]]; then
+  say warn "项目 $PID 含本地仓 [${LOCAL_SUBS# }]：后端已就绪，但在推代码前机器人无法作答（索引为空）。"
+  say warn "  从你自己的机器推代码即建图上线（首推=建图，之后每次改动重推=刷新）："
+  for _s in $LOCAL_SUBS; do
+    say warn "    scripts/push-local-repo.sh --host <ssh-host> [--identity <key>] $_s <本地路径>"
+  done
+fi

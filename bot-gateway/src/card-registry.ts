@@ -195,7 +195,8 @@ export function collectChain(messageId: string): ChainTurn[] {
   // which are the most relevant to the current follow-up).
   let total = turns.reduce((n, t) => n + (t.question?.length ?? 0) + (t.answer?.length ?? 0), 0);
   while (turns.length > 1 && total > MAX_CHAIN_CHARS) {
-    const dropped = turns.shift()!;
+    const dropped = turns.shift();
+    if (!dropped) break;
     total -= (dropped.question?.length ?? 0) + (dropped.answer?.length ?? 0);
   }
   return turns;

@@ -17,6 +17,7 @@ bot-gateway/            飞书 Bot 长连接事件网关 + CardKit 流式渲染�
   README.md             长连接 / 事件去重 / 会话→runtimeSessionId 映射 / 卡片更新频控
   src/                  事件消费入口、SigV4 调 AgentCore、会话映射、CardKit 渲染、SSE 解析、脱敏日志
   run.sh                服务启动器：source systemd 注入的 per-project env（/etc/bot-gateway-<项目>.env）+ 从 Secrets Manager 取飞书凭证（不落盘）→ node dist
+  tests/                jest 单测（由 scripts/test.sh 调用）
 index-service/          常驻 CodeGraph 索引服务 + MCP-over-HTTP 接口
   README.md             常驻会话（独占写入 graph.db） / CodeGraph / HTTP 接口（定位 + 读文件） / 本地仓库副本 / bootstrap
   http_bridge.py        FastMCP HTTP 接口（包根，非 src/）：对外提供 codegraph 定位 + 读文件工具，路径对齐为仓库相对
@@ -36,9 +37,9 @@ index-service/          常驻 CodeGraph 索引服务 + MCP-over-HTTP 接口
   codegraph_client.py   codegraph-server 客户端封装（休眠：仅测试用，独占写入 tripwire 守护，绝不进常驻服务路径）
   perf.py               结构化耗时日志
   bootstrap.sh          EC2 user-data：装依赖 + codegraph 二进制 + 术语表构建用的 claude(cc) CLI + 网关构建 + systemd 模板（base host，不挂项目）
-  activate_project.sh   按项目挂载（SSM 调用）：写清单 / git 仓 clone、本地仓确认代码已推送 / 建图 / 起 index-bridge-<项目> + 刷新 timer（仅 git 仓）/ 按上一版清单清理已移除的仓
+  activate_project.sh   按项目挂载（SSM 调用）：写清单 / git 仓 clone 后建图；本地仓无代码则延迟建图到首次 push（bridge 先起、空图 unhealthy）/ 起 index-bridge-<项目> + 刷新 timer（仅 git 仓）/ 按上一版清单清理已移除的仓
   git_fetch.sh          单仓 git clone/pull（凭证 + ref + 失败 GIT_FETCH_FAILED 告警；bootstrap 与刷新 timer 共用）
-  reindex_local_repo.sh local 仓应用暂存代码：常规推送原地同步到正在用的目录（--delay-updates 缩小中断窗口）、watcher 增量重建索引 + 按变更清单增量刷新术语表（不停 bridge）；首次推送停 bridge 全量建图；--prepare 建暂存目录
+  reindex_local_repo.sh local 仓应用暂存代码：常规推送原地同步到正在用的目录（--delay-updates 缩小中断窗口）、watcher 增量重建索引 + 按变更清单增量刷新术语表（不停 bridge）；首次推送停 bridge 全量建图、建图与术语表并行；重活交给后台 systemd 单元、ssh 断开不影响；--prepare 建暂存目录
   tests/                pytest（由 scripts/test.sh 调用）
 infra/                  基础设施即代码（MVP 先 agentcore toolkit / boto3，渐进 CDK 化）
   README.md             IaC 分工：CDK 管稳定层 / deploy-all.sh 用 boto3 配 AgentCore Runtime
@@ -52,7 +53,7 @@ infra/                  基础设施即代码（MVP 先 agentcore toolkit / boto
   (p2) lib/             runtime / codegraph(index-service) / gateway 各 stack
 config/                 配置驱动：i18n.json（卡片 / 告警 / 错误文案）、alarm-thresholds.json（告警阈值，运维可调）、projects.example.json（项目路由 schema 模板；真实配置在 .local/projects.json，部署相关、gitignore）
 scripts/                运维生命周期
-  check-invariants.sh   快速结构 lint（AGENTS / CLAUDE / structure / 双语配对 / 顶层目录存在性）
+  check-invariants.sh   快速结构 lint（AGENTS / CLAUDE / 双语配对 / 顶层目录 ↔ structure 文档双向对齐）
   lib/                  common.sh（格式化 + 依赖检查）、env-utils.sh（.env / deploy-config 共享 helper）、render_metric_filters.py（指标定义→put-metric-filter 计划）、render_dashboard.py（看板模板渲染 + 禁 type:log 校验）、render_alarms.py（阈值→put-metric-alarm 计划）、render_manifest.py（多仓 REPO_MANIFEST_JSON 校验+逐仓记录，纯函数可测）
   apply-metric-filters.sh  把 infra/monitoring 的指标定义应用到 CloudWatch（幂等 upsert；--defs 切 A 类/告警；--dry-run）
   apply-dashboards.sh   渲染看板模板并 put-dashboard（幂等；--dry-run；读 metric-filters 同源 namespace）
@@ -85,6 +86,7 @@ docs/
   structure_en.md       英文对照
   runbook.md            部署 / 连飞书 / 运维 / 排错（中性名，不参与双语配对）
   glossary.md           术语表怎么来的：构建流程 / 产物结构 / 可信依据 / 成本运维（面向人，中性名）
+  aws-services_zh.md    用到的 AWS 服务清单：干什么用 / 计费点（双语配对 aws-services_en.md）
   design/               设计权威依据（仅中文，暂不翻译）
     README.md                   目录说明 + 与架构 / 不变量文档的关系
     requirements_zh.md          需求与方案评审纪要（导入）
@@ -96,7 +98,8 @@ docs/
     glossary.md         术语表：把中文提问映射到英文代码符号（构建期/查询期、grounding、价值边界）
     invariants.md       源 → 生成物映射 + 改 X 必改 Y 的耦合（9 条不变量）
     playbooks.md        变更手册（7 个改动场景）
-    *-spike.md          调研记录（cardkit 流式 / 索引性能 / 存储选型 / 性能对比 / 模板）
+    *-spike.md          调研记录（cardkit 流式 / 索引性能 / 存储选型 / 模板）
+    perf-comparison.md  与原生 Claude Code 的耗时对比记录
   assets/               文档配图（手写 SVG：架构 / 代码进入与刷新 / 会话隔离 / 术语表 / 术语表构建 / 术语表置信度分层 / 安全设计 / 时序；架构 / 时序 / 安全设计另有英文版 `*.en.svg` 供英文 README 用；及一次真实问答录屏 demo-qa.gif）
 .local/                 （已 gitignore）账号特定部署状态：deploy-config、projects.json（项目路由）
 ```

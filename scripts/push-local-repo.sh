@@ -43,6 +43,11 @@ REAL="$(cd "$LOCAL_PATH" && pwd -P)"
 SSH=(ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new)
 if [ -n "$IDENTITY" ]; then
   [ -f "$IDENTITY" ] || { say err "--identity keyfile not found: $IDENTITY"; exit 2; }
+  # rsync 对 -e 字符串只做空白切分 + 双引号分组，不解释 printf %q 的反斜杠转义——
+  # 含空格的路径会被切成两截（-e 下面用双引号包每个词，故这里禁掉引号字符本身）。
+  case "$IDENTITY" in
+    *\"*) say err "--identity path must not contain double quotes"; exit 2 ;;
+  esac
   SSH+=(-i "$IDENTITY")
 fi
 
@@ -54,9 +59,13 @@ REINDEX="/opt/idx/app/reindex_local_repo.sh"
 # index files outside the repo (info leak). --exclude .git keeps VCS metadata out; protect filters
 # are belt-and-suspenders (stage has no graph dirs, but if someone points --host at a live dir by
 # mistake, --delete still won't strip them).
+# -e：rsync 只按空白切词 + 认双引号分组（不解释 %q 的反斜杠转义），所以逐词双引号包裹。
+# 词表全部来自本脚本的固定选项 + 已校验的 IDENTITY（上面禁了双引号字符），不会注入。
+_SSH_E=""
+for _w in "${SSH[@]}"; do _SSH_E+="\"${_w}\" "; done
 RSYNC=(rsync -az --delete --safe-links --no-links
   --filter='P .codegraph/' --filter='P .home/' --exclude='.git'
-  -e "$(printf '%q ' "${SSH[@]}")" "$SRC" "${HOST}:${STAGE}/")
+  -e "${_SSH_E% }" "$SRC" "${HOST}:${STAGE}/")
 # The host script (run via a SINGLE sudo-authorized entry) creates+owns the stage dir, then later
 # does the swap+rebuild. push never runs raw `sudo mkdir/chown` — so sudoers authorizes ONE script.
 # Invoke via `bash <script>` (not direct exec) so it works even if the +x bit isn't set yet.
