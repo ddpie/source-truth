@@ -17,6 +17,16 @@ TOKEN FRUGALITY (engineering, by request):
     extract_entries() still salvages valid lines if cc adds chatter anyway.
   * Empty diff -> no cc call at all (caller skips).
 
+CONCURRENCY (wall-clock, not token count):
+  * A full scan loops MANY cc batches; build() runs them on a ThreadPoolExecutor
+    (default 8, env GLOSSARY_BUILD_CONCURRENCY) instead of serially. Output is
+    reassembled in batch order, so results are identical to the old serial path.
+  * Each batch retries on Bedrock throttle/timeout with bounded exponential backoff
+    + jitter (env GLOSSARY_BUILD_RETRY_BASE_S / GLOSSARY_BUILD_MAX_RETRIES); a hard
+    error or an exhausted retry fails the whole build -> glossary_gen keeps the old
+    slice (SKIP), never a partial write. Cross-repo parallelism (systemd-run per
+    subdir) is unchanged and stacks on top of this.
+
 The cc invocation is injected (``runner``) so the orchestration is unit-testable
 without shelling out; run_cc() is the default subprocess runner.
 """
