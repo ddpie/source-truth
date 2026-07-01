@@ -39,6 +39,10 @@ bash -n "$L"; check "launch-host parses" $?
 # launch-host scp's the prepare script up and runs it, instead of a long inline command
 grep -qE 'scp .*prepare-local-host\.sh' "$L"; check "launch-host scp's prepare-local-host.sh" $?
 grep -q 'bash /tmp/prepare-local-host.sh' "$L"; check "launch-host runs the prepared script over ssh" $?
+# passes the current branch so the EC2 runs the SAME code, not a stale main
+grep -q 'REPO_REF=' "$L"; check "launch-host forwards REPO_REF (current branch, not main)" $?
+grep -q 'rev-parse --abbrev-ref HEAD' "$L"; check "launch-host detects its own branch" $?
+grep -q 'checkout "\$REPO_REF"' "$P"; check "prepare checks out the requested ref" $?
 # asks for the private key (launch-host doesn't know its path)
 grep -q 'SSH 私钥路径' "$L"; check "asks for the SSH private key path" $?
 # manual fallback prints TWO short commands (scp + ssh), not one long line

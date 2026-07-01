@@ -28,6 +28,11 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$HERE/lib/common.sh"
 source "$HERE/lib/env-utils.sh"
 
+# The branch this launch-host is running from — passed to prepare-local-host.sh so the EC2 checks
+# out the SAME code, not a stale main. Falls back to main if we can't tell (not a git checkout).
+REPO_REF="$(git -C "$HERE" rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)"
+[ -n "$REPO_REF" ] && [ "$REPO_REF" != HEAD ] || REPO_REF=main
+
 # Prior-choice state for pre-fill is per-account (set once ACCOUNT is known, below): keys like the
 # SSH key name / CIDR / region only make sense within one account, so a single shared file would
 # cross-fill wrong values when an operator switches accounts. (gitignored under .local/)
@@ -81,7 +86,7 @@ print_manual_fallback() {
   cat >&2 <<NEXT
   手动部署（两条短命令，把 <你的key>.pem 换成你的私钥）：
     scp -i <你的key>.pem "$HERE/prepare-local-host.sh" ubuntu@${ip}:/tmp/
-    ssh -t -i <你的key>.pem ubuntu@${ip} 'REGION=${REGION} bash /tmp/prepare-local-host.sh'
+    ssh -t -i <你的key>.pem ubuntu@${ip} 'REGION=${REGION} REPO_REF=${REPO_REF} bash /tmp/prepare-local-host.sh'
 NEXT
 }
 
@@ -132,7 +137,7 @@ NEXT
     say warn "scp 失败。请手动执行："; print_manual_fallback "$ip"; return 0
   fi
   # -t for the interactive installer. This is the ONLY step that needs a tty.
-  ssh -t "${sshopt[@]}" ubuntu@"$ip" "REGION=$REGION bash /tmp/prepare-local-host.sh"
+  ssh -t "${sshopt[@]}" ubuntu@"$ip" "REGION=$REGION REPO_REF=$REPO_REF bash /tmp/prepare-local-host.sh"
 }
 
 # --- 1. profile (menu-picked; not pre-filled — pick is cheap and the account isn't known yet) ---

@@ -8,13 +8,16 @@
 #
 #   REGION=us-east-1 bash /tmp/prepare-local-host.sh
 #
-# Env: REGION (required) · REPO_URL (default the public HTTPS URL) · TOKEN_SECRET (default
+# Env: REGION (required) · REPO_URL (default the public HTTPS URL) · REPO_REF (git branch/tag/sha to
+# check out, default main — launch-host passes YOUR current branch so the EC2 runs the SAME code as
+# the launch-host/prepare scripts, not a mismatched main) · TOKEN_SECRET (default
 # source-truth/deploy-github-token) · REPO_DIR (default source-truth).
 set -euo pipefail
 
 REGION="${REGION:-}"
 [ -n "$REGION" ] || { echo "✗ REGION is required (e.g. REGION=us-east-1 bash $0)" >&2; exit 2; }
 REPO_URL="${REPO_URL:-https://github.com/ddpie/source-truth.git}"
+REPO_REF="${REPO_REF:-main}"
 TOKEN_SECRET="${TOKEN_SECRET:-source-truth/deploy-github-token}"
 REPO_DIR="${REPO_DIR:-source-truth}"
 
@@ -72,12 +75,17 @@ else
   echo "• no token in $TOKEN_SECRET — treating the repo as public (plain clone)"
 fi
 
-# --- 5. clone or update the repo ----------------------------------------------------------------
-step "repo"
+# --- 5. clone or update the repo, on the requested ref ------------------------------------------
+# Check out REPO_REF (the branch launch-host is on) so the EC2 runs the SAME code as the scripts
+# that got us here — not a stale main. On an existing checkout, fetch + hard-checkout the ref.
+step "repo ($REPO_REF)"
 if [ -d "$REPO_DIR/.git" ]; then
-  git -C "$REPO_DIR" pull --ff-only
+  git -C "$REPO_DIR" fetch origin "$REPO_REF"
+  git -C "$REPO_DIR" checkout "$REPO_REF"
+  git -C "$REPO_DIR" pull --ff-only origin "$REPO_REF"
 else
   git clone "$REPO_URL" "$REPO_DIR"
+  git -C "$REPO_DIR" checkout "$REPO_REF"
 fi
 
 # --- 6. hand off to the installer in --local mode, inside the docker group -----------------------
