@@ -10,7 +10,7 @@ update_env() {
   local env_file="$1" key="$2" value="$3"
   if [[ -f "$env_file" ]] && grep -q "^${key}=" "$env_file"; then
     awk -v k="$key" -v v="$value" 'BEGIN{FS=OFS="="} $1==k{$0=k"="v} 1' "$env_file" > "${env_file}.tmp" \
-      && mv "${env_file}.tmp" "$env_file"
+      && command mv -f "${env_file}.tmp" "$env_file"
   else
     printf '%s=%s\n' "$key" "$value" >> "$env_file"
   fi
