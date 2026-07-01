@@ -49,7 +49,17 @@
 # Inputs via environment (deploy-all.sh writes /etc/index-service.env first):
 #   BUCKET, REGION, MAX_FILES
 set -euxo pipefail
-exec > /var/log/index-svc-bootstrap.log 2>&1
+# Log to the file AND keep showing on the caller's stdout/stderr, via tee. The old `exec > file`
+# sent everything to the log ONLY — under --local (bootstrap runs synchronously in the operator's
+# ssh session) that left the terminal frozen at `+ exec` for minutes with no sign of progress. With
+# tee, --local streams live to the terminal; as EC2 user-data (no terminal) the extra copy just goes
+# to the cloud-init console, harmless. `tee` truncates the log fresh each run (matches old behavior).
+# CRITICAL: tee is a background process; deploy-all greps the log for BOOTSTRAP_DONE right after this
+# script returns, so we must let tee flush the final line first. Record its PID and wait on it at exit.
+exec > >(tee /var/log/index-svc-bootstrap.log) 2>&1
+_TEE_PID=$!
+# shellcheck disable=SC2154  # ec IS assigned (ec=$?) at the start of the same trap command
+trap 'ec=$?; exec 1>&- 2>&-; wait "$_TEE_PID" 2>/dev/null; exit $ec' EXIT
 
 # shellcheck disable=SC1091
 source /etc/index-service.env
