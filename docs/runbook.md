@@ -31,7 +31,7 @@ git clone https://github.com/ddpie/source-truth.git && cd source-truth
 ```
 详见[第二节](#二一键安装交互式推荐)；装完照[第五节](#五验证端到端冒烟)验证。
 
-**单机（`--local`）**——三步走：**起机器 → 装服务 → 推代码**（git 仓只需前两步）。
+**单机（`--local`）**——三步走：**起机器 → 装服务 → 推代码**。
 
 **第一步 · 起机器**（本机）：创建 EC2；命令跑完会打印一条登录用的 `ssh` 命令，下一步要用。
 
@@ -43,7 +43,7 @@ git clone https://github.com/ddpie/source-truth.git && cd source-truth
 **第二步 · 装服务**（用上一步的 `ssh` 命令登录机器后运行）：跟着 `install.sh` 交互填代码仓 / 模型 / 飞书凭证，装完后端（bridge + runtime + gateway）就都起来了。
 
 ```bash
-bash /tmp/prepare-local-host.sh
+bash /tmp/prepare-local-host.sh   # 直接用 launch-host 打印的那条即可
 ```
 
 **第三步 · 推代码**（回本机，仅本地仓需要）：本地仓要先把代码推上去，机器人才能开始回答；之后代码有改动，再推一次即可刷新。
@@ -246,14 +246,15 @@ aws ssm start-session --region <r> --target <INDEX_SERVICE_INSTANCE>
 
 ## 五、验证（端到端冒烟）
 
-1. **后端健康**（在 index-service 实例内，经 SSM）：
+1. **后端健康**（进 index-service 实例查，`8080` 是第一个项目的端口，其它项目用它在 `projects.json` 里的 `port`）：
 
    ```bash
-   aws ssm send-command --region <r> --instance-ids <INDEX_SERVICE_INSTANCE> \
-     --document-name AWS-RunShellScript \
-     --parameters 'commands=["curl -fs -w %{http_code} http://127.0.0.1:8080/health"]'
-   # 期望 200 + healthy:true
+   aws ssm start-session --region <r> --target <INDEX_SERVICE_INSTANCE>
+   # 登录后：
+   curl -fs -w '%{http_code}\n' http://127.0.0.1:8080/health   # 期望 200 + healthy:true
    ```
+
+   > 本地仓项目要先完成 Quick Start 第三步（推代码），否则 `/health` 非 200、机器人答「未找到」——这是推代码前的正常状态，不是故障。
 
 2. **在群里 @ 机器人**并提问（如「装备耐久怎么算？」）。预期：
    - 几秒内出现一张卡片，标题带实时计时（思考→分析→完成）；
@@ -490,7 +491,8 @@ refreshIntervalSec?}`，`source` 默认 `git`、本地仓写 `local`）。顶层
 cd bot-gateway
 npm install
 export AWS_REGION=ap-northeast-1
-export RUNTIME_ARN="$(grep '^AGENT_RUNTIME_ARN=' ../.local/deploy-config | cut -d= -f2-)"
+# deploy 按项目写 RUNTIME_ARN_<项目>（项目名里的 - 换成 _）到 .local/deploy-config，取你要调试的那个：
+export RUNTIME_ARN="$(grep '^RUNTIME_ARN_<项目>=' ../.local/deploy-config | cut -d= -f2-)"
 export FEISHU_APP_ID=cli_xxx
 export FEISHU_APP_SECRET=xxx            # 不要写进仓库
 export FEISHU_BOT_OPEN_ID=ou_xxx
