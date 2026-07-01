@@ -89,8 +89,8 @@ print_manual_fallback() {
     scp -i <你的key>.pem "$HERE/prepare-local-host.sh" ubuntu@${ip}:/tmp/
     # ② 本机：SSH 登录机器
     ssh -t -i <你的key>.pem ubuntu@${ip}
-    # ③ 登录后在机器上运行
-    REGION=${REGION} REPO_REF=${REPO_REF} bash /tmp/prepare-local-host.sh
+    # ③ 登录后在机器上运行（region 由机器自动检测，无需传）
+    REPO_REF=${REPO_REF} bash /tmp/prepare-local-host.sh
 NEXT
 }
 
@@ -145,8 +145,8 @@ NEXT
   cat >&2 <<NEXT
 
   ssh -t -i ${key} ubuntu@${ip}
-  # 登录后，在机器上运行：
-  REGION=${REGION} REPO_REF=${REPO_REF} bash /tmp/prepare-local-host.sh
+  # 登录后，在机器上运行（region 由机器自动检测，无需传）：
+  REPO_REF=${REPO_REF} bash /tmp/prepare-local-host.sh
 NEXT
 }
 

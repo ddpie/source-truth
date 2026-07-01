@@ -10,7 +10,7 @@ check() { _run=$((_run+1)); if [[ "$2" -eq 0 ]]; then printf '  ok   %s\n' "$1";
 echo "test_prepare_local_host:"
 
 bash -n "$P"; check "prepare parses" $?
-grep -q 'REGION' "$P" && grep -q 'is required' "$P"; check "REGION required (fails loud if unset)" $?
+grep -q 'placement/region' "$P"; check "REGION auto-detected from IMDS (not required to pass)" $?
 # installs the deps install.sh checks for
 grep -q 'awscli-exe-linux' "$P"; check "installs AWS CLI v2" $?
 grep -q 'docker.io' "$P"; check "installs docker" $?

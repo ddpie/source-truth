@@ -6,16 +6,24 @@
 # logs gh in with the token stashed in Secrets Manager (so a private clone works), clones the repo,
 # and hands off to the interactive installer. Idempotent — safe to re-run.
 #
-#   REGION=us-east-1 bash /tmp/prepare-local-host.sh
+#   bash /tmp/prepare-local-host.sh                 # region auto-detected from IMDS
+#   REGION=us-east-1 bash /tmp/prepare-local-host.sh # or pass it explicitly
 #
-# Env: REGION (required) · REPO_URL (default the public HTTPS URL) · REPO_REF (git branch/tag/sha to
+# Env: REGION (default: this instance's own region via IMDS) · REPO_URL (default the public HTTPS URL) · REPO_REF (git branch/tag/sha to
 # check out, default main — launch-host passes YOUR current branch so the EC2 runs the SAME code as
 # the launch-host/prepare scripts, not a mismatched main) · TOKEN_SECRET (default
 # source-truth/deploy-github-token) · REPO_DIR (default source-truth).
 set -euo pipefail
 
+# REGION: default to THIS instance's own region from IMDS — we run on the EC2, so its region is
+# knowable; making the operator type it is redundant and error-prone. Honor an explicit REGION if
+# given (override / non-EC2 testing). Only used to read the token secret below.
 REGION="${REGION:-}"
-[ -n "$REGION" ] || { echo "✗ REGION is required (e.g. REGION=us-east-1 bash $0)" >&2; exit 2; }
+if [ -z "$REGION" ]; then
+  _tok="$(curl -fsS -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 60" 2>/dev/null || true)"
+  REGION="$(curl -fsS ${_tok:+-H "X-aws-ec2-metadata-token: $_tok"} "http://169.254.169.254/latest/meta-data/placement/region" 2>/dev/null || true)"
+fi
+[ -n "$REGION" ] || { echo "✗ could not detect region from IMDS — pass REGION=<r> explicitly." >&2; exit 2; }
 REPO_URL="${REPO_URL:-https://github.com/ddpie/source-truth.git}"
 REPO_REF="${REPO_REF:-main}"
 TOKEN_SECRET="${TOKEN_SECRET:-source-truth/deploy-github-token}"
