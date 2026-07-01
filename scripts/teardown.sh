@@ -75,7 +75,10 @@ is_set() { [[ -n "${1:-}" && "${1:-}" != "None" ]]; }
 # reservation) + only the 2 config vars, so it could miss a second tagged instance and
 # leave it billing after reporting "teardown complete" (cross-review P1). Collect every
 # `Instances[].InstanceId` across all reservations + the config ids, dedup, terminate all.
-TAGGED_INSTANCES="$(Q describe-instances --filters "Name=tag:Name,Values=source-truth-index-service" "Name=instance-state-name,Values=pending,running,stopping,stopped" --query 'Reservations[].Instances[].InstanceId' --output text 2>/dev/null || echo "")"
+# Both tag names: source-truth-index-service (default two-machine) AND source-truth-host (the
+# --local single host launch-host.sh creates). Missing the latter left the --local box billing and,
+# because its ENI kept the VPC's SG/subnet pinned, cascaded into DependencyViolation on VPC delete.
+TAGGED_INSTANCES="$(Q describe-instances --filters "Name=tag:Name,Values=source-truth-index-service,source-truth-host" "Name=instance-state-name,Values=pending,running,stopping,stopped" --query 'Reservations[].Instances[].InstanceId' --output text 2>/dev/null || echo "")"
 # space-separated, deduped union of config ids + every tagged id. CRITICAL: `|| true`
 # on the pipeline — `grep -v` exits 1 when NOTHING matches (the zero-instances case: EC2
 # already torn down but NAT/EIP/zone still billing), and under `set -euo pipefail` that
@@ -243,6 +246,7 @@ if is_set "$VPC"; then
   # fails with DependencyViolation and STRANDS that resource (cross-review P1). Wait
   # for the project's ENIs (those on the index SG, and any in the private subnet) to
   # clear first. Bounded — if they linger, we warn and a re-run finishes the job.
+  # Our runtime SG (source-truth-index-svc). Wait for its ENIs before deleting anything.
   SG="$(Q describe-security-groups --filters "Name=group-name,Values=source-truth-index-svc" "Name=vpc-id,Values=$VPC" --query 'SecurityGroups[0].GroupId' --output text 2>/dev/null || echo "")"
   if is_set "$SG"; then
     wait_gone "ENIs on SG $SG" 300 Q describe-network-interfaces \
@@ -250,8 +254,13 @@ if is_set "$VPC"; then
   fi
   is_set "${PRIVATE_SUBNET:-}" && wait_gone "ENIs in subnet $PRIVATE_SUBNET" 120 Q describe-network-interfaces \
     --filters "Name=subnet-id,Values=$PRIVATE_SUBNET" --query 'NetworkInterfaces[].NetworkInterfaceId' --output text
-  # Security group (non-default): delete after the instance + ENIs are gone.
-  is_set "$SG" && del "security group $SG" Q delete-security-group --group-id "$SG"
+  # Delete EVERY non-default SG in the VPC — not just index-svc. --local also creates
+  # source-truth-host (SSH SG); a leftover SG pins the VPC and fails delete-vpc. The VPC is
+  # ours (source-truth-vpc tag), so its non-default SGs are all ours. Retry-friendly: a SG still
+  # referenced by a not-yet-released ENI fails here and a re-run finishes it.
+  for sg in $(Q describe-security-groups --filters "Name=vpc-id,Values=$VPC" --query "SecurityGroups[?GroupName!='default'].GroupId" --output text 2>/dev/null || echo ""); do
+    del "security group $sg" Q delete-security-group --group-id "$sg"
+  done
 
   # Detach + delete the internet gateway.
   IGW="$(Q describe-internet-gateways --filters "Name=attachment.vpc-id,Values=$VPC" --query 'InternetGateways[0].InternetGatewayId' --output text 2>/dev/null || echo "")"
@@ -273,11 +282,52 @@ if is_set "$VPC"; then
   del "VPC $VPC" Q delete-vpc --vpc-id "$VPC"
 fi
 
-# ---- 6. ECR repository (region-scoped) ----
+# ---- 6. monitoring stack (region-scoped, best-effort — Phase 7 of deploy-all builds it) ----
+# DAU Lambda + its EventBridge daily rule (+ the lambda permission that rule installs).
+del "EventBridge rule source-truth-dau-daily targets" aws events remove-targets --region "$REGION" --rule source-truth-dau-daily --ids 1
+del "EventBridge rule source-truth-dau-daily" aws events delete-rule --region "$REGION" --name source-truth-dau-daily
+del "Lambda source-truth-dau-preaggregate" aws lambda delete-function --region "$REGION" --function-name source-truth-dau-preaggregate
+# Dashboards (both pages).
+del "dashboards source-truth-{product,sre,by-project}" aws cloudwatch delete-dashboards --region "$REGION" \
+  --dashboard-names source-truth-product source-truth-sre source-truth-by-project
+# Alarms (enumerate by our prefix — the set grows) + the SNS topic they notify.
+ALARMS="$(aws cloudwatch describe-alarms --region "$REGION" --alarm-name-prefix source-truth --query 'MetricAlarms[].AlarmName' --output text 2>/dev/null || echo "")"
+is_set "$ALARMS" && del "CloudWatch alarms ($ALARMS)" aws cloudwatch delete-alarms --region "$REGION" --alarm-names $ALARMS
+TOPIC="$(aws sns list-topics --region "$REGION" --query "Topics[?ends_with(TopicArn, ':source-truth-alarms')].TopicArn | [0]" --output text 2>/dev/null || echo "")"
+[[ "$TOPIC" == "None" ]] && TOPIC=""
+is_set "$TOPIC" && del "SNS topic source-truth-alarms" aws sns delete-topic --region "$REGION" --topic-arn "$TOPIC"
+# Metric filters live on the gateway log group; deleting the log group (or the filters) is optional —
+# they stop costing once the log group is gone. Delete our filters by name best-effort.
+GW_LOG="/source-truth/bot-gateway"
+for mf in $(aws logs describe-metric-filters --region "$REGION" --log-group-name "$GW_LOG" --query 'metricFilters[].filterName' --output text 2>/dev/null || echo ""); do
+  del "metric filter $mf" aws logs delete-metric-filter --region "$REGION" --log-group-name "$GW_LOG" --filter-name "$mf"
+done
+
+# ---- 7. ECR repository (region-scoped) ----
 del "ECR repo source-truth/agent" aws ecr delete-repository --repository-name source-truth/agent --region "$REGION" --force
 
-# ---- 7. shared resources (opt-in) ----
+# ---- 8. shared resources (opt-in) ----
 if [[ "$INCLUDE_SHARED" == true ]]; then
+  # CROSS-REGION GUARD: the IAM roles + S3 bucket are ACCOUNT-global and shared by every region's
+  # host. Deleting them while another region still runs a host would instantly break its
+  # S3/Secrets/Bedrock access. Refuse if any source-truth host exists in ANOTHER region.
+  OTHER=""
+  for r in $(aws ec2 describe-regions --query 'Regions[].RegionName' --output text 2>/dev/null || echo ""); do
+    [[ "$r" == "$REGION" ]] && continue
+    hit="$(aws ec2 describe-instances --region "$r" \
+      --filters "Name=tag:Name,Values=source-truth-index-service,source-truth-host" "Name=instance-state-name,Values=pending,running,stopping,stopped" \
+      --query 'Reservations[].Instances[].InstanceId' --output text 2>/dev/null || echo "")"
+    is_set "$hit" && OTHER="$OTHER $r"
+  done
+  if is_set "$OTHER"; then
+    say warn "跳过共享 IAM 角色 + S3 桶：其它区域仍有 source-truth 主机在跑（$OTHER）——删了会让那些机器失权。"
+    say info "  等所有区域都拆完，再在最后一个区域跑 --include-shared。"
+  else
+  # DAU Lambda's IAM role (account-global, created by apply-dau-lambda.sh).
+  for p in $(aws iam list-role-policies --role-name source-truth-dau-lambda-role --query 'PolicyNames[]' --output text 2>/dev/null || echo ""); do
+    aws iam delete-role-policy --role-name source-truth-dau-lambda-role --policy-name "$p" >/dev/null 2>&1 || true
+  done
+  del "IAM role source-truth-dau-lambda-role" aws iam delete-role --role-name source-truth-dau-lambda-role
   # IAM index role: detach managed, delete inline + profile, then the role.
   aws iam remove-role-from-instance-profile --instance-profile-name source-truth-index-profile --role-name source-truth-index-role >/dev/null 2>&1 || true
   del "instance profile source-truth-index-profile" aws iam delete-instance-profile --instance-profile-name source-truth-index-profile
@@ -298,6 +348,7 @@ if [[ "$INCLUDE_SHARED" == true ]]; then
     aws s3 rm "s3://${ARTIFACT_BUCKET}" --recursive >/dev/null 2>&1 || true
     del "S3 bucket ${ARTIFACT_BUCKET}" aws s3api delete-bucket --bucket "${ARTIFACT_BUCKET}" --region "$REGION"
   fi
+  fi   # cross-region guard
 fi
 
 say ok "teardown complete for $REGION"
