@@ -659,6 +659,7 @@ for d in \$SUBS; do
   systemctl reset-failed index-refresh-\$d.timer index-refresh-\$d.service index-build@\$d.service 2>/dev/null
   rm -f /etc/systemd/system/index-refresh-\$d.service /etc/systemd/system/index-refresh-\$d.timer
   rm -rf /data/repo/\$d /data/repo/\$d.incoming /data/repo/\$d.bridge.lock
+  rm -f /data/repo/.\$d.reindex.lock 2>/dev/null   # per-subdir reindex flock lives at repo-root, not inside \$d
 done
 rm -rf /data/glossary/${SEL}
 rm -f /etc/bot-gateway-${SEL}.env /etc/index-projects/${SEL}.json /etc/systemd/system/index-bridge-${SEL}.service
