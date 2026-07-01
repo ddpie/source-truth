@@ -83,7 +83,7 @@ print_next_steps() {
 
 下一步：复制这一条命令跑（在这台 EC2 上部署，用它的实例角色，无需配 profile）：
 
-  ssh -t ubuntu@$ip 'if [ -d source-truth/.git ]; then git -C source-truth pull --ff-only; else git clone --depth 1 https://github.com/ddpie/source-truth.git; fi && cd source-truth && ./scripts/install.sh'
+  ssh -t ubuntu@$ip 'if [ -d source-truth/.git ]; then git -C source-truth pull --ff-only; else git clone https://github.com/ddpie/source-truth.git; fi && cd source-truth && ./scripts/install.sh'
 
 （SSH 密钥不在 ssh-agent 里就加 -i：ssh -t -i <你的 key>.pem ubuntu@$ip '...'）
 install.sh 会交互问：AWS 区域、代码仓、回答模型、飞书 App ID/Secret——先把飞书凭证准备好。

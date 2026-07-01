@@ -26,7 +26,7 @@
 **默认（双机）**——在你的部署机上：
 
 ```bash
-git clone --depth 1 https://github.com/ddpie/source-truth.git && cd source-truth
+git clone https://github.com/ddpie/source-truth.git && cd source-truth
 ./scripts/install.sh          # 交互填区域 / 代码仓 / 飞书凭证，一次装好后端和网关
 ```
 详见[第二节](#二一键安装交互式推荐)；装完照[第五节](#五验证端到端冒烟)验证。
@@ -35,11 +35,11 @@ git clone --depth 1 https://github.com/ddpie/source-truth.git && cd source-truth
 
 ```bash
 # 第一步：在本机运行，创建并配置好 EC2
-git clone --depth 1 https://github.com/ddpie/source-truth.git && cd source-truth
+git clone https://github.com/ddpie/source-truth.git && cd source-truth
 ./scripts/launch-host.sh      # 自动建好网络和 IAM，创建一台 ARM64 EC2，末尾打印第二步命令
 
 # 第二步：照 launch-host 末尾打印的命令登录机器部署（下面是它打印的样子）
-ssh -t ubuntu@<launch-host 打印的 IP> 'git clone --depth 1 https://github.com/ddpie/source-truth.git; cd source-truth && ./scripts/install.sh'
+ssh -t ubuntu@<launch-host 打印的 IP> 'git clone https://github.com/ddpie/source-truth.git; cd source-truth && ./scripts/install.sh'
 ```
 `launch-host.sh` 会做完选 profile、建网络、建 IAM、创建 EC2 的全过程；第二步登录后由 `install.sh` 交互填代码仓 / 模型 / 飞书凭证并完成部署。详见[第二节末「在单台 EC2 上就地部署」](#在单台-ec2-上就地部署--local)；首次部署后建议照[附录 C](#附录-c首次部署后的真机核对清单)逐项核对。
 
@@ -168,7 +168,7 @@ codegraph 索引吃内存、随仓库增大而增长，按仓库规模选机型�
 **② 登录 EC2 部署**（照 launch-host 打印的命令运行）
 
 ```bash
-ssh -t ubuntu@<脚本打印的 IP> 'if [ -d source-truth/.git ]; then git -C source-truth pull --ff-only; else git clone --depth 1 https://github.com/ddpie/source-truth.git; fi && cd source-truth && ./scripts/install.sh'
+ssh -t ubuntu@<脚本打印的 IP> 'if [ -d source-truth/.git ]; then git -C source-truth pull --ff-only; else git clone https://github.com/ddpie/source-truth.git; fi && cd source-truth && ./scripts/install.sh'
 #   密钥不在 ssh-agent 中时，加 -i <你的 key>.pem
 ```
 
@@ -496,7 +496,7 @@ node_modules/.bin/ts-node --transpile-only src/index.ts
 
 ## 附录 C：首次部署后的真机核对清单
 
-第五节的冒烟测试（`/health` + 在群里提一个问题）确认了主流程可用。这份清单更细，用于**首次在一个新账号或新区域部署之后**逐项确认——重点是几项静态检查与离线测试都覆盖不到、必须在真实机器上验证的地方，其中有的即使部署显示成功、实际也未必可用（`--local` 单机模式尤其需要注意）。日常重复部署无需每次执行。命令中 `<r>` = 区域、`<I>` = 索引主机实例 id（取自 `.local/deploy-config` 的 `INDEX_SERVICE_INSTANCE`）。
+第五节的冒烟测试（`/health` + 在群里提一个问题）确认了主流程可用。这份清单更细，用于**首次在一个新账号或新区域部署之后**逐项确认——重点是几个静态检查与离线测试都覆盖不到、必须在真实机器上验证的环节，其中有的即使部署显示成功、实际也未必可用（`--local` 单机模式尤其需要注意）。日常重复部署无需每次执行。命令中 `<r>` = 区域、`<I>` = 索引主机实例 id（取自 `.local/deploy-config` 的 `INDEX_SERVICE_INSTANCE`）。
 
 **必须验证（交付前）**
 
