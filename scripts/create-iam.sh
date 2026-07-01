@@ -100,7 +100,8 @@ aws iam put-role-policy --role-name "$ROLE" --policy-name deploy-ecr --policy-do
   "Statement":[{"Effect":"Allow","Action":[
     "ecr:GetAuthorizationToken","ecr:DescribeRepositories","ecr:CreateRepository",
     "ecr:BatchCheckLayerAvailability","ecr:InitiateLayerUpload","ecr:UploadLayerPart",
-    "ecr:CompleteLayerUpload","ecr:PutImage"],
+    "ecr:CompleteLayerUpload","ecr:PutImage",
+    "ecr:BatchGetImage","ecr:GetDownloadUrlForLayer"],
     "Resource":"*"}]}' >/dev/null
 
 aws iam put-role-policy --role-name "$ROLE" --policy-name deploy-agentcore --policy-document '{
