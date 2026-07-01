@@ -312,21 +312,35 @@ safe_source_env "$CONFIG_FILE"
 PROJECTS_CFG="$ROOT/.local/projects.json"
 
 # ask_region <var> : the region menu is shared by every flow (pre-selects persisted).
-# In --local mode the region is NOT a choice — we're deploying onto THIS EC2, whose region is fixed.
-# Read it from IMDS and skip the menu (asking would just invite the wrong pick, e.g. a stale Tokyo
-# default while the box is in us-east-1). IMDSv2: fetch a token first (launch-host sets it required).
+# On the SINGLE-HOST box, region is NOT a choice — we deploy onto THIS EC2, whose region is fixed;
+# asking just invites the wrong pick (e.g. a stale Tokyo default while the box is in us-east-1).
+# Auto-detect from IMDS whenever this machine IS the source-truth index host — i.e. --local was
+# passed, OR IMDS answers AND this instance carries source-truth-index-profile (so a plain operator
+# laptop, or an unrelated EC2, still gets the menu). This covers bare `install.sh` re-runs on the
+# host (add-project / redeploy), not just the first --local run.
+_imds_region() {
+  local tok
+  tok="$(curl -fsS -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 60" 2>/dev/null || true)"
+  curl -fsS ${tok:+-H "X-aws-ec2-metadata-token: $tok"} "http://169.254.169.254/latest/meta-data/placement/region" 2>/dev/null || true
+}
+_is_index_host() {
+  # true if this EC2's attached instance profile is source-truth-index-profile
+  local tok prof
+  tok="$(curl -fsS -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 60" 2>/dev/null || true)"
+  prof="$(curl -fsS ${tok:+-H "X-aws-ec2-metadata-token: $tok"} "http://169.254.169.254/latest/meta-data/iam/security-credentials/" 2>/dev/null || true)"
+  [[ "$prof" == *source-truth-index* ]]
+}
 ask_region() {
-  if [[ "$LOCAL_MODE" == true ]]; then
-    local tok imds_region
-    tok="$(curl -fsS -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 60" 2>/dev/null || true)"
-    imds_region="$(curl -fsS ${tok:+-H "X-aws-ec2-metadata-token: $tok"} "http://169.254.169.254/latest/meta-data/placement/region" 2>/dev/null || true)"
-    if [[ -n "$imds_region" ]]; then
-      printf -v "$1" '%s' "$imds_region"
-      say info "区域 / region: $imds_region（本机所在区域，--local 自动检测）"
-      return
-    fi
-    say warn "无法从实例元数据读取区域（--local）；回退到手动选择。"
+  local imds_region=""
+  if [[ "$LOCAL_MODE" == true ]] || _is_index_host; then
+    imds_region="$(_imds_region)"
   fi
+  if [[ -n "$imds_region" ]]; then
+    printf -v "$1" '%s' "$imds_region"
+    say info "区域 / region: $imds_region（本机所在区域，自动检测）"
+    return
+  fi
+  [[ "$LOCAL_MODE" == true ]] && say warn "无法从实例元数据读取区域（--local）；回退到手动选择。"
   pick_field "$1" "AWS 区域 / region (↑/↓ 选择，回车确认)" \
     "${DEPLOY_REGION:-ap-northeast-1}" "AWS 区域代码 / region code" "${REGION_OPTIONS[@]}"
 }
