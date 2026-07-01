@@ -110,7 +110,10 @@ aws iam put-role-policy --role-name "$ROLE" --policy-name deploy-agentcore --pol
     {"Effect":"Allow","Action":[
       "bedrock-agentcore:CreateAgentRuntime","bedrock-agentcore:UpdateAgentRuntime",
       "bedrock-agentcore:GetAgentRuntime","bedrock-agentcore:ListAgentRuntimes",
-      "bedrock-agentcore:DeleteAgentRuntime","bedrock-agentcore:InvokeAgentRuntime"],
+      "bedrock-agentcore:DeleteAgentRuntime","bedrock-agentcore:InvokeAgentRuntime",
+      "bedrock-agentcore:CreateAgentRuntimeEndpoint","bedrock-agentcore:UpdateAgentRuntimeEndpoint",
+      "bedrock-agentcore:GetAgentRuntimeEndpoint","bedrock-agentcore:ListAgentRuntimeEndpoints",
+      "bedrock-agentcore:DeleteAgentRuntimeEndpoint"],
       "Resource":"*"},
     {"Effect":"Allow","Action":["bedrock:ListInferenceProfiles","bedrock:GetInferenceProfile"],
       "Resource":"*"}]}' >/dev/null
