@@ -394,7 +394,7 @@ refreshIntervalSec?}`，`source` 默认 `git`、本地仓写 `local`）。顶层
 | 症状 | 可能原因 | 处置 |
 |------|----------|------|
 | 卡片一直「正在分析…」不结束 | 后端流被中断 / finalize 异常 | 查看网关日志 `finalize_error` / `card_closed failed:true`；偶发则重问；持续则查 runtime/index 健康 |
-| 卡片里出现异常的 `<invoke>` 代码标记 | 冷启动那次问答，底层取证工具尚未就绪，agent 就提前作答 | 网关会自动重试一次，预热后不再出现。查日志 `num_turns`/`cache_read` 确认是否冷启动 |
+| 卡片里出现异常的 `<invoke>` 代码标记 | 冷启动那次问答，底层的代码检索工具尚未就绪，agent 就提前作答 | 网关会自动重试一次，预热后不再出现。查日志 `num_turns`/`cache_read` 确认是否冷启动 |
 | 机器人在群里**完全无响应** | 网关未启动 / 未 @ 到机器人 / 同一 app 运行了两个网关争抢事件 | 进实例 `systemctl status 'bot-gateway@*'` 确认 active + 日志 `sdk_wsclient_connected`；确认 @ 的是 `FEISHU_BOT_OPEN_ID`；停止多余网关，只保留一个 |
 | 网关 `condition failed` 未启动 | `/etc/bot-gateway-<项目>.env` 尚未写入（runtime 未就绪 / gateway 阶段被跳过） | 重跑 `install.sh` 或 `deploy-all.sh`（不跳 gateway）；确认 `FEISHU_SECRET_ID` 已配 |
 | 卡片回「查询失败」/ 日志 `AccessDenied` | 部署身份缺 `bedrock:InvokeModel`，或该模型在此区域无可用推理档 | 给部署身份补 `bedrock:InvokeModel`；模型档由部署按区域自动解析，查不到时 preflight 会列出该区域可用的档（见前置条件 3） |
@@ -410,7 +410,7 @@ refreshIntervalSec?}`，`source` 默认 `git`、本地仓写 `local`）。顶层
 
 ## 九、边界与安全（务必知道）
 
-- **只读**：MVP 全程不写代码 / 不提交 / 不运行引擎；答案只基于最新主分支真实代码 + CodeGraph 取证。
+- **只读**：MVP 全程不写代码 / 不提交 / 不运行引擎；答案只基于最新主分支的真实代码，并用 CodeGraph 核对验证。
 - **密钥**：飞书 `App Secret`、`App ID` 等绝不入仓库（gitleaks pre-commit 守）；走环境变量 / Secrets Manager / SSM。
 - **越界能力后置**：多分支、设计文档读取、写回、第二引擎等均为 post-MVP，详见
   [`../README.md`](../README.md) 的「MVP 边界」与设计权威依据 [`design/`](design/)。
