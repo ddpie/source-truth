@@ -112,7 +112,7 @@ bash <(gh api repos/ddpie/source-truth/contents/scripts/get.sh --jq '.content' |
 两种部署拓扑：
 
 - **默认（两台）**：在一台部署机上跑脚本，由它新建并配置索引主机 EC2。
-- **单台 EC2（`--local`）**：一台机器既跑部署、又常驻索引与网关，不再单开部署机。在本地跑 `./scripts/launch-host.sh` 一条龙起机（自动建网 + 建 IAM + 起 ARM64 EC2），再 SSH 进去跑 `./scripts/deploy-all.sh --region <r> --local`。AgentCore Runtime 仍由 AWS 托管，不占本机。
+- **单台 EC2（`--local`）**：一台机器既跑部署、又常驻索引与网关，不再单开部署机。在本地跑 `./scripts/launch-host.sh` 一条龙起机（自动建网 + 建 IAM + 起 ARM64 EC2），再按它打印的命令 SSH 进去跑 `./scripts/install.sh`（交互填代码仓/模型/飞书凭证，install 内部调 `deploy-all --local`）。AgentCore Runtime 仍由 AWS 托管，不占本机。
 
 完整部署流程（前置条件、`deploy-all.sh` 各阶段的命令行参数、`--local` 的角色与权限要求、连飞书、运维、排错）见
 [`docs/runbook.md`](docs/runbook.md)。飞书凭证走 Secrets Manager，不落盘、不入仓库。
@@ -273,7 +273,7 @@ With the repo already cloned, just run the scripts; offline tests need no Docker
 Two deployment topologies:
 
 - **Default (two machines)**: run the script on a deploy box, which creates and configures the index-host EC2.
-- **Single EC2 (`--local`)**: run `./scripts/deploy-all.sh --region <r> --local` directly on the target EC2 — that one machine both deploys and then resides as the index + gateway host, with no separate deploy box. Needs ARM64 + an instance role + passwordless sudo; the AgentCore Runtime is still AWS-managed and off this host.
+- **Single EC2 (`--local`)**: one machine both deploys and then resides as the index + gateway host, with no separate deploy box. Run `./scripts/launch-host.sh` locally to bring the box up (auto-builds the network + IAM + an ARM64 EC2), then SSH in per the command it prints and run `./scripts/install.sh` (interactive repo/model/Feishu prompts; install calls `deploy-all --local`). The AgentCore Runtime is still AWS-managed and off this host.
 
 Full deployment flow (prerequisites, `deploy-all.sh` staged options, the `--local` role/permission requirements, connecting Feishu, ops, troubleshooting): [`docs/runbook.md`](docs/runbook.md). Feishu credentials go through Secrets Manager — never written to disk, never committed.
 

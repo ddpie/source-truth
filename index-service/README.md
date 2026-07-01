@@ -32,7 +32,7 @@ CodeGraph 引擎原生仅 stdio MCP，本服务（`http_bridge.py`）把它转�
 | `path_align.py` | 索引路径对齐为仓库相对路径（`mount_root` 默认 `""`，拒越界） |
 | `glossary*.py` / `glossary_refresh.sh` | 术语表数据层 / 只读查询 / 构建期生成（详见 [`docs/agent/glossary.md`](../docs/agent/glossary.md)） |
 | `perf.py` | 结构化耗时日志 |
-| `bootstrap.sh` | EC2 user-data：装依赖 / 解包仓库到 `/data/repo` / systemd `index-build`→`index-bridge` |
+| `bootstrap.sh` | EC2 user-data（base host，不挂项目）：装依赖 / codegraph 二进制 / systemd `index-build`→`index-bridge` 模板；仓库由 `activate_project.sh` 按项目挂载 |
 
 依赖单一来源是 `requirements.txt`（`mcp` + `uvicorn` + `typing_extensions`，全部 `==` 固定；`bootstrap.sh` 用 `pip install -r` 安装，`scripts/check-versions.sh` 守卫不漂移）。
 
