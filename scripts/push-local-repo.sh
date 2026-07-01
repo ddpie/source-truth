@@ -41,7 +41,10 @@ REAL="$(cd "$LOCAL_PATH" && pwd -P)"
 
 # Build the ssh argv as an ARRAY (no string-splitting, no -e "...") and only from vetted inputs.
 SSH=(ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new)
-[ -n "$IDENTITY" ] && SSH+=(-i "$IDENTITY")
+if [ -n "$IDENTITY" ]; then
+  [ -f "$IDENTITY" ] || { say err "--identity keyfile not found: $IDENTITY"; exit 2; }
+  SSH+=(-i "$IDENTITY")
+fi
 
 SRC="${REAL%/}/"
 STAGE="/data/repo/${SUBDIR}.incoming"

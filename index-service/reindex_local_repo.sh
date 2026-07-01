@@ -145,7 +145,13 @@ refresh_glossary() {
   ) || true
 }
 
-if [ -s "$GRAPH" ]; then
+# Decide incremental vs full by graph VALIDITY, not mere non-emptiness. Use the SAME >=64KiB
+# threshold index-build@'s ExecStartPost enforces (bootstrap.sh): a first build that was killed
+# mid-write can leave a small partial graph.db — `[ -s ]` (non-empty) would then wrongly pick the
+# incremental path and the watcher would serve a broken/stale graph forever. A sub-64KiB file means
+# "no valid graph yet" → fall through to the full-build branch, which rebuilds it correctly.
+GRAPH_SZ="$(du -sb "$GRAPH" 2>/dev/null | cut -f1 || echo 0)"
+if [ "${GRAPH_SZ:-0}" -ge 65536 ]; then
   # ----- SUBSEQUENT push: in-place update, watcher picks it up, bridge stays up -----
   echo "reindex: applying staged update in place (bridge stays up; watcher re-indexes incrementally)"
   apply_staged

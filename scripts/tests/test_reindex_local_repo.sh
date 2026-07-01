@@ -19,8 +19,11 @@ grep -q 'REINDEX_PREPARED' "$S"; check "has --prepare mode" $?
 grep -q '\[ "\$SRC" = "local" \]' "$S"; check "refuses non-local (git) repos" $?
 grep -q 'not local' "$S"; check "fail-loud message explains git vs local" $?
 
-# Two update paths keyed on whether the graph already exists.
-grep -q 'if \[ -s "\$GRAPH" \]' "$S"; check "branches on existing graph (incremental vs first build)" $?
+# Two update paths keyed on whether a VALID graph exists — same >=64KiB threshold index-build@'s
+# ExecStartPost enforces, so a killed first build's partial graph.db re-triggers a full rebuild
+# rather than a wrong incremental.
+grep -q 'GRAPH_SZ.*du -sb "\$GRAPH"' "$S"; check "sizes the graph to decide incremental vs first build" $?
+grep -q '"\${GRAPH_SZ:-0}" -ge 65536' "$S"; check "uses the 64KiB validity threshold (matches build guard)" $?
 # Incremental path: in-place apply, NO bridge stop (watcher picks it up).
 grep -q 'mode=incremental' "$S"; check "has incremental (watcher) path" $?
 # First-build path: stop bridge, build, start bridge.
