@@ -79,16 +79,16 @@ print_next_steps() {
   local iid="$1" ip="$2"
   cat <<NEXT
 
-✓ EC2 $iid（$ip）。这台机器长期保留：它的仓库 .local/ 会存部署状态，以后升级 SSH 回这台、重跑即可。
+✓ EC2 ${iid}（${ip}）。这台机器长期保留：它的仓库 .local/ 会存部署状态，以后升级 SSH 回这台、重跑即可。
 
 下一步：复制这一条命令跑（在这台 EC2 上部署，用它的实例角色，无需配 profile）：
 
-  ssh -t ubuntu@$ip 'if [ -d source-truth/.git ]; then git -C source-truth pull --ff-only; else git clone https://github.com/ddpie/source-truth.git; fi && cd source-truth && ./scripts/install.sh'
+  ssh -t ubuntu@${ip} 'if [ -d source-truth/.git ]; then git -C source-truth pull --ff-only; else git clone https://github.com/ddpie/source-truth.git; fi && cd source-truth && ./scripts/install.sh'
 
-（SSH 密钥不在 ssh-agent 里就加 -i：ssh -t -i <你的 key>.pem ubuntu@$ip '...'）
+（SSH 密钥不在 ssh-agent 里就加 -i：ssh -t -i <你的 key>.pem ubuntu@${ip} '...'）
 install.sh 会交互问：AWS 区域、代码仓、回答模型、飞书 App ID/Secret——先把飞书凭证准备好。
 
-升级版本：SSH 回这台 $iid，跑：cd source-truth && git pull && ./scripts/deploy-all.sh --region $REGION --local
+升级版本：SSH 回这台 ${iid}，跑：cd source-truth && git pull && ./scripts/deploy-all.sh --region ${REGION} --local
 NEXT
 }
 
@@ -139,7 +139,7 @@ if [ "${#EXISTING[@]}" -gt 0 ] && [ "$NEW_HOST" != true ]; then
   fi
   # A stopped box must be started before you can SSH in.
   if [ "$EX_STATE" = stopped ] || [ "$EX_STATE" = stopping ]; then
-    say info "实例当前 $EX_STATE，正在启动 / starting it ..."
+    say info "实例当前 ${EX_STATE}，正在启动 / starting it ..."
     aws ec2 start-instances --instance-ids "$EX_ID" >/dev/null
     aws ec2 wait instance-running --instance-ids "$EX_ID"
   fi
