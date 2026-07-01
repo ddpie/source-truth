@@ -33,6 +33,7 @@
 9. [边界与安全（务必知道）](#九边界与安全务必知道)
 - [附录 A：手动 deploy-all.sh](#附录-a手动-deploy-allsh)
 - [附录 B：本地手动启动网关（开发调试）](#附录-b本地手动启动网关开发调试)
+- [附录 C：首次部署后的真机核对清单](#附录-c首次部署后的真机核对清单)
 
 ---
 
@@ -467,3 +468,32 @@ node_modules/.bin/ts-node --transpile-only src/index.ts
 
 > 注意：同一飞书 app 只能有一个网关连接。本地启动前，先停掉 index 主机上对应项目的服务
 > （`sudo systemctl stop bot-gateway@<项目>`），否则两个网关会争抢同一批事件。
+
+## 附录 C：首次部署后的真机核对清单
+
+第五节的冒烟（`/health` + 群里问一句）覆盖了「跑通了」的主路径。这份清单是**首次在一个新账号/新区域部署后**逐项确认的深查，重点在几个**只有真机才暴露、且可能「部署报绿但其实没通」**的点——尤其 `--local` 单机模式。日常重复部署不必每次跑。命令里 `<r>` = 区域、`<I>` = 索引主机实例 id（`.local/deploy-config` 的 `INDEX_SERVICE_INSTANCE`）。
+
+**P0（合并/交付前必验）**
+
+| 验什么 | 怎么确认通过 | 不通的样子 |
+|---|---|---|
+| **能 SSH 进新起的机器**（`--local`） | `ssh ubuntu@<公网IP>` 能连上 | 卡住/超时 → 安全组 22 没放行你的真实出口 IP（`launch-host` 靠 `curl checkip` 取，NAT/代理下可能取错）。到控制台给该 SG 补一条你当前 IP 的 22 |
+| **Runtime 能解析索引主机私有域名** | 进实例：`aws ssm start-session ... --target <I>`，实例内 `dig +short index.<r>.source-truth.internal` 返回私有 IP | 空/NXDOMAIN → 每次问答都空答，**但部署会报绿**（health 只探 loopback）。查 VPC 的 `enableDnsSupport/Hostnames` 是否都为 true |
+| **Runtime 出网到 Bedrock + 连 bridge** | 群里真问一句，卡片给出带 `文件:行号` 的答案 | 卡「查询失败」/超时 → 私有子网 NAT 路由不通，或 runtime 的自引用 SG 没放行 8080-8099 |
+| **部署身份权限够**（`--local` 复用角色后） | `deploy-all --local` 一路到 runtime `InvokeAgentRuntime` 不报 AccessDenied | 卡在 runtime 阶段 AccessDenied/PassRole denied → 角色缺 `bedrock-agentcore:*` 或 `iam:PassRole SourceTruthAgentRuntimeRole`（见前置条件 3 / `--local` 权限说明） |
+
+**P1（首次接一个新代码仓时验）**
+
+| 验什么 | 怎么确认通过 | 备注 |
+|---|---|---|
+| **本地仓首次推送**（停 bridge 全量建图） | `push-local-repo.sh` 后主机日志出 `REINDEX_DONE ... mode=initial-build`，`graph.db` ≥64KiB，bridge 起来 | 中文仓的 GBK 编码问题也在这条路上第一次暴露 |
+| **本地仓增量推送**（不停 bridge） | 改几个文件再推，日志 `mode=incremental`，几秒后问答用上新代码 | 网关不中断；术语表增量在后台（看 `/var/log/glossary-build-*`） |
+| **中断能重跑收敛** | 推送途中断网/Ctrl-C，`.incoming` 仍在，重跑一次即对齐 | 见第九节「本地仓上传」的中断说明 |
+| **codegraph 二进制冒烟** | bootstrap 日志有 `codegraph-server --version` 通过 | ARM64/glibc 不匹配会当场 FATAL（东京已验过则低风险） |
+
+**P2（行为观察，非阻断）**
+
+- **冷启动首问**：新 microVM 第一次问可能慢、极偶发冒 `<invoke>` 标记——网关会自动重试一次，暖机后消失（见第八节排错表）。
+- **复用/清理**：`launch-host` 复用已停机器会先 `start`；本地仓移除后 reconcile 会清副本 + `.incoming`（改仓库集合重部署后 `sudo ls /data/repo/` 确认无残留）。
+
+> **最可能真机翻车的两项**：① 私网 DNS 静默 NXDOMAIN（部署报绿却空答，最难自查）；② 安全组 22 放行的是错的出口 IP（连不上刚起的机器）。这两项务必在交付前亲手确认。
