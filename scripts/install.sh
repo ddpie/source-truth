@@ -341,16 +341,24 @@ except Exception: pass' "$PROJECTS_CFG"
 flow_init_env() {
   echo; say step "初始化环境（不挂项目）/ init environment only"
   local REGION INSTANCE_TYPE ROOT_VOLUME_GB GLOSSARY_MAX_FILES
+  local HW_FLAGS=()   # --instance-type/--root-volume-gb — only meaningful when WE create the host
   ask_region REGION
-  pick_field INSTANCE_TYPE "索引主机机型 (ARM·决定 CPU/内存) / index host type" \
-    "${DEPLOY_INSTANCE_TYPE:-t4g.large}" "EC2 机型 (ARM)" "${INSTANCE_OPTIONS[@]}"
-  pick_field ROOT_VOLUME_GB "索引主机磁盘 / index host disk GiB" \
-    "${DEPLOY_ROOT_VOLUME_GB:-30}" "磁盘大小 GiB" "${DISK_OPTIONS[@]}"
-  while ! [[ "$ROOT_VOLUME_GB" =~ ^[0-9]+$ ]] || (( ROOT_VOLUME_GB < 8 )); do
-    [[ "$ASSUME_YES" == true ]] && { say err "磁盘大小无效 / invalid disk size '$ROOT_VOLUME_GB'"; exit 1; }
-    say warn "磁盘大小需为 ≥8 的整数 GiB / disk must be an integer GiB ≥ 8."
-    ask ROOT_VOLUME_GB "磁盘大小 GiB" "30"
-  done
+  if [[ "$LOCAL_MODE" == true ]]; then
+    # --local deploys onto THIS existing EC2; its type/disk were fixed at launch (launch-host.sh),
+    # and deploy-all --local reuses the box in place — asking would just mislead. Skip, show actual.
+    say info "机型/磁盘 / type & disk: 沿用本机（$( (curl -fsS -H "X-aws-ec2-metadata-token: $(curl -fsS -X PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' 2>/dev/null)" http://169.254.169.254/latest/meta-data/instance-type 2>/dev/null) || echo '本机机型' ) ）—— 由 launch-host 起机时决定，如需变更请换机"
+  else
+    pick_field INSTANCE_TYPE "索引主机机型 (ARM·决定 CPU/内存) / index host type" \
+      "${DEPLOY_INSTANCE_TYPE:-t4g.large}" "EC2 机型 (ARM)" "${INSTANCE_OPTIONS[@]}"
+    pick_field ROOT_VOLUME_GB "索引主机磁盘 / index host disk GiB" \
+      "${DEPLOY_ROOT_VOLUME_GB:-30}" "磁盘大小 GiB" "${DISK_OPTIONS[@]}"
+    while ! [[ "$ROOT_VOLUME_GB" =~ ^[0-9]+$ ]] || (( ROOT_VOLUME_GB < 8 )); do
+      [[ "$ASSUME_YES" == true ]] && { say err "磁盘大小无效 / invalid disk size '$ROOT_VOLUME_GB'"; exit 1; }
+      say warn "磁盘大小需为 ≥8 的整数 GiB / disk must be an integer GiB ≥ 8."
+      ask ROOT_VOLUME_GB "磁盘大小 GiB" "30"
+    done
+    HW_FLAGS=(--instance-type "$INSTANCE_TYPE" --root-volume-gb "$ROOT_VOLUME_GB")
+  fi
   pick_field GLOSSARY_MAX_FILES "术语表构建文件上限 (中文→代码符号·控成本) / glossary build cap" \
     "${DEPLOY_GLOSSARY_MAX_FILES:-400}" "文件数 (0=不限)" "${GLOSSARY_OPTIONS[@]}"
   while ! [[ "$GLOSSARY_MAX_FILES" =~ ^[0-9]+$ ]]; do
@@ -361,8 +369,7 @@ flow_init_env() {
   echo; say info "将只起共享底座（VPC/NAT/EC2/镜像），不挂任何项目。之后用「添加项目」上线机器人。"
   confirm "开始初始化环境？/ Initialize the base environment now?" || { say info "已取消"; exit 0; }
   say step "部署底座 / Deploying base host (several minutes)"
-  exec "$SCRIPT_DIR/deploy-all.sh" --region "$REGION" \
-    --instance-type "$INSTANCE_TYPE" --root-volume-gb "$ROOT_VOLUME_GB" \
+  exec "$SCRIPT_DIR/deploy-all.sh" --region "$REGION" "${HW_FLAGS[@]}" \
     --glossary-max-files "$GLOSSARY_MAX_FILES" --skip-projects "${LOCAL_FLAG[@]}"
 }
 

@@ -199,13 +199,25 @@ if ! is_set "$ZONE_ID"; then
   done
 fi
 if is_set "$ZONE_ID"; then
-  # Delete every non-SOA/NS record set, then the zone (Route53 refuses a non-empty zone).
-  recs="$(aws route53 list-resource-record-sets --hosted-zone-id "$ZONE_ID" --query "ResourceRecordSets[?Type!='SOA' && Type!='NS']" --output json 2>/dev/null || echo "[]")"
-  if [[ "$recs" != "[]" && -n "$recs" ]]; then
-    batch="$(python3 -c "import json,sys; rs=json.load(sys.stdin); print(json.dumps({'Changes':[{'Action':'DELETE','ResourceRecordSet':r} for r in rs]}))" <<<"$recs" 2>/dev/null || echo "")"
-    [[ -n "$batch" ]] && aws route53 change-resource-record-sets --hosted-zone-id "$ZONE_ID" --change-batch "$batch" >/dev/null 2>&1 || true
+  # The private zone `source-truth.internal` is SHARED across regions: each region owns its OWN
+  # record `index.<region>.source-truth.internal` (see provision_index_dns.sh). So we must NOT wipe
+  # every record + the whole zone — that would kill OTHER regions' live records (and their VPCs still
+  # rely on the zone). Delete ONLY this region's record; drop the zone only if nothing region-scoped
+  # is left (this was the last region). config-id ($INDEX_DNS_ZONE_ID) may point at that shared zone.
+  OUR_REC="index.${REGION}.source-truth.internal."
+  rec="$(aws route53 list-resource-record-sets --hosted-zone-id "$ZONE_ID" \
+    --query "ResourceRecordSets[?Name=='${OUR_REC}' && Type=='A']" --output json 2>/dev/null || echo "[]")"
+  if [[ "$rec" != "[]" && -n "$rec" ]]; then
+    batch="$(python3 -c "import json,sys; rs=json.load(sys.stdin); print(json.dumps({'Changes':[{'Action':'DELETE','ResourceRecordSet':r} for r in rs]}))" <<<"$rec" 2>/dev/null || echo "")"
+    [[ -n "$batch" ]] && del "DNS record ${OUR_REC}" aws route53 change-resource-record-sets --hosted-zone-id "$ZONE_ID" --change-batch "$batch"
   fi
-  del "hosted zone $ZONE_ID" aws route53 delete-hosted-zone --id "$ZONE_ID"
+  # Delete the zone only if no A records remain (no other region uses it). Route53 keeps SOA+NS.
+  remaining="$(aws route53 list-resource-record-sets --hosted-zone-id "$ZONE_ID" --query "ResourceRecordSets[?Type=='A'] | length(@)" --output text 2>/dev/null || echo "?")"
+  if [[ "$remaining" == "0" ]]; then
+    del "hosted zone $ZONE_ID (no records left)" aws route53 delete-hosted-zone --id "$ZONE_ID"
+  else
+    say info "保留共享私有区 $ZONE_ID（仍有其它区域记录：$remaining 条 A）——只删本区域的记录"
+  fi
 fi
 
 # ---- 4. NAT gateway + release its Elastic IP ----
