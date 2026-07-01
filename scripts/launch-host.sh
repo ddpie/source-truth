@@ -103,6 +103,15 @@ NEXT
   def=""; [ -n "${KEY:-}" ] && def="$HOME/.ssh/${KEY}.pem"
   read -e -rp "  SSH 私钥路径（用于把部署脚本传上去并执行；留空=稍后手动）[${def}]: " key || true
   key="${key:-$def}"
+  # `read` does NOT expand a leading ~ (tilde), so a hand-typed ~/.ssh/foo.pem would be taken
+  # literally and fail the -f check below. Expand ~ / ~user ourselves. (The ~ in these case
+  # patterns is a literal we're matching against the input — not shell tilde expansion; SC2088 N/A.)
+  # shellcheck disable=SC2088
+  case "$key" in
+    "~") key="$HOME" ;;
+    "~/"*) key="$HOME/${key#\~/}" ;;
+    "~"*) key="$(eval echo "$key")" ;;   # ~otheruser/... — let the shell resolve the home dir
+  esac
   if [ -z "$key" ] || [ ! -f "$key" ]; then
     [ -n "$key" ] && say warn "私钥文件不存在：$key"
     say info "跳过自动部署。请手动执行："
