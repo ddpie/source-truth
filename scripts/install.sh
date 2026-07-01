@@ -279,21 +279,25 @@ fi
 # VPC/NAT/EC2 are already created) fails with a docker.sock connect error. Catch it
 # here so the operator isn't billed for half a deploy before hitting it. `docker info`
 # is the standard daemon-liveness check; run_timeout guards a hung daemon.
-if have_cmd docker && ! run_timeout 20 docker info >/dev/null 2>&1; then
+# In --local prepare-local-host.sh just started docker + runs us under `sg docker`, and deploy-all's
+# own preflight_docker re-checks right after — so this check is redundant there; skip it.
+if [[ "$LOCAL_MODE" != true ]] && have_cmd docker && ! run_timeout 20 docker info >/dev/null 2>&1; then
   say err "Docker 已安装但守护进程未运行 / docker is installed but its daemon isn't running."
   say info "  启动 Docker Desktop（或 dockerd），等它就绪后重试。验证：docker info"
   say info "  start Docker Desktop (or dockerd), wait until ready, then re-run. Verify with: docker info"
   exit 1
 fi
-# gh is OPTIONAL — only needed to auto-download codegraph-server from a PRIVATE repo's
-# Release (gh carries auth). Not required if the repo is public, or if you already have
-# the binary locally (CODEGRAPH_SERVER_BIN / PATH / ~/.local/bin). Warn, don't block.
-if have_cmd gh && gh auth status >/dev/null 2>&1; then
-  say ok "gh (authenticated — can fetch codegraph-server from a private Release)"
-else
-  say info "gh 未安装或未登录 / gh absent or not logged in — fine if the repo is public or"
-  say info "  codegraph-server is already local. For a PRIVATE repo's auto-download, run"
-  say info "  'gh auth login', or set CODEGRAPH_SERVER_BIN=/path/to/codegraph-server."
+# gh is OPTIONAL — only needed to auto-download codegraph-server from a PRIVATE repo's Release (gh
+# carries auth). In --local the index host fetches the binary itself (S3 → Release) and prepare has
+# already run `gh auth login`, so this hint is just noise there — skip it. Otherwise warn, don't block.
+if [[ "$LOCAL_MODE" != true ]]; then
+  if have_cmd gh && gh auth status >/dev/null 2>&1; then
+    say ok "gh (authenticated — can fetch codegraph-server from a private Release)"
+  else
+    say info "gh 未安装或未登录 / gh absent or not logged in — fine if the repo is public or"
+    say info "  codegraph-server is already local. For a PRIVATE repo's auto-download, run"
+    say info "  'gh auth login', or set CODEGRAPH_SERVER_BIN=/path/to/codegraph-server."
+  fi
 fi
 # AWS identity (also proves credentials work before we collect anything).
 if ! ACCOUNT="$(aws sts get-caller-identity --query Account --output text 2>/dev/null)"; then
@@ -359,6 +363,13 @@ flow_init_env() {
     done
     HW_FLAGS=(--instance-type "$INSTANCE_TYPE" --root-volume-gb "$ROOT_VOLUME_GB")
   fi
+  # Glossary cap is a build-cost knob (not machine-specific). In --local, don't make the operator
+  # stop and choose on first run — take the safe default (400, cost-controlled) and just show it.
+  # To change it later: re-run install without --local, or set GLOSSARY_MAX_FILES / edit the env.
+  if [[ "$LOCAL_MODE" == true ]]; then
+    GLOSSARY_MAX_FILES="${DEPLOY_GLOSSARY_MAX_FILES:-400}"
+    say info "术语表构建文件上限 / glossary build cap: ${GLOSSARY_MAX_FILES}（默认，控成本；改需重设 GLOSSARY_MAX_FILES）"
+  else
   pick_field GLOSSARY_MAX_FILES "术语表构建文件上限 (中文→代码符号·控成本) / glossary build cap" \
     "${DEPLOY_GLOSSARY_MAX_FILES:-400}" "文件数 (0=不限)" "${GLOSSARY_OPTIONS[@]}"
   while ! [[ "$GLOSSARY_MAX_FILES" =~ ^[0-9]+$ ]]; do
@@ -366,6 +377,7 @@ flow_init_env() {
     say warn "需为非负整数 (0=不限) / must be a non-negative integer (0 = no cap)."
     ask GLOSSARY_MAX_FILES "文件数 (0=不限)" "400"
   done
+  fi
   echo; say info "将只起共享底座（VPC/NAT/EC2/镜像），不挂任何项目。之后用「添加项目」上线机器人。"
   confirm "开始初始化环境？/ Initialize the base environment now?" || { say info "已取消"; exit 0; }
   say step "部署底座 / Deploying base host (several minutes)"

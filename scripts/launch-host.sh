@@ -132,11 +132,14 @@ NEXT
   # Fresh instance: SSH may not answer for a bit. Bounded backoff, not back-to-back.
   say step "等待 SSH 就绪 ..."
   local ok=false i
-  for i in $(seq 1 12); do
+  for i in $(seq 1 24); do   # ~120s: a fresh EC2's cloud-init can take >60s to open sshd
     if ssh "${sshopt[@]}" -o BatchMode=yes ubuntu@"$ip" true 2>/dev/null; then ok=true; break; fi
     sleep 5
   done
-  [ "$ok" = true ] || { say warn "SSH 暂时连不上 $ip（私钥不对，或机器还没起好）。稍后手动执行："; print_manual_fallback "$ip"; return 0; }
+  if [ "$ok" != true ]; then
+    say warn "SSH 暂时连不上 $ip。常见原因：① 私钥不对；② 安全组的 22 端口放行的不是你真实出口 IP（launch-host 用 curl checkip 取，经 NAT/代理可能不准——到控制台核对）；③ 机器还没起好。稍后手动执行："
+    print_manual_fallback "$ip"; return 0
+  fi
   say step "把部署脚本传到 EC2（/tmp/prepare-local-host.sh）..."
   if ! scp "${sshopt[@]}" "$HERE/prepare-local-host.sh" ubuntu@"$ip":/tmp/prepare-local-host.sh; then
     say warn "scp 失败。请手动执行："; print_manual_fallback "$ip"; return 0
