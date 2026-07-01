@@ -78,10 +78,10 @@ pick_one() {
 # clones-or-pulls the repo and runs install.sh. When false (public repo / no token), it just
 # clones-or-pulls + install.sh. All $-vars stay literal here (single-quoted at the ssh call site).
 remote_deploy_script() {
-  local clone='if [ -d source-truth/.git ]; then git -C source-truth pull --ff-only; else git clone https://github.com/ddpie/source-truth.git; fi'
+  local clone='command -v git >/dev/null || sudo apt-get install -y git; if [ -d source-truth/.git ]; then git -C source-truth pull --ff-only; else git clone https://github.com/ddpie/source-truth.git; fi'
   if [ "${1:-false}" = true ]; then
     cat <<'REMOTE'
-T=$(aws secretsmanager get-secret-value --region REGION_PLACEHOLDER --secret-id source-truth/deploy-github-token --query SecretString --output text 2>/dev/null || true); if [ -n "$T" ]; then command -v gh >/dev/null || { sudo mkdir -p -m 755 /etc/apt/keyrings && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg >/dev/null && sudo chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list >/dev/null && sudo apt-get update && sudo apt-get install -y gh; }; printf '%s' "$T" | gh auth login --with-token && gh auth setup-git; fi; CLONE_PLACEHOLDER && cd source-truth && ./scripts/install.sh
+T=$(aws secretsmanager get-secret-value --region REGION_PLACEHOLDER --secret-id source-truth/deploy-github-token --query SecretString --output text 2>/dev/null || true); if [ -n "$T" ]; then command -v gh >/dev/null || { sudo mkdir -p -m 755 /etc/apt/keyrings && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg >/dev/null && sudo chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list >/dev/null && sudo apt-get update && sudo apt-get install -y gh; }; gh auth login --with-token <<<"$T" && gh auth setup-git; fi; CLONE_PLACEHOLDER && cd source-truth && ./scripts/install.sh
 REMOTE
   else
     printf '%s && cd source-truth && ./scripts/install.sh\n' "$clone"
@@ -93,7 +93,7 @@ REMOTE
 # reuse path so the two never drift.
 print_next_steps() {
   local iid="$1" ip="$2" gh_ready="${3:-false}"
-  local clone='if [ -d source-truth/.git ]; then git -C source-truth pull --ff-only; else git clone https://github.com/ddpie/source-truth.git; fi'
+  local clone='command -v git >/dev/null || sudo apt-get install -y git; if [ -d source-truth/.git ]; then git -C source-truth pull --ff-only; else git clone https://github.com/ddpie/source-truth.git; fi'
   local remote; remote="$(remote_deploy_script "$gh_ready")"
   remote="${remote//CLONE_PLACEHOLDER/$clone}"
   remote="${remote//REGION_PLACEHOLDER/$REGION}"
@@ -159,10 +159,12 @@ else
     read -rsp "  GitHub token（留空 = 公开仓，跳过）: " GH_TOK || true; echo >&2
   fi
   if [ -n "$GH_TOK" ]; then
+    # Pass the token via stdin (file:///dev/stdin), NOT --secret-string "$GH_TOK": a command-line
+    # argument is visible to other users on this machine via `ps` / /proc/<pid>/cmdline.
     if aws secretsmanager describe-secret --secret-id source-truth/deploy-github-token >/dev/null 2>&1; then
-      aws secretsmanager put-secret-value --secret-id source-truth/deploy-github-token --secret-string "$GH_TOK" >/dev/null
+      printf '%s' "$GH_TOK" | aws secretsmanager put-secret-value --secret-id source-truth/deploy-github-token --secret-string file:///dev/stdin >/dev/null
     else
-      aws secretsmanager create-secret --name source-truth/deploy-github-token --secret-string "$GH_TOK" >/dev/null
+      printf '%s' "$GH_TOK" | aws secretsmanager create-secret --name source-truth/deploy-github-token --secret-string file:///dev/stdin >/dev/null
     fi
     say ok "GitHub 凭证已写入 Secrets Manager（source-truth/deploy-github-token）"
     GH_TOKEN_READY=true
