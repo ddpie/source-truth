@@ -19,8 +19,10 @@ curl() { case "$*" in *api/token*) echo TOKEN;; *instance-id*) echo i-abc;; *loc
 # local mode must derive VPC/subnet via describe-instances, NOT IMDS mac paths
 grep -q 'describe-instances' "$F"; check "uses describe-instances for vpc/subnet/sg" $?
 ! grep -q 'macs/.*security-group-ids' "$F"; check "does NOT scrape IMDS mac sg path" $?
-# local mode must wrap bootstrap with a timeout
-grep -qE 'timeout [0-9].* bash .*bootstrap.sh|run_timeout .* bootstrap.sh' "$F"; check "bootstrap wrapped in a timeout" $?
+# local mode must wrap bootstrap with a timeout; --foreground keeps it in our process group so
+# tty access (tee streaming) doesn't get the tree stopped by SIGTTIN/SIGTTOU
+grep -qE 'timeout (--foreground )?[0-9].* bash .*bootstrap.sh|run_timeout .* bootstrap.sh' "$F"; check "bootstrap wrapped in a timeout" $?
+grep -q 'timeout --foreground' "$F"; check "timeout runs bootstrap in the foreground process group" $?
 # A2 fail-loud precheck: read the instance's IAM profile, abort if none, abort if S3 artifact unreadable
 grep -q 'IamInstanceProfile.Arn' "$F"; check "local mode reads the instance's IAM profile" $?
 grep -q 'NO IAM instance profile' "$F"; check "local mode fails loud when no instance role" $?

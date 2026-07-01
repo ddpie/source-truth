@@ -173,7 +173,13 @@ GLOSSARY_MAX_FILES='$GLOSSARY_MAX_FILES'
 ENV
   # Synchronous bootstrap, but bounded: a hung apt/pip must not wedge the deploy forever.
   log info "local mode: running bootstrap.sh in place (bounded 1800s) ..."
-  timeout 1800 sudo -E bash "$ROOT/index-service/bootstrap.sh" >&2 \
+  # --foreground: GNU timeout normally puts the command in a NEW process group (to kill the whole
+  # tree on expiry) — but a background process group that touches the controlling tty gets
+  # SIGTTIN/SIGTTOU and is STOPPED by the kernel. With bootstrap now streaming to the operator's
+  # terminal (tee), apt's post-install steps (needrestart) hit exactly that and hung forever in
+  # do_signal_stop. --foreground keeps the command in OUR (foreground) process group so tty access
+  # is legal; </dev/null belts-and-suspenders any stray stdin read.
+  timeout --foreground 1800 sudo -E bash "$ROOT/index-service/bootstrap.sh" </dev/null >&2 \
     || { log err "local-mode bootstrap.sh failed/timed out — see /var/log/index-svc-bootstrap.log"; exit 1; }
 
   # PRIVATE_SUBNET feeds the AgentCore runtime ENI (deploy_project.sh → deploy_runtime.py). It must
