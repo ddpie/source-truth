@@ -68,7 +68,10 @@ export function stripFollowUps(answer: string): string {
 // of the answer), so without this an evidence heading `> 🔍 **供研发复核**`, a
 // ```chart fence, or its JSON line each became a clickable "follow-up" that re-asks
 // garbage on click (cross-review HIGH). Line-anchored, marker-tolerant of bold/quote.
-const SECTION_BOUNDARY_RE = /(?:供研发复核|需要你确认)|^[ \t　]*(?:>?[ \t]*\**)?```/;
+// 供研发复核/需要你确认 只按「标题行」匹配（行首 + 可选 >/🔍/** 装饰），不做无锚定子串：
+// 一条 follow-up 建议本身提及这个词（"- 供研发复核的证据在哪里？"）不该被当成边界，
+// 否则它和后面所有合法按钮一起丢失。列表项的 "- " 前缀不满足标题锚定，故不受影响。
+const SECTION_BOUNDARY_RE = /^[ \t　]*(?:>[ \t]*)?(?:🔍[ \t]*)?\*{0,2}(?:供研发复核|需要你确认)|^[ \t　]*(?:>?[ \t]*\**)?```/;
 
 function _extractAfter(afterMarker: string): string[] {
   // Extract lines starting with "- " or "· " or numbered "1. " etc.
