@@ -9,17 +9,21 @@
 - **bot-gateway**：飞书长连接网关，把群里的 @ 消息路由到后端，再把答案流式写回卡片。**网关与索引服务同主机**
   （index-service 那台 EC2 上的第二个 systemd 服务），由部署脚本一并拉起。
 
-> **两种部署方式**：
-> - **推荐（客户环境）**：`./scripts/install.sh` —— 交互式，询问区域 / 代码仓 / 飞书凭证，
->   把凭证写进 Secrets Manager，然后端到端启动后端 **+ 网关**。见第二节。
-> - **手动 / 进阶**：`./scripts/deploy-all.sh` 直接传参（CI、可复现、可跳过某阶段）。见 [附录 A](#附录-a手动-deploy-allsh)。
+> **先定拓扑（用几台机器）**：
+> - **默认（双机）**：在一台部署机上跑脚本，由它新建并配置一台索引主机 EC2。网络全自动、机器职责清晰——首次交付推荐。走第二节。
+> - **单机（`--local`）**：只开一台 EC2，在它上面既部署又常驻，省去单独的部署机。见[第二节末「在单台 EC2 上就地部署」](#二一键安装交互式推荐)。
 >
-> 两者都**幂等**：失败后重跑会继续未完成部分。`install.sh` 重跑会预填上次的答案。
+> **再定入口（两种拓扑都适用）**：
+> - **`install.sh`（推荐）**：交互式，问区域 / 代码仓 / 飞书凭证，写进 Secrets Manager，端到端起后端 **+ 网关**。
+> - **`deploy-all.sh`（进阶）**：直接传参（CI、可复现、可跳过某阶段）。见 [附录 A](#附录-a手动-deploy-allsh)。
+>
+> 全部**幂等**：失败后重跑会继续未完成部分。`install.sh` 重跑会预填上次的答案。
 
 **目录**
 
 1. [前置条件（一次性）](#一前置条件一次性)
 2. [一键安装（交互式，推荐）](#二一键安装交互式推荐)
+   - [在单台 EC2 上就地部署（`--local`）](#在单台-ec2-上就地部署--local)
 3. [接入飞书（connect 清单）](#三接入飞书connect-清单)
 4. [网关运行位置](#四网关运行位置)
 5. [验证（端到端冒烟）](#五验证端到端冒烟)
@@ -123,31 +127,36 @@ codegraph 索引吃内存、随仓库增大而增长，按仓库规模选机型�
 
 ### 在单台 EC2 上就地部署（`--local`）
 
-默认流程是「在一台部署机上运行脚本，由脚本新建索引主机 EC2」。若希望**只开一台 EC2、在其上完成整套部署**（省去单独的部署机），用 `--local` 模式——这台 EC2 既跑部署、又常驻为索引与网关主机。它**长期保留**：部署状态（`.local/`）就存在这台机器的仓库目录里，以后升级 SSH 回这台、重跑即可。
+**只开一台 EC2、在它上面既部署又常驻**（省去单独的部署机），用 `--local` 模式。这台 EC2 长期保留：部署状态存在它的 `.local/` 里，升级就是 SSH 回这台、重跑。
 
-**两步（第一步在你本地起机，第二步在 EC2 上部署；命令由 [`scripts/launch-host.sh`](../scripts/launch-host.sh) 末尾打印，照抄即可）：**
+分两步——**在你本地起机**，**再进 EC2 部署**。命令都由 [`scripts/launch-host.sh`](../scripts/launch-host.sh) 末尾打印，照抄即可。
+
+**① 本地起机**
 
 ```bash
-# ① 在你本地：选 AWS profile → 建 IAM → 自动建一套 source-truth 专用网络 + 安全组（只放行你的 IP 的 22）→ 选密钥/机型 → 起一台 ARM64 EC2 并挂好实例角色
-./scripts/launch-host.sh          # 全程交互选择；也可 --profile <名> --region <r> 跳过前两问
-
-# ② 复制 launch-host 末尾打印的这一条命令：SSH 进 EC2（带 tty）→ 克隆/更新仓库 → 跑 install.sh
-#    （部署用这台机器的实例角色，无需配 profile；交互填区域/代码仓/模型/飞书凭证）
-ssh -t ubuntu@<脚本打印的 IP> 'if [ -d source-truth/.git ]; then git -C source-truth pull --ff-only; else git clone --depth 1 https://github.com/ddpie/source-truth.git; fi && cd source-truth && ./scripts/install.sh'
-#    SSH 密钥不在 ssh-agent 里就加 -i <你的 key>.pem
+./scripts/launch-host.sh          # 也可 --profile <名> --region <r> 跳过前两问；--dry-run 先看计划
 ```
 
-要点与前提：
+它依次（全自动、每步幂等）：选 profile → 建/复用 IAM 角色 → **自动建一套 source-truth 专用网络**（VPC + 公私子网 + IGW + NAT，账号里已有就复用，你不用挑 VPC/子网）→ 建安全组（只放行你当前出口 IP 的 22）→ 选密钥/机型/磁盘 → 在公有子网起一台 ARM64 EC2、挂好实例角色 → 打印第二步命令。
 
-- **某一步失败不用从头来**：`launch-host.sh` 每步都幂等（IAM、建网、安全组都是「有就复用、没有才建」），直接重跑即可，不会留下重复资源。**若它上次已经起了 EC2、之后才中断，重跑会自动复用那台**（确认 IAM 就绪后直接打印第二步的 SSH 命令；机器若被停了会先帮你启动），不会再起一台。确实想要一台全新的就加 `--new-host`。第二步（EC2 上 `install.sh` / `deploy-all`）同样幂等，断在哪重跑哪。
-- **EC2 必须是 ARM64（aarch64）、Ubuntu 24.04**：镜像在本机构建、codegraph-server 也是 ARM64；脚本一开始就检查，x86 直接拦下。`launch-host.sh` 会设置 IMDSv2 required + hop-limit 1。
-- 部署用户需**免密 sudo**（或以 root 运行）——`bootstrap.sh` 与本地仓 `reindex` 都用 `sudo`。
-- **`--local` 部署调用 AWS 用的是这台机器的实例角色**，不是你本地的 profile（profile 只在你自己机器上，SSH 进 EC2 后就用不上了）。所以这个角色既要有建资源的权限（VPC/EC2/ECR/AgentCore/Secrets），也要有运行期的权限，**权限比较大**——这台机器应**专机专用，不跟其它业务混跑**。角色由 `launch-host.sh` 一次性建好（它内部调 [`scripts/create-iam.sh`](../scripts/create-iam.sh)）；建角色这一步用你本地选的 profile，该 profile 需有建 IAM 的权限。
-- **角色名与默认部署共用**（都是 `source-truth-index-role`，IAM 角色账号级全局、不分区域）。`create-iam.sh` 幂等：角色已存在就直接复用、只补 `--local` 要的部署期权限，不会重建。但要留意一个副作用——**该账号若已有默认（双机）部署在用这个角色，补上部署期权限后那台机器也会一并拿到**。要让默认部署保持最小权限，就别在同一账号跑 `--local`，换个账号。
+**② 进 EC2 部署**（照抄 launch-host 打印的那一条）
 
-**网络**：`launch-host.sh` 会自动建一套 source-truth 专用网络（一个 VPC + 一个公有子网 + 一个私有子网 + IGW + NAT），运维不用挑现有 VPC/子网。这套网络复用默认部署那条久经测试的建网逻辑、按 tag 幂等，账号里已有就直接复用。机器起在**公有子网**、带公网 IP（供你 SSH）；**AgentCore Runtime 起在私有子网，经 NAT 出网到 Bedrock**——Runtime 的网卡是 AWS 托管、没有公网 IP，只能走 NAT，公有子网到不了 Bedrock，这也是这里必须有 NAT 的原因（NAT 有固定费用，约每月 $32 起，省不掉）。机器的安全组只放行你指定来源的 22；runtime 另用一个自引用安全组，只开 8080-8099、只对组内成员（本机及其 runtime）开放，外部访问不到 bridge。**Runtime 由 AWS 托管**，不占本机资源——「单台 EC2」指只需开通并维护这一台主机。首次部署约 10–20 分钟（视机型而定）：bootstrap 与镜像构建都在本机串行执行，比默认的双机方式略慢。
+```bash
+ssh -t ubuntu@<脚本打印的 IP> 'if [ -d source-truth/.git ]; then git -C source-truth pull --ff-only; else git clone --depth 1 https://github.com/ddpie/source-truth.git; fi && cd source-truth && ./scripts/install.sh'
+#   密钥不在 ssh-agent 里就加 -i <你的 key>.pem
+```
 
-**升级 source-truth（本地模式）**：默认（双机）模式靠 `--refresh-index` 起一台新机蓝绿切换来升级底座；本地模式只有这一台主机，不走蓝绿，而是 SSH 回这台 EC2 就地升级：`cd source-truth && git pull && ./scripts/deploy-all.sh --region <r> --local`。`.local/` 里的状态还在，脚本读它就知道该更新哪些：重新下发底座代码、重建并推送镜像、更新 runtime，各项目的网关与索引随之重启到新版本。升级期间会有一段服务中断（时长和首次部署差不多，主要花在镜像重建 + 索引重启），挑低峰期做。
+进去后 `install.sh` 交互填区域 / 代码仓 / 模型 / 飞书凭证，随后内部调 `deploy-all --local` 跑完整部署。用的是**这台机器的实例角色**，EC2 上不用配 profile。首次约 10–20 分钟（bootstrap + 镜像构建都在本机串行，比双机略慢）。
+
+**失败与重跑**：每步都幂等，**断在哪重跑哪，不用从头来**。若已经起了机、之后才中断，重跑 `launch-host.sh` 会**自动复用那台**（停了的先帮你启动）、直接打印第二步命令，不会再起一台；确实想要一台全新的才加 `--new-host`。
+
+**要知道的三件事**
+
+- **机器规格**：必须 ARM64（aarch64）、Ubuntu 24.04（镜像和 codegraph-server 都是 ARM，x86 会被拦下）；部署用户需免密 sudo。launch-host 已设 IMDSv2 + hop-limit 1。
+- **权限较大、专机专用**：`--local` 用这台机器的**实例角色**调 AWS（不是你本地 profile——SSH 进去就用不上了），它既要建资源权限也要运行期权限，**权限偏大，这台机器别跟其它业务混跑**。角色名 `source-truth-index-role` 与默认部署共用（IAM 账号级全局）：`create-iam.sh` 幂等复用、只补权限不重建，但**若同账号已有默认部署在用这个角色，补权限后那台也会一并拿到**——要让默认部署保持最小权限就换个账号跑 `--local`。
+- **NAT 省不掉**：机器在公有子网（有公网 IP 供 SSH），但 AgentCore Runtime 在私有子网、经 **NAT** 出网到 Bedrock——Runtime 的网卡由 AWS 托管、无公网 IP，走不了 IGW，所以必须有 NAT（固定费用约每月 $32 起）。bridge 端口（8080-8099）只对自引用安全组内成员开放，外部访问不到。
+
+**升级**：SSH 回**同一台**（`.local` 状态在它上面），`cd source-truth && git pull && ./scripts/deploy-all.sh --region <r> --local`。不走双机的蓝绿换机，而是就地重建镜像 + 更新 runtime + 重启网关/索引；有一段服务中断（与首次部署同量级），挑低峰期做。
 
 ## 三、接入飞书（connect 清单）
 
