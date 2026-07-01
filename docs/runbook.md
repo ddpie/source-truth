@@ -19,8 +19,30 @@
 >
 > 全部**幂等**：失败后重跑会继续未完成部分。`install.sh` 重跑会预填上次的答案。
 
+## 最短路径
+
+急着跑起来看这里，细节按需翻后面。前提：本机装好 `aws` CLI 并配好可部署的凭证；飞书应用先按[第三节](#三接入飞书connect-清单)建好，拿到 `App ID` / `App Secret` / 机器人 `open_id`。
+
+**默认（双机）**——在你的部署机上：
+
+```bash
+git clone --depth 1 https://github.com/ddpie/source-truth.git && cd source-truth
+./scripts/install.sh          # 交互填区域 / 代码仓 / 飞书凭证，端到端起后端 + 网关
+```
+详见[第二节](#二一键安装交互式推荐)；跑完照[第五节](#五验证端到端冒烟)验证。
+
+**单机（`--local`）**——先在本机起机，再进 EC2 部署：
+
+```bash
+git clone --depth 1 https://github.com/ddpie/source-truth.git && cd source-truth
+./scripts/launch-host.sh      # 自动建网 + IAM，起一台 ARM64 EC2，末尾打印下一步命令
+# 照抄它打印的那条 ssh 命令进机器，跑 ./scripts/install.sh
+```
+详见[第二节末「在单台 EC2 上就地部署」](#在单台-ec2-上就地部署--local)；首次部署后建议照[附录 C](#附录-c首次部署后的真机核对清单)逐项核对。
+
 **目录**
 
+0. [最短路径](#最短路径)
 1. [前置条件（一次性）](#一前置条件一次性)
 2. [一键安装（交互式，推荐）](#二一键安装交互式推荐)
    - [在单台 EC2 上就地部署（`--local`）](#在单台-ec2-上就地部署--local)
