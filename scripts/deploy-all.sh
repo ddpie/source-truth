@@ -341,7 +341,13 @@ preflight_quota() {
   fi
   return 0
 }
-if [[ "$DRY_RUN" != true ]]; then preflight_boto3; preflight_docker; preflight_model_access; preflight_agentcore; preflight_quota; fi
+if [[ "$DRY_RUN" != true ]]; then
+  preflight_boto3; preflight_docker; preflight_model_access; preflight_agentcore
+  # preflight_quota checks EIP/VPC/vCPU headroom — all for resources we're about to CREATE. --local
+  # creates none of them (reuses this host's VPC/subnet, doesn't run-instances or allocate an EIP),
+  # so the checks are irrelevant and their warnings just mislead. Skip in --local.
+  [[ "$LOCAL_MODE" == true ]] || preflight_quota
+fi
 
 # Persist resolved config — but NOT on --dry-run (dry-run must make no changes,
 # including no writes to deploy-config).
