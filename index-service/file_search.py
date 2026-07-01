@@ -30,7 +30,7 @@ from perf import perf_entry
 logger = logging.getLogger("file-search")
 
 # Hard cap so a pathological pattern can't return megabytes or run unbounded.
-MAX_MATCHES = 200
+MAX_MATCHES = 500
 SEARCH_TIMEOUT_S = 20
 # Per-file hit ceiling (rg --max-count). Was 5, which silently dropped the 6th+ hit
 # in a SINGLE file — e.g. a config/data TABLE where one file legitimately holds dozens
