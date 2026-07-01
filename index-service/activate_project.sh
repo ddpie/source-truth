@@ -112,6 +112,11 @@ fi
 # --- clone each repo + build its graph + write a concrete per-repo refresh unit+timer ----------
 BUILD_UNITS=""
 SERVE_FLOCKS=""
+# Local repos whose code hasn't been pushed yet: "装服务" stands up the bridge/runtime/gateway now
+# and DEFERS the graph build to the first `scripts/push-local-repo.sh`. Tracked here so the build
+# loop + initial glossary build skip them (they'd otherwise fail / waste a Bedrock precheck on an
+# empty dir). The bridge still serves them (empty, unhealthy) until the first push builds the graph.
+DEFERRED_SUBDIRS=""
 while IFS= read -r SUBDIR; do
   : "${SUBDIR:?ACTIVATE_FAILED: empty subdir (refusing git op on repo root)}"
   WS="$LOCAL_REPO_ROOT/$SUBDIR"
@@ -127,12 +132,16 @@ while IFS= read -r SUBDIR; do
       || { echo "ACTIVATE_FAILED: git fetch $SUBDIR"; exit 1; }
   else
     # LOCAL source: code is pushed out-of-band to $WS by scripts/push-local-repo.sh (+ host-side
-    # reindex_local_repo.sh). Refuse if it hasn't landed — index-build@ would otherwise fail later.
+    # reindex_local_repo.sh). If it hasn't landed yet, DON'T fail — "装服务" should still stand up
+    # the bridge/runtime/gateway; the graph build is deferred to the first push (reindex's first-push
+    # path does the full build). Mark it deferred so the build + initial-glossary loops skip it.
+    mkdir -p "$WS"
     if [ -z "$(ls -A "$WS" 2>/dev/null)" ]; then
-      echo "ACTIVATE_FAILED: local repo '$SUBDIR' has no code at $WS — push it first (scripts/push-local-repo.sh)"
-      exit 1
+      echo "activate: local repo '$SUBDIR' has no code yet — deferring graph build to first push (scripts/push-local-repo.sh)"
+      DEFERRED_SUBDIRS="$DEFERRED_SUBDIRS $SUBDIR"
+    else
+      echo "activate: $SUBDIR is a LOCAL repo (no git fetch, no refresh timer)"
     fi
-    echo "activate: $SUBDIR is a LOCAL repo (no git fetch, no refresh timer)"
   fi
   # graph dirs INSIDE $WS (proven layout); created after fetch/push, git-untracked so reset --hard keeps them.
   mkdir -p "$WS/.codegraph" "$WS/.home/.codegraph"
@@ -201,7 +210,14 @@ systemctl daemon-reload
 # Build each repo (sole writer per graph) BEFORE starting the bridge. If the bridge is already
 # running (re-activate), stop it first so the build's `flock -n` can take the writer lock.
 systemctl stop "index-bridge-${PROJECT_ID}.service" 2>/dev/null || true
+DEFERRED_MEMBER=" $(echo $DEFERRED_SUBDIRS) "   # space-delimited membership test
 for SUBDIR in $SUBDIRS; do
+  # A deferred (empty local) repo has no code to index yet — skip its build. The bridge starts and
+  # serves it empty (unhealthy) until the first `push-local-repo.sh` runs the full build.
+  case "$DEFERRED_MEMBER" in *" $SUBDIR "*)
+    echo "activate: skipping graph build for '$SUBDIR' (no code yet — deferred to first push)"
+    continue ;;
+  esac
   systemctl reset-failed "index-build@${SUBDIR}.service" 2>/dev/null || true
   systemctl start "index-build@${SUBDIR}.service" || true
   R="$(systemctl show "index-build@${SUBDIR}.service" --value -p Result 2>/dev/null || echo unknown)"
@@ -261,6 +277,9 @@ GLOSSARY_ROOT="${GLOSSARY_ROOT:-/data/glossary}"
 # idempotent re-activation, and avoids re-blanking a working slice.
 NEED_BUILD=""
 for SUBDIR in $SUBDIRS; do
+  # Skip deferred (empty local) repos: no code → a cc scan finds nothing and would waste a Bedrock
+  # precheck + write an empty slice. The first push builds the graph AND refreshes the glossary.
+  case "$DEFERRED_MEMBER" in *" $SUBDIR "*) continue ;; esac
   SLICE="$GLOSSARY_ROOT/${PROJECT_ID}/${SUBDIR}.jsonl"
   if [ ! -s "$SLICE" ]; then
     NEED_BUILD="$NEED_BUILD $SUBDIR"

@@ -25,6 +25,11 @@ set -euo pipefail
 
 MODE="reindex"
 if [ "${1:-}" = "--prepare" ]; then MODE="prepare"; shift; fi
+# __build is INTERNAL: the ssh-facing invocation re-launches this script in __build mode inside a
+# transient systemd unit (see the launcher at the tail), so the heavy work survives SSH disconnect.
+# Operators never pass it; only systemd-run does.
+BG=false
+if [ "${1:-}" = "__build" ]; then BG=true; shift; fi
 SUBDIR="${1:?usage: reindex_local_repo.sh [--prepare] <subdir>}"
 echo "$SUBDIR" | grep -qE '^[a-z0-9][a-z0-9-]*$' || { echo "REINDEX_FAILED: invalid subdir '$SUBDIR'"; exit 2; }
 
@@ -164,36 +169,79 @@ refresh_glossary() {
   ) || true
 }
 
-# Decide incremental vs full by graph VALIDITY, not mere non-emptiness. Use the SAME >=64KiB
-# threshold index-build@'s ExecStartPost enforces (bootstrap.sh): a first build that was killed
-# mid-write can leave a small partial graph.db — `[ -s ]` (non-empty) would then wrongly pick the
-# incremental path and the watcher would serve a broken/stale graph forever. A sub-64KiB file means
-# "no valid graph yet" → fall through to the full-build branch, which rebuilds it correctly.
-GRAPH_SZ="$(du -sb "$GRAPH" 2>/dev/null | cut -f1 || echo 0)"
-if [ "${GRAPH_SZ:-0}" -ge 65536 ]; then
-  # ----- SUBSEQUENT push: in-place update, watcher picks it up, bridge stays up -----
-  echo "reindex: applying staged update in place (bridge stays up; watcher re-indexes incrementally)"
-  apply_staged
-  stamp_snapshot
-  rm -rf "$STAGE"
-  refresh_glossary incremental
-  echo "REINDEX_DONE subdir=${SUBDIR} project=${PID} mode=incremental"
-else
-  # ----- FIRST push: no graph yet → full build with the bridge stopped (free the writer flock) -----
-  echo "reindex: first build for $SUBDIR — stopping $BRIDGE to build the graph (single-writer)"
-  systemctl stop "$BRIDGE" 2>/dev/null || true
-  apply_staged
-  stamp_snapshot
-  systemctl reset-failed "index-build@${SUBDIR}.service" 2>/dev/null || true
-  systemctl start "index-build@${SUBDIR}.service" || true
-  R="$(systemctl show "index-build@${SUBDIR}.service" --value -p Result 2>/dev/null || echo unknown)"
-  if [ "$R" != "success" ]; then
-    echo "REINDEX_FAILED: index-build@${SUBDIR} Result=$R"; journalctl -u "index-build@${SUBDIR}.service" --no-pager | tail -30 || true
-    systemctl start "$BRIDGE" 2>/dev/null || true   # bring the project back even on a failed first build
-    exit 1
+# do_build: apply the staged code, then (re)build the graph and refresh the glossary IN PARALLEL.
+# Runs in the background transient unit (BG=true) so it survives SSH disconnect: a first-push full
+# build takes minutes AND must reach its final `systemctl start $BRIDGE` — if the ssh channel were
+# killed mid-build the bridge would stay down forever. glossary_gen writes <subdir>.jsonl under its
+# OWN per-slice lock and never touches graph.db, so it's safe to run concurrently with the graph
+# build (which holds the per-repo .writer.lock) — 单写者 is per-graph.db, and these are different files.
+do_build() {
+  # Decide incremental vs full by graph VALIDITY, not mere non-emptiness. Use the SAME >=64KiB
+  # threshold index-build@'s ExecStartPost enforces (bootstrap.sh): a first build that was killed
+  # mid-write can leave a small partial graph.db — `[ -s ]` (non-empty) would then wrongly pick the
+  # incremental path and the watcher would serve a broken/stale graph forever. A sub-64KiB file means
+  # "no valid graph yet" → fall through to the full-build branch, which rebuilds it correctly.
+  GRAPH_SZ="$(du -sb "$GRAPH" 2>/dev/null | cut -f1 || echo 0)"
+  if [ "${GRAPH_SZ:-0}" -ge 65536 ]; then
+    # ----- SUBSEQUENT push: in-place update, watcher picks it up, bridge stays up -----
+    echo "reindex: applying staged update in place (bridge stays up; watcher re-indexes incrementally)"
+    apply_staged
+    stamp_snapshot
+    rm -rf "$STAGE"
+    refresh_glossary incremental   # parallel: launches its own detached systemd unit, returns at once
+    echo "REINDEX_DONE subdir=${SUBDIR} project=${PID} mode=incremental"
+  else
+    # ----- FIRST push: no graph yet → full build with the bridge stopped (free the writer flock) -----
+    echo "reindex: first build for $SUBDIR — stopping $BRIDGE to build the graph (single-writer)"
+    systemctl stop "$BRIDGE" 2>/dev/null || true
+    apply_staged
+    stamp_snapshot
+    # Kick the glossary build off NOW, BEFORE the (blocking, minutes-long) graph build — it scans the
+    # applied source files and is independent of graph.db, so the two run in parallel and total
+    # wall-clock ≈ max(graph, glossary) instead of their sum.
+    refresh_glossary full
+    systemctl reset-failed "index-build@${SUBDIR}.service" 2>/dev/null || true
+    systemctl start "index-build@${SUBDIR}.service" || true
+    R="$(systemctl show "index-build@${SUBDIR}.service" --value -p Result 2>/dev/null || echo unknown)"
+    if [ "$R" != "success" ]; then
+      echo "REINDEX_FAILED: index-build@${SUBDIR} Result=$R"; journalctl -u "index-build@${SUBDIR}.service" --no-pager | tail -30 || true
+      systemctl start "$BRIDGE" 2>/dev/null || true   # bring the project back even on a failed first build
+      exit 1
+    fi
+    rm -rf "$STAGE"
+    systemctl start "$BRIDGE" || { echo "REINDEX_WARN: graph built OK but bridge start returned non-zero — check: systemctl status $BRIDGE"; }
+    echo "REINDEX_DONE subdir=${SUBDIR} project=${PID} mode=initial-build"
   fi
-  rm -rf "$STAGE"
-  systemctl start "$BRIDGE" || { echo "REINDEX_WARN: graph built OK but bridge start returned non-zero — check: systemctl status $BRIDGE"; }
-  refresh_glossary full
-  echo "REINDEX_DONE subdir=${SUBDIR} project=${PID} mode=initial-build"
+}
+
+if [ "$BG" = true ]; then
+  # We ARE the background build (launched by systemd-run below): do the heavy work and exit. The
+  # per-subdir flock (fd 9, taken at the top) is held for the whole build — a second push's launcher
+  # fails fast rather than racing this build's rsync/graph write.
+  do_build
+  exit 0
+fi
+
+# ssh-FACING PATH: hand the heavy work to a transient systemd unit (PID 1, own session/cgroup/fds)
+# and return immediately. This is why a first-push full build (minutes) survives the operator's ssh
+# disconnecting — systemd, not the ssh channel, owns the process. We RELEASE our own advisory lock
+# first (close fd 9): the background unit re-takes the SAME lock at its top, so serialization still
+# holds, but we mustn't hold it here or the child would deadlock on its own flock -n.
+UNIT="reindex-${SUBDIR}"
+exec 9>&-   # drop the launcher's lock; the background unit re-acquires it
+systemctl reset-failed "${UNIT}.service" 2>/dev/null || true
+if systemd-run --collect --unit="$UNIT" \
+     -p "StandardOutput=append:/var/log/reindex-${SUBDIR}.log" \
+     -p "StandardError=append:/var/log/reindex-${SUBDIR}.log" \
+     /bin/bash "$0" __build "$SUBDIR" >/dev/null 2>&1; then
+  echo "REINDEX_LAUNCHED subdir=${SUBDIR} unit=${UNIT}.service"
+  echo "  代码已上传，建图+术语表在后台并行进行（ssh 断开不影响）。查看进度："
+  echo "    sudo journalctl -u ${UNIT}.service -f        # 建图/编排"
+  echo "    sudo tail -f /var/log/reindex-${SUBDIR}.log  # 同上（文件）"
+  echo "    sudo tail -f /var/log/glossary-build-*-${SUBDIR}.log  # 术语表"
+else
+  # systemd-run unavailable/failed (e.g. non-systemd test box) — fall back to running inline so the
+  # push still works, just without detach (ssh disconnect would then interrupt it).
+  echo "reindex: systemd-run unavailable — running the build inline (ssh disconnect WOULD interrupt it)"
+  do_build
 fi

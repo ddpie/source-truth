@@ -51,4 +51,19 @@ grep -q 'bedrock-runtime converse' "$S"; check "glossary refresh gated by Bedroc
 grep -q 'systemd-run' "$S"; check "glossary build detaches via systemd-run (not nohup under SSH)" $?
 # no ACTUAL nohup command (strip comment lines first — the rationale comment names the old pattern).
 ! grep -vE '^\s*#' "$S" | grep -qE '\bnohup\b'; check "no nohup-backgrounded glossary build" $?
+
+# DETACH-FROM-SSH: the heavy work (apply + graph build + glossary) must run in a transient systemd
+# unit, NOT inline in the ssh channel — else a first-push full build (minutes) is killed when the
+# operator's ssh drops, and its final `systemctl start $BRIDGE` never runs (bridge stays down).
+grep -q 'do_build' "$S"; check "heavy work factored into do_build" $?
+grep -q 'UNIT="reindex-' "$S" && grep -q 'systemd-run --collect --unit="$UNIT"' "$S"; check "ssh path launches build in a transient reindex- unit" $?
+grep -q 'REINDEX_LAUNCHED' "$S"; check "ssh path returns immediately (REINDEX_LAUNCHED), not blocking" $?
+grep -q '__build' "$S"; check "background unit re-invokes the script in __build mode" $?
+# The launcher must DROP its own advisory lock (close fd 9) before the child re-takes it, or the
+# background unit deadlocks on its own flock -n.
+grep -q 'exec 9>&-' "$S"; check "launcher releases fd9 lock so the bg unit can re-acquire it" $?
+# PARALLEL on first push: kick the glossary build off BEFORE the blocking graph build so the two
+# overlap (glossary writes its own slice lock, never graph.db — safe concurrently). Assert the
+# `refresh_glossary full` call precedes `index-build@` start in the first-build branch.
+awk '/----- FIRST push/{f=1} f&&/refresh_glossary full/{g=NR} f&&/systemctl start "index-build@/{b=NR} END{exit !(g&&b&&g<b)}' "$S"; check "first push launches glossary BEFORE the graph build (parallel)" $?
 [[ "$_fail" -eq 0 ]]; exit $?

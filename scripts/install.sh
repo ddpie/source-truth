@@ -446,7 +446,7 @@ a=json.loads(sys.argv[1]); a.append({"subdir":os.environ["RSUB"],"source":"git",
       REPOS_JSON="$(RSUB="$RSUB" python3 -c '
 import json,os,sys
 a=json.loads(sys.argv[1]); a.append({"subdir":os.environ["RSUB"],"source":"local"}); print(json.dumps(a))' "$REPOS_JSON")"
-      say ok "    已加入本地仓 / local repo: $RSUB （部署后用 scripts/push-local-repo.sh 推送代码）"
+      say ok "    已加入本地仓 / local repo: $RSUB （装服务会先起好后端，之后本机跑 scripts/push-local-repo.sh 推代码即建图上线）"
     fi
     N=$((N + 1))
   done
@@ -486,7 +486,16 @@ print(free[0] if free else "")' "$PROJECTS_CFG")"
   if ! [[ "$PORT" =~ ^[0-9]+$ ]] || (( PORT < 8080 || PORT > 8099 )); then
     say err "端口必须在 8080-8099（安全组只放行这一段）/ port must be 8080-8099 (only this range is open in the SG); got '$PORT'"; exit 1
   fi
-  if project_ids | while read -r p; do python3 -c 'import json,sys; d=json.load(open(sys.argv[1]))["projects"]; sys.exit(0 if d.get(sys.argv[2],{}).get("port")==int(sys.argv[3]) else 1)' "$PROJECTS_CFG" "$p" "$PORT" && echo "$p"; done | grep -q .; then
+  # 一次 python3 遍历判冲突（同上面 subdir 冲突检查的写法）。不要用 while+&& 管道：
+  # 循环体末条命令对不匹配项目返回 1，会在 set -e + pipefail 下把整条管道判非零，
+  # 让「已占用」误报成「空闲」——两个项目共用一个 bridge 端口，后启动的起不来。
+  if ! python3 -c 'import json,sys
+try: projects=json.load(open(sys.argv[1])).get("projects",{})
+except Exception: projects={}
+clash=[pid for pid,p in projects.items() if p.get("port")==int(sys.argv[2])]
+if clash:
+    sys.stderr.write("port used by: "+", ".join(clash)+"\n"); sys.exit(1)
+' "$PROJECTS_CFG" "$PORT"; then
     say err "端口 $PORT 已被占用 / port already used by another project"; exit 1
   fi
 
