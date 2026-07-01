@@ -15,6 +15,8 @@ grep -q 'REGION' "$P" && grep -q 'is required' "$P"; check "REGION required (fai
 grep -q 'awscli-exe-linux' "$P"; check "installs AWS CLI v2" $?
 grep -q 'docker.io' "$P"; check "installs docker" $?
 grep -q 'apt-get install -y git' "$P"; check "ensures git" $?
+# deploy-all Phase 5 needs a boto3 new enough to know bedrock-agentcore-control
+grep -q 'bedrock-agentcore-control' "$P" && grep -q 'pip3 install .*boto3' "$P"; check "ensures boto3/botocore recent enough for AgentCore" $?
 # token via Secrets Manager + here-string (not argv), never in the process list
 grep -q 'secretsmanager get-secret-value' "$P"; check "reads token from Secrets Manager" $?
 grep -q 'gh auth login --with-token <<<"\$T"' "$P"; check "gh login via here-string (token not in argv)" $?

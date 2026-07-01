@@ -44,6 +44,19 @@ fi
 step "git"
 command -v git >/dev/null && echo "• already present" || sudo apt-get install -y git
 
+# --- 2b. boto3/botocore recent enough for AgentCore ---------------------------------------------
+# deploy-all Phase 5 drives AgentCore via boto3 (lib/deploy_runtime.py); an old apt/pip botocore
+# lacks the 'bedrock-agentcore-control' service and deploy-all's preflight HARD-fails. Ubuntu 24.04
+# is PEP-668 externally-managed, so --break-system-packages (same as bootstrap.sh's pip install).
+step "boto3/botocore (for AgentCore)"
+command -v pip3 >/dev/null || sudo apt-get install -y python3-pip
+if python3 -c 'import boto3,sys; sys.exit(0 if "bedrock-agentcore-control" in boto3.Session().get_available_services() else 1)' 2>/dev/null; then
+  echo "• already recent enough"
+else
+  sudo pip3 install --break-system-packages -q -U boto3 botocore
+  echo "• upgraded boto3/botocore"
+fi
+
 # --- 3. docker + buildx (install.sh's Phase 4 builds the ARM64 image locally) -------------------
 step "docker"
 if command -v docker >/dev/null; then
