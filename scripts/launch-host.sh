@@ -9,8 +9,8 @@
 #   4. launch ONE ARM64 Ubuntu 24.04 EC2 in the PUBLIC subnet (public IP for SSH), instance profile
 #      attached + IMDSv2 required. The AgentCore runtime later lands in the PRIVATE subnet (NAT egress
 #      to Bedrock) — a VPC-mode runtime ENI has no public IP, so it can't reach Bedrock via the IGW.
-#   5. ask for the SSH key, then scp prepare-local-host.sh to the box and run it (installs deps,
-#      logs gh in, clones, runs install.sh) — no long command to paste by hand
+#   5. ask for the SSH key, scp prepare-local-host.sh to the box, and print the one command to run it
+#      yourself over ssh (installs deps, logs gh in, clones, runs install.sh) — you watch it live
 #
 # The EC2 is LONG-LIVED and holds the deployment state in its repo's .local/ (deploy-config +
 # projects.json), so later upgrades = SSH back into the SAME box and re-run deploy-all --local.
@@ -84,16 +84,21 @@ pick_one() {
 print_manual_fallback() {
   local ip="$1"
   cat >&2 <<NEXT
-  手动部署（两条短命令，把 <你的key>.pem 换成你的私钥）：
+  手动部署（把 <你的key>.pem 换成你的私钥）：
+    # ① 本机：把脚本传上去
     scp -i <你的key>.pem "$HERE/prepare-local-host.sh" ubuntu@${ip}:/tmp/
-    ssh -t -i <你的key>.pem ubuntu@${ip} 'REGION=${REGION} REPO_REF=${REPO_REF} bash /tmp/prepare-local-host.sh'
+    # ② 本机：SSH 登录机器
+    ssh -t -i <你的key>.pem ubuntu@${ip}
+    # ③ 登录后在机器上运行
+    REGION=${REGION} REPO_REF=${REPO_REF} bash /tmp/prepare-local-host.sh
 NEXT
 }
 
-# deploy_to_host <instance-id> <ip> : scp prepare-local-host.sh to the box and run it (it installs
-# aws/docker/gh, logs gh in with the token from Secrets Manager, clones, and runs install.sh). Ask
-# for the SSH key (launch-host doesn't know the operator's private-key path — only the key-pair
-# name). Blank / a failed connect falls back to printing the two short manual commands.
+# deploy_to_host <instance-id> <ip> : scp prepare-local-host.sh onto the box, then hand the operator
+# the one command to run it themselves over ssh. We upload for you (we have the key), but DON'T
+# auto-run — running it interactively lets you watch each step and handle a hiccup (e.g. a preflight
+# stop) on the spot. Ask for the SSH key (launch-host only knows the key-pair NAME, not its path);
+# blank / a failed connect still prints the manual scp+ssh pair.
 deploy_to_host() {
   local iid="$1" ip="$2" key def
   cat >&2 <<NEXT
@@ -106,7 +111,7 @@ NEXT
   fi
   # KEY is the chosen key-pair name on the launch path; on the reuse path it's unset — default blank.
   def=""; [ -n "${KEY:-}" ] && def="$HOME/.ssh/${KEY}.pem"
-  read -e -rp "  SSH 私钥路径（用于把部署脚本传上去并执行；留空=稍后手动）[${def}]: " key || true
+  read -e -rp "  SSH 私钥路径（用于把部署脚本传上去；留空=稍后手动）[${def}]: " key || true
   key="${key:-$def}"
   # `read` does NOT expand a leading ~ (tilde), so a hand-typed ~/.ssh/foo.pem would be taken
   # literally and fail the -f check below. Expand ~ / ~user ourselves. (The ~ in these case
@@ -132,12 +137,17 @@ NEXT
     sleep 5
   done
   [ "$ok" = true ] || { say warn "SSH 暂时连不上 $ip（私钥不对，或机器还没起好）。稍后手动执行："; print_manual_fallback "$ip"; return 0; }
-  say step "把部署脚本传到 EC2 并执行（装依赖 + 登录 GitHub + clone + install）..."
+  say step "把部署脚本传到 EC2（/tmp/prepare-local-host.sh）..."
   if ! scp "${sshopt[@]}" "$HERE/prepare-local-host.sh" ubuntu@"$ip":/tmp/prepare-local-host.sh; then
     say warn "scp 失败。请手动执行："; print_manual_fallback "$ip"; return 0
   fi
-  # -t for the interactive installer. This is the ONLY step that needs a tty.
-  ssh -t "${sshopt[@]}" ubuntu@"$ip" "REGION=$REGION REPO_REF=$REPO_REF bash /tmp/prepare-local-host.sh"
+  say ok "脚本已上传。接下来 SSH 进机器、手动运行它（能看到每一步；卡住就地处理，断了重连再跑即可）："
+  cat >&2 <<NEXT
+
+  ssh -t -i ${key} ubuntu@${ip}
+  # 登录后，在机器上运行：
+  REGION=${REGION} REPO_REF=${REPO_REF} bash /tmp/prepare-local-host.sh
+NEXT
 }
 
 # --- 1. profile (menu-picked; not pre-filled — pick is cheap and the account isn't known yet) ---

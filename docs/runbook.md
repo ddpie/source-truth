@@ -35,9 +35,9 @@ git clone https://github.com/ddpie/source-truth.git && cd source-truth
 
 ```bash
 git clone https://github.com/ddpie/source-truth.git && cd source-truth
-./scripts/launch-host.sh      # 选 profile → 建网络/IAM → 创建 ARM64 EC2 → 问你 SSH 私钥 → 自动上机部署
+./scripts/launch-host.sh      # 选 profile → 建网络/IAM → 创建 ARM64 EC2 → 问你 SSH 私钥 → 传部署脚本上机
 ```
-`launch-host.sh` 建好 EC2 后会问你 SSH 私钥路径，然后自动把部署脚本传上去执行：装依赖、（私有仓）登录 GitHub、克隆仓库，进入 `install.sh` 交互填代码仓 / 模型 / 飞书凭证。你只需在本机跑这一条、输一次私钥。详见[第二节末「在单台 EC2 上就地部署」](#在单台-ec2-上就地部署--local)；首次部署后建议照[附录 C](#附录-c首次部署后的真机核对清单)逐项核对。
+`launch-host.sh` 建好 EC2 后会问你 SSH 私钥路径，用它把部署脚本传上机，然后打印一条 `ssh` 命令。你照它登录机器、运行那条脚本——装依赖、（私有仓）登录 GitHub、克隆仓库、进入 `install.sh` 交互填代码仓 / 模型 / 飞书凭证，全在你眼前跑，卡住能就地处理。详见[第二节末「在单台 EC2 上就地部署」](#在单台-ec2-上就地部署--local)；首次部署后建议照[附录 C](#附录-c首次部署后的真机核对清单)逐项核对。
 
 **目录**
 
@@ -159,13 +159,13 @@ codegraph 索引吃内存、随仓库增大而增长，按仓库规模选机型�
 
 它按顺序执行（全自动、每步幂等）：选 profile → 建/复用 IAM 角色 → 若是私有仓，取你本机 `gh` 的 token 存进 Secrets Manager（见下「GitHub 凭证」）→ **自动创建一套 source-truth 专用网络**（VPC + 公私子网 + IGW + NAT，账号中已有则复用，无需手动选 VPC/子网）→ 创建安全组（只放行你当前出口 IP 的 22 端口）→ 选密钥/机型/磁盘 → 在公有子网创建一台 ARM64 EC2、挂好实例角色。
 
-创建好后，它会**问你 SSH 私钥路径**（默认猜 `~/.ssh/<你选的 key pair>.pem`），然后自动把部署脚本 [`scripts/prepare-local-host.sh`](../scripts/prepare-local-host.sh) 传到 EC2 并执行——这一步在机器上装好 install.sh 需要的依赖（`aws` / `docker` / `git`）、用第一步存好的凭证登录 GitHub、克隆仓库，最后进入 `install.sh` 交互（填区域 / 代码仓 / 模型 / 飞书凭证）。全程你只需在本机跑一条命令、输一次私钥路径，不用手粘任何长命令。
+创建好后，它会**问你 SSH 私钥路径**（默认猜 `~/.ssh/<你选的 key pair>.pem`），用它把部署脚本 [`scripts/prepare-local-host.sh`](../scripts/prepare-local-host.sh) 传到 EC2，然后**打印一条 `ssh` 登录命令**。你照它登录机器，运行那条脚本：装好 install.sh 需要的依赖（`aws` / `docker` / `git` / boto3）、用第一步存好的凭证登录 GitHub、克隆仓库，最后进入 `install.sh --local` 交互（填代码仓 / 模型 / 飞书凭证）。**故意不替你自动跑**——脚本在你眼前一步步执行，哪一步卡住（比如 preflight 提示某依赖）能当场处理，断了重连再跑即可。
 
-> 私钥留空、或连不上（私钥不对、机器还没起好）时，launch-host 会改为打印两条短命令（`scp` 脚本 + `ssh` 执行）让你手动完成——同样不含 token。
+> 私钥留空、或连不上（私钥不对、机器还没起好）时，launch-host 会改为打印三条命令（`scp` 上传 + `ssh` 登录 + 登录后运行）让你手动完成——同样不含 token。
 
 首次部署约 10–20 分钟（bootstrap 与镜像构建都在本机串行执行，比双机略慢）。
 
-**失败后重跑**：每一步都幂等，**从中断的地方重新运行即可，不必从头开始**。若机器已创建、之后才中断，重新运行 `launch-host.sh` 会**自动复用它**（已停止的会先启动），照常问 SSH 私钥后自动上机部署，不会再创建一台；确需一台全新的，加 `--new-host`。
+**失败后重跑**：每一步都幂等，**从中断的地方重新运行即可，不必从头开始**。脚本已在机器上时，直接 SSH 进去重跑 `bash /tmp/prepare-local-host.sh`（或 `cd source-truth && ./scripts/install.sh --local`）即可续。若机器已创建、之后才中断，重新运行 `launch-host.sh` 会**自动复用它**（已停止的会先启动），照常问 SSH 私钥、重新传脚本并打印登录命令，不会再创建一台；确需一台全新的，加 `--new-host`。
 
 **四点需要注意**
 
