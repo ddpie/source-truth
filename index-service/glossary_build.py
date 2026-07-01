@@ -23,9 +23,13 @@ without shelling out; run_cc() is the default subprocess runner.
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import logging
+import os
+import random
 import subprocess
+import time
 from dataclasses import replace
 from typing import Callable
 
@@ -243,6 +247,86 @@ def run_cc(prompt: str, *, cwd: str, model: str, region: str,
         raise subprocess.CalledProcessError(proc.returncode, argv[0], output=proc.stdout,
                                             stderr=(proc.stderr or "")[:200])
     return proc.stdout or ""
+
+
+# --- concurrency + backoff for the batch loop -------------------------------
+# Env-tunable knobs (illegal / non-positive values fall back to the default).
+_DEFAULT_CONCURRENCY = 8
+_DEFAULT_RETRY_BASE_S = 4.0
+_DEFAULT_MAX_RETRIES = 3
+
+# Bedrock throttle signatures. cc surfaces these on stderr when the model endpoint
+# rate-limits; we retry ONLY these (plus timeouts), never hard errors (bad args,
+# AccessDenied, non-throttle 4xx) — retrying those just wastes time and tokens.
+_THROTTLE_MARKERS = ("throttl", "429", "too many requests", "rate exceeded")
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        v = int(os.environ.get(name, "") or default)
+    except ValueError:
+        return default
+    return v if v > 0 else default
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        v = float(os.environ.get(name, "") or default)
+    except ValueError:
+        return default
+    return v if v > 0 else default
+
+
+def _build_concurrency() -> int:
+    return _env_int("GLOSSARY_BUILD_CONCURRENCY", _DEFAULT_CONCURRENCY)
+
+
+def _retry_base_s() -> float:
+    return _env_float("GLOSSARY_BUILD_RETRY_BASE_S", _DEFAULT_RETRY_BASE_S)
+
+
+def _max_retries() -> int:
+    return _env_int("GLOSSARY_BUILD_MAX_RETRIES", _DEFAULT_MAX_RETRIES)
+
+
+def _is_throttle_error(exc: BaseException) -> bool:
+    """True iff exc is a retriable throttle/timeout. Timeouts count (a batch that timed
+    out is usually the endpoint being slow under load). A CalledProcessError counts only
+    when its stderr carries a throttle marker — a hard error (bad flag, AccessDenied) does
+    NOT, so it bubbles up immediately without burning retries."""
+    if isinstance(exc, subprocess.TimeoutExpired):
+        return True
+    if isinstance(exc, subprocess.CalledProcessError):
+        stderr = exc.stderr or ""
+        low = stderr.lower() if isinstance(stderr, str) else ""
+        return any(m in low for m in _THROTTLE_MARKERS)
+    return False
+
+
+def _run_with_retry(run: Callable[..., str], *, prompt: str, cwd: str, model: str,
+                    region: str, timeout: int, batch_idx: int,
+                    sleeper: Callable[[float], None] = time.sleep,
+                    rng: Callable[[float, float], float] = random.uniform) -> str:
+    """Call `run` for one batch with bounded exponential backoff on throttle/timeout.
+    Backoff is base*2**attempt + jitter to de-correlate concurrent batches (avoid
+    back-to-back retries all hammering the endpoint at once). Hard errors and a final
+    exhausted throttle both raise — the caller (build) turns that into an overall failure
+    so glossary_gen keeps the old slice (SKIP)."""
+    base = _retry_base_s()
+    max_retries = _max_retries()
+    attempt = 0
+    while True:
+        try:
+            return run(prompt, cwd=cwd, model=model, region=region, timeout=timeout)
+        except Exception as exc:  # noqa: BLE001 - classify then re-raise
+            if not _is_throttle_error(exc) or attempt >= max_retries:
+                raise
+            wait = base * (2 ** attempt) + rng(0.0, base)
+            logger.warning(json.dumps({"event": "glossary_build_retry", "batch": batch_idx,
+                                        "attempt": attempt + 1, "max": max_retries,
+                                        "wait_s": round(wait, 2), "detail": str(exc)[:120]}))
+            sleeper(wait)
+            attempt += 1
 
 
 def build(files: list[str] | None, *, project: str, cwd: str, model: str, region: str,

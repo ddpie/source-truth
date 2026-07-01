@@ -367,3 +367,90 @@ def test_build_emits_per_batch_progress(monkeypatch, caplog):
               if r.name == "glossary-build" and "glossary_build_batch" in r.message]
     assert [e["batch"] for e in events] == [1, 2, 3]
     assert all(e["batches"] == 3 and e["project"] == "p" for e in events)
+
+
+# --- concurrency + backoff: throttle-aware retry around each cc batch ----------
+import subprocess as _subp  # noqa: E402
+
+
+def _throttle_err():
+    return _subp.CalledProcessError(1, "claude", output="", stderr="ThrottlingException: rate exceeded")
+
+
+def _hard_err():
+    return _subp.CalledProcessError(2, "claude", output="", stderr="invalid --model foo")
+
+
+def test_is_throttle_error_matches_429_and_timeout():
+    assert glossary_build._is_throttle_error(_throttle_err()) is True
+    assert glossary_build._is_throttle_error(_subp.TimeoutExpired("claude", 1)) is True
+    assert glossary_build._is_throttle_error(_hard_err()) is False
+    assert glossary_build._is_throttle_error(ValueError("x")) is False
+
+
+def test_run_with_retry_retries_throttle_then_succeeds(monkeypatch):
+    monkeypatch.setenv("GLOSSARY_BUILD_MAX_RETRIES", "3")
+    monkeypatch.setenv("GLOSSARY_BUILD_RETRY_BASE_S", "1")
+    calls = {"n": 0}
+
+    def run(prompt, *, cwd, model, region, timeout):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            raise _throttle_err()
+        return '{"ok":1}'
+
+    slept = []
+    out = glossary_build._run_with_retry(
+        run, prompt="p", cwd="/x", model="m", region="r",
+        timeout=1, batch_idx=1, sleeper=slept.append, rng=lambda a, b: 0.0)
+    assert out == '{"ok":1}'
+    assert calls["n"] == 3
+    assert len(slept) == 2  # two backoffs before the 3rd success
+
+
+def test_run_with_retry_hard_error_no_retry(monkeypatch):
+    monkeypatch.setenv("GLOSSARY_BUILD_MAX_RETRIES", "3")
+    calls = {"n": 0}
+
+    def run(prompt, *, cwd, model, region, timeout):
+        calls["n"] += 1
+        raise _hard_err()
+
+    try:
+        glossary_build._run_with_retry(
+            run, prompt="p", cwd="/x", model="m", region="r",
+            timeout=1, batch_idx=1, sleeper=lambda s: None, rng=lambda a, b: 0.0)
+        assert False, "expected CalledProcessError"
+    except _subp.CalledProcessError:
+        pass
+    assert calls["n"] == 1  # hard error: no retry
+
+
+def test_run_with_retry_exhausts_then_raises(monkeypatch):
+    monkeypatch.setenv("GLOSSARY_BUILD_MAX_RETRIES", "2")
+    monkeypatch.setenv("GLOSSARY_BUILD_RETRY_BASE_S", "1")
+    calls = {"n": 0}
+
+    def run(prompt, *, cwd, model, region, timeout):
+        calls["n"] += 1
+        raise _throttle_err()
+
+    try:
+        glossary_build._run_with_retry(
+            run, prompt="p", cwd="/x", model="m", region="r",
+            timeout=1, batch_idx=1, sleeper=lambda s: None, rng=lambda a, b: 0.0)
+        assert False, "expected CalledProcessError after exhausting retries"
+    except _subp.CalledProcessError:
+        pass
+    assert calls["n"] == 3  # 1 initial + 2 retries
+
+
+def test_build_concurrency_env_fallback(monkeypatch):
+    monkeypatch.delenv("GLOSSARY_BUILD_CONCURRENCY", raising=False)
+    assert glossary_build._build_concurrency() == 8
+    monkeypatch.setenv("GLOSSARY_BUILD_CONCURRENCY", "not-a-number")
+    assert glossary_build._build_concurrency() == 8
+    monkeypatch.setenv("GLOSSARY_BUILD_CONCURRENCY", "0")
+    assert glossary_build._build_concurrency() == 8  # <=0 falls back
+    monkeypatch.setenv("GLOSSARY_BUILD_CONCURRENCY", "5")
+    assert glossary_build._build_concurrency() == 5
