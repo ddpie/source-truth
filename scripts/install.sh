@@ -268,10 +268,10 @@ DISK_OPTIONS=(
 # 中文→英文符号 map; higher = more coverage but more $ (a full scan of a large repo
 # can run into the hundreds of USD, one-time). 0 = no cap (whole repo).
 GLOSSARY_OPTIONS=(
-  "400    控成本·默认 (cap cost)"
+  "0      不限·全量·默认 (no cap — full coverage)"
+  "4000   大仓深覆盖 (deep)"
   "1000   更广覆盖 (more coverage)"
-  "4000   大仓深覆盖 (deep, larger \$)"
-  "0      不限·全量 (no cap, highest \$)"
+  "400    控成本 (cap cost — may miss Chinese-dense files)"
   "$MANUAL_SENTINEL"
 )
 
@@ -384,18 +384,18 @@ flow_init_env() {
     HW_FLAGS=(--instance-type "$INSTANCE_TYPE" --root-volume-gb "$ROOT_VOLUME_GB")
   fi
   # Glossary cap is a build-cost knob (not machine-specific). In --local, don't make the operator
-  # stop and choose on first run — take the safe default (400, cost-controlled) and just show it.
+  # stop and choose on first run — take the default (0 = no cap, full coverage) and just show it.
   # To change it later: re-run install without --local, or set GLOSSARY_MAX_FILES / edit the env.
   if [[ "$LOCAL_MODE" == true ]]; then
-    GLOSSARY_MAX_FILES="${DEPLOY_GLOSSARY_MAX_FILES:-400}"
-    say info "术语表构建文件上限 / glossary build cap: ${GLOSSARY_MAX_FILES}（默认，控成本；改需重设 GLOSSARY_MAX_FILES）"
+    GLOSSARY_MAX_FILES="${DEPLOY_GLOSSARY_MAX_FILES:-0}"
+    say info "术语表构建文件上限 / glossary build cap: ${GLOSSARY_MAX_FILES}（0=不限·全量覆盖；设正数可控成本）"
   else
-  pick_field GLOSSARY_MAX_FILES "术语表构建文件上限 (中文→代码符号·控成本) / glossary build cap" \
-    "${DEPLOY_GLOSSARY_MAX_FILES:-400}" "文件数 (0=不限)" "${GLOSSARY_OPTIONS[@]}"
+  pick_field GLOSSARY_MAX_FILES "术语表构建文件上限 (中文→代码符号；0=不限) / glossary build cap" \
+    "${DEPLOY_GLOSSARY_MAX_FILES:-0}" "文件数 (0=不限)" "${GLOSSARY_OPTIONS[@]}"
   while ! [[ "$GLOSSARY_MAX_FILES" =~ ^[0-9]+$ ]]; do
     [[ "$ASSUME_YES" == true ]] && { say err "术语表上限无效 / invalid glossary cap '$GLOSSARY_MAX_FILES'"; exit 1; }
     say warn "需为非负整数 (0=不限) / must be a non-negative integer (0 = no cap)."
-    ask GLOSSARY_MAX_FILES "文件数 (0=不限)" "400"
+    ask GLOSSARY_MAX_FILES "文件数 (0=不限)" "0"
   done
   fi
   echo; say info "将只起共享底座（VPC/NAT/EC2/镜像），不挂任何项目。之后用「添加项目」上线机器人。"
