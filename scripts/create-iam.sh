@@ -154,6 +154,20 @@ aws iam put-role-policy --role-name "$ROLE" --policy-name deploy-misc --policy-d
       "route53:AssociateVPCWithHostedZone","route53:DisassociateVPCFromHostedZone"],"Resource":"*"},
     {"Effect":"Allow","Action":"sts:GetCallerIdentity","Resource":"*"}]}' >/dev/null
 
+aws iam put-role-policy --role-name "$ROLE" --policy-name deploy-monitoring --policy-document '{
+  "Version":"2012-10-17",
+  "Statement":[
+    {"Effect":"Allow","Action":[
+      "cloudwatch:PutDashboard","cloudwatch:DeleteDashboards","cloudwatch:GetDashboard","cloudwatch:ListDashboards",
+      "cloudwatch:PutMetricAlarm","cloudwatch:DeleteAlarms","cloudwatch:DescribeAlarms",
+      "logs:PutMetricFilter","logs:DeleteMetricFilter","logs:DescribeMetricFilters","logs:DescribeLogGroups",
+      "sns:CreateTopic","sns:Subscribe","sns:ListTopics","sns:GetTopicAttributes","sns:SetTopicAttributes",
+      "lambda:CreateFunction","lambda:UpdateFunctionCode","lambda:UpdateFunctionConfiguration",
+      "lambda:GetFunction","lambda:AddPermission","lambda:RemovePermission",
+      "events:PutRule","events:PutTargets","events:RemoveTargets","events:DeleteRule","events:DescribeRule",
+      "iam:PassRole"],
+      "Resource":"*"}]}' >/dev/null
+
 # --- instance profile (create if missing; attach role if not already on it) --------------------
 if ! aws iam get-instance-profile --instance-profile-name "$PROFILE_NAME" >/dev/null 2>&1; then
   echo "▶ creating instance profile $PROFILE_NAME ..."
