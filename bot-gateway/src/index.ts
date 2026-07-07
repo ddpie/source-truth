@@ -38,7 +38,7 @@ import { stripToolCallLeak, isToolCallLeakDominant } from "./strip-toolcall-leak
 import { normalizeBlocks } from "./normalize-blocks";
 import { t, initI18n, currentLocale } from "./i18n";
 import { extractClarification } from "./extract-clarify";
-import { handleMessageEvent, type InvokeFn } from "./handle-event";
+import { handleMessageEvent } from "./handle-event";
 import { classifyWsError } from "./index-core";
 import { sdkEventToImEvent } from "./sdk-event";
 import { sendReply } from "./reply";
@@ -1269,21 +1269,12 @@ async function main(): Promise<void> {
   // the cached creds are near expiry, so this is cheap to call per request.
   const credentials = fromNodeProviderChain();
 
-  // The InvokeFn for handleMessageEvent: it returns the final answer (for
-  // logging), but the real streaming card lifecycle is driven by
-  // streamingCardInvoke called from the line handler.
-  const invoke: InvokeFn = async (_sessionId, prompt) => {
-    // The real streaming invoke is driven by streamingCardInvoke in the line
-    // handler below. This returns the prompt so res.answer carries it through.
-    return prompt;
-  };
-
   log({ event: "gateway_start", region: REGION });
 
   // After handleMessageEvent decides to answer, drive the streaming card.
   const replyWithCard = async (res: Awaited<ReturnType<typeof handleMessageEvent>>) => {
     if (!res?.handled || !res.messageId || !res.sessionId) return;
-    const question = res.answer ?? ""; // InvokeFn passes the clean question through as `answer`
+    const question = res.prompt ?? ""; // the clean question text (mentions stripped)
     // If this IM message REPLIED to a prior bot card (Feishu 回复/引用), replay that
     // card's whole conversation chain as context — so a TYPED follow-up continues
     // the thread just like the follow-up button does. parentId → registry chain.
@@ -1394,7 +1385,7 @@ async function main(): Promise<void> {
       if (shuttingDown) return;
       const event = sdkEventToImEvent(data);
       if (event) {
-        void handleMessageEvent(event, { invoke }, {
+        void handleMessageEvent(event, {
           botOpenId: BOT_OPEN_ID || undefined,
           // A reply BY THE ASKER to one of our remembered bot cards counts as an
           // implicit mention so group reply-follow-ups don't require an extra @

@@ -5,7 +5,7 @@
  */
 
 import { extractCharts, chartRejectReason } from "../src/extract-charts";
-import { buildChartElements, ensureAxisTitlesVisible } from "../src/cardkit-client";
+import { ensureAxisTitlesVisible } from "../src/cardkit-client";
 
 // A minimal RENDERABLE spec helper: real bindable fields + numeric yField, so these
 // extraction/stripping tests aren't rejected by the render-validity guard. The fence-
@@ -153,37 +153,23 @@ describe("extractCharts", () => {
   });
 });
 
-describe("buildChartElements", () => {
-  it("wraps each VChart spec as a CardKit chart element", () => {
-    const els = buildChartElements([{ type: "bar", data: { values: [] } }]) as Array<{
-      tag: string; chart_spec: { type: string };
-    }>;
-    expect(els).toHaveLength(1);
-    expect(els[0].tag).toBe("chart");
-    expect(els[0].chart_spec.type).toBe("bar");
-  });
-
-  it("returns an empty array for no specs", () => {
-    expect(buildChartElements([])).toEqual([]);
-  });
-
+describe("ensureAxisTitlesVisible", () => {
   it("forces axis titles VISIBLE + defaults axis type so the chart shows axis descriptions (user-reported)", () => {
     // VChart hides axis titles by default; an agent spec with title.text but no `visible`
-    // (and no type) rendered a chart with no axis labels. buildChartElements must inject
+    // (and no type) rendered a chart with no axis labels. The backstop must inject
     // visible:true and a sensible type-by-orient (Feishu official example carries both).
     const spec = { type: "bar", data: { values: [{ x: "L1", y: 1 }] }, xField: "x", yField: "y",
       axes: [{ orient: "bottom", title: { text: "等级" } }, { orient: "left", title: { text: "攻击力" } }] };
-    const els = buildChartElements([spec]) as Array<{ chart_spec: { axes: Array<{ title: { visible?: boolean; text: string }; type?: string }> } }>;
-    const ax = els[0].chart_spec.axes;
+    const out = ensureAxisTitlesVisible(spec) as unknown as
+      { axes: Array<{ title: { visible?: boolean; text: string }; type?: string }> };
+    const ax = out.axes;
     expect(ax[0].title.visible).toBe(true);
     expect(ax[0].title.text).toBe("等级");        // text preserved
     expect(ax[0].type).toBe("band");              // bottom → band (category)
     expect(ax[1].title.visible).toBe(true);
     expect(ax[1].type).toBe("linear");            // left → linear (value)
   });
-});
 
-describe("ensureAxisTitlesVisible", () => {
   it("respects an explicit visible:false (don't override an intentional choice)", () => {
     const out = ensureAxisTitlesVisible({ type: "bar", axes: [{ orient: "bottom", title: { visible: false, text: "x" } }] }) as
       { axes: Array<{ title: { visible: boolean } }> };

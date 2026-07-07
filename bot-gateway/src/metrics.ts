@@ -28,12 +28,9 @@ import { saltIsWeak } from "./log";
 // `count by reason` answers "线上主要死在哪".
 export type FailReason =
   | "cold_start_mcp_race"
-  | "coldstart_retry_exhausted"
   | "turn_capped"
-  | "aborted"
   | "upstream_throttle"
   | "auth_denied"
-  | "encoding_error"
   | "unknown";
 
 // Why a user pressed 👎 (selected from buttons, never free text).
@@ -51,14 +48,12 @@ export type FeedbackReasonCode =
 export type CardHealthKind =
   | "toolcall_leak_detected"
   | "finalize_failed"
-  | "heartbeat_stall"
   | "dedup_hit"
-  | "idempotent_resend"
   | "zero_evidence_answer";
 
 const FAIL_REASONS: ReadonlySet<string> = new Set<FailReason>([
-  "cold_start_mcp_race", "coldstart_retry_exhausted", "turn_capped", "aborted",
-  "upstream_throttle", "auth_denied", "encoding_error", "unknown",
+  "cold_start_mcp_race", "turn_capped",
+  "upstream_throttle", "auth_denied", "unknown",
 ]);
 
 /** Classify a backend invoke error string into a FailReason for the failure-by-reason
@@ -103,8 +98,7 @@ const FEEDBACK_REASON_CODES: ReadonlySet<string> = new Set<FeedbackReasonCode>([
   "too_slow", "hard_to_understand", "too_shallow", "other",
 ]);
 const CARD_HEALTH_KINDS: ReadonlySet<string> = new Set<CardHealthKind>([
-  "toolcall_leak_detected", "finalize_failed", "heartbeat_stall", "dedup_hit", "idempotent_resend",
-  "zero_evidence_answer",
+  "toolcall_leak_detected", "finalize_failed", "dedup_hit", "zero_evidence_answer",
 ]);
 
 // Runtime whitelist per enum field-name. A value not in the set is replaced (not logged
