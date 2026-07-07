@@ -16,7 +16,7 @@
     "auto-discover projects without hardcoding ids. Sparse (no defaultValue) — for breakdown",
     "panels, not alarms; alarms keep watching the dense un-dimensioned rollup.",
     "",
-    "Apply with: scripts/apply-metric-filters.sh --defs <this file> (same applier/contract)."
+    "Apply with: scripts/lib/apply-metric-filters.sh --defs <this file> (same applier/contract)."
   ],
   "metricNamespace": "SourceTruth/Gateway",
   "logGroup": "/source-truth/bot-gateway",

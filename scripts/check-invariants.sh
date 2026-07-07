@@ -75,7 +75,7 @@ done
 #    必须用 '*'，靠 account + 资源名前缀兜底。只查易越权的服务面（lambda/events 的 ARN 是按区
 #    构造的合法用法，不在此列）。
 guard_hits="$(grep -nE 'arn:aws:(logs|bedrock|bedrock-agentcore|secretsmanager|s3[a-z-]*):[a-z0-9-]*\$\{REGION\}:' \
-  scripts/lib/provision_iam.sh scripts/apply-dau-lambda.sh 2>/dev/null || true)"
+  scripts/lib/provision_iam.sh scripts/lib/apply-dau-lambda.sh 2>/dev/null || true)"
 if [[ -n "$guard_hits" ]]; then
   err "全局共享角色策略 Resource 钉死了 \${REGION}（多区部署会互相覆盖，改用 '*'）："
   printf '      %s\n' "$guard_hits" >&2

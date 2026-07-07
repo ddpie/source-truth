@@ -12,8 +12,8 @@
 # instance already using this role (e.g. an existing index-service host). Don't run --local in an
 # account whose default deploy you want to keep permission-isolated.
 #
-#   scripts/create-iam.sh                    # interactive: pick profile + region
-#   scripts/create-iam.sh --profile admin --region ap-northeast-1   # non-interactive
+#   scripts/lib/create-iam.sh                    # interactive: pick profile + region
+#   scripts/lib/create-iam.sh --profile admin --region ap-northeast-1   # non-interactive
 #
 # It also creates the AgentCore service-linked role (fresh-account safe; ignored if it exists).
 set -euo pipefail

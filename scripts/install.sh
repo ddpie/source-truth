@@ -297,18 +297,8 @@ if [[ "$DEPS_OK" != true ]]; then
   say info "  aws CLI v2, python3, docker (ARM64-capable buildx), git"
   exit 1
 fi
-# docker EXISTS isn't enough — the daemon must be RUNNING, or the build phase (after
-# VPC/NAT/EC2 are already created) fails with a docker.sock connect error. Catch it
-# here so the operator isn't billed for half a deploy before hitting it. `docker info`
-# is the standard daemon-liveness check; run_timeout guards a hung daemon.
-# In --local prepare-local-host.sh just started docker + runs us under `sg docker`, and deploy-all's
-# own preflight_docker re-checks right after — so this check is redundant there; skip it.
-if [[ "$LOCAL_MODE" != true ]] && have_cmd docker && ! run_timeout 20 docker info >/dev/null 2>&1; then
-  say err "Docker 已安装但守护进程未运行 / docker is installed but its daemon isn't running."
-  say info "  启动 Docker Desktop（或 dockerd），等它就绪后重试。验证：docker info"
-  say info "  start Docker Desktop (or dockerd), wait until ready, then re-run. Verify with: docker info"
-  exit 1
-fi
+# (No docker-daemon liveness check here: deploy-all.sh's preflight_docker runs the same
+# `docker info` probe up front — before any billable resource — so this would be a duplicate.)
 # gh is OPTIONAL — only needed to auto-download codegraph-server from a PRIVATE repo's Release (gh
 # carries auth). In --local the index host fetches the binary itself (S3 → Release) and prepare has
 # already run `gh auth login`, so this hint is just noise there — skip it. Otherwise warn, don't block.
@@ -352,11 +342,16 @@ ask_region() {
 }
 
 # project_ids : print existing projectIds from .local/projects.json, one per line (empty if none).
+# FAIL-LOUD on a broken file: swallowing the parse error made remove/redeploy report the
+# misleading "清单无项目 / no projects" instead of the real problem (hand-edited bad JSON).
 project_ids() {
   [[ -f "$PROJECTS_CFG" ]] || return 0
   python3 -c 'import json,sys
-try: print("\n".join(json.load(open(sys.argv[1])).get("projects",{})))
-except Exception: pass' "$PROJECTS_CFG"
+try:
+    print("\n".join(json.load(open(sys.argv[1])).get("projects",{})))
+except Exception as e:
+    sys.stderr.write(f"projects.json 解析失败 / failed to parse {sys.argv[1]}: {e}\n")
+    sys.exit(1)' "$PROJECTS_CFG"
 }
 
 # ============================================================
@@ -414,10 +409,13 @@ flow_add_project() {
   mkdir -p "$ROOT/.local"
   [[ -f "$PROJECTS_CFG" ]] || echo '{"refreshIntervalSec":300,"projects":{}}' > "$PROJECTS_CFG"
 
-  local PID
+  local PID EXISTING_PIDS
   ask PID "项目 ID（小写字母数字与连字符）/ projectId (^[a-z0-9-]+$)" ""
   [[ "$PID" =~ ^[a-z0-9][a-z0-9-]*$ ]] || { say err "projectId 非法 / invalid projectId '$PID'"; exit 1; }
-  if project_ids | grep -qx "$PID"; then
+  # project_ids fails loud on a broken projects.json (its stderr has the reason) — abort,
+  # don't fall through to "not exists" and then corrupt/overwrite the file further down.
+  EXISTING_PIDS="$(project_ids)" || { say err "修复 .local/projects.json 后重试 / fix projects.json and retry"; exit 1; }
+  if grep -qx "$PID" <<< "$EXISTING_PIDS"; then
     say err "项目 '$PID' 已存在 / already exists — use 'redeploy' to update it."; exit 1
   fi
 
@@ -586,6 +584,17 @@ json.dump(cfg,open(sys.argv[1],"w"),ensure_ascii=False,indent=2)' "$PROJECTS_CFG
   say ok "已写入清单 / wrote projects.json: $PID (port=$PORT, secret=$SECRET_ID, model=${MODEL:-默认/default})"
 
   echo; confirm "现在部署项目 ${PID}？/ Deploy project $PID now?" || { say info "清单已保存，稍后可用「重新部署」/ saved; deploy later via redeploy"; exit 0; }
+  # GLOSSARY COST GATE: when the base host doesn't exist yet, the deploy-all below auto-initializes
+  # it — and the glossary build then runs with the DEFAULT cap (GLOSSARY_MAX_FILES=0 = whole repo).
+  # On a large repo that one-time cc scan can cost hundreds of USD. Surface it and confirm once;
+  # the "init environment" flow is where a cap can be chosen. (--local skips: init took the default
+  # knowingly there; confirm() auto-accepts under --yes.)
+  if [[ -z "${INDEX_SERVICE_INSTANCE:-}" && "$LOCAL_MODE" != true ]]; then
+    say warn "底座尚未初始化，将自动创建。注意：术语表默认全量构建（GLOSSARY_MAX_FILES=0，扫全仓），"
+    say warn "大仓一次性成本可达数百美元。要控制成本，可先取消、运行「初始化环境」选择文件上限。"
+    confirm "接受全量术语表构建并继续？/ proceed with the full glossary build?" \
+      || { say info "已取消。清单已保存；先跑「初始化环境」设上限，再用「重新部署」/ cancelled — run init-env to set a cap, then redeploy"; exit 0; }
+  fi
   # Ensure the shared base exists (idempotent no-op if already up), then deploy this project.
   say step "确保底座就绪 / ensuring shared base (idempotent)"
   "$SCRIPT_DIR/deploy-all.sh" --region "$REGION" --skip-projects "${LOCAL_FLAG[@]}" \
@@ -600,7 +609,11 @@ json.dump(cfg,open(sys.argv[1],"w"),ensure_ascii=False,indent=2)' "$PROJECTS_CFG
 flow_redeploy() {
   echo; say step "重新部署现有项目 / redeploy an existing project"
   local REGION; ask_region REGION
-  mapfile -t PIDS < <(project_ids)
+  # Capture + check rc BEFORE splitting: `mapfile < <(project_ids)` would swallow a parse
+  # failure into an empty list and mis-report it as "no projects".
+  local _plist
+  _plist="$(project_ids)" || { say err "修复 .local/projects.json 后重试 / fix projects.json and retry"; exit 1; }
+  mapfile -t PIDS < <(printf '%s\n' "$_plist" | grep -v '^$' || true)
   [[ ${#PIDS[@]} -gt 0 ]] || { say err "清单无项目 / no projects in projects.json — use 'add a project' first"; exit 1; }
   local SEL; pick SEL 0 "${PIDS[@]}"
   exec bash "$SCRIPT_DIR/lib/deploy_project.sh" "$REGION" "$SEL"
@@ -612,7 +625,10 @@ flow_redeploy() {
 flow_remove_project() {
   echo; say step "删除项目 / remove a project"
   local REGION; ask_region REGION
-  mapfile -t PIDS < <(project_ids)
+  # Same fail-loud capture as flow_redeploy (a broken projects.json is NOT "no projects").
+  local _plist
+  _plist="$(project_ids)" || { say err "修复 .local/projects.json 后重试 / fix projects.json and retry"; exit 1; }
+  mapfile -t PIDS < <(printf '%s\n' "$_plist" | grep -v '^$' || true)
   [[ ${#PIDS[@]} -gt 0 ]] || { say err "清单无项目 / no projects to remove"; exit 1; }
   local SEL; pick SEL 0 "${PIDS[@]}"
   say warn "删除项目 '$SEL' 是破坏性操作：停 bridge@/gateway@、删 runtime、删其代码副本、从清单移除。"

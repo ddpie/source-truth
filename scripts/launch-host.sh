@@ -86,7 +86,7 @@ print_manual_fallback() {
   cat >&2 <<NEXT
   手动部署（把 <你的key>.pem 换成你的私钥）：
     # ① 本机：把脚本传上去
-    scp -i <你的key>.pem "$HERE/prepare-local-host.sh" ubuntu@${ip}:/tmp/
+    scp -i <你的key>.pem "$HERE/lib/prepare-local-host.sh" ubuntu@${ip}:/tmp/
     # ② 本机：SSH 登录机器
     ssh -t -i <你的key>.pem ubuntu@${ip}
     # ③ 登录后在机器上运行（region 由机器自动检测，无需传）
@@ -106,7 +106,7 @@ deploy_to_host() {
 ✓ EC2 ${iid}（${ip}）。这台机器长期保留：它的仓库 .local/ 会存部署状态，以后升级登录同一台机器重跑即可。
 NEXT
   if [ "$DRY_RUN" = true ]; then
-    say info "[dry-run] would scp scripts/prepare-local-host.sh to ubuntu@${ip} and run it (installs deps, gh login, clone, install.sh)"
+    say info "[dry-run] would scp scripts/lib/prepare-local-host.sh to ubuntu@${ip} and run it (installs deps, gh login, clone, install.sh)"
     return 0
   fi
   # KEY is the chosen key-pair name on the launch path; on the reuse path it's unset — default blank.
@@ -141,7 +141,7 @@ NEXT
     print_manual_fallback "$ip"; return 0
   fi
   say step "把部署脚本传到 EC2（/tmp/prepare-local-host.sh）..."
-  if ! scp "${sshopt[@]}" "$HERE/prepare-local-host.sh" ubuntu@"$ip":/tmp/prepare-local-host.sh; then
+  if ! scp "${sshopt[@]}" "$HERE/lib/prepare-local-host.sh" ubuntu@"$ip":/tmp/prepare-local-host.sh; then
     say warn "scp 失败。请手动执行："; print_manual_fallback "$ip"; return 0
   fi
   say ok "脚本已上传。接下来 SSH 进机器、手动运行它（能看到每一步；卡住就地处理，断了重连再跑即可）："
@@ -181,7 +181,7 @@ if [ "$DRY_RUN" = true ]; then
   say info "[dry-run] would ensure IAM role + profile via create-iam.sh"
 else
   say step "ensuring IAM roles (create-iam.sh) ..."
-  "$HERE/create-iam.sh" --profile "$PROFILE" --region "$REGION"
+  "$HERE/lib/create-iam.sh" --profile "$PROFILE" --region "$REGION"
 fi
 
 # --- 2b. GitHub token → Secrets Manager --------------------------------------------------------

@@ -1,7 +1,7 @@
 {
   "_doc": [
     "Alarm thresholds (monitoring plan 阶段3). Operator-tunable knobs — change a threshold here,",
-    "re-run scripts/apply-alarms.sh, NO code change. Each alarm reads a CloudWatch metric created",
+    "re-run scripts/lib/apply-alarms.sh, NO code change. Each alarm reads a CloudWatch metric created",
     "by a metric-filter (a-class-metrics.json or alarm-metrics.json) and notifies the SNS topic.",
     "",
     "TWO alarm semantics (plan 阶段3, never mix on one alarm):",
