@@ -7,9 +7,7 @@
  * CardKit streaming card is layered on the same reply path.
  */
 
-import { createCard, updateContent, closeStreaming, buildSendCardContent } from "./cardkit-client";
 import { imReply } from "./feishu-http";
-import { replyWithCard } from "./reply-card";
 
 export interface ReplyParams {
   messageId: string;
@@ -29,24 +27,4 @@ export async function sendReply(p: ReplyParams): Promise<void> {
   // second fallback text into the chat (cross-review H1). One message gets at most one
   // fallback, so keying on messageId is both stable (dedupe retries) and distinct.
   await imReply(p.messageId, "text", buildTextContent(p.answer), `reply-text-${p.messageId}`);
-}
-
-/** Reply to a message with an already-created interactive card (in-process). */
-function sendCardAsReply(messageId: string, cardId: string): Promise<void> {
-  return imReply(messageId, "interactive", buildSendCardContent(cardId)).then(() => undefined);
-}
-
-/**
- * @deprecated NOT the live path. The production streaming card is driven by
- * streamingCardInvoke → sendStreamingCard → runStreamingInvoke in index.ts, which
- * captures the sent message_id directly for the follow-up registry. This wrapper
- * (and reply-card.ts's replyWithCard) returns only the card_id, NOT the message_id,
- * so wiring it to rememberCard would silently break follow-up chaining — do not
- * revive without threading message_id out first. Kept only for its unit test.
- */
-export async function sendReplyCard(p: ReplyParams & { title?: string }): Promise<string> {
-  return replyWithCard(
-    { messageId: p.messageId, answer: p.answer, title: p.title ?? "source-truth" },
-    { createCard, updateContent, closeStreaming, sendCard: sendCardAsReply },
-  );
 }
