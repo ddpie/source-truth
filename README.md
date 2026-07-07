@@ -12,38 +12,24 @@
 
 ## 四个特点
 
-- **答得可信，且能复核**：以真实代码为唯一依据，每条结论附 `文件:行号` 出处（折叠在「供研发复核」区，策划看结论、研发按需展开）。代码与文档冲突时以代码为准并标注差异；证据不足时提示转研发，不猜不编。
-- **大代码库不拖慢定位**：常驻 CodeGraph 索引先定位、再精准读取，不全仓扫描。16 GB、7.5 万文件的工程上，定位查询稳定在 **1–5 毫秒**；整轮问答比原生 Claude Code 快 **2.7–5.1 倍**。
-- **中文提问也能命中英文代码**：策划问「公会战怎么结算」，代码里却可能写成历史代号 `LeagueWar`；「招募保底」藏在 `pity_counter` 这类内部叫法里，直接用中文搜常只命中注释、甚至零命中。术语表离线把中文业务词映射到代码里真实出现的英文符号，作为额外检索线索——只负责「该搜哪个英文词」，结论仍以查看代码为准。
-- **答案是会生长的交互卡片**：在飞书 @ 机器人即可（免部署、下载、开账号）。卡片实时显示进度、结论先行边写边展开、能画图表 / 表格、出处自动折叠（策划看结论、研发按需展开）；看完点按钮或回复卡片就能带上下文继续追问，手机上同样可用。
+- **答得可信，且能复核**：以真实代码为唯一依据，每条结论附 `文件:行号` 出处（折叠在「供研发复核」区）；证据不足时提示转研发，不猜不编。
+- **大代码库不拖慢定位**：常驻 CodeGraph 索引先定位、再精准读取。16 GB、7.5 万文件的工程上定位稳定在 **1–5 毫秒**，整轮问答比原生 Claude Code 快 **2.7–5.1 倍**（[数据与复现](docs/agent/perf-comparison.md)）。
+- **中文提问也能命中英文代码**：「公会战」在代码里可能叫历史代号 `LeagueWar`，直接搜中文常一无所获。术语表离线把中文业务词映射到代码里真实出现的英文符号，作为检索线索；结论仍以查看代码为准（[术语表怎么来的](docs/glossary.md)）。
+- **答案是会生长的交互卡片**：在飞书 @ 机器人即可。卡片实时显示进度、结论先行流式展开、能画图表 / 表格、出处自动折叠；点按钮或回复卡片就能带上下文追问，手机同样可用。
 
-> 性能数据来源与复现见 [`docs/agent/perf-comparison.md`](docs/agent/perf-comparison.md) 与
-> [`docs/agent/indexing-performance-spike.md`](docs/agent/indexing-performance-spike.md)。
+## 一次真实问答
 
-## 一次真实问答如何发生
-
-下面是飞书群里的一次真实问答（接入的是一套魔兽风格 C++ 服务端代码）：策划问「默认背包有多少格子、怎么扩展」，又追问了仓库格子。卡片实时计时、结论流式展开、出处自动折叠：
+飞书群里的真实录屏（接入一套魔兽风格 C++ 服务端代码）：策划问「默认背包有多少格子、怎么扩展」，又追问了仓库格子。卡片实时计时、结论流式展开、出处自动折叠：
 
 ![飞书群里一次真实问答的录屏：策划 @机器人提问背包格子，卡片实时显示分析进度与计时，结论先行流式展开，底部「供研发复核」折叠区列出代码出处，可点按钮继续追问](docs/assets/demo-qa.gif)
 
 > 录屏为 3 倍速；卡片标题里的计时是真实耗时（首问 45 秒、追问 1 分 4 秒）。
 
-下面按时间顺序拆解这次问答从提问到出结论的每一步：
+从提问到出结论，系统内部走这样一条链路——先定位（CodeGraph + 术语表线索）、再精读相关文件、结论流式回填、出处折叠、可带上下文追问：
 
 ![一次问答的端到端时序图：飞书客户端、bot-gateway、AgentCore microVM、index-service、CardKit 五方泳道，从 @机器人提问到流式回填结论卡片](docs/assets/sequence-qa.svg)
 
-| # | 你做什么 / 系统做什么 | 为什么是这一步 |
-|---|----------------------|---------------|
-| 1 | 你在群里 `@助手 默认背包有多少格子？如何扩展？` | 飞书长连接把消息推给网关，无需轮询 |
-| 2 | 卡片立即回「正在分析…」，标题带实时计时 | 说明系统仍在处理，避免误判为无响应 |
-| 3 | Agent 用 CodeGraph 定位到背包槽位相关代码，并行查术语表补检索线索 | 术语表是旁路辅助：代码命名多为英文，中文「背包」可能对应别的英文符号 |
-| 4 | 读出文件里的真实槽位定义与扩展逻辑 | 先定位再读，不做全仓扫描 |
-| 5 | 结论流式回填，先给结论再讲依据（业务语言，不堆砌代码） | 结论先行，非技术读者也能读懂 |
-| 6 | 卡片底部展开「供研发复核」折叠区，列出 `文件:行号` 出处 | 研发可直接核对，非技术读者不被代码淹没 |
-| 7 | 可点击「继续追问」或直接回复卡片，**带着上文**接着问 | 多轮对话复用同一会话，不丢上下文 |
-
-> 需求与架构权威依据见 [`docs/design/`](docs/design/)；AI 协作约定见 [`AGENTS.md`](AGENTS.md)；
-> 一次提问如何在系统里流转见 [`docs/agent/architecture.md`](docs/agent/architecture.md)。
+> 逐步细节见 [`docs/agent/architecture.md`](docs/agent/architecture.md)；需求与架构权威依据见 [`docs/design/`](docs/design/)。
 
 ## 能力边界
 
@@ -54,8 +40,7 @@
 - 不读设计文档、不跨多分支 / worktree、不做跨会话共享记忆
 - 不接第二引擎（Codex）、不做完整的审计防线
 
-这些边界既是产品定位，也是安全保证。规划中的能力见
-[`docs/agent/architecture.md`](docs/agent/architecture.md) 与设计文档。
+规划中的能力见 [`docs/agent/architecture.md`](docs/agent/architecture.md) 与设计文档。
 
 ## 系统全貌
 
@@ -63,7 +48,7 @@
 
 ![source-truth 架构图，按机器分三层：飞书侧 → 一台 EC2（每个项目的 bot-gateway 与 index-bridge 同机，都在 index-service 主机上）→ AgentCore 会话 microVM；事件经长连接推给网关，网关 invoke 会话，会话再经 HTTP 向 bridge 只读访问（定位代码 / 读文件·配置表 / 查术语表）](docs/assets/architecture.svg)
 
-> **会话 microVM 不挂任何文件系统**：源码与配置表都经 index-service 的 HTTP 接口读取（`codegraph_read_file` / `codegraph_glob_files` / `codegraph_search_files`），代码副本只在 index-service 本地磁盘（每项目各一份，不进 microVM、无第二处）。
+> **会话 microVM 不挂任何文件系统**：源码与配置表都经 index-service 的 HTTP 接口读取（只读文件工具，见 [`docs/agent/architecture.md`](docs/agent/architecture.md)），代码副本只在 index-service 本地磁盘（每项目各一份，不进 microVM、无第二处）。
 
 ## 组件一览（monorepo）
 
@@ -112,7 +97,7 @@ bash <(gh api repos/ddpie/source-truth/contents/scripts/get.sh --jq '.content' |
 两种部署拓扑：
 
 - **默认（两台）**：在一台部署机上跑脚本，由它新建并配置索引主机 EC2。
-- **单台 EC2（`--local`）**：一台机器既跑部署、又常驻索引与网关，不再单开部署机。在本地跑 `./scripts/launch-host.sh` 一步完成：自动建网 + 建 IAM + 创建 ARM64 EC2，然后问你 SSH 私钥、自动把部署脚本传上机执行（装依赖 → 登录 GitHub → 克隆 → 进入 `install.sh` 交互填代码仓/模型/飞书凭证）。AgentCore Runtime 仍由 AWS 托管，不占本机。
+- **单台 EC2（`--local`）**：一台机器既跑部署、又常驻索引与网关，不再单开部署机。在本地跑 `./scripts/launch-host.sh`：自动建网 + 建 IAM + 创建 ARM64 EC2，把部署脚本传上机并打印一条 `ssh` 登录命令；按它登录后运行该脚本（装依赖 → 登录 GitHub → 克隆 → 进入 `install.sh` 交互填代码仓/模型/飞书凭证），执行过程逐步可见。AgentCore Runtime 仍由 AWS 托管，不占本机。
 
 完整部署流程（前置条件、`deploy-all.sh` 各阶段的命令行参数、`--local` 的角色与权限要求、连飞书、运维、排错）见
 [`docs/runbook.md`](docs/runbook.md)。飞书凭证走 Secrets Manager，不落盘、不入仓库。
@@ -136,29 +121,19 @@ bash <(gh api repos/ddpie/source-truth/contents/scripts/get.sh --jq '.content' |
 
 逐条「怎么强制 / 以谁为准 / 怎么自动检查 / 违反后果」见 [`docs/agent/invariants.md`](docs/agent/invariants.md)。
 
-## 风险与可信度
-
-- **AI 固有风险**：模型可能幻觉，也可能被提问里夹带的指令带偏。约束见上面的「答得可信」与「安全设计」——以代码为唯一依据、标注出处、证据不足转研发，信任边界只信 system prompt。
-- **索引非实时**：刷新是分钟级，刚推的提交需等一个刷新周期才反映。
+已知局限：模型可能幻觉、可能被提问里夹带的指令带偏（约束即上面的「答得可信」与三道防线）；
+索引刷新是分钟级，刚推的提交需等一个刷新周期才反映。
 
 ## 文档导航
 
-> 全部文档的入口地图见 [`docs/README.md`](docs/README.md)（按受众分类）。下表是高频入口：
+| 主题 | 链接 |
+|------|------|
+| 部署 / 连飞书 / 运维 / 排错（从零到能用） | [`docs/runbook.md`](docs/runbook.md) |
+| 一次提问如何在系统里流转 | [`docs/agent/architecture.md`](docs/agent/architecture.md) |
+| AI 协作约定 | [`AGENTS.md`](AGENTS.md) |
+| 需求 / 架构设计权威依据 | [`docs/design/`](docs/design/README.md) |
 
-| 层 | 主题 | 链接 |
-|----|------|------|
-| **入门** | 部署 / 连飞书 / 运维 / 排错（从零到能用） | [`docs/runbook.md`](docs/runbook.md) |
-| **架构** | 一次提问如何在系统里流转（AI 必读） | [`docs/agent/architecture.md`](docs/agent/architecture.md) |
-| **架构** | 目录结构（双语） | [`docs/structure_zh.md`](docs/structure_zh.md) · [`docs/structure_en.md`](docs/structure_en.md) |
-| **架构** | 术语表怎么来的：构建 / 产物 / 可信依据（面向人） | [`docs/glossary.md`](docs/glossary.md) |
-| **规范** | AI 协作约定 | [`AGENTS.md`](AGENTS.md) |
-| **规范** | 不变量与权威依据映射（含安全不变量逐条） | [`docs/agent/invariants.md`](docs/agent/invariants.md) |
-| **规范** | 变更手册（改 X 怎么做 / 怎么验 / 怎么上线） | [`docs/agent/playbooks.md`](docs/agent/playbooks.md) |
-| **设计权威依据** | 需求 / 架构设计原件（导入，仅中文） | [`docs/design/`](docs/design/README.md) |
-| **调研** | CardKit 流式卡片 | [`docs/agent/cardkit-streaming-spike.md`](docs/agent/cardkit-streaming-spike.md) |
-| **调研** | 索引性能基准 | [`docs/agent/indexing-performance-spike.md`](docs/agent/indexing-performance-spike.md) |
-| **调研** | 代码副本与共享存储方案选型 | [`docs/agent/efs-codegraph-sharing-spike.md`](docs/agent/efs-codegraph-sharing-spike.md) |
-| **调研** | 性能对比（vs 原生 Claude Code） | [`docs/agent/perf-comparison.md`](docs/agent/perf-comparison.md) |
+完整文档地图（目录结构、术语表、不变量、变更手册、各调研记录）见 [`docs/README.md`](docs/README.md)。
 
 ## 许可证
 
@@ -178,36 +153,24 @@ bash <(gh api repos/ddpie/source-truth/contents/scripts/get.sh --jq '.content' |
 
 ## Highlights
 
-- **Trustworthy and verifiable**: real code is the only source of truth; every conclusion carries a `file:line` source (collapsed into a "for engineers to verify" panel — designers read the conclusion, engineers expand on demand). When code and docs conflict, code wins and the difference is flagged; when evidence is insufficient it says so and defers to engineers, never guessing or fabricating.
-- **Stays fast on large codebases**: a resident CodeGraph index locates first, then reads precisely — no whole-repo scans. On a 16 GB, 75k-file project, a locate query stays at **1–5 ms**; a full round-trip Q&A is **2.7–5.1× faster** than native Claude Code.
-- **Chinese questions hit English code**: a designer asks about "公会战" (guild war) settlement, but the code may call it by a legacy codename `LeagueWar`; "招募保底" (pity) hides under internal names like `pity_counter`. Searching in Chinese directly tends to match only comments, or turn up nothing at all. An offline glossary maps Chinese business terms to the English symbols that actually appear in the code, as an extra search hint — it only suggests "which English term to search"; the conclusion still comes from reading the code.
-- **The answer is a living, interactive card**: just @-mention the bot in Feishu (no deploy, download, or account needed). The card shows live progress, streams the conclusion first as it's generated, can draw charts / tables, and collapses the sources into a panel (designers see the conclusion, engineers expand on demand); when done, tap a button or reply to the card to keep asking with context carried over — works on mobile too.
+- **Trustworthy and verifiable**: real code is the only source of truth; every conclusion carries a `file:line` source (collapsed into a "for engineers to verify" panel); when evidence is insufficient it says so and defers to engineers — never guessing.
+- **Stays fast on large codebases**: a resident CodeGraph index locates first, then reads precisely. On a 16 GB, 75k-file project a locate query stays at **1–5 ms**; a full Q&A round-trip is **2.7–5.1× faster** than native Claude Code ([data & reproduction](docs/agent/perf-comparison.md)).
+- **Chinese questions hit English code**: "公会战" (guild war) may live in the code under a legacy codename like `LeagueWar`; searching in Chinese often finds nothing. An offline glossary maps Chinese business terms to the English symbols that actually appear in the code, as a search hint; the conclusion still comes from reading the code ([how the glossary is built](docs/glossary.md)).
+- **The answer is a living, interactive card**: just @-mention the bot in Feishu. The card shows live progress, streams the conclusion first, can draw charts / tables, and folds the sources away; tap a button or reply to the card to keep asking with context — works on mobile too.
 
-> Performance data sources and reproduction: [`docs/agent/perf-comparison.md`](docs/agent/perf-comparison.md) and [`docs/agent/indexing-performance-spike.md`](docs/agent/indexing-performance-spike.md).
+## One real Q&A
 
-## How one real Q&A happens
-
-Below is a real Q&A from a Feishu group (connected to a WoW-style C++ server codebase): a designer asks "how many slots does the default backpack have, and how is it expanded?", then follows up about the bank. The card times itself live, streams the conclusion, and auto-folds the sources:
+A real screen recording from a Feishu group (connected to a WoW-style C++ server codebase): a designer asks "how many slots does the default backpack have, and how is it expanded?", then follows up about the bank. The card times itself live, streams the conclusion, and auto-folds the sources:
 
 ![Screen recording of a real Q&A in a Feishu group: a designer @-mentions the bot asking about backpack slots; the card shows live analysis progress with a timer, streams the conclusion first, lists code sources in a collapsed "for engineers to verify" panel at the bottom, and offers a follow-up button](docs/assets/demo-qa.gif)
 
 > The recording is 3× speed; the timer in the card title is the real elapsed time (first question 45s, follow-up 1m4s).
 
-Step by step, in time order, from question to conclusion:
+From question to conclusion the system runs one pipeline — locate first (CodeGraph + glossary hints), then read the relevant files precisely, stream the conclusion back, fold the sources, and carry context into follow-ups:
 
 ![End-to-end sequence of one Q&A: Feishu client, bot-gateway, AgentCore microVM, index-service, CardKit across five swimlanes, from @-mention to the streamed conclusion card](docs/assets/sequence-qa.en.svg)
 
-| # | What happens | Why this step |
-|---|--------------|---------------|
-| 1 | You post `@bot how many slots does the default backpack have? how to expand?` in the group | Feishu pushes the message to the gateway over a persistent connection — no polling |
-| 2 | The card instantly replies "analyzing…", with a live timer in the title | Shows the system is still working, so it doesn't look frozen |
-| 3 | The agent uses CodeGraph to locate the backpack-slot code, querying the glossary in parallel for extra search hints | The glossary is a side aid: code names are mostly English, and Chinese "背包" may map to a different English symbol |
-| 4 | It reads the real slot definitions and expansion logic out of the files | Locate first, then read — no whole-repo scan |
-| 5 | The conclusion streams back, conclusion first then the basis (business language, no code dumps) | Conclusion-first, so non-technical readers can follow |
-| 6 | The card expands a collapsible "for engineers to verify" panel listing `file:line` sources | Engineers can check directly; non-technical readers aren't drowned in code |
-| 7 | Tap "follow up" or just reply to the card to keep asking **with the prior context** | Multi-turn reuses the same session, no lost context |
-
-> Authoritative requirements and architecture: [`docs/design/`](docs/design/); AI collaboration conventions: [`AGENTS.md`](AGENTS.md); how a question flows through the system: [`docs/agent/architecture.md`](docs/agent/architecture.md).
+> Step-by-step details: [`docs/agent/architecture.md`](docs/agent/architecture.md); authoritative requirements and architecture: [`docs/design/`](docs/design/).
 
 ## Scope
 
@@ -218,7 +181,7 @@ It is a **read-only code Q&A**: main branch only, answers only, changes nothing.
 - No reading design docs, no multi-branch / worktree, no cross-session shared memory
 - No second engine (Codex), no full audit guardrails
 
-These boundaries are both product positioning and a security guarantee. Planned capabilities: [`docs/agent/architecture.md`](docs/agent/architecture.md) and the design docs.
+Planned capabilities: [`docs/agent/architecture.md`](docs/agent/architecture.md) and the design docs.
 
 ## At a glance
 
@@ -226,7 +189,7 @@ A question flows through three resident components: the **bot-gateway** (subscri
 
 ![source-truth architecture across three tiers: Feishu side → one EC2 (each project's bot-gateway and index-bridge co-located on the index-service host) → AgentCore session microVMs; events are pushed to the gateway over a persistent connection, the gateway invokes a session, and the session reaches the bridge over HTTP read-only (locate code / read files & config tables / glossary lookup)](docs/assets/architecture.en.svg)
 
-> **Session microVMs don't mount any filesystem**: source and config tables are read through index-service's HTTP interface (`codegraph_read_file` / `codegraph_glob_files` / `codegraph_search_files`); the code copy lives only on index-service's local disk (one copy per project, kept off the microVM entirely — there is never a second copy).
+> **Session microVMs don't mount any filesystem**: source and config tables are read through index-service's HTTP interface (read-only file tools, see [`docs/agent/architecture.md`](docs/agent/architecture.md)); the code copy lives only on index-service's local disk (one copy per project, kept off the microVM entirely — there is never a second copy).
 
 ## Components (monorepo)
 
@@ -273,7 +236,7 @@ With the repo already cloned, just run the scripts; offline tests need no Docker
 Two deployment topologies:
 
 - **Default (two machines)**: run the script on a deploy box, which creates and configures the index-host EC2.
-- **Single EC2 (`--local`)**: one machine both deploys and then resides as the index + gateway host, with no separate deploy box. Run `./scripts/launch-host.sh` locally to bring the box up (auto-builds the network + IAM + an ARM64 EC2), then SSH in per the command it prints and run `./scripts/install.sh` (interactive repo/model/Feishu prompts; install calls `deploy-all --local`). The AgentCore Runtime is still AWS-managed and off this host.
+- **Single EC2 (`--local`)**: one machine both deploys and then resides as the index + gateway host, with no separate deploy box. Run `./scripts/launch-host.sh` locally to bring the box up (auto-builds the network + IAM + an ARM64 EC2); it uploads the deploy script and prints an `ssh` login command — log in and run the script (installs deps, logs into GitHub, clones, then the interactive `install.sh` prompts), every step visible as it runs. The AgentCore Runtime is still AWS-managed and off this host.
 
 Full deployment flow (prerequisites, `deploy-all.sh` staged options, the `--local` role/permission requirements, connecting Feishu, ops, troubleshooting): [`docs/runbook.md`](docs/runbook.md). Feishu credentials go through Secrets Manager — never written to disk, never committed.
 
@@ -294,29 +257,20 @@ Three classes of security, and not by prompt constraints alone — the code enfo
 
 Per-item "how it's enforced / source of truth / how it's auto-checked / consequence of violation": [`docs/agent/invariants.md`](docs/agent/invariants.md).
 
-## Risks and trustworthiness
-
-- **Inherent AI risk**: the model can hallucinate, and can be swayed by instructions smuggled into a question. The mitigations are in "Trustworthy and verifiable" and "Security design" above — code as the only basis, sources cited, defer to engineers when evidence is thin, and a trust boundary that trusts only the system prompt.
-- **The index isn't real-time**: refresh is minute-level, so a just-pushed commit takes one refresh cycle to show up.
+Known limits: the model can hallucinate or be swayed by instructions smuggled into a question (the guards are
+"Trustworthy and verifiable" plus the three defenses above); index refresh is minute-level, so a just-pushed
+commit takes one refresh cycle to show up.
 
 ## Docs
 
-> The full entry map of all docs is in [`docs/README.md`](docs/README.md) (organized by audience). The table below lists high-traffic entries:
+| Topic | Link |
+|-------|------|
+| Deploy / connect Feishu / ops / troubleshooting (from zero to usable) | [`docs/runbook.md`](docs/runbook.md) |
+| How a question flows through the system | [`docs/agent/architecture.md`](docs/agent/architecture.md) |
+| AI collaboration conventions | [`AGENTS.md`](AGENTS.md) |
+| Requirements / architecture design authority | [`docs/design/`](docs/design/README.md) |
 
-| Layer | Topic | Link |
-|-------|-------|------|
-| **Getting started** | Deploy / connect Feishu / ops / troubleshooting (from zero to usable) | [`docs/runbook.md`](docs/runbook.md) |
-| **Architecture** | How a question flows through the system (must-read for AI) | [`docs/agent/architecture.md`](docs/agent/architecture.md) |
-| **Architecture** | Directory structure (bilingual) | [`docs/structure_en.md`](docs/structure_en.md) · [`docs/structure_zh.md`](docs/structure_zh.md) |
-| **Architecture** | Where the glossary comes from: build / artifacts / trust basis (for humans) | [`docs/glossary.md`](docs/glossary.md) |
-| **Conventions** | AI collaboration conventions | [`AGENTS.md`](AGENTS.md) |
-| **Conventions** | Invariants and source-of-truth mapping (incl. each security invariant) | [`docs/agent/invariants.md`](docs/agent/invariants.md) |
-| **Conventions** | Change playbooks (how to change X / verify / ship) | [`docs/agent/playbooks.md`](docs/agent/playbooks.md) |
-| **Design authority** | Requirements / architecture originals (imported, Chinese only) | [`docs/design/`](docs/design/README.md) |
-| **Research** | CardKit streaming card | [`docs/agent/cardkit-streaming-spike.md`](docs/agent/cardkit-streaming-spike.md) |
-| **Research** | Indexing performance benchmark | [`docs/agent/indexing-performance-spike.md`](docs/agent/indexing-performance-spike.md) |
-| **Research** | Code-copy & shared-storage option selection | [`docs/agent/efs-codegraph-sharing-spike.md`](docs/agent/efs-codegraph-sharing-spike.md) |
-| **Research** | Performance comparison (vs native Claude Code) | [`docs/agent/perf-comparison.md`](docs/agent/perf-comparison.md) |
+Full docs map (directory structure, glossary, invariants, playbooks, research spikes): [`docs/README.md`](docs/README.md).
 
 ## License
 

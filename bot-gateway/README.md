@@ -31,9 +31,10 @@
 
 ```bash
 npm install
-# 必需 env（RUNTIME_ARN 来自后端部署写入的 .local/deploy-config）：
+# 必需 env（deploy 按项目写 RUNTIME_ARN_<项目> 到 .local/deploy-config，
+# 项目名里的 - 换成 _，取你要调试的那个）：
 export AWS_REGION=ap-northeast-1
-export RUNTIME_ARN="$(grep '^AGENT_RUNTIME_ARN=' ../.local/deploy-config | cut -d= -f2-)"
+export RUNTIME_ARN="$(grep '^RUNTIME_ARN_<项目>=' ../.local/deploy-config | cut -d= -f2-)"
 export FEISHU_APP_ID=cli_xxx
 export FEISHU_APP_SECRET=xxx          # 从 Secrets Manager/SSM 取出注入，勿写进仓库
 export FEISHU_BOT_OPEN_ID=ou_xxx

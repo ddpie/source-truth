@@ -20,7 +20,7 @@
 - **上线**：
 
   ```bash
-  ./scripts/deploy-all.sh --region ap-northeast-1 --repo <repo> \
+  ./scripts/deploy-all.sh --region ap-northeast-1 \
     --skip artifacts --skip iam --skip network --skip index-svc
   # 只重建 image + 更新 runtime
   ```
@@ -52,7 +52,7 @@
   的 `refreshIntervalSec` 可配）周期性 `git pull`；常驻 codegraph（`--mcp --graph-only`）进程的
   file-watcher 在数秒内增量重建内存图——无重启、不会有两个进程同时写同一张图、无服务抖动。主分支改动分钟级内反映到问答，**无需重新部署**。
 - **改刷新频率 / 加减仓库**：改 `.local/projects.json`，重跑该项目的部署
-  （`./scripts/deploy-all.sh ... --skip-base` 或 `install.sh` 的 redeploy 流程），脚本按清单重建 timer / bridge。
+  （`install.sh` 的「重新部署现有项目」，或 `./scripts/lib/deploy_project.sh <region> <projectId>`），脚本按清单重建 timer / bridge。
 - **验证**：`git pull` 失败会打 `GIT_FETCH_FAILED: <subdir>` 标记（可接监控）；端到端可问一个只有新提交才有的问题，确认改动已反映。
 
 ## 场景 5：改卡片渲染 / 流式 / 脱敏（gateway）
