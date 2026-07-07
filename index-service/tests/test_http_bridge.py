@@ -176,7 +176,7 @@ def test_bridge_exposes_codegraph_tools_over_http():
 
 
 def test_bridge_result_paths_are_repo_relative():
-    # Tool result paths must be REPO-RELATIVE (path_align chained in, mount_root="").
+    # Tool result paths must be REPO-RELATIVE (path_align chained in).
     # The agent has no filesystem mount, so paths are plain relative, never the raw
     # codegraph ./-prefixed form and never an absolute host/index path.
     _, text = asyncio.run(_run_bridge_and_query("to_container_path", 8912))

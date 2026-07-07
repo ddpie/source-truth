@@ -55,9 +55,7 @@ def test_different_workspaces_do_not_collide():
 def _reset_locks(http_bridge):
     """Snapshot + clear the module lock state for an isolated test, returning a restorer."""
     saved_fds = dict(http_bridge._WRITER_LOCK_FDS)
-    saved_single = http_bridge._SINGLETON_FD
     http_bridge._WRITER_LOCK_FDS.clear()
-    http_bridge._SINGLETON_FD = None
 
     def restore():
         # Close only fds WE acquired in the test (not the pre-existing ones).
@@ -69,7 +67,6 @@ def _reset_locks(http_bridge):
                     pass
         http_bridge._WRITER_LOCK_FDS.clear()
         http_bridge._WRITER_LOCK_FDS.update(saved_fds)
-        http_bridge._SINGLETON_FD = saved_single
 
     return restore
 

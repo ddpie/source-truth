@@ -184,7 +184,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--strict", action="store_true", help="treat a cc build failure as fatal")
     p.add_argument("--timeout", type=int, default=glossary_build.DEFAULT_TIMEOUT_S)
     p.add_argument("--max-files", type=int, default=None,
-                   help="per-build file cap (wins over GLOSSARY_MAX_FILES env / default 400); "
+                   help="per-build file cap (wins over GLOSSARY_MAX_FILES env; default 0 = no cap); "
                         "0 or negative = no cap (scan the whole candidate set)")
     args = p.parse_args(argv)
 
@@ -198,7 +198,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     # Resolve the per-build file cap: --max-files flag wins, else the module default
-    # (GLOSSARY_MAX_FILES env or 400). <=0 means "no cap" (whole candidate set).
+    # (GLOSSARY_MAX_FILES env; default 0 = no cap). <=0 means "no cap" (whole candidate set).
     cap = args.max_files if args.max_files is not None else MAX_BUILD_FILES
     uncapped = cap <= 0
 

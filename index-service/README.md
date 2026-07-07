@@ -26,10 +26,9 @@ CodeGraph 引擎原生仅 stdio MCP，本服务（`http_bridge.py`）把它转�
 | `codegraph_session.py` | 常驻 codegraph-server 会话，独占写入 `graph.db`（worker 线程 + 私有事件循环 + 健康自愈 + liveness 容忍） |
 | `repo_router.py` | 服务端多仓路由 + 范围强制（多仓隔离不变量 1：白名单默认拒绝，越界 `repo` 参数永不路由） |
 | `repo_fanout.py` | 未指定 `repo` 时对每个仓的会话各查一遍再合并结果（纯合并核，无 I/O） |
-| `codegraph_client.py` | 定位类工具的 stdio 调用封装 |
 | `file_read.py` / `file_search.py` / `file_table.py` | 读文件 / 文本检索 / 读数值表三个文件工具 |
 | `text_decode.py` | 容错文本解码（仅标准库）：中文游戏仓常为 GBK/GB2312、配置表可能 UTF-16，按编码探测避免乱码 |
-| `path_align.py` | 索引路径对齐为仓库相对路径（`mount_root` 默认 `""`，拒越界） |
+| `path_align.py` | 索引路径对齐为仓库相对路径（拒越界） |
 | `glossary*.py` / `glossary_refresh.sh` | 术语表数据层 / 只读查询 / 构建期生成（详见 [`docs/agent/glossary.md`](../docs/agent/glossary.md)） |
 | `perf.py` | 结构化耗时日志 |
 | `bootstrap.sh` | EC2 user-data（base host，不挂项目）：装依赖 / codegraph 二进制 / systemd `index-build`→`index-bridge` 模板；仓库由 `activate_project.sh` 按项目挂载 |

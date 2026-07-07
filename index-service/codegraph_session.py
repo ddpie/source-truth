@@ -1,8 +1,8 @@
 """Persistent codegraph-server MCP session (the resident half of the bridge).
 
-The naive client (codegraph_client.acall_tool) spawns a fresh codegraph-server
-process per query. For a large repo on EFS that means re-scanning ~8.7k files on
-every call (~20s cold) — unusable on a user request path. codegraph-server keeps
+A naive client would spawn a fresh codegraph-server process per query. For a
+large repo that means re-scanning ~8.7k files on every call (~20s cold) —
+unusable on a user request path. codegraph-server keeps
 the call graph in memory for the lifetime of one ``--mcp`` process, so the fix is
 to hold ONE long-lived process and relay every query into it: first query warms
 the graph (~20s), every subsequent query is single-digit milliseconds.

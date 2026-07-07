@@ -16,8 +16,6 @@ if str(SVC_DIR) not in sys.path:
 
 import file_table  # noqa: E402
 
-MOUNT = ""  # production: repo-relative
-
 
 @pytest.fixture()
 def repo(tmp_path):
@@ -30,7 +28,7 @@ def repo(tmp_path):
 
 # --- CSV / TSV -------------------------------------------------------------
 def test_read_csv(repo):
-    out = file_table.read_table("Config/items.csv", local_root=str(repo), mount_root=MOUNT)
+    out = file_table.read_table("Config/items.csv", local_root=str(repo))
     assert out["kind"] == "csv"
     assert out["path"] == "Config/items.csv"
     assert "name | atk | def" in out["content"]
@@ -43,7 +41,7 @@ def test_csv_wide_row_clipped_at_read(repo):
     # the full row (memory DoS) — it's clipped to MAX_COLS+1 at read time.
     p = repo / "Config" / "wide.csv"
     p.write_text(",".join(str(i) for i in range(100000)))  # 100k columns, one row
-    out = file_table.read_table("Config/wide.csv", local_root=str(repo), mount_root=MOUNT)
+    out = file_table.read_table("Config/wide.csv", local_root=str(repo))
     assert out["kind"] == "csv"
     # The rendered row has at most MAX_COLS cells (clip happens in _rows_to_text after
     # the read-time clip to MAX_COLS+1) — never 100k.
@@ -52,7 +50,7 @@ def test_csv_wide_row_clipped_at_read(repo):
 
 
 def test_read_tsv(repo):
-    out = file_table.read_table("Config/skills.tsv", local_root=str(repo), mount_root=MOUNT)
+    out = file_table.read_table("Config/skills.tsv", local_root=str(repo))
     assert out["kind"] == "tsv"
     assert "fireball | 3" in out["content"]
 
@@ -68,7 +66,7 @@ def test_read_excel(repo):
     ws.append(["dagger", 1, 6])
     ws.append(["claymore", 2, 18])
     wb.save(str(p))
-    out = file_table.read_table("Config/balance.xlsx", local_root=str(repo), mount_root=MOUNT)
+    out = file_table.read_table("Config/balance.xlsx", local_root=str(repo))
     assert out["kind"] == "excel"
     assert "sheet 'weapons'" in out["content"]
     assert "weapon | min | max" in out["content"]
@@ -83,7 +81,7 @@ def test_read_sqlite(repo):
     con.execute("INSERT INTO monsters VALUES ('rat', 4), ('orc', 30)")
     con.commit()
     con.close()
-    out = file_table.read_table("Config/game.db", local_root=str(repo), mount_root=MOUNT)
+    out = file_table.read_table("Config/game.db", local_root=str(repo))
     assert out["kind"] == "sqlite"
     assert "table 'monsters'" in out["content"]
     assert "rat | 4" in out["content"]
@@ -100,7 +98,7 @@ def test_read_sqlite_with_question_mark_in_filename(repo):
     con.execute("INSERT INTO t VALUES (7)")
     con.commit()
     con.close()
-    out = file_table.read_table("Config/weird?name.db", local_root=str(repo), mount_root=MOUNT)
+    out = file_table.read_table("Config/weird?name.db", local_root=str(repo))
     assert out["kind"] == "sqlite"
     assert "table 't'" in out["content"]
     assert "7" in out["content"]
@@ -116,7 +114,7 @@ def test_sqlite_is_read_only(repo):
     con.commit()
     con.close()
     before = p.stat().st_mtime_ns
-    file_table.read_table("Config/ro.db", local_root=str(repo), mount_root=MOUNT)
+    file_table.read_table("Config/ro.db", local_root=str(repo))
     assert p.stat().st_mtime_ns == before  # read didn't touch the file
 
 
@@ -125,7 +123,7 @@ def test_row_cap_truncates(repo, monkeypatch):
     monkeypatch.setattr(file_table, "MAX_ROWS", 2)
     big = "\n".join([f"r{i},{i}" for i in range(50)])
     (repo / "Config" / "big.csv").write_text("a,b\n" + big + "\n", encoding="utf-8")
-    out = file_table.read_table("Config/big.csv", local_root=str(repo), mount_root=MOUNT)
+    out = file_table.read_table("Config/big.csv", local_root=str(repo))
     assert out["truncated"] is True
 
 
@@ -134,7 +132,7 @@ def test_exactly_max_rows_not_truncated_and_keeps_last_row(repo, monkeypatch):
     # MAX_ROWS data rows dropped its last row AND falsely reported TRUNCATED.
     monkeypatch.setattr(file_table, "MAX_ROWS", 3)
     (repo / "Config" / "exact.csv").write_text("id,v\n0,0\n1,1\n2,2\n", encoding="utf-8")
-    out = file_table.read_table("Config/exact.csv", local_root=str(repo), mount_root=MOUNT)
+    out = file_table.read_table("Config/exact.csv", local_root=str(repo))
     assert out["truncated"] is False
     assert "2 | 2" in out["content"]            # last data row present
     assert "(3 row(s))" in out["content"]        # reports DATA rows, no TRUNCATED
@@ -144,7 +142,7 @@ def test_csv_cell_with_embedded_newline_stays_one_row(repo):
     # A quoted cell with an embedded newline (game description/dialogue columns) must
     # NOT split into phantom output rows — it's flattened to a visible \n.
     (repo / "Config" / "desc.csv").write_text('id,desc\n1,"line1\nline2"\n2,ok\n', encoding="utf-8")
-    out = file_table.read_table("Config/desc.csv", local_root=str(repo), mount_root=MOUNT)
+    out = file_table.read_table("Config/desc.csv", local_root=str(repo))
     pipe_lines = [ln for ln in out["content"].splitlines() if "|" in ln]
     assert len(pipe_lines) == 3                  # header + 2 data rows, not 4
     assert "line1\\nline2" in out["content"]     # newline flattened, not split
@@ -155,28 +153,28 @@ def test_corrupt_sqlite_raises_clean_value_error(repo):
     # an opaque internal error (the bridge only forwards ValueError detail).
     (repo / "Config" / "bad.db").write_bytes(b"this is not a database at all")
     with pytest.raises(ValueError, match="not a valid SQLite database"):
-        file_table.read_table("Config/bad.db", local_root=str(repo), mount_root=MOUNT)
+        file_table.read_table("Config/bad.db", local_root=str(repo))
 
 
 def test_unsupported_extension_raises(repo):
     (repo / "Config" / "x.png").write_bytes(b"\x89PNG\r\n")
     with pytest.raises(ValueError, match="does not handle"):
-        file_table.read_table("Config/x.png", local_root=str(repo), mount_root=MOUNT)
+        file_table.read_table("Config/x.png", local_root=str(repo))
 
 
 def test_missing_file_raises(repo):
     with pytest.raises(ValueError, match="not a readable file"):
-        file_table.read_table("Config/nope.csv", local_root=str(repo), mount_root=MOUNT)
+        file_table.read_table("Config/nope.csv", local_root=str(repo))
 
 
 def test_path_escape_raises(repo):
     with pytest.raises(ValueError):
-        file_table.read_table("../../etc/passwd", local_root=str(repo), mount_root=MOUNT)
+        file_table.read_table("../../etc/passwd", local_root=str(repo))
 
 
 def test_to_json_valid(repo):
     import json
-    s = file_table.read_table_to_json("Config/items.csv", local_root=str(repo), mount_root=MOUNT)
+    s = file_table.read_table_to_json("Config/items.csv", local_root=str(repo))
     d = json.loads(s)
     assert d["kind"] == "csv" and "content" in d
 
@@ -188,7 +186,7 @@ def test_oversize_file_rejected_before_parse(repo, monkeypatch):
     monkeypatch.setattr(file_table, "MAX_FILE_BYTES", 64)
     (repo / "Config" / "huge.csv").write_text("a,b\n" + ("x,y\n" * 1000), encoding="utf-8")
     with pytest.raises(ValueError, match="read_table limit"):
-        file_table.read_table("Config/huge.csv", local_root=str(repo), mount_root=MOUNT)
+        file_table.read_table("Config/huge.csv", local_root=str(repo))
 
 
 def test_zip_inflate_guard_rejects_bomb(repo, monkeypatch):
@@ -204,7 +202,7 @@ def test_zip_inflate_guard_rejects_bomb(repo, monkeypatch):
     wb.save(str(p))
     monkeypatch.setattr(file_table, "MAX_UNCOMPRESSED_BYTES", 128)  # below the real inflate size
     with pytest.raises(ValueError, match="zip-bomb"):
-        file_table.read_table("Config/bomb.xlsx", local_root=str(repo), mount_root=MOUNT)
+        file_table.read_table("Config/bomb.xlsx", local_root=str(repo))
 
 
 def test_corrupt_xlsx_raises_clean_error(repo):
@@ -213,7 +211,7 @@ def test_corrupt_xlsx_raises_clean_error(repo):
     pytest.importorskip("openpyxl")
     (repo / "Config" / "fake.xlsx").write_bytes(b"this is not a zip at all")
     with pytest.raises(ValueError, match="not a valid .xlsx|corrupt"):
-        file_table.read_table("Config/fake.xlsx", local_root=str(repo), mount_root=MOUNT)
+        file_table.read_table("Config/fake.xlsx", local_root=str(repo))
 
 
 def test_legacy_xls_explicitly_unsupported(repo):
@@ -221,7 +219,7 @@ def test_legacy_xls_explicitly_unsupported(repo):
     # read it) rather than misadvertise support.
     (repo / "Config" / "old.xls").write_bytes(b"\xd0\xcf\x11\xe0")  # OLE2 magic
     with pytest.raises(ValueError, match="does not handle"):
-        file_table.read_table("Config/old.xls", local_root=str(repo), mount_root=MOUNT)
+        file_table.read_table("Config/old.xls", local_root=str(repo))
 
 
 def test_csv_gbk_chinese_decoded_faithfully(repo):
@@ -229,7 +227,7 @@ def test_csv_gbk_chinese_decoded_faithfully(repo):
     # as real Chinese, not mojibake (the planners' actual data). decode_bytes handles it.
     p = repo / "Config" / "skills_cn.csv"
     p.write_bytes("技能名,伤害,冷却\n火球术,500,3\n治疗术,0,5\n".encode("gbk"))
-    out = file_table.read_table("Config/skills_cn.csv", local_root=str(repo), mount_root=MOUNT)
+    out = file_table.read_table("Config/skills_cn.csv", local_root=str(repo))
     assert "火球术" in out["content"]
     assert "技能名" in out["content"]
     assert "�" not in out["content"]
@@ -242,14 +240,14 @@ def test_csv_overlong_cell_does_not_error_whole_table(repo):
     big = "x" * (200 * 1024)  # 200KB single field, over the old 128KB default
     p = repo / "Config" / "desc.csv"
     p.write_text(f'id,desc\n1,"{big}"\n2,"short"\n', encoding="utf-8")
-    out = file_table.read_table("Config/desc.csv", local_root=str(repo), mount_root=MOUNT)
+    out = file_table.read_table("Config/desc.csv", local_root=str(repo))
     assert out["kind"] == "csv"
     assert "short" in out["content"]            # the table is readable, not an error
 
 
 # --- multi-repo repo= round-trip ---
 def test_read_table_strips_and_reprefixes_repo(repo):
-    out = file_table.read_table("code-5x/Config/items.csv", local_root=str(repo), mount_root="", repo="code-5x")
+    out = file_table.read_table("code-5x/Config/items.csv", local_root=str(repo), repo="code-5x")
     assert out["path"] == "code-5x/Config/items.csv", out["path"]
     assert out["kind"] == "csv"
     assert "sword" in out["content"]
