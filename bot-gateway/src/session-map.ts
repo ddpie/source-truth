@@ -35,6 +35,8 @@
 
 import { randomUUID } from "node:crypto";
 
+import { DEFAULT_MAX_CONCURRENT_INVOKES } from "./tunables";
+
 /**
  * Session-reuse TTL, ALIGNED to the AgentCore runtime's idle timeout.
  *
@@ -60,14 +62,15 @@ const DEFAULT_TTL_MS = resolveDefaultTtlMs();
 
 /**
  * Max number of DISTINCT warm sessions to hold. Mirrors the invoke concurrency
- * gate (MAX_CONCURRENT_INVOKES, default 8 in index.ts): a warm VM beyond what the
- * gate can ever run concurrently is just idle cost, so the pool never grows past
- * it — past the cap, a new conversation shares an existing session instead of
- * minting a 9th. Keeping the same env/default as the gate ties the two together.
+ * gate (MAX_CONCURRENT_INVOKES in index.ts): a warm VM beyond what the gate can
+ * ever run concurrently is just idle cost, so the pool never grows past it —
+ * past the cap, a new conversation shares an existing session instead of minting
+ * a 9th. Same env as the gate; the shared default lives in tunables.ts so the
+ * two sites can't drift.
  */
 function resolveMaxWarmPool(): number {
   const raw = Number(process.env.MAX_CONCURRENT_INVOKES);
-  return Number.isFinite(raw) && raw > 0 ? raw : 8;
+  return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_MAX_CONCURRENT_INVOKES;
 }
 
 const MAX_WARM_POOL = resolveMaxWarmPool();

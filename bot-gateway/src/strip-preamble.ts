@@ -13,6 +13,14 @@
  * the first `---` looks like a short planning/transition preamble (a known opener
  * phrase, and short enough to not be a real answer). It never touches a body that
  * doesn't start with such a preamble, and never strips past the first `---`.
+ *
+ * STOP-LOSS RULE (do not grow this file): a NEW preamble variant observed in the
+ * wild is a PROMPT problem first — fix it durably in agent-container/prompts/
+ * system.md (the agent must not narrate before the conclusion). Only add a regex
+ * here if the prompt fix demonstrably can't hold (e.g. a model-specific tic that
+ * survives explicit instruction), and prefer widening an existing broad pattern
+ * over adding a new narrow one. History: this list grew to 23 entries by playing
+ * whack-a-mole per sighting; that's the failure mode this note exists to stop.
  */
 
 // STRICTER subset (used by BOTH strategies via isFullPreamble). Without a `---` signal, an opener
