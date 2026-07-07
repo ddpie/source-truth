@@ -1,7 +1,7 @@
 {
   "_doc": [
     "SRE / HEALTH dashboard (monitoring plan §2.B, 受众: 工程 / 运维).",
-    "TEMPLATE — placeholders ${REGION} and ${NAMESPACE} rendered by scripts/render_dashboard.py",
+    "TEMPLATE — placeholders ${REGION} and ${NAMESPACE} rendered by scripts/lib/render_dashboard.py",
     "before put-dashboard. Edit THIS template, not the rendered output (源在 git — plan 原则1).",
     "",
     "HARD CONSTRAINT (plan 阶段2): every widget is type:metric. NO type:log Insights widgets.",

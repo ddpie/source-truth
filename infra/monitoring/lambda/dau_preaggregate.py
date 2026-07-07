@@ -21,7 +21,7 @@ Contract (the parts that MUST be right, per the plan's 最小可执行规格):
     are still counted; the metric is tagged saltWeak when ANY counted row was weak-salted.
 
 Packaging: pure stdlib + boto3 (present in the Lambda runtime) — no third-party deps, so
-scripts/apply-dau-lambda.sh can zip this single file with no build step.
+scripts/lib/apply-dau-lambda.sh can zip this single file with no build step.
 
 The query construction + result parsing + window math are factored into pure helpers so
 they're unit-testable WITHOUT AWS (tests in index-service/tests or a dedicated suite call

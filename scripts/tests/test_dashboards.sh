@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # test_dashboards.sh — offline tests for the dashboard renderer
-# (scripts/lib/render_dashboard.py) and the apply wrapper's dry-run path.
+# (scripts/lib/render_dashboard.py) and the apply stage's dry-run path
+# (scripts/lib/apply-dashboards.sh, dispatched by scripts/apply-monitoring.sh).
 # No AWS calls.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 RENDER="$ROOT/scripts/lib/render_dashboard.py"
-APPLY="$ROOT/scripts/apply-dashboards.sh"
+APPLY="$ROOT/scripts/lib/apply-dashboards.sh"
 PROD="$ROOT/infra/monitoring/dashboard.product.json"
 SRE="$ROOT/infra/monitoring/dashboard.sre.json"
 BYPROJ="$ROOT/infra/monitoring/dashboard.by-project.json"
@@ -24,7 +25,7 @@ TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 
 # --- both real templates render to valid JSON with no leftover placeholders ---
 # --account-id is always supplied: the SRE template uses ${ACCOUNT_ID} in its alarm-widget
-# ARNs (apply-dashboards.sh resolves it via STS), so a render without it would fail-loud on
+# ARNs (lib/apply-dashboards.sh resolves it via STS), so a render without it would fail-loud on
 # the unresolved placeholder. A template that doesn't use it just ignores the value.
 for tpl in "$PROD" "$SRE" "$BYPROJ"; do
   name="$(basename "$tpl")"

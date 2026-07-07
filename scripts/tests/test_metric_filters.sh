@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # test_metric_filters.sh — offline tests for the A-class metric-filter renderer
-# (scripts/lib/render_metric_filters.py) and the apply wrapper's dry-run path.
+# (scripts/lib/render_metric_filters.py) and the apply stage's dry-run path
+# (scripts/lib/apply-metric-filters.sh, dispatched by scripts/apply-monitoring.sh).
 # No AWS calls.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 RENDER="$ROOT/scripts/lib/render_metric_filters.py"
-APPLY="$ROOT/scripts/apply-metric-filters.sh"
+APPLY="$ROOT/scripts/lib/apply-metric-filters.sh"
 DEFS="$ROOT/infra/monitoring/queries/metric-filters/a-class-metrics.json"
 
 _run=0 _fail=0

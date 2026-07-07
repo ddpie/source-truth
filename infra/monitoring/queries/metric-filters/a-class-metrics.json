@@ -6,7 +6,7 @@
     "B-class (DAU/retention de-dup) is NOT here — see ../insights/ (it needs a scheduled pre-aggregation",
     "Lambda, never a real-time dashboard log-dedup widget).",
     "",
-    "Each entry is consumed by scripts/apply-metric-filters.sh: it creates one metric-filter on the",
+    "Each entry is consumed by scripts/lib/apply-metric-filters.sh: it creates one metric-filter on the",
     "gateway log group (logGroup below) emitting `metric` into namespace `metricNamespace`.",
     "DENSITY rules (and a hard CloudWatch constraint):",
     "  - Plain counters (no dimensions) set defaultValue:0 so the metric is DENSE (emits 0 when no",

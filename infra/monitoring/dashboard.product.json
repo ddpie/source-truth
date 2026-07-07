@@ -2,7 +2,7 @@
   "_doc": [
     "PRODUCT / USAGE dashboard (monitoring plan §2.A, 受众: 产品 / 非技术).",
     "TEMPLATE — placeholders ${REGION} and ${NAMESPACE} are rendered by",
-    "scripts/render_dashboard.py before put-dashboard. Do NOT hand-edit the rendered output;",
+    "scripts/lib/render_dashboard.py before put-dashboard. Do NOT hand-edit the rendered output;",
     "edit THIS template and re-render (源在 git, 看板是生成物 — plan 原则1).",
     "",
     "HARD CONSTRAINT (plan 阶段2): every widget is type:metric (reads CloudWatch metrics extracted",
