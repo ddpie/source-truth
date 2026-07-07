@@ -1,15 +1,15 @@
-"""Unit tests for path_align.to_container_path (POC#1 path normalization).
+"""Unit tests for path_align (POC#1 path normalization).
 
 CodeGraph (codegraph-server 0.18.5) returns symbol.location.file paths whose
 format mirrors the --workspace argument it was started with:
   - workspace "."         -> "./agent-container/tests/test_agent_lib.py"  (./-prefixed)
   - workspace "/abs/root" -> "/abs/root/agent-container/tests/test_agent_lib.py"
-(verified empirically — see test_real_codegraph_paths below.)
+(verified empirically.)
 
 In production index-service starts the server with a fixed absolute workspace =
-the EFS worktree path (index_root). path_align rewrites that prefix into the
-session container's read-only mount (/mnt/repo), handling both the ./-relative
-and absolute forms, and refusing paths that escape the repo root.
+the local repo copy (index_root). path_align strips that prefix into plain
+REPO-RELATIVE paths (the agent mounts no filesystem), handling both the
+./-relative and absolute forms, and refusing paths that escape the repo root.
 """
 
 from __future__ import annotations
@@ -27,12 +27,10 @@ if str(SVC_DIR) not in sys.path:
 import path_align  # noqa: E402
 
 INDEX_ROOT = "/data/repo/code-5x"  # index-service-side local repo copy
-MOUNT = "/mnt/repo"                 # legacy mount namespace (back-compat coverage)
 
 
-# --- Repo-relative output (the default post-EFS-removal: no agent mount) -----
+# --- Repo-relative output (the agent has no mount) ---------------------------
 def test_default_is_repo_relative():
-    # mount_root defaults to "" → the agent sees plain repo-relative paths.
     got = path_align.to_container_path("a/b.cs", index_root=INDEX_ROOT)
     assert got == "a/b.cs"
 
@@ -48,7 +46,6 @@ def test_backslash_path_normalized_to_forward_slash():
     assert path_align.to_container_path(r"Assets\Scripts\Foo.cs", index_root=INDEX_ROOT) == "Assets/Scripts/Foo.cs"
     assert path_align.to_container_path(f"{INDEX_ROOT}\\Assets\\Foo.cs", index_root=INDEX_ROOT) == "Assets/Foo.cs"
     # And a backslash '..' climb is still rejected (normalized first, then guarded).
-    import pytest
     with pytest.raises(ValueError):
         path_align.to_container_path(r"..\..\etc\passwd", index_root=INDEX_ROOT)
 
@@ -69,6 +66,11 @@ def test_repo_relative_bare_dot_returns_dot():
     assert path_align.to_container_path(".", index_root=INDEX_ROOT) == "."
 
 
+def test_normalizes_redundant_segments():
+    got = path_align.to_container_path(f"{INDEX_ROOT}/./Assets//x/../y.cs", index_root=INDEX_ROOT)
+    assert got == "Assets/y.cs"
+
+
 def test_repo_relative_rejects_escape():
     with pytest.raises(ValueError):
         path_align.to_container_path("/etc/passwd", index_root=INDEX_ROOT)
@@ -76,129 +78,26 @@ def test_repo_relative_rejects_escape():
         path_align.to_container_path("../../etc/passwd", index_root=INDEX_ROOT)
 
 
-def test_format_location_repo_relative():
-    location = {"file": "./agent-container/agent.py", "line": 21}
-    assert path_align.format_location(location, index_root=INDEX_ROOT) == "agent-container/agent.py:21"
-
-
-# --- Legacy /mnt/repo mount namespace (still supported via explicit mount_root) -
-def test_dot_slash_relative_path_rewritten_to_mount():
-    # codegraph-server started with --workspace "." returns this exact form.
-    got = path_align.to_container_path(
-        "./agent-container/tests/test_agent_lib.py",
-        index_root=INDEX_ROOT,
-        mount_root=MOUNT,
-    )
-    assert got == f"{MOUNT}/agent-container/tests/test_agent_lib.py"
-
-
-def test_bare_dot_returns_mount_root():
-    assert path_align.to_container_path(".", index_root=INDEX_ROOT, mount_root=MOUNT) == MOUNT
-
-
-def test_absolute_under_workspace_rewritten_to_mount():
-    # codegraph-server started with --workspace "/mnt/efs/repo" returns this form.
-    got = path_align.to_container_path(
-        f"{INDEX_ROOT}/index-service/path_align.py",
-        index_root=INDEX_ROOT,
-        mount_root=MOUNT,
-    )
-    assert got == f"{MOUNT}/index-service/path_align.py"
-
-
-def test_relative_path_prepended_with_mount():
-    got = path_align.to_container_path(
-        "Assets/Scripts/Foo.cs", index_root=INDEX_ROOT, mount_root=MOUNT
-    )
-    assert got == f"{MOUNT}/Assets/Scripts/Foo.cs"
-
-
-def test_already_under_mount_is_idempotent():
-    p = f"{MOUNT}/Assets/Bar.cs"
-    assert path_align.to_container_path(p, index_root=INDEX_ROOT, mount_root=MOUNT) == p
-
-
-def test_normalizes_redundant_segments():
-    got = path_align.to_container_path(
-        f"{INDEX_ROOT}/./Assets//x/../y.cs", index_root=INDEX_ROOT, mount_root=MOUNT
-    )
-    assert got == f"{MOUNT}/Assets/y.cs"
-
-
-def test_absolute_outside_index_root_rejected():
-    with pytest.raises(ValueError):
-        path_align.to_container_path(
-            "/etc/passwd", index_root=INDEX_ROOT, mount_root=MOUNT
-        )
-
-
-def test_relative_escaping_root_rejected():
-    with pytest.raises(ValueError):
-        path_align.to_container_path(
-            "../../etc/passwd", index_root=INDEX_ROOT, mount_root=MOUNT
-        )
-
-
 def test_empty_path_rejected():
     with pytest.raises(ValueError):
-        path_align.to_container_path("", index_root=INDEX_ROOT, mount_root=MOUNT)
-
-
-# --- format_location: real CodeGraph location dict -> agent-readable reference
-def test_format_location_real_codegraph_shape():
-    # Exact shape returned by codegraph-server 0.18.5 (empirically verified).
-    location = {
-        "column": 0,
-        "end_column": 10000,
-        "end_line": 40,
-        "file": "./index-service/tests/test_path_align.py",
-        "line": 33,
-    }
-    ref = path_align.format_location(location, index_root=INDEX_ROOT, mount_root=MOUNT)
-    assert ref == f"{MOUNT}/index-service/tests/test_path_align.py:33"
-
-
-def test_format_location_absolute_workspace_form():
-    location = {"file": f"{INDEX_ROOT}/agent-container/agent.py", "line": 21}
-    ref = path_align.format_location(location, index_root=INDEX_ROOT, mount_root=MOUNT)
-    assert ref == f"{MOUNT}/agent-container/agent.py:21"
-
-
-def test_format_location_missing_line_omits_suffix():
-    location = {"file": "./a/b.py"}
-    ref = path_align.format_location(location, index_root=INDEX_ROOT, mount_root=MOUNT)
-    assert ref == f"{MOUNT}/a/b.py"
-
-
-def test_format_location_rejects_missing_file():
-    with pytest.raises((KeyError, ValueError)):
-        path_align.format_location({"line": 5}, index_root=INDEX_ROOT, mount_root=MOUNT)
+        path_align.to_container_path("", index_root=INDEX_ROOT)
 
 
 # --- to_local_path: inverse mapping (agent-space path -> local on-disk path) -
-# Backs read_file/glob_files (EFS removal). Untrusted input surface, so it must
-# confine to local_root via BOTH a lexical guard AND a realpath symlink check.
-def test_to_local_strips_mount_prefix(tmp_path):
-    root = tmp_path / "repo"
-    (root / "Assets").mkdir(parents=True)
-    f = root / "Assets" / "Foo.cs"
-    f.write_text("x")
-    got = path_align.to_local_path(f"{MOUNT}/Assets/Foo.cs", local_root=str(root), mount_root=MOUNT)
-    assert got == os.path.realpath(str(f))
-
-
+# Backs read_file/glob_files. Untrusted input surface, so it must confine to
+# local_root via BOTH a lexical guard AND a realpath symlink check.
 def test_to_local_accepts_relative(tmp_path):
     root = tmp_path / "repo"
     (root / "a").mkdir(parents=True)
     (root / "a" / "b.json").write_text("{}")
-    got = path_align.to_local_path("a/b.json", local_root=str(root), mount_root=MOUNT)
+    got = path_align.to_local_path("a/b.json", local_root=str(root))
     assert got == os.path.realpath(str(root / "a" / "b.json"))
 
 
 def test_to_local_bare_dot_returns_root(tmp_path):
     root = tmp_path / "repo"
     root.mkdir()
-    got = path_align.to_local_path(".", local_root=str(root), mount_root=MOUNT)
+    got = path_align.to_local_path(".", local_root=str(root))
     assert got == os.path.realpath(str(root))
 
 
@@ -207,28 +106,28 @@ def test_to_local_already_local_is_idempotent(tmp_path):
     root.mkdir()
     (root / "x.cs").write_bytes(b"y")
     p = os.path.realpath(str(root / "x.cs"))
-    assert path_align.to_local_path(p, local_root=str(root), mount_root=MOUNT) == p
+    assert path_align.to_local_path(p, local_root=str(root)) == p
 
 
 def test_to_local_rejects_relative_escape(tmp_path):
     root = tmp_path / "repo"
     root.mkdir()
     with pytest.raises(ValueError):
-        path_align.to_local_path("../../etc/passwd", local_root=str(root), mount_root=MOUNT)
+        path_align.to_local_path("../../etc/passwd", local_root=str(root))
 
 
 def test_to_local_rejects_absolute_outside(tmp_path):
     root = tmp_path / "repo"
     root.mkdir()
     with pytest.raises(ValueError):
-        path_align.to_local_path("/etc/passwd", local_root=str(root), mount_root=MOUNT)
+        path_align.to_local_path("/etc/passwd", local_root=str(root))
 
 
 def test_to_local_empty_rejected(tmp_path):
     root = tmp_path / "repo"
     root.mkdir()
     with pytest.raises(ValueError):
-        path_align.to_local_path("", local_root=str(root), mount_root=MOUNT)
+        path_align.to_local_path("", local_root=str(root))
 
 
 def test_to_local_rejects_sibling_prefix_dir(tmp_path):
@@ -243,7 +142,7 @@ def test_to_local_rejects_sibling_prefix_dir(tmp_path):
     (tmp_path / "repo-evil").mkdir()
     (tmp_path / "repo-evil" / "secret.txt").write_text("x")
     with pytest.raises(ValueError):
-        path_align.to_local_path("../repo-evil/secret.txt", local_root=str(root), mount_root=MOUNT)
+        path_align.to_local_path("../repo-evil/secret.txt", local_root=str(root))
 
 
 def test_to_local_rejects_symlink_escape(tmp_path):
@@ -256,7 +155,7 @@ def test_to_local_rejects_symlink_escape(tmp_path):
     link = root / "escape"
     os.symlink(str(outside), str(link))
     with pytest.raises(ValueError):
-        path_align.to_local_path(f"{MOUNT}/escape", local_root=str(root), mount_root=MOUNT)
+        path_align.to_local_path("escape", local_root=str(root))
 
 
 def test_to_local_allows_symlink_within_repo(tmp_path):
@@ -267,7 +166,7 @@ def test_to_local_allows_symlink_within_repo(tmp_path):
     target.write_text("{}")
     link = root / "alias.json"
     os.symlink(str(target), str(link))
-    got = path_align.to_local_path(f"{MOUNT}/alias.json", local_root=str(root), mount_root=MOUNT)
+    got = path_align.to_local_path("alias.json", local_root=str(root))
     assert got == os.path.realpath(str(target))
 
 
@@ -290,17 +189,6 @@ def test_repo_prefix_default_empty_is_unchanged():
 def test_repo_prefix_repo_root_is_bare_repo():
     # the repo root "." becomes just "<repo>", not "<repo>/."
     assert path_align.to_container_path(".", index_root=INDEX_ROOT, repo="client") == "client"
-
-
-def test_repo_prefix_not_applied_with_legacy_mount_root():
-    # a legacy mount_root is single-repo only; repo is ignored there.
-    got = path_align.to_container_path("a/b.cs", index_root=INDEX_ROOT, mount_root="/mnt/repo", repo="client")
-    assert got == "/mnt/repo/a/b.cs"
-
-
-def test_format_location_carries_repo_prefix():
-    loc = {"file": "Assets/Foo.cs", "line": 12}
-    assert path_align.format_location(loc, index_root=INDEX_ROOT, repo="client") == "client/Assets/Foo.cs:12"
 
 
 def test_to_local_strips_repo_prefix(tmp_path):

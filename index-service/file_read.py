@@ -1,14 +1,13 @@
 """Read a single file / list files over the LOCAL-disk repo copy.
 
 Why this exists: the agent microVM used to read source via builtin Read/Glob on
-the EFS mount (/mnt/repo). To remove EFS entirely, the agent now reads code over
-HTTP through index-service, which already keeps a LOCAL copy of the repo
+an EFS mount. To remove EFS entirely, the agent now reads code over HTTP through
+index-service, which already keeps a LOCAL copy of the repo
 (/data/repo/<subdir>, the same copy file_search.py greps). These two functions
 back the ``read_file`` and ``glob_files`` MCP tools — they take an agent-supplied
-path (repo-relative, or a legacy /mnt/repo prefix), confine it to the local copy
-via ``path_align.to_local_path`` (lexical + realpath symlink-escape guard), and
-return content / matches with paths in the agent's namespace (repo-relative by
-default) so results are indistinguishable from the old builtin tools.
+repo-relative path, confine it to the local copy via ``path_align.to_local_path``
+(lexical + realpath symlink-escape guard), and return content / matches with
+repo-relative paths so results are indistinguishable from the old builtin tools.
 
 Pure-ish: all disk access is confined under ``local_root``; nothing writes.
 """
@@ -85,17 +84,15 @@ def read_file(
     requested: str,
     *,
     local_root: str,
-    mount_root: str,
     offset: int = 0,
     limit: int | None = None,
     repo: str = "",
 ) -> dict[str, Any]:
     """Read a single file from the LOCAL repo copy.
 
-    ``requested`` is an agent-space path (repo-relative, or a legacy ``/mnt/repo/...``
-    prefix); it is confined to ``local_root`` before opening. Returns
-    {"path", "content", "lines", "truncated"} with ``path`` in the agent's namespace
-    (repo-relative by default).
+    ``requested`` is an agent-space (repo-relative) path; it is confined to
+    ``local_root`` before opening. Returns
+    {"path", "content", "lines", "truncated"} with ``path`` repo-relative.
     ``repo`` (multi-repo): the graph/search tools emit paths as ``<repo>/<rel>`` so the
     agent can tell repos apart, and passes that path back here verbatim. With ``repo`` set,
     ``to_local_path`` STRIPS the leading ``<repo>/`` before confining to ``local_root`` (the
@@ -105,7 +102,7 @@ def read_file(
     a bad/escaping path or a path that isn't a regular file (so the bridge can
     report a clean error rather than leak a stack trace)."""
     t0 = perf_counter()
-    local_path = path_align.to_local_path(requested, local_root=local_root, mount_root=mount_root, repo=repo)
+    local_path = path_align.to_local_path(requested, local_root=local_root, repo=repo)
     if not os.path.isfile(local_path):
         raise ValueError(f"not a readable file: {requested!r}")
 
@@ -181,7 +178,7 @@ def read_file(
     # prefix match and raise "escapes repo root" on every read. Mirror glob_files,
     # which roots on os.path.realpath(local_root).
     mount_path = path_align.to_container_path(
-        local_path, index_root=os.path.realpath(local_root), mount_root=mount_root, repo=repo)
+        local_path, index_root=os.path.realpath(local_root), repo=repo)
     elapsed_ms = (perf_counter() - t0) * 1000
     logger.info(perf_entry("file_read", elapsed_ms, path=mount_path[:120],
                            lines=len(sliced), start=start, total=total_lines,
@@ -216,20 +213,19 @@ def glob_files(
     pattern: str,
     *,
     local_root: str,
-    mount_root: str,
     repo: str = "",
 ) -> dict[str, Any]:
     """List files in the LOCAL repo copy matching a glob ``pattern``.
 
     ``pattern`` is interpreted relative to the repo root (e.g. ``**/*.cs``,
-    ``Config/*.json``); a legacy /mnt/repo-prefixed pattern is also accepted and
-    rebased. Returns {"paths": [...], "truncated": bool} with paths in the agent's
-    namespace (repo-relative by default), sorted, deduped. Hidden/.git/node_modules
+    ``Config/*.json``). Returns {"paths": [...], "truncated": bool} with
+    repo-relative paths, sorted, deduped. Hidden/.git/node_modules
     entries are excluded to match file_search's view. Raises ValueError on an empty pattern
     or one that escapes the repo root.
     ``repo`` (multi-repo): with ``repo`` set, a leading ``<repo>/`` on the pattern is stripped
     before globbing this repo's copy, and returned paths are re-prefixed with ``<repo>/`` so
-    they round-trip with what the agent saw. ``repo=""`` is unchanged (single repo)."""
+    they round-trip with what the agent saw. ``repo=""`` is unchanged (single repo).
+    An absolute pattern is rejected (nothing outside the repo is ever globbed)."""
     if not pattern or not pattern.strip():
         raise ValueError("glob pattern must be non-empty")
     t0 = perf_counter()
@@ -243,8 +239,7 @@ def glob_files(
     pattern = path_align._normalize_seps(pattern)
 
     # MULTI-REPO: strip a leading "<repo>/" the agent carried over from a cited path (the
-    # graph/search tools prefix every path with the repo it came from). Only a relative
-    # pattern carries it; a legacy absolute mount pattern never does. repo="" → no-op.
+    # graph/search tools prefix every path with the repo it came from). repo="" → no-op.
     if repo and not os.path.isabs(pattern):
         _prefix = repo.rstrip("/") + "/"
         if pattern == repo:
@@ -254,24 +249,12 @@ def glob_files(
         if not pattern or not pattern.strip():
             raise ValueError("glob pattern is empty after stripping the repo prefix")
 
-    # Rebase a (legacy) mount-prefixed pattern to repo-relative, then confine the
-    # NON-glob prefix to the repo (a pattern like ../../etc/* must be rejected).
-    norm_mount = mount_root.rstrip("/")
+    # Confine the NON-glob prefix to the repo: reject absolute patterns (an absolute
+    # second arg to os.path.join DISCARDS real_root — the classic absolute-reset) and
+    # any ../ climb. The per-hit realpath confinement below is the second layer.
     rel_pattern = pattern
-    if norm_mount and pattern.startswith(norm_mount + "/"):
-        rel_pattern = pattern[len(norm_mount) + 1:]
-    elif os.path.isabs(pattern):
-        raise ValueError(f"absolute glob pattern outside repo: {pattern!r}")
-    # Re-check is-absolute on the POST-strip pattern, not just the raw one: with a
-    # legacy non-empty mount_root, "/mnt/repo//etc/passwd" strips to "/etc/passwd"
-    # (still absolute), which would survive the ../ checks below and then hit
-    # os.path.join(real_root, "/etc/passwd") — Python DISCARDS real_root on an
-    # absolute second arg (the classic absolute-reset), making disk_pattern
-    # "/etc/passwd". The per-hit realpath confinement still drops the out-of-repo
-    # match, but reject it here so the lexical guard (the advertised first layer)
-    # actually holds and never reaches outside the repo.
     if os.path.isabs(rel_pattern):
-        raise ValueError(f"glob pattern escapes repo root (absolute after rebase): {pattern!r}")
+        raise ValueError(f"absolute glob pattern outside repo: {pattern!r}")
     if rel_pattern.startswith("../") or "/../" in rel_pattern or rel_pattern == "..":
         raise ValueError(f"glob pattern escapes repo root: {pattern!r}")
 
@@ -293,7 +276,7 @@ def glob_files(
         if not os.path.isfile(real_hit):
             continue
         try:
-            mount_path = path_align.to_container_path(real_hit, index_root=real_root, mount_root=mount_root, repo=repo)
+            mount_path = path_align.to_container_path(real_hit, index_root=real_root, repo=repo)
         except ValueError:
             continue
         paths.append(mount_path)
@@ -307,15 +290,15 @@ def glob_files(
     return {"paths": paths, "truncated": truncated, "count": len(paths)}
 
 
-def read_to_json(requested: str, *, local_root: str, mount_root: str,
+def read_to_json(requested: str, *, local_root: str,
                  offset: int = 0, limit: int | None = None, repo: str = "") -> str:
     """read_file → JSON string (the MCP tool return shape)."""
     return json.dumps(
-        read_file(requested, local_root=local_root, mount_root=mount_root, offset=offset, limit=limit, repo=repo),
+        read_file(requested, local_root=local_root, offset=offset, limit=limit, repo=repo),
         ensure_ascii=False,
     )
 
 
-def glob_to_json(pattern: str, *, local_root: str, mount_root: str, repo: str = "") -> str:
+def glob_to_json(pattern: str, *, local_root: str, repo: str = "") -> str:
     """glob_files → JSON string (the MCP tool return shape)."""
-    return json.dumps(glob_files(pattern, local_root=local_root, mount_root=mount_root, repo=repo), ensure_ascii=False)
+    return json.dumps(glob_files(pattern, local_root=local_root, repo=repo), ensure_ascii=False)
