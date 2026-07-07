@@ -168,72 +168,20 @@ agent 会话（注入本项目服务地址）
 策划说「体力」「战力」「掉率」，代码里是 `stamina` / `combatPower` / `dropRate`。没有这层对照，agent
 用中文词定位不到英文符号。术语表提供这层映射，带上业务解释后也是一份面向非技术读者的小型领域词典。
 
-### 9.1 存放位置
+> 初始设计（CSV 人工建表、read_table 读取、S3 拉取）在落地时被有意替换，此处只记实现现状
+> （2026-06-22，代码见 `index-service/glossary*.py`）；早期设计见 git 历史。
 
-**不放进业务代码仓。** 术语表是索引服务的独立数据，与代码副本物理并列：
-
-```
-/data/
-├── repo/<仓库>/          ← 代码副本（只读）
-└── glossary/<项目>/      ← 术语表（独立目录）
-```
-
-从独立来源（S3 / 小仓库 / 本地文件）拉取，刷新时同样适用 `.new` + rename 原子切换。
-
-### 9.2 读取隔离
-
-术语表在现有沙箱根 `/data/repo/<仓库>` 之外，隔离**不会自动继承**，必须显式规定：
-
-- 新增独立只读读取工具（不能复用现有读文件工具，会被 realpath 拒）。
-- 沙箱根固定在 `/data/glossary/<项目>/`，不能是 `/data/glossary/` 顶层（防 `../B` 穿越）。
-- 使用同一套 realpath + 项目名 `^[a-z0-9-]+$` 白名单 + 回归测试。
-- 纳入只读白名单。
-
-### 9.3 结构与建法
-
-CSV（纯文本，便于 diff 和评审）：
-
-```
-中文名 | 英文名      | 代码符号/字段名    | 解释（业务含义）                            | 所属系统  | 别名
-体力  | stamina     | maxStamina        | 玩家行动消耗的资源，清零后无法行动、随时间恢复 | 背包/体力 | 精力,行动力
-战力  | combatPower | CombatPower.calc() | 综合战斗强度评分，由属性+装备派生，非存储值    | 战斗      | 战斗力,BP
-```
-
-「代码符号」列是中文到代码的锚点；「解释」列面向非技术读者。半自动建表：英文名 / 字段名用
-`symbol_search` 抽符号、`search_files` 扫配置表表头；中文名和解释由人补；高频被问到但表里没有的词
-逐步补入。
-
-### 9.4 防过期
-
-术语表脱离 PR 评审后更容易和代码对不上，校验从建议升为必须：
-
-1. **符号校验是降级信号，不是硬告警**：codegraph 不区分「真不存在」和「召回不到」（动态语言、宏、GBK
-   仓库都是常态），逐条告警会持续误报直到运维无视。做法：查不到只降低置信度，agent 标注「未在索引中确认」；
-   告警阈值设为某仓库过期条目**占比突然升高**。
-2. **术语表是不可信输入**：「解释」列脱离代码评审，容易成为注入通道。进 agent 上下文前做和用户提问同级的
-   注入隔离（不可信文本放带分隔符的数据块，不和系统指令混排）；「代码符号」列先过字符白名单。术语表可信
-   级别 ≤ 它服务的代码仓。
-3. **标注来源、过期降级**：基于术语表的翻译要能溯源；低置信度条目降级处理（提示转研发，不直接采信）。
-
-> 配置表读取工具有截断上限（每表 500 行 / 每格 200 字符）。术语表超限会被静默截断，导致漏映射。对策：按系统
-> 拆成多张 CSV（每张 < 500 行），或调高上限。
-
-### 9.5 实现实况（2026-06-22，实现已偏离上面的 9.1/9.3/9.4 设计，以本节为准）
-
-上面 9.1–9.4 是初始设计；落地时在几处**有意改进**，实现现状如下（代码见 `index-service/glossary*.py`）：
-
-- **存储**：每个仓一份 slice `/data/glossary/<项目>/<subdir>.jsonl`（单仓项目就一份），不是单张表；
+- **存储**：每个仓一份 slice `/data/glossary/<项目>/<subdir>.jsonl`，与代码副本物理并列、不进业务代码仓；
   `glossary_read` 把项目目录下所有 `*.jsonl` 聚合，多仓时给 concept_id 加上 `<repo>/` 命名空间前缀、防跨仓混淆。
-- **格式**：**JSONL**（非 CSV），concept 为中心的 Entry：`{concept_id, kind(symbol|alias), value, source, line, confidence}`。
-  没有「解释（业务含义）」列——9.4 自己指出该自由文本列是注入通道，实现改用确定性 grounding 替代。
-- **生成**：**全自动、无人工**。构建期在 index 主机用本地 `claude` (cc) CLI 扫代码产出（不是「中文名/解释由人补」）。
-  cc 锁定（`run_cc`：`--disallowed-tools` + `--setting-sources ""`）；cc 臆造的中文别名由 `extract_entries` 的
-  **grounding 校验**（中文必须真实出现在 cited 源文件）丢弃——以此替代人工填写的可信度。
-- **更新**：**in-place 增量**。刷新 timer 跑 `git_fetch` 后按 `old..new` diff 只重建变更文件的条目（`glossary_gen`），
-  per-slice `flock` 防与首建争用；不是「S3/独立来源 + .new rename」。空 diff / 仅 docs 改动则跳过、不调 cc。
-- **读取**：**专用**两个只读工具（注册名带 `codegraph_` 前缀）`codegraph_glossary_index`（轻量层，med+ 置信、
+- **格式**：JSONL，concept 为中心的 Entry：`{concept_id, kind(symbol|alias), value, source, line, confidence}`。
+  不设自由文本「解释」列——那是注入通道，用确定性 grounding 替代。
+- **生成**：全自动、无人工。构建期在 index 主机用本地 `claude` (cc) CLI 扫代码产出。cc 锁定
+  （`run_cc`：`--disallowed-tools` + `--setting-sources ""`）；cc 臆造的中文别名由 `extract_entries` 的
+  **grounding 校验**（中文必须真实出现在 cited 源文件）丢弃。
+- **更新**：in-place 增量。刷新 timer 跑 `git_fetch` 后按 `old..new` diff 只重建变更文件的条目（`glossary_gen`），
+  per-slice `flock` 防与首建争用；空 diff / 仅 docs 改动则跳过、不调 cc。
+- **读取隔离**：专用两个只读工具（注册名带 `codegraph_` 前缀）——`codegraph_glossary_index`（轻量层，med+ 置信、
   每概念≥1 符号、head 截断、按 slice 均分预算）+ `codegraph_glossary_lookup`（按 concept_id 或中文词查，含 index
-  省略的低置信概念）。不再走 read_table，故 9.4 的 500 行
-  截断注意事项不适用。9.2 的读取隔离（独立只读工具、沙箱根钉在 `/data/glossary/<项目>/`、项目名白名单、realpath）
-  **与实现一致**。
+  省略的低置信概念）。沙箱根钉在 `/data/glossary/<项目>/`（不能是顶层，防 `../B` 穿越），项目名
+  `^[a-z0-9-]+$` 白名单 + realpath 校验 + 回归测试。
 - **边界**：构建期引擎是对「不跑引擎」MVP 约束的明确例外，见 AGENTS.md「构建期引擎」与 `docs/agent/invariants.md` §6。
