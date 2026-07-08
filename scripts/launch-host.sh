@@ -155,7 +155,9 @@ NEXT
 
 # --- 1. profile (menu-picked; not pre-filled — pick is cheap and the account isn't known yet) ---
 if [ -z "$PROFILE" ]; then
-  mapfile -t PROFILES < <(aws configure list-profiles 2>/dev/null || true)
+  # bash 3.2 (stock macOS) has no mapfile — while-read keeps the deploy box portable.
+  PROFILES=(); while IFS= read -r _line; do PROFILES+=("$_line"); done \
+    < <(aws configure list-profiles 2>/dev/null || true)
   [ "${#PROFILES[@]}" -gt 0 ] || { say err "no AWS profiles (run aws configure / SSO, or pass --profile)."; exit 1; }
   PROFILE="$(pick_one "选择 AWS profile / pick the AWS profile:" "" "${PROFILES[@]}")"
 fi
@@ -216,7 +218,8 @@ fi
 # Only one host is meant to exist (it holds the deploy state). If one is already up — e.g. a prior
 # run that died after launch but before deploy finished — REUSE it by default: IAM is now ensured
 # above, so we just deploy onto that box (scp + run the prepare script). Pass --new-host to force one.
-mapfile -t EXISTING < <(aws ec2 describe-instances \
+# bash 3.2 (stock macOS) has no mapfile — while-read keeps the deploy box portable.
+EXISTING=(); while IFS= read -r _line; do EXISTING+=("$_line"); done < <(aws ec2 describe-instances \
   --filters "Name=tag:Name,Values=source-truth-host" "Name=instance-state-name,Values=running,pending,stopped,stopping" \
   --query 'Reservations[].Instances[].[InstanceId,State.Name,PublicIpAddress]' --output text 2>/dev/null | grep -v '^[[:space:]]*$' || true)
 if [ "${#EXISTING[@]}" -gt 0 ] && [ "$NEW_HOST" != true ]; then
@@ -283,7 +286,9 @@ if ! aws ec2 describe-security-groups --group-ids "$SG" \
     || { [[ "$auth_err" == *Duplicate* ]] || { say err "failed to open SSH 22 for $SSHCIDR on $SG: $auth_err"; exit 1; }; }
 fi
 
-mapfile -t KEYS < <(aws ec2 describe-key-pairs --query 'KeyPairs[].KeyName' --output text 2>/dev/null | tr '\t' '\n')
+# bash 3.2 (stock macOS) has no mapfile — while-read keeps the deploy box portable.
+KEYS=(); while IFS= read -r _line; do KEYS+=("$_line"); done \
+  < <(aws ec2 describe-key-pairs --query 'KeyPairs[].KeyName' --output text 2>/dev/null | tr '\t' '\n')
 if [ "${#KEYS[@]}" -eq 0 ]; then
   say err "no EC2 key pair in $REGION — you need one to SSH in. Create one, e.g.:"
   say err "  aws ec2 create-key-pair --region $REGION --key-name source-truth --query KeyMaterial --output text > source-truth.pem && chmod 600 source-truth.pem"

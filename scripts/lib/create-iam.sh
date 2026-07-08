@@ -35,7 +35,9 @@ command -v aws >/dev/null || { echo "✗ aws CLI not found — install AWS CLI v
 
 # --- pick a profile (select, don't type) -------------------------------------------------------
 if [ -z "$PROFILE" ]; then
-  mapfile -t PROFILES < <(aws configure list-profiles 2>/dev/null || true)
+  # bash 3.2 (stock macOS) has no mapfile — while-read keeps the deploy box portable.
+  PROFILES=(); while IFS= read -r _line; do PROFILES+=("$_line"); done \
+    < <(aws configure list-profiles 2>/dev/null || true)
   if [ "${#PROFILES[@]}" -eq 0 ]; then
     echo "✗ no AWS profiles found (aws configure list-profiles is empty)." >&2
     echo "  Configure one (aws configure --profile <name> / SSO), or pass --profile <name>." >&2
