@@ -434,8 +434,8 @@ sudo journalctl -u reindex-<subdir> -f          # 或 sudo tail -f /var/log/rein
 # 只打印计划、不动资源：
 ./scripts/deploy-all.sh --region <r> --dry-run
 
-# 跳过某阶段（可重复）：artifacts|iam|network|index-svc|image|runtime|gateway|monitoring
-# 注意 runtime 与 gateway 同属「按项目部署」一个阶段，只有两个都跳才会跳过它（单跳其一无效）。
+# 跳过某阶段（可重复）：artifacts|iam|network|index-svc|image|projects|monitoring
+# （runtime 与 gateway 已合入 projects 阶段，用 --skip projects 整体跳过）
 ./scripts/deploy-all.sh --region <r> --skip monitoring
 
 # 部署/重部署单个项目（底座须已就绪）：

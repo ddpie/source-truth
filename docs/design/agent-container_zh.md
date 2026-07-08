@@ -36,7 +36,7 @@ bot-gateway ──InvokeAgentRuntime──▶ agent-container（本组件，micr
 
 | 项 | 约定 |
 |----|------|
-| 入参 | `{ "prompt", "session" }`（bot-gateway 注入；agent 只依赖 `prompt`，`session` 作为不透明上下文） |
+| 入参 | payload `{ "prompt", "traceId"?, "repos"? }`（agent 只依赖 `prompt`；`traceId`/`repos` 可选）；runtimeSessionId 经 AgentCore 请求头到达，不进 payload |
 | 出参 | 流式 `yield` `AssistantMessage` / `ResultMessage`，由网关渲染为 CardKit |
 | 代码/配置 | 经 index-service 文件工具读取（仓库副本只在 index-service 本地磁盘；microVM 不挂文件系统；路径为仓库相对，如 `Assets/Scripts/Foo.cs`） |
 | 临时文件 | Session Storage 可写挂载 `/mnt/workspace`（每会话，约 14 天过期） |

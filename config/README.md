@@ -8,3 +8,4 @@
   你可能还想问 / 需要你确认）——这些 marker 由 agent 写在答案文本里、再由网关解析，属于
   `agent-container/prompts/system.md` 的契约，翻译它们会破坏网关对 marker 的解析。
 - `alarm-thresholds.json`：CloudWatch 告警阈值，运维可调。改阈值后重跑 `scripts/apply-monitoring.sh --only alarms` 即生效，无需改代码（渲染逻辑见 `scripts/lib/render_alarms.py`）。
+- `projects.example.json`：多项目路由清单（`port` / `feishuSecretId` / `repos`）的 schema 示例；真实配置写在 `.local/projects.json`（不入库，由 `install.sh` 的「添加项目」生成）。字段说明见文件内 `_doc`。
