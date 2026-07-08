@@ -773,6 +773,38 @@ def test_run_agent_does_not_retry_when_no_markup():
     assert calls["n"] == 1, "a clean short answer must not retry"
 
 
+def test_run_agent_logs_when_multiturn_leak_defeats_the_num_turns_assumption(caplog):
+    # The buffer/retry design assumes the cold-start leak is always num_turns<=1
+    # (_is_leak_shape returns False for >1 turn). If a run reaches turn 2+ with
+    # toolcall markup but NO real tool_use — the shape the design says can't happen —
+    # the markup streams live and the warm retry is skipped. That should not be
+    # silent: assert the observability warning fires, exactly once, no retry, and the
+    # yielded text is not re-buffered/dropped (the gateway backstop handles display).
+    import json as _json
+    import logging
+    calls = {"n": 0}
+
+    async def fake_query(prompt, options):
+        calls["n"] += 1
+        # turn 1: markup text, no tool_use (looks like a leak so far)
+        yield _MsgWith([_TextBlock("先搜一下\n<invoke name=\"codegraph_search_files\">")])
+        yield _ResultMsg(num_turns=1)
+        # turn 2 arrives WITHOUT any tool_use — defeats the <=1-turn assumption
+        yield _MsgWith([_TextBlock("继续说明……")])
+        yield _ResultMsg(num_turns=2)
+
+    with caplog.at_level(logging.INFO, logger="agent"):
+        msgs = _collect(agent_lib.run_agent({"prompt": "x"}, query_fn=fake_query))
+    assert calls["n"] == 1, ">1-turn flush commits the run; no warm retry fires"
+    # The buffered messages stream through (not dropped) once turn 2 commits.
+    texts = [getattr(b, "text", "") for m in msgs for b in getattr(m, "content", []) or [] if hasattr(b, "text")]
+    assert any("继续说明" in s for s in texts), "committed turn-2 content must stream, not be dropped"
+    rows = [_json.loads(r.message) for r in caplog.records
+            if "cold_start_leak_multiturn_unexpected" in r.message]
+    assert len(rows) == 1, "the assumption-violation must be logged exactly once"
+    assert rows[0]["num_turns"] == 2 and rows[0]["markup"] is True
+
+
 def test_run_agent_recovers_on_second_retry_after_two_cold_attempts(monkeypatch):
     # ROOT-FIX regression: the live failure (card st-e70f824f…) was TWO back-to-back
     # cold attempts both losing the MCP-init race. With a bounded backoff retry budget,

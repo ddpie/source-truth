@@ -407,7 +407,7 @@ def build_bridge(
         _tool.__name__ = tool_name
         return _tool
 
-    # All six tools are READ-ONLY, IDEMPOTENT, and CLOSED-DOMAIN (they only query the
+    # Every registered tool is READ-ONLY, IDEMPOTENT, and CLOSED-DOMAIN (they only query the
     # local repo copy / in-memory graph — no writes, no external/open-world calls). The
     # MCP spec's tool annotations default to the pessimistic (destructive, non-idempotent,
     # open-world) when unset, so we set them explicitly: this is both honest metadata and
