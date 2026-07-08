@@ -1,8 +1,8 @@
 """Persistent codegraph-server MCP session (the resident half of the bridge).
 
-The naive client (codegraph_client.acall_tool) spawns a fresh codegraph-server
-process per query. For a large repo on EFS that means re-scanning ~8.7k files on
-every call (~20s cold) — unusable on a user request path. codegraph-server keeps
+A naive client would spawn a fresh codegraph-server process per query. For a
+large repo that means re-scanning ~8.7k files on every call (~20s cold) —
+unusable on a user request path. codegraph-server keeps
 the call graph in memory for the lifetime of one ``--mcp`` process, so the fix is
 to hold ONE long-lived process and relay every query into it: first query warms
 the graph (~20s), every subsequent query is single-digit milliseconds.
@@ -633,19 +633,24 @@ class CodegraphSession:
         """ONE point-in-time scan for codegraph-server processes bound to OUR workspace.
         Returns (pids, queried_ok). stdlib-only (no psutil); never raises.
 
-        Match by TWO pgrep queries, unioned:
-          (a) direct children of this pid (`-P self`), AND
-          (b) ANY process whose cmdline contains `codegraph-server … --workspace <ours>`.
-        (b) is the critical one: a hard worker-loop teardown can leave the
-        codegraph-server REPARENTED to init (PPID=1), which `-P self` never sees —
-        that reparented orphan is exactly the silent second-writer the old code missed
-        (cross-review C1). The `--workspace <ours>` anchor keeps us from touching an
-        unrelated codegraph-server serving a different repo on the same host.
+        Match by a SINGLE pgrep query: ANY process whose cmdline contains
+        `codegraph-server … --workspace <ours>`. Matching on the workspace cmdline is
+        both necessary and sufficient — it covers our OWN direct children (their cmdline
+        always carries `--workspace <ours>`, see _params) AND, critically, a
+        codegraph-server left REPARENTED to init (PPID=1) by a hard worker-loop teardown,
+        which `pgrep -P self` would never see — that reparented orphan is exactly the
+        silent second-writer the old code missed (cross-review C1). We deliberately do
+        NOT also scan `-P self` (direct children of this pid): in a multi-repo bridge one
+        process spawns a sibling codegraph-server per workspace, so `-P self` would return
+        those siblings' healthy pids too and reaping OUR workspace would SIGKILL another
+        repo's live server — breaking "refresh one repo never touches the others"
+        (invariant §5). The `--workspace <ours>` cmdline anchor already scopes the match to
+        our repo alone, so `-P self` adds nothing but that cross-repo mis-kill.
 
-        ``queried_ok`` is True iff at least one pgrep ran cleanly (exit 0 = matched,
-        1 = no match — both valid empty results; >=2 = a real error). If NO query could
-        run we never actually looked, so the caller must NOT treat an empty pid set as
-        proof of "no orphan"."""
+        ``queried_ok`` is True iff the pgrep ran cleanly (exit 0 = matched, 1 = no match —
+        both valid empty results; >=2 = a real error). If the query could not run we never
+        actually looked, so the caller must NOT treat an empty pid set as proof of
+        "no orphan"."""
         pids: set[int] = set()
         any_query_ok = False
         # pgrep -f treats the pattern as a regex; re.escape the workspace path so a
@@ -661,7 +666,6 @@ class CodegraphSession:
         # so \s matches in practice; $ covers the defensive last-arg case.
         ws_re = re.escape(self._workspace)
         queries = (
-            ["pgrep", "-P", str(os.getpid()), "-f", "codegraph-server"],
             ["pgrep", "-f", r"codegraph-server.*--workspace %s(\s|$)" % ws_re],
         )
         for q in queries:

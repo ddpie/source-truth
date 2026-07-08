@@ -3,12 +3,12 @@
 > 架构权威依据：POC 架构方案。MVP 边界与验收基准见 [`requirements_zh.md`](requirements_zh.md)；
 > 面向 AI 的实现工作原理见 [`../agent/architecture.md`](../agent/architecture.md)。
 >
-> **本文是早期 POC 方案存档，记录当初的设计选型；落地后部分技术选择已调整，与现状不一致处以
-> [`../agent/architecture.md`](../agent/architecture.md) 为准。** 已知偏离：
+> **本文按 2026-06-16 的 POC 方案原样存档，正文不再随实现更新；与现状不一致处一律以
+> [`../agent/architecture.md`](../agent/architecture.md) 为准。** 主要偏离：
 > - 代码刷新走 **systemd timer 定时 `git pull` + codegraph file-watcher 增量**，不用 push webhook / inotify；
-> - MVP 是**单引擎 Claude Code**（Codex 后置），**仅主分支**（无 worktree 多分支）；代码来源以 git 仓为主（定时 `git pull` 跟主分支），并支持本地仓（`source:"local"`，rsync 手动推送的快照，详见 [`../runbook.md`](../runbook.md)）；
-> - 不读设计文档、不做数值模拟（均 post-MVP）；
-> - 取证经 SDK 原生 HTTP MCP 连接，**无需 stdio→HTTP 转换层**（mcp-proxy）。
+> - MVP 是**单引擎 Claude Code**（Codex 后置），**仅主分支**（无 worktree 多分支）；代码来源以 git 仓为主，并支持本地仓（`source:"local"`，rsync 手动推送的快照，详见 [`../runbook.md`](../runbook.md)）；
+> - 不读设计文档、不做数值模拟；完整审计护栏后置（MVP 安全仅保留 prompt/response 日志防滥用）；
+> - 取证经 SDK 原生 HTTP MCP 连接，**无需 stdio→HTTP 转换层**（mcp-proxy）；代码只在索引服务本地磁盘，会话容器不挂任何文件系统。
 
 策划日常有大量咨询性需求（理解代码逻辑、确认数值配置、评估修改影响），这些需求本身不复杂，却常常卡在研发
 排期上。本方案在飞书中部署 AI 编程助手（Claude Code / Codex），让业务人员直接获得代码级别的问答和数值
@@ -50,8 +50,6 @@ graph TB
     BOT -.->|"CardKit流式卡片"| LARK
 ```
 
-> 图中 `push webhook` 为 POC 时的设想；现状改为 systemd timer 定时 `git pull` + file-watcher 增量，见顶部偏离说明。
-
 核心链路：用户在飞书提问 → Bot 转给会话容器 → 容器内的 AI（Claude Code / Codex）通过 CodeGraph 定位
 代码、读取配置、查阅飞书文档 → 结果流式返回飞书卡片。
 
@@ -89,9 +87,6 @@ sequenceDiagram
 | 设计文档 | lark-cli 按需读取 | 容器内预装 lark-cli，需要时直接调用飞书 API 读文档，不预同步 |
 | 飞书交互 | 基于官方 SDK 自研 | CardKit 流式卡片 + markdown 组件渲染 + 动态按钮 |
 
-> 实现备注：MVP 单引擎 Claude Code（Codex 第二引擎后置）；MVP 不纳入设计文档（lark-cli 读文档后置）；
-> MVP 仅主分支（多分支 worktree 后置）。详见 [`requirements_zh.md`](requirements_zh.md) 的 MVP 边界。
-
 ## 3. 关键点展开
 
 ### 3.1 CodeGraph：为什么需要、如何工作
@@ -112,10 +107,6 @@ graph LR
     IDX -->|"MCP over HTTP（定位+读文件）"| VM["会话容器"]
     WT -->|"经 HTTP 接口读文件工具"| VM
 ```
-
-> 实现备注：图中 `git push → webhook` 与 `inotify` 均为 POC 设想，现状为 systemd timer 定时 `git pull` + codegraph
-> file-watcher 增量（见顶部偏离说明）。**代码只存在索引服务本地磁盘**，会话容器不挂任何文件系统，定位与读文件都经索引服务的
-> MCP-over-HTTP 接口（`codegraph_read_file` / `codegraph_glob_files` / `codegraph_search_files` + 定位类）。
 
 - 会话容器与索引服务不共享挂载：索引服务在本地磁盘持唯一一份代码副本、监听变更构建索引——一份代码，
   无副本同步问题；定位查询与文件读取都由索引服务经 HTTP 接口提供给会话容器
@@ -164,8 +155,6 @@ MCP-over-HTTP 接口（定位 + 读文件工具）提供给所有会话容器，
 - **隔离**：Firecracker microVM 按会话隔离，进程内存会话结束擦除；Session Storage 按会话隔离、最长 14 天回收
 - **审计**：全量 prompt/response 记录（谁/何时/问什么/答什么）
 - **设计文档权限**：机器人作为文件夹只读协作者，未授权文档不可见
-
-> 实现备注：MVP 安全仅保留 prompt/response 日志用于防滥用；完整审计护栏与文档可见性管控后置。
 
 ## 5. 需客户配合确认
 

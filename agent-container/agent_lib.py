@@ -486,6 +486,18 @@ async def run_agent(
                 # a long tool-free multi-turn answer no longer accumulates entirely in
                 # RAM / defeats the typewriter; it streams live once turn 2 starts.
                 if saw_tool_use or (last_num_turns is not None and last_num_turns > 1):
+                    # OBSERVABILITY: the whole buffer/retry design assumes the cold-start
+                    # leak is always num_turns<=1 (see _is_leak_shape). If we reach turn >1
+                    # with NO real tool_use but toolcall markup/bare-toolname text present,
+                    # that assumption did NOT hold this run: the markup is about to stream
+                    # live and the warm retry is skipped (the gateway's strip/zeroToolLeak
+                    # backstop still fail-closes, so no raw XML reaches the user, but the
+                    # self-heal is lost). Log it so a real occurrence is visible instead of
+                    # silent — this branch should essentially never fire in practice.
+                    if (not saw_tool_use and last_num_turns is not None and last_num_turns > 1
+                            and (saw_markup_text or saw_bare_toolname_text)):
+                        _plog("cold_start_leak_multiturn_unexpected", num_turns=last_num_turns,
+                              markup=saw_markup_text, bareToolname=saw_bare_toolname_text)
                     committed = True
                     for m in buf:
                         yield m

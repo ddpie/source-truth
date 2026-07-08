@@ -1,10 +1,10 @@
 /**
  * IM-event core for the gateway.
  *
- * Consumes a normalized Feishu im.message.receive_v1 event (the shape lark-cli
- * delivers), dedups re-deliveries, routes to a runtimeSessionId, and invokes
- * the agent. The agent invoke is injected so this is testable without AWS or a
- * live Feishu long-connection.
+ * Consumes a normalized Feishu im.message.receive_v1 event, dedups
+ * re-deliveries, routes to a runtimeSessionId, and decides whether/what to
+ * answer. Pure gating + routing — the actual streaming invoke is driven by
+ * the caller (src/index.ts) from the returned HandleResult.
  *
  * The real long-connection subscriber (src/index.ts) feeds events here; that
  * piece needs bot identity + IM scopes and is wired separately.
@@ -38,12 +38,10 @@ export interface ImEvent {
   parent_id?: string;
 }
 
-/** Invoke the agent for a session; returns the answer text. */
-export type InvokeFn = (sessionId: string, prompt: string) => Promise<string>;
-
 export interface HandleResult {
   handled: boolean;
-  answer?: string;
+  /** The cleaned question text (mentions stripped) to send to the agent. */
+  prompt?: string;
   sessionId?: string;
   /** True when this turn's sessionId was freshly minted (no warm microVM behind it
    *  → AgentCore cold start: spin-up + routing folded into the first response). Used
@@ -93,7 +91,6 @@ function stripMentions(text: string, mentions: Mention[]): string {
 
 export async function handleMessageEvent(
   event: ImEvent,
-  deps: { invoke: InvokeFn },
   options: HandleOptions = {},
 ): Promise<HandleResult> {
   // 1. Dedup — Feishu re-delivers events; event_id is the idempotency key. Guard on
@@ -174,7 +171,5 @@ export async function handleMessageEvent(
   //    `cold` = freshly minted session → AgentCore cold start (no warm VM yet).
   const { sessionId, cold } = getSessionState(event.chat_id, event.thread_id);
 
-  // 4. Invoke the agent.
-  const answer = await deps.invoke(sessionId, prompt);
-  return { handled: true, answer, sessionId, coldStart: cold, messageId: event.message_id, parentId: event.parent_id, senderId: event.sender_id, eventId: event.event_id };
+  return { handled: true, prompt, sessionId, coldStart: cold, messageId: event.message_id, parentId: event.parent_id, senderId: event.sender_id, eventId: event.event_id };
 }

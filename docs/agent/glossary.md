@@ -26,7 +26,7 @@
 4. 写到 `/data/glossary/<项目>/<仓>.jsonl`，按项目、按仓隔离。
 
 **查询期（会话 microVM）**——两个只读工具（注册名带 `codegraph_` 前缀）：
-- `codegraph_glossary_index`：会话开始时取一份轻量对照（中等及以上置信度的词条）。
+- `codegraph_glossary_index`：agent 在开局按需调用一次，取一份轻量对照（中等及以上置信度的词条）——是工具调用，非自动注入上下文。
 - `codegraph_glossary_lookup`：按**中文词**或词条 id（`concept_id`）查完整符号集（含低置信的）。
 - 拿到英文符号后，照常走 `codegraph_search_files` / `codegraph_symbol_search` / `codegraph_read_file` 实际查看代码取证。
 

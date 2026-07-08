@@ -1,6 +1,6 @@
 /**
  * Adapt the Feishu SDK's nested im.message.receive_v1 event into the flat
- * ImEvent shape the gateway core (index-core/handle-event) expects.
+ * ImEvent shape the gateway core (handle-event) expects.
  *
  * The SDK (@larksuiteoapi/node-sdk WSClient) delivers the raw Feishu event:
  *   { event_id, message: { chat_id, content: '{"text":"…"}', message_id,

@@ -7,8 +7,8 @@
  * carrying the runtimeSessionId header so the same question thread reuses one
  * warm microVM. Requests are SigV4-signed (service "bedrock-agentcore").
  *
- * buildInvokeRequest is pure; signInvoke adds the SigV4 headers; invokeRuntime
- * performs the real HTTPS call (used at runtime, not in unit tests).
+ * buildInvokeRequest is pure; signInvoke adds the SigV4 headers;
+ * invokeRuntimeStreaming performs the real HTTPS call (used at runtime, not in unit tests).
  */
 
 import { Sha256 } from "@aws-crypto/sha256-js";
@@ -180,21 +180,6 @@ export async function signInvoke(
   });
   const signed = await signer.sign(httpReq);
   return { ...req, headers: signed.headers as Record<string, string> };
-}
-
-/** Perform the real signed HTTPS call to AgentCore. Returns the raw response
- *  body (text/event-stream). Used at runtime; integration-tested, not unit. */
-export async function invokeRuntime(
-  p: InvokeParams,
-  opts: SignOptions,
-): Promise<{ status: number; body: string }> {
-  const signed = await signInvoke(buildInvokeRequest(p), opts);
-  const res = await fetch(`https://${signed.hostname}${signed.path}`, {
-    method: signed.method,
-    headers: signed.headers,
-    body: signed.body,
-  });
-  return { status: res.status, body: await res.text() };
 }
 
 /** Streaming invoke. Parses the SSE stream into the agent's prose blocks and

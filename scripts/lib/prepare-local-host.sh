@@ -55,6 +55,12 @@ fi
 step "git"
 command -v git >/dev/null && echo "• already present" || apti install -y git
 
+# --- 2a. zip (monitoring's DAU-lambda phase packages the function with `zip`) --------------------
+# apply-dau-lambda.sh require_cmd's zip and hard-fails without it; a fresh minimal image lacks it,
+# so deploy-all's Phase 7 DAU stage would fail (non-fatal, but leaves the 日活 widget empty).
+step "zip"
+command -v zip >/dev/null && echo "• already present" || apti install -y zip
+
 # --- 2b. boto3/botocore recent enough for AgentCore ---------------------------------------------
 # deploy-all Phase 5 drives AgentCore via boto3 (lib/deploy_runtime.py); an old apt/pip botocore
 # lacks the 'bedrock-agentcore-control' service and deploy-all's preflight HARD-fails. Ubuntu 24.04

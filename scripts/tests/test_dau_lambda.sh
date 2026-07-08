@@ -66,8 +66,8 @@ PY
 rc=$?
 check "dau_preaggregate pure helpers" "$rc"
 
-# --- apply-dau-lambda.sh: dry-run / help / unknown flag (no AWS) ---
-APPLY="$ROOT/scripts/apply-dau-lambda.sh"
+# --- lib/apply-dau-lambda.sh: dry-run / help / unknown flag (no AWS) ---
+APPLY="$ROOT/scripts/lib/apply-dau-lambda.sh"
 dry="$("$APPLY" --dry-run --region us-east-1 2>&1)"; rc=$?
 check "apply --dry-run exits 0" "$rc"
 [[ "$dry" == *"source-truth-dau-preaggregate"* && "$dry" == *"schedule"* ]]; check "dry-run prints the plan" $?

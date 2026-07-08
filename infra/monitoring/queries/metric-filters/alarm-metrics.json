@@ -11,7 +11,7 @@
     "is DENSE → the alarm evaluates stably (plan 阶段3 澄清).",
     "",
     "Same contract + same applier as a-class-metrics.json: apply with",
-    "  scripts/apply-metric-filters.sh --defs infra/monitoring/queries/metric-filters/alarm-metrics.json",
+    "  scripts/lib/apply-metric-filters.sh --defs infra/monitoring/queries/metric-filters/alarm-metrics.json",
     "These have NO dimensions (so defaultValue:0 is legal) and metricValue 1 (a count).",
     "toolcall_leak_detected (工具调用泄漏) and finalize_failed (卡片未正常结束) are the two mandatory health alarms."
   ],

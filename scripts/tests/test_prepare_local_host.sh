@@ -3,7 +3,7 @@
 # No AWS, no SSH. Pure grep/bash -n.
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-P="$ROOT/scripts/prepare-local-host.sh"
+P="$ROOT/scripts/lib/prepare-local-host.sh"
 L="$ROOT/scripts/launch-host.sh"
 _run=0 _fail=0
 check() { _run=$((_run+1)); if [[ "$2" -eq 0 ]]; then printf '  ok   %s\n' "$1"; else printf '  FAIL %s\n' "$1"; _fail=$((_fail+1)); fi; }

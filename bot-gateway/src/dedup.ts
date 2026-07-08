@@ -9,17 +9,18 @@
  * processes, replace with a shared store (Redis/DDB TTL).
  */
 
+import { STREAM_TIMEOUT_MS } from "./tunables";
+
 // The TTL MUST outlive the longest possible in-flight invoke, or a duplicate
 // guard expires WHILE its work is still running: a single answer can stream up to
-// ~9 min (index.ts STREAM_TIMEOUT_MS = Feishu's 10-min hard close minus a 1-min
-// finalize margin). If Feishu re-delivers the triggering event after the 5-min mark
-// (push retry / network blip), BOTH the event_id and msg: guards have already
-// expired → the event passes the gates again → a SECOND invoke + a SECOND card +
-// double cost (cross-review CONFIRMED). Set the window past the invoke ceiling plus
-// a redelivery margin so a guard never lapses mid-flight. Kept in sync with index.ts
-// by COMMENT (dedup.ts must not import the gateway entrypoint); if the stream timeout
-// changes, revisit this. 15 min = 9-min invoke ceiling + ~6-min redelivery margin.
-const DEFAULT_TTL_MS = 15 * 60 * 1000; // 15 minutes — must exceed the ~9-min invoke ceiling
+// STREAM_TIMEOUT_MS (~9 min). If Feishu re-delivers the triggering event after the
+// guard expired, BOTH the event_id and msg: guards pass the gates again → a SECOND
+// invoke + a SECOND card + double cost (cross-review CONFIRMED). So the TTL is
+// DERIVED from the invoke ceiling (shared via tunables.ts, a neutral leaf module —
+// dedup.ts must not import the gateway entrypoint) plus a ~6-min redelivery margin:
+// changing the stream timeout moves this window with it, no comment-sync needed.
+// Currently 9 min + 6 min = 15 min.
+const DEFAULT_TTL_MS = STREAM_TIMEOUT_MS + 6 * 60 * 1000;
 
 const seen = new Map<string, NodeJS.Timeout>();
 

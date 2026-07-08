@@ -14,13 +14,13 @@
 # logs:PutMetricFilter (+ logs:DescribeMetricFilters for --list) on the log group.
 #
 # Usage:
-#   ./scripts/apply-metric-filters.sh [--region <r>] [--log-group <g>] [--dry-run] [--list]
+#   ./scripts/apply-monitoring.sh --only filters [--region <r>] [--log-group <g>] [--dry-run] [--list]
 #   --region      AWS region (default: DEPLOY_REGION from .local/deploy-config)
 #   --log-group   override the log group (default: logGroup from the defs JSON)
 #   --dry-run     print the put-metric-filter plan; make NO AWS calls
 #   --list        after applying, list the live filters on the group
 set -euo pipefail
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # shellcheck source-path=SCRIPTDIR source=lib/common.sh
 source "$ROOT/scripts/lib/common.sh"
 # shellcheck source-path=SCRIPTDIR source=lib/env-utils.sh
@@ -34,7 +34,7 @@ REGION="" LOG_GROUP="" DRY_RUN=0 DO_LIST=0
 
 usage() {
   cat <<'EOF'
-Usage: ./scripts/apply-metric-filters.sh [--region <r>] [--defs <f>] [--log-group <g>] [--dry-run] [--list]
+Usage: ./scripts/apply-monitoring.sh --only filters [--region <r>] [--defs <f>] [--log-group <g>] [--dry-run] [--list]
 
 Creates/updates CloudWatch metric-filters from a definitions JSON (idempotent upsert).
 Default defs: infra/monitoring/queries/metric-filters/a-class-metrics.json (the dashboard

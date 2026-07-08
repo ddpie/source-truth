@@ -19,9 +19,9 @@
 # cloudwatch:PutMetricAlarm, sns:CreateTopic, sns:GetTopicAttributes.
 #
 # Usage:
-#   ./scripts/apply-alarms.sh [--region <r>] [--namespace <ns>] [--prefix <p>] [--topic-name <n>] [--dry-run]
+#   ./scripts/apply-monitoring.sh --only alarms [--region <r>] [--namespace <ns>] [--prefix <p>] [--topic-name <n>] [--dry-run]
 set -euo pipefail
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # shellcheck source-path=SCRIPTDIR source=lib/common.sh
 source "$ROOT/scripts/lib/common.sh"
 # shellcheck source-path=SCRIPTDIR source=lib/env-utils.sh
@@ -39,7 +39,7 @@ REGION="" NAMESPACE="" PREFIX="source-truth" TOPIC_NAME="source-truth-alarms" DR
 
 usage() {
   cat <<'EOF'
-Usage: ./scripts/apply-alarms.sh [--region <r>] [--namespace <ns>] [--prefix <p>] [--topic-name <n>] [--dry-run]
+Usage: ./scripts/apply-monitoring.sh --only alarms [--region <r>] [--namespace <ns>] [--prefix <p>] [--topic-name <n>] [--dry-run]
 
 Ensures the SNS topic + creates CloudWatch alarms from config/alarm-thresholds.json (idempotent).
 
@@ -90,7 +90,7 @@ fi
 # alarms reference them — the operator can't get the order wrong. Skipped in --dry-run.
 if [[ "$DRY_RUN" -eq 0 ]]; then
   say step "ensuring alarm backing metric-filters exist (deploy-order safety)"
-  if ! bash "$ROOT/scripts/apply-metric-filters.sh" --region "$REGION" --defs "$DEFS"; then
+  if ! bash "$ROOT/scripts/lib/apply-metric-filters.sh" --region "$REGION" --defs "$DEFS"; then
     say err "could not apply alarm metric-filters ($DEFS) — alarms would watch non-existent metrics; aborting"
     exit 1
   fi

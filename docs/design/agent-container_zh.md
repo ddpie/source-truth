@@ -1,8 +1,7 @@
 # agent-container 组件设计
 
 > 设计概览，面向人工阅读。工作原理见 [`../agent/architecture.md`](../agent/architecture.md)，MVP 边界见
-> [`requirements_zh.md`](requirements_zh.md)。**实现细节**（运行时骨架、完整 env、方案对比、逐条注意事项、
-> 全部开放问题）见工作草稿 `.claude/specs/2026-06-16-agent-container-design.md`（gitignored，本机）。
+> [`requirements_zh.md`](requirements_zh.md)；实现细节以 [`../../agent-container/README.md`](../../agent-container/README.md) 为准。
 
 ## 是什么
 
@@ -37,7 +36,7 @@ bot-gateway ──InvokeAgentRuntime──▶ agent-container（本组件，micr
 
 | 项 | 约定 |
 |----|------|
-| 入参 | `{ "prompt", "session" }`（bot-gateway 注入；agent 只依赖 `prompt`，`session` 作为不透明上下文） |
+| 入参 | payload `{ "prompt", "traceId"?, "repos"? }`（agent 只依赖 `prompt`；`traceId`/`repos` 可选）；runtimeSessionId 经 AgentCore 请求头到达，不进 payload |
 | 出参 | 流式 `yield` `AssistantMessage` / `ResultMessage`，由网关渲染为 CardKit |
 | 代码/配置 | 经 index-service 文件工具读取（仓库副本只在 index-service 本地磁盘；microVM 不挂文件系统；路径为仓库相对，如 `Assets/Scripts/Foo.cs`） |
 | 临时文件 | Session Storage 可写挂载 `/mnt/workspace`（每会话，约 14 天过期） |
@@ -61,7 +60,7 @@ agent-container/
 
 MVP 用 `agentcore` toolkit（`configure --disable-memory` → `deploy --env CLAUDE_CODE_USE_BEDROCK=1` → `invoke`
 → `destroy`），不强求 CDK。Runtime 的 env / idle timeout / 请求头由 `scripts/lib/deploy_runtime.py`（boto3，
-由 `scripts/deploy-all.sh` 调用）配置；`deploy.sh` 为已废弃兼容垫片。
+由 `scripts/deploy-all.sh` 调用）配置。
 
 ## 待验证点（已确认 / 剩余）
 
@@ -71,8 +70,7 @@ MVP 用 `agentcore` toolkit（`configure --disable-memory` → `deploy --env CLA
    原生支持 `McpHttpServerConfig`（`{type:"http", url, headers?}`，`type` 必填）。**不需要** streamablehttp + `@tool` 转换层。
    `agent_lib.build_options_dict` 已据此实现，并通过真实 SDK 一致性测试。
 2. **路径对齐**：codegraph-server 0.18.5 真实返回 `./`-前缀相对路径（workspace 用 `.` 时）或 workspace 绝对路径；
-   `index-service/path_align.py`（`to_container_path` + `format_location`）已按真实输出实现并测试通过。当前
-   `mount_root` 默认 `""`（输出仓库相对路径，如 `Assets/Scripts/Foo.cs`）。
+   `index-service/path_align.py` 已按真实输出实现并测试通过，统一输出仓库相对路径（如 `Assets/Scripts/Foo.cs`）。
 3. **代码读取经 HTTP 接口**：仓库副本只在 index-service 本地磁盘，agent 经其文件工具
    （`codegraph_read_file` / `codegraph_glob_files` / `codegraph_search_files`）读取源码；microVM 不挂任何文件系统。
    Runtime 仍 `networkMode=VPC`（为在 VPC 内经 HTTP `:8080` 访问 index-service）+ NAT 出站；模型用 `global.anthropic.*`。
@@ -80,5 +78,4 @@ MVP 用 `agentcore` toolkit（`configure --disable-memory` → `deploy --env CLA
 
 **剩余待验证：** 经 HTTP 接口读文件的延迟 / 冷启动延迟 / CodeGraph 召回率 / 流式卡片频控对接 / index-service 的 HTTP 接口常驻部署。
 
-> 逐条注意事项与开放问题（`session` schema、`HookContext` 语义、Bedrock 配额等）见工作草稿
-> `.claude/specs/2026-06-16-agent-container-design.md`；真实部署资源见 `.local/deploy-config`。
+> 真实部署资源见 `.local/deploy-config`（不入库）。

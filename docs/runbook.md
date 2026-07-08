@@ -5,7 +5,7 @@
 
 系统分两部分，由部署脚本一并启动：**后端**（S3 产物 → IAM → 网络 → index-service EC2 → 镜像 → AgentCore Runtime）和 **bot-gateway**（飞书长连接网关，与索引服务同主机，将群聊中 @ 机器人的消息路由到后端、答案流式写回卡片）。
 
-部署入口有 `install.sh`（交互式，推荐）与 `deploy-all.sh`（命令行传参，适合 CI）；安装可从单独的操作机一键发起，或登录目标主机手动逐步发起（`--local`）。「快速开始」给出各自的命令，选型细节见[第二节](#二一键安装交互式推荐)。所有部署均**幂等**，中断后重新运行将从断点继续。
+部署入口有 `install.sh`（交互式，推荐）与 `deploy-all.sh`（命令行传参，适合 CI）；安装可从单独的操作机一键发起，或登录目标主机手动逐步发起（`--local`）。「快速开始」给出各自的命令，选型细节见[第二节](#二一键安装交互式推荐)。所有部署都**幂等**：中断后重跑，从断点继续。
 
 ## 快速开始
 
@@ -73,8 +73,10 @@ bash /tmp/prepare-local-host.sh   # 建议直接复制 launch-host 输出的命�
 1. **AWS 账号 + 目标区域**：区域须支持 AgentCore（如 `ap-northeast-1` 东京）。本机配好可部署的 AWS 凭证。
 2. **部署机（Linux 或 macOS）**：装好 `aws` CLI v2、`python3`、`git`，以及 **Docker 且守护进程在运行**
    （Phase 4 要构建 ARM64 镜像；只装不启动会在依赖检查就被拦下，提示 `docker info` 验证）。私有仓部署还需
-   `gh` 并已 `gh auth login`（用于克隆仓库 + 拉取 `codegraph-server`）。`codegraph-server` 二进制无需手动准备——
+   `gh` 并已 `gh auth login`（用于克隆仓库 + 拉取 `codegraph-server`）。验证与日常运维要进实例
+   （`aws ssm start-session`），需另装 [Session Manager plugin](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html)（不随 aws CLI 附带）。`codegraph-server` 二进制无需手动准备——
    本地与 S3 都没有时，部署会从本仓 Release 自动下载（私有仓经 `gh`，公开仓经直链）。
+   可选：`zip`（仅监控的 DAU 预聚合 Lambda 打包用；缺了不影响问答与其余监控，只是「日活」widget 为空，`--local` 会自动装）。
 3. **Bedrock 模型访问**：确保部署身份有 `bedrock:InvokeModel`（AWS 已不再需要逐模型在控制台「Model access」开通）。
    模型推理档由部署按 `--region` 自动解析，无需手填——部署调 `bedrock list-inference-profiles` 查该区域实际提供的档、
    自动挑最优（地域档 `us.`/`eu.`/`jp.`/`au.` 优先，没有就用 `global.`；如默认模型在东京解析为 `jp.…`、在新加坡保留 `global.…`）。
@@ -90,23 +92,14 @@ bash /tmp/prepare-local-host.sh   # 建议直接复制 launch-host 输出的命�
 
 先准备好飞书应用（第三节），拿到 `App ID` / `App Secret` / 机器人 `open_id`。
 
-**一行命令安装**（克隆仓库后进入交互式安装）：
+安装命令见[快速开始](#快速开始)；还没克隆仓库时也可以一行命令引导（自动克隆到 `./source-truth/` 再进入交互安装）：
 
 ```bash
-# 仓库公开时
-bash <(curl -fsSL https://raw.githubusercontent.com/ddpie/source-truth/main/scripts/get.sh)
-
-# 仓库私有时（先 gh auth login 一次，再用 gh 取脚本，带认证）
-bash <(gh api repos/ddpie/source-truth/contents/scripts/get.sh --jq '.content' | base64 -d)
+bash <(curl -fsSL https://raw.githubusercontent.com/ddpie/source-truth/main/scripts/get.sh)   # 公开仓
+bash <(gh api repos/ddpie/source-truth/contents/scripts/get.sh --jq '.content' | base64 -d)   # 私有仓，先 gh auth login
 ```
 
-已克隆仓库则直接：
-
-```bash
-./scripts/install.sh
-```
-
-它是一个交互菜单（键盘上下键选择、回车确认），四个流程见 [第七节 多项目](#七多项目一台机器多个机器人)。
+`install.sh` 是一个交互菜单（键盘上下键选择、回车确认），四个流程见 [第七节 多项目](#七多项目一台机器多个机器人)。
 首次部署的典型顺序：
 
 1. **查依赖**：`aws` / `python3` / `docker`（含守护进程在运行）/ `git`，可选 `gh`（私有仓部署需要），并校验 AWS 凭证可用；
@@ -137,13 +130,13 @@ codegraph 索引占用内存较高，且随仓库增大而增长，按仓库规�
 
 | 选项 | 适用场景 | 成本量级（一次性） |
 |---|---|---|
-| `400`（默认） | 覆盖高频概念，适用于日常问答 | 约 $10 量级 |
-| `1000` / `4000` | 覆盖更广 / 大仓深度覆盖 | 随文件数线性增长 |
-| `0`（不限） | 全量、最高覆盖 | 大仓可达数百美元 |
+| `0`（不限，**默认**） | 全量、最高覆盖 | 随仓库大小线性增长，**大仓可达数百美元**（实测 1.4 万文件约 $372） |
+| `4000` / `1000` | 大仓深度覆盖 / 更广覆盖 | 随文件数线性增长 |
+| `400` | 控成本（可能漏掉中文密集文件） | 约 $10 量级 |
 
-成本随文件数线性增长（首次全量为一次性开销，之后仅扫描代码变更的增量，成本很低）。**纯英文 / 无中文
-项目建议保持默认**——术语表会自动为空、零开销、不影响问答功能。调整该上限需重新初始化主机方可生效
-（见第六节「改术语表构建上限」），常规运维中无需调整。
+首次全量为一次性开销，之后仅扫描代码变更的增量，成本很低。**接大仓且需控成本时先选一个正数上限**；
+纯英文 / 无中文项目无需在意——术语表会自动为空、零开销、不影响问答功能。调整该上限需重新初始化主机
+方可生效（见第六节「改术语表构建上限」），常规运维中无需调整。
 
 > 术语表为**后台异步**构建：部署完成后问答功能立即可用；大仓首次全量构建可能耗时数十分钟，其间问答
 > 功能不受影响，仅中文冷僻词可能尚未对应。构建进度与结果记录在主机日志中（`journalctl` 查
@@ -170,7 +163,7 @@ codegraph 索引占用内存较高，且随仓库增大而增长，按仓库规�
 
 它按顺序执行（全自动、每步幂等）：选择 profile → 创建 / 复用 IAM 角色 → 若为私有仓，取本机 `gh` 的 token 存入 Secrets Manager（见下「GitHub 凭证」）→ **自动创建 source-truth 专用网络**（VPC + 公私子网 + IGW + NAT，账号中已有则复用，无需手动选择 VPC / 子网）→ 创建安全组（仅放行当前出口 IP 的 22 端口）→ 选择密钥 / 机型 / 磁盘 → 在公有子网创建一台 ARM64 EC2 并挂载实例角色。
 
-创建完成后，脚本会**提示输入 SSH 私钥路径**（默认推断为 `~/.ssh/<所选 key pair>.pem`），据此将部署脚本 [`scripts/prepare-local-host.sh`](../scripts/prepare-local-host.sh) 传至 EC2，并**输出一条 `ssh` 登录命令**。按该命令登录实例并运行脚本：安装 install.sh 所需依赖（`aws` / `docker` / `git` / boto3）、用第一步存入的凭证登录 GitHub、克隆仓库，最后进入 `install.sh --local` 交互（填写代码仓 / 模型 / 飞书凭证）。**脚本刻意不自动执行**——执行过程逐步可见，若某一步中断（如 preflight 报告依赖缺失），可当场排查；连接断开后重连再次运行即可从中断处继续。
+创建完成后，脚本会**提示输入 SSH 私钥路径**（默认推断为 `~/.ssh/<所选 key pair>.pem`），据此将部署脚本 [`scripts/lib/prepare-local-host.sh`](../scripts/lib/prepare-local-host.sh) 传至 EC2，并**输出一条 `ssh` 登录命令**。按该命令登录实例并运行脚本：安装 install.sh 所需依赖（`aws` / `docker` / `git` / boto3）、用第一步存入的凭证登录 GitHub、克隆仓库，最后进入 `install.sh --local` 交互（填写代码仓 / 模型 / 飞书凭证）。**脚本刻意不自动执行**——执行过程逐步可见，若某一步中断（如 preflight 报告依赖缺失），可当场排查；连接断开后重连再次运行即可从中断处继续。
 
 > 私钥留空、或无法连接（私钥不匹配、实例尚未启动完成）时，launch-host 改为输出三条命令（`scp` 上传 + `ssh` 登录 + 登录后运行）供手动完成——同样不含 token。
 
@@ -319,7 +312,7 @@ aws ssm start-session --region <r> --target <INDEX_SERVICE_INSTANCE>
 **重启网关**（实例内）：`sudo systemctl restart bot-gateway@<项目>`。修改飞书凭证后，重新运行
 `install.sh`（或 deploy 的 gateway 阶段）会重写 `/etc/bot-gateway-<项目>.env` 并重启服务。
 
-**监控：指标 / 看板 / 告警**——`deploy-all.sh` 的 Phase 7 已自动部署整套（CloudWatch 指标 filter、三页看板、告警 + SNS、DAU 预聚合 Lambda），**正常无需手动干预**。只在单独刷新看板/阈值、或 deploy 时 `--skip monitoring` 后需要补充执行时才手动运行——命令见[附录 D](#附录-d手动刷新监控)。告警的 SNS 订阅需手动确认一次（邮件点确认链接）。
+**监控：指标 / 看板 / 告警**——`deploy-all.sh` 的 Phase 7 已自动部署整套（CloudWatch 指标 filter、三页看板、告警 + SNS、DAU 预聚合 Lambda），**正常无需手动干预**。例外是**首次部署**：网关还没写过日志、log group 尚不存在时，指标 filter 与告警会建不出来（deploy 只 WARN 不失败）——在群里提一个问题后重跑一次 deploy（或[附录 D](#附录-d手动刷新监控) 的命令）即补齐。此外只在单独刷新看板/阈值、或 deploy 时 `--skip monitoring` 后需要补充执行时才手动运行。告警的 SNS 订阅需手动确认一次（邮件点确认链接）。
 
 关键告警：`ToolcallLeakDetected`（工具调用指令文本漏进卡片）、`FinalizeFailed`（卡片未正常结束、停在「分析中」）、
 `AnswerFailedBurst`（回答失败率激增）、`LogPipelineStalled`（网关每 60 秒发一次 `gateway_heartbeat` 心跳日志，
@@ -442,8 +435,8 @@ sudo journalctl -u reindex-<subdir> -f          # 或 sudo tail -f /var/log/rein
 # 只打印计划、不动资源：
 ./scripts/deploy-all.sh --region <r> --dry-run
 
-# 跳过某阶段（可重复）：artifacts|iam|network|index-svc|image|runtime|gateway|monitoring
-# 注意 runtime 与 gateway 同属「按项目部署」一个阶段，只有两个都跳才会跳过它（单跳其一无效）。
+# 跳过某阶段（可重复）：artifacts|iam|network|index-svc|image|projects|monitoring
+# （runtime 与 gateway 已合入 projects 阶段，用 --skip projects 整体跳过）
 ./scripts/deploy-all.sh --region <r> --skip monitoring
 
 # 部署/重部署单个项目（底座须已就绪）：
@@ -507,21 +500,16 @@ node_modules/.bin/ts-node --transpile-only src/index.ts
 
 ## 附录 D：手动刷新监控
 
-`deploy-all.sh` 的 Phase 7 已自动部署整套监控，此处命令仅用于单独刷新看板/阈值、或 deploy 时 `--skip monitoring` 后补充执行。部署期身份需 `logs:PutMetricFilter`、`cloudwatch:PutDashboard`、`cloudwatch:PutMetricAlarm`、`sns:CreateTopic`（非运行时角色）。四步幂等、可重复运行，换区域改 `--region` 即可。
-
-**顺序固定：先建指标 filter，再建看板与告警**（告警引用指标，指标由 filter 产出）：
+`deploy-all.sh` 的 Phase 7 已自动部署整套监控，此处命令仅用于单独刷新看板/阈值、或 deploy 时 `--skip monitoring` 后补充执行。部署期身份需 `logs:PutMetricFilter`、`cloudwatch:PutDashboard`、`cloudwatch:PutMetricAlarm`、`sns:CreateTopic`（非运行时角色）。幂等、可重复运行，换区域改 `--region` 即可。
 
 ```bash
-# 1. A 类指标 filter（看板读取的计数 / 分位 / 分布）
-./scripts/apply-metric-filters.sh --region <r>     # 加 --dry-run 先看计划
-# 2. 看板（三页：产品用量、SRE 健康、分项目拆分）
-./scripts/apply-dashboards.sh --region <r>
-# 3. 告警 + SNS（脚本先应用告警专用 filter 再建 alarm，避免引用空指标）
-./scripts/apply-alarms.sh --region <r>
-# 4. DAU 预聚合 Lambda + 每日调度（产品看板「日活」widget 的数据来源）
-./scripts/apply-dau-lambda.sh --region <r>
+# 全量：看板 → 指标 filter → 告警 + SNS → DAU 预聚合 Lambda，顺序内置
+./scripts/apply-monitoring.sh --region <r>          # 加 --dry-run 先看计划
+
+# 只刷新某一部分：--only dashboards|filters|alarms|dau
+./scripts/apply-monitoring.sh --region <r> --only alarms
 ```
 
-- 告警阈值在 `config/alarm-thresholds.json`，可调整，修改后重新运行第 3 步。
+- 告警阈值在 `config/alarm-thresholds.json`，可调整，修改后重跑 `--only alarms`。
 - SNS 订阅需手动确认一次：`aws sns subscribe --region <r> --topic-arn <脚本打印的 ARN> --protocol email --notification-endpoint you@example.com`（邮件点确认链接）。
-- 不跑第 4 步则看板「日活」widget 持续为空，其余 widget 不受影响。
+- 不跑 dau 阶段则看板「日活」widget 持续为空，其余 widget 不受影响。

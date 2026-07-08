@@ -261,6 +261,65 @@ def test_reap_orphan_workspace_pattern_is_end_anchored(monkeypatch):
     assert not re.search(pat, "codegraph-server --mcp --workspace /data/repo/code-5x.bak --max-files 10000")
 
 
+def test_reap_orphan_ignores_sibling_repo_server(monkeypatch):
+    # 多仓 不变量5 regression: a SINGLE bridge process spawns one codegraph-server per
+    # workspace, so all those servers share the SAME ppid (this pid). If the reaper scanned
+    # `pgrep -P self` (all children of this pid, unfiltered by workspace) it would return a
+    # SIBLING repo's HEALTHY server pid and SIGKILL it when refreshing OUR repo — breaking
+    # "refresh one repo never touches the others". The reaper must scan ONLY the workspace-
+    # cmdline query, so a sibling's pid is never even a candidate. We assert the reaper
+    # queries pgrep by our workspace (never `-P self`) and kills only our own pid.
+    import re
+    import codegraph_session as cs
+
+    OUR_PID = 12345
+    SIBLING_PID = 67890
+    # Two sibling servers under the same bridge ppid, distinct workspaces.
+    proc_table = {
+        OUR_PID: "codegraph-server --mcp --workspace /data/repo/code-5x --max-files 10000",
+        SIBLING_PID: "codegraph-server --mcp --workspace /data/repo/code-7y --max-files 10000",
+    }
+    killed = []
+    sess = cs.CodegraphSession("/data/repo/code-5x")
+    monkeypatch.setattr(cs.time, "sleep", lambda _s: None)
+
+    # FAITHFUL pgrep mock: a `-P <ppid>` query filters by PARENT pid only (workspace-
+    # blind), so it returns BOTH sibling servers — exactly the mis-kill source. A
+    # workspace `-f` query applies its regex to each cmdline (as real `pgrep -f` does).
+    # NOTE: assert in the TEST BODY, not here — an AssertionError raised inside this
+    # mock would be swallowed by _scan_orphan_servers' `except Exception`, giving a
+    # false green. We record what ran and let the body decide.
+    ran_ppid_query = []
+
+    def fake_run(cmd, **k):
+        if killed:  # after the kill, a re-scan reports empty
+            return _O("", 1)
+        if "-P" in cmd:
+            # ppid-filtered, workspace-blind → BOTH siblings (the regression path).
+            ran_ppid_query.append(cmd)
+            return _O("%d\n%d\n" % (OUR_PID, SIBLING_PID), 0)
+        pat = cmd[-1]  # the -f regex, as pgrep -f would apply it to each cmdline
+        matched = [str(pid) for pid, cmdline in proc_table.items() if re.search(pat, cmdline)]
+        return _O("\n".join(matched) + ("\n" if matched else ""), 0 if matched else 1)
+
+    monkeypatch.setattr(cs.subprocess, "run", fake_run)
+    monkeypatch.setattr(cs.os, "kill", lambda pid, sig: killed.append((pid, sig)))
+
+    pids, queried_ok = sess._scan_orphan_servers()
+    # The reaper must NOT run a ppid-filtered query (it would union in the sibling).
+    # If query (a) is ever re-added, this list is non-empty AND pids gains SIBLING_PID
+    # (the ppid mock returns it) → both asserts below fail → the regression is caught.
+    assert ran_ppid_query == [], "reaper must not scan `pgrep -P self` (unions in sibling repos)"
+    assert queried_ok is True
+    assert pids == {OUR_PID}  # ONLY our workspace's server
+    assert SIBLING_PID not in pids  # the sibling repo's healthy server is untouched
+
+    # And the full reap loop kills only our pid, never the sibling.
+    assert sess._reap_orphan_servers() is True
+    assert (OUR_PID, cs.signal.SIGKILL) in killed
+    assert not any(pid == SIBLING_PID for pid, _ in killed)
+
+
 def test_reap_orphan_never_targets_self(monkeypatch):
     # The workspace regex could match this very python process's cmdline; must never
     # SIGKILL os.getpid().
@@ -342,9 +401,11 @@ def test_reap_orphan_catches_fork_that_appears_during_settle(monkeypatch):
 
     def fake_run(cmd, **k):
         scans["n"] += 1
-        # scan 1+2 (first iteration's scan + its settle re-scan): empty.
-        # scan 3: the late fork 7777 has now surfaced. After it's killed: empty.
-        if scans["n"] <= 2:
+        # scan 1 (first iteration's scan): empty — the fork isn't visible to pgrep yet.
+        # scan 2 (the settle re-scan): the late fork 7777 has now surfaced. After it's
+        # killed, every later scan is empty. (One pgrep call per scan now the reaper runs
+        # a single workspace-cmdline query.)
+        if scans["n"] <= 1:
             return _O("", 1)
         if killed:
             return _O("", 1)

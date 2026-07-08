@@ -1,18 +1,17 @@
 """CodeGraph MCP-over-HTTP bridge (the HTTP half of index-service).
 
 codegraph-server speaks MCP over stdio only and its socket can't cross a
-Firecracker microVM. This bridge wraps the stdio client (codegraph_client) in a
-FastMCP streamable-HTTP server so session containers can query CodeGraph over
-HTTP. It also serves the repo's file content (read_file/glob_files) and text
-search (search_files) off the LOCAL repo copy, so the agent microVM needs NO
-filesystem mount — all code access is over HTTP. Tool results have their file
-paths rewritten via path_align into REPO-RELATIVE form (mount_root defaults to
-""; a legacy /mnt/repo mount_root is still accepted for back-compat) before
-returning.
+Firecracker microVM. This bridge wraps the resident stdio session
+(codegraph_session) in a FastMCP streamable-HTTP server so session containers can
+query CodeGraph over HTTP. It also serves the repo's file content
+(read_file/glob_files) and text search (search_files) off the LOCAL repo copy, so
+the agent microVM needs NO filesystem mount — all code access is over HTTP. Tool
+results have their file paths rewritten via path_align into REPO-RELATIVE form
+before returning.
 
 Run as a resident service:
     python -m http_bridge --workspace /data/repo/<subdir> --host 0.0.0.0 --port 8080 \
-        --mount-root "" --local-workspace /data/repo/<subdir>
+        --local-workspace /data/repo/<subdir>
 """
 
 from __future__ import annotations
@@ -33,10 +32,8 @@ from codegraph_session import CodegraphSession, IndexUnhealthy
 from repo_fanout import merge_fanout
 from repo_router import RepoRouter, RepoOutOfScope
 
-# NOTE: the bridge uses the RESIDENT CodegraphSession exclusively. The older
-# per-call spawner codegraph_client.py still exists (exercised by its own
-# integration tests) but is deliberately NOT imported here — spawning a fresh
-# codegraph process per query is the corruption-risk pattern the resident
+# NOTE: the bridge uses the RESIDENT CodegraphSession exclusively — spawning a
+# fresh codegraph process per query is the corruption-risk pattern the resident
 # session replaced, so it must never re-enter the production path.
 
 # Per-WORKSPACE writer-lock fds, module-global so the GC can't collect them and
@@ -44,12 +41,6 @@ from repo_router import RepoRouter, RepoOutOfScope
 # multi-repo bridge that serves N workspaces in one process takes N DISTINCT flocks
 # (one per graph.db), NOT one process-wide lock. See acquire_singleton_writer_lock().
 _WRITER_LOCK_FDS: dict[str, Any] = {}
-
-# Back-compat shim for older tests/inspection that referenced a single fd. It mirrors
-# the MOST-RECENTLY acquired lock fd (None when none held). The authoritative state is
-# _WRITER_LOCK_FDS; this is only a convenience view. (Setting it to None and calling
-# acquire still works — the per-workspace dict is what gates idempotency.)
-_SINGLETON_FD: Any = None
 
 
 class SingleWriterConflict(RuntimeError):
@@ -81,7 +72,6 @@ def acquire_singleton_writer_lock(workspace: str) -> None:
     no-op (same fd kept). A DIFFERENT process gets BlockingIOError on the non-blocking
     acquire → SingleWriterConflict.
     """
-    global _SINGLETON_FD
     key = _lock_key(workspace)
     if key in _WRITER_LOCK_FDS:
         return  # this process already owns THIS workspace's lock
@@ -103,7 +93,6 @@ def acquire_singleton_writer_lock(workspace: str) -> None:
     fd.write(str(os.getpid()))
     fd.flush()
     _WRITER_LOCK_FDS[key] = fd
-    _SINGLETON_FD = fd  # back-compat view: most-recent lock
 
 logger = logging.getLogger("codegraph-bridge")
 
@@ -115,19 +104,50 @@ EXPOSED_TOOLS = (
 )
 
 
-def _align_one(path: Any, *, index_root: str, mount_root: str, repo: str = "") -> Any:
-    """Rewrite a single path into mount space, or None if it escapes the repo."""
+def _guarded(fn, *, bad_input: str, failed: str, log_event: str,
+             scope_warn_tool: str | None = None, fallback: str | None = None) -> str:
+    """Shared error envelope for the file/glossary tools. One policy, three tiers:
+
+    - RepoOutOfScope → "repo not in scope" (logged as a warning when
+      ``scope_warn_tool`` names the tool);
+    - ValueError → ``bad_input`` with the detail echoed — a ValueError from these
+      tools only ever carries agent-supplied input (a path/pattern), never a host
+      path, so it's safe to return;
+    - any other Exception → log ``log_event`` with the real error (an OSError etc.
+      can embed an absolute HOST path like /data/repo/... that must NEVER reach the
+      group-visible card) and return ``failed`` with a generic detail — or the
+      literal ``fallback`` JSON when given (the glossary tools' degraded payloads).
+    """
+    try:
+        return fn()
+    except RepoOutOfScope as exc:
+        if scope_warn_tool:
+            logger.warning(json.dumps({"event": "repo_out_of_scope",
+                                       "tool": scope_warn_tool, "detail": str(exc)}))
+        return json.dumps({"error": "repo not in scope", "detail": str(exc)})
+    except ValueError as exc:
+        return json.dumps({"error": bad_input, "detail": str(exc)})
+    except Exception as exc:  # noqa: BLE001 - isolate one query's failure
+        logger.error(json.dumps({"event": log_event, "error": str(exc)}))
+        if fallback is not None:
+            return fallback
+        return json.dumps({"error": failed, "detail": "internal error (see service logs)"})
+
+
+def _align_one(path: Any, *, index_root: str, repo: str = "") -> Any:
+    """Rewrite a single path into the agent's repo-relative namespace, or None if
+    it escapes the repo."""
     if not isinstance(path, str) or not path:
         return path
     try:
-        return path_align.to_container_path(path, index_root=index_root, mount_root=mount_root, repo=repo)
+        return path_align.to_container_path(path, index_root=index_root, repo=repo)
     except ValueError:
         # Path escaped repo root — drop it rather than leak an out-of-repo path.
         return None
 
 
-def _align_paths(raw_json: str, tool_name: str, *, index_root: str, mount_root: str, repo: str = "") -> str:
-    """Rewrite every file path in a codegraph result into mount space.
+def _align_paths(raw_json: str, tool_name: str, *, index_root: str, repo: str = "") -> str:
+    """Rewrite every file path in a codegraph result into the agent's namespace.
 
     Tool-aware: each of the three exposed tools returns a DIFFERENT envelope
     (verified live against codegraph-server 0.18.5):
@@ -153,11 +173,11 @@ def _align_paths(raw_json: str, tool_name: str, *, index_root: str, mount_root: 
         sym = item.get("symbol") if isinstance(item, dict) else None
         loc = sym.get("location") if isinstance(sym, dict) else None
         if isinstance(loc, dict) and "file" in loc:
-            loc["file"] = _align_one(loc.get("file"), index_root=index_root, mount_root=mount_root, repo=repo)
+            loc["file"] = _align_one(loc.get("file"), index_root=index_root, repo=repo)
         # get_callers entries also carry a call_site with its own file path.
         call_site = item.get("call_site") if isinstance(item, dict) else None
         if isinstance(call_site, dict) and "file" in call_site:
-            call_site["file"] = _align_one(call_site.get("file"), index_root=index_root, mount_root=mount_root, repo=repo)
+            call_site["file"] = _align_one(call_site.get("file"), index_root=index_root, repo=repo)
 
     if tool_name == "codegraph_symbol_search":
         for item in data.get("results", []) if isinstance(data.get("results"), list) else []:
@@ -171,7 +191,7 @@ def _align_paths(raw_json: str, tool_name: str, *, index_root: str, mount_root: 
             if isinstance(seq, list):
                 for item in seq:
                     if isinstance(item, dict) and "path" in item:
-                        item["path"] = _align_one(item.get("path"), index_root=index_root, mount_root=mount_root, repo=repo)
+                        item["path"] = _align_one(item.get("path"), index_root=index_root, repo=repo)
     return json.dumps(data, ensure_ascii=False)
 
 
@@ -226,7 +246,6 @@ def build_bridge(
     workspaces: list[tuple[str, str | None]] | None = None,
     host: str = "127.0.0.1",
     port: int = 8080,
-    mount_root: str = path_align.DEFAULT_MOUNT_ROOT,
     local_workspace: str | None = None,
     project: str | None = None,
 ) -> FastMCP:
@@ -237,9 +256,8 @@ def build_bridge(
     repo, all served by this one bridge process. The two forms are mutually exclusive.
 
     Each repo's ``workspace`` is the index-service-side path codegraph-server indexes (a
-    LOCAL-disk copy); returned paths are rewritten into the agent's namespace — REPO-RELATIVE
-    by default (``mount_root=""``), or under a legacy ``/mnt/repo`` if a non-empty
-    ``mount_root`` is given — and PREFIXED with ``<repo>/`` so the agent can tell repos apart.
+    LOCAL-disk copy); returned paths are rewritten into the agent's namespace — REPO-RELATIVE,
+    and PREFIXED with ``<repo>/`` so the agent can tell repos apart.
     ``local_workspace`` is the copy the file tools read; post-EFS-removal it's the SAME path
     as ``workspace``.
 
@@ -340,7 +358,7 @@ def build_bridge(
             arguments = await _build_args(repo, tool_name, query)
             raw = await repo.session.call_tool(tool_name, arguments)
             # Align against THIS repo's workspace; prefix paths with <repo>/ (path honesty).
-            return _align_paths(raw, tool_name, index_root=repo.workspace, mount_root=mount_root, repo=repo.name)
+            return _align_paths(raw, tool_name, index_root=repo.workspace, repo=repo.name)
         except IndexUnhealthy as exc:
             logger.error(json.dumps({"event": "refuse_unhealthy", "tool": tool_name,
                                      "repo": repo.name, "detail": str(exc)}))
@@ -389,7 +407,7 @@ def build_bridge(
         _tool.__name__ = tool_name
         return _tool
 
-    # All six tools are READ-ONLY, IDEMPOTENT, and CLOSED-DOMAIN (they only query the
+    # Every registered tool is READ-ONLY, IDEMPOTENT, and CLOSED-DOMAIN (they only query the
     # local repo copy / in-memory graph — no writes, no external/open-world calls). The
     # MCP spec's tool annotations default to the pessimistic (destructive, non-idempotent,
     # open-world) when unset, so we set them explicitly: this is both honest metadata and
@@ -509,36 +527,22 @@ def build_bridge(
             is a regex; optional `glob` narrows by filename (e.g. "*.cs", "*.json"); optional
             `repo` scopes to one repo (omit to search ALL repos in the project). Use this
             instead of shell grep."""
-            try:
+            def run() -> str:
                 targets = _file_targets(repo)
-            except RepoOutOfScope as exc:
-                logger.warning(json.dumps({"event": "repo_out_of_scope", "tool": "search_files", "detail": str(exc)}))
-                return json.dumps({"error": "repo not in scope", "detail": str(exc)})
-            try:
                 if len(targets) == 1:
                     t = targets[0]
-                    return file_search.search_to_json(
-                        pattern, local_root=t.local, mount_root=mount_root, glob=glob, repo=t.name,
-                    )
+                    return file_search.search_to_json(pattern, local_root=t.local, glob=glob, repo=t.name)
                 # FAN-OUT: each repo isolated via _safe_file_call so one repo's failure can't
                 # blank the others (merge drops error envelopes; all-errored surfaces first).
                 per_repo = [
                     _safe_file_call(
-                        lambda t=t: file_search.search_to_json(
-                            pattern, local_root=t.local, mount_root=mount_root, glob=glob, repo=t.name),
+                        lambda t=t: file_search.search_to_json(pattern, local_root=t.local, glob=glob, repo=t.name),
                         t.name, "search")
                     for t in targets
                 ]
                 return _merge_file_fanout("matches", per_repo)
-            except ValueError as exc:
-                # ValueError only echoes the agent-supplied pattern (no host path) → safe to return.
-                return json.dumps({"error": "bad search pattern", "detail": str(exc)})
-            except Exception as exc:  # noqa: BLE001 - isolate one query's failure
-                # str(exc) on an OSError/RuntimeError can embed an absolute HOST path
-                # (/data/repo/...) — log it for the operator, but NEVER return it to the
-                # model (it reaches the group-visible card). Generic detail only.
-                logger.error(json.dumps({"event": "search_error", "error": str(exc)}))
-                return json.dumps({"error": "search failed", "detail": "internal error (see service logs)"})
+            return _guarded(run, bad_input="bad search pattern", failed="search failed",
+                            log_event="search_error", scope_warn_tool="search_files")
 
         async def codegraph_read_file(path: str, offset: int = 0, limit: int | None = None) -> str:
             """Read a source/config file's contents by its path (the path codegraph/search
@@ -550,72 +554,45 @@ def build_bridge(
             until `truncated` is false). Prefer this for reading a long contiguous run (e.g. a
             whole config/data table) rather than many narrow searches. Use this instead of a
             shell `cat` or builtin Read."""
-            try:
+            def run() -> str:
                 t = _repo_for_path(path, None)
-            except RepoOutOfScope as exc:
-                return json.dumps({"error": "repo not in scope", "detail": str(exc)})
-            except ValueError as exc:
-                return json.dumps({"error": "cannot read file", "detail": str(exc)})
-            try:
-                return file_read.read_to_json(
-                    path, local_root=t.local, mount_root=mount_root, offset=offset, limit=limit, repo=t.name,
-                )
-            except ValueError as exc:
-                # ValueError echoes only the agent-supplied path (no host path) → safe.
-                return json.dumps({"error": "cannot read file", "detail": str(exc)})
-            except Exception as exc:  # noqa: BLE001 - isolate one query's failure
-                # An OSError from open() serializes the absolute HOST path (/data/repo/...);
-                # log it but return a generic detail so it can't leak into the group card.
-                logger.error(json.dumps({"event": "read_error", "error": str(exc)}))
-                return json.dumps({"error": "read failed", "detail": "internal error (see service logs)"})
+                return file_read.read_to_json(path, local_root=t.local, offset=offset, limit=limit, repo=t.name)
+            return _guarded(run, bad_input="cannot read file", failed="read failed",
+                            log_event="read_error")
 
         async def codegraph_glob_files(pattern: str, repo: str | None = None) -> str:
             """List files matching a glob `pattern` (e.g. "**/*.cs", "Config/*.json"),
             interpreted relative to the repo root. Returns paths in the agent's namespace
             (multi-repo prefixes them `<repo>/...`). Optional `repo` scopes to one repo
             (omit to glob ALL repos). Use this instead of a shell `ls`/`find` or builtin Glob."""
-            try:
+            def run() -> str:
                 targets = _file_targets(repo)
-            except RepoOutOfScope as exc:
-                logger.warning(json.dumps({"event": "repo_out_of_scope", "tool": "glob_files", "detail": str(exc)}))
-                return json.dumps({"error": "repo not in scope", "detail": str(exc)})
-            try:
                 if len(targets) == 1:
                     t = targets[0]
-                    return file_read.glob_to_json(pattern, local_root=t.local, mount_root=mount_root, repo=t.name)
+                    return file_read.glob_to_json(pattern, local_root=t.local, repo=t.name)
                 # FAN-OUT: per-repo isolation so one repo's failure can't blank the others.
                 per_repo = [
                     _safe_file_call(
-                        lambda t=t: file_read.glob_to_json(pattern, local_root=t.local, mount_root=mount_root, repo=t.name),
+                        lambda t=t: file_read.glob_to_json(pattern, local_root=t.local, repo=t.name),
                         t.name, "glob")
                     for t in targets
                 ]
                 return _merge_file_fanout("paths", per_repo)
-            except ValueError as exc:
-                return json.dumps({"error": "bad glob pattern", "detail": str(exc)})
-            except Exception as exc:  # noqa: BLE001 - isolate one query's failure
-                logger.error(json.dumps({"event": "glob_error", "error": str(exc)}))
-                return json.dumps({"error": "glob failed", "detail": "internal error (see service logs)"})
+            return _guarded(run, bad_input="bad glob pattern", failed="glob failed",
+                            log_event="glob_error", scope_warn_tool="glob_files")
 
         async def codegraph_read_table(path: str) -> str:
-            """Read a STRUCTURED config table that read_file can't (Excel .xlsx/.xls,
+            """Read a STRUCTURED config table that read_file can't (Excel .xlsx,
             .csv, .tsv, or a SQLite .db) — parsed server-side into plain text rows.
+            The legacy binary .xls is NOT supported (re-save as .xlsx).
             Pass the path verbatim (a `<repo>/...` prefix is fine). Use this when the data
             lives in a spreadsheet/database config file (common for game numeric tables);
             for plain-text source/config use read_file."""
-            try:
+            def run() -> str:
                 t = _repo_for_path(path, None)
-            except RepoOutOfScope as exc:
-                return json.dumps({"error": "repo not in scope", "detail": str(exc)})
-            except ValueError as exc:
-                return json.dumps({"error": "cannot read table", "detail": str(exc)})
-            try:
-                return file_table.read_table_to_json(path, local_root=t.local, mount_root=mount_root, repo=t.name)
-            except ValueError as exc:
-                return json.dumps({"error": "cannot read table", "detail": str(exc)})
-            except Exception as exc:  # noqa: BLE001 - isolate one query's failure
-                logger.error(json.dumps({"event": "read_table_error", "error": str(exc)}))
-                return json.dumps({"error": "read table failed", "detail": "internal error (see service logs)"})
+                return file_table.read_table_to_json(path, local_root=t.local, repo=t.name)
+            return _guarded(run, bad_input="cannot read table", failed="read table failed",
+                            log_event="read_table_error")
 
         # Ship the FULL docstrings as the tool description (FastMCP uses `description or
         # __doc__`, so passing a terse description= DROPS the docstring the model needs to
@@ -659,13 +636,10 @@ def build_bridge(
             to search for. Each row is {concept_id, aliases, symbols}; for a concept's full
             symbol set + source anchors (file:line), call glossary_lookup. The index is a
             derived hint built from the code — always confirm against real code."""
-            try:
-                return glossary_read.index_to_json(project)
-            except ValueError as exc:
-                return json.dumps({"error": "glossary unavailable", "detail": str(exc)})
-            except Exception as exc:  # noqa: BLE001 - never break the bridge
-                logger.error(json.dumps({"event": "glossary_index_error", "error": str(exc)}))
-                return json.dumps({"concepts": []})
+            return _guarded(lambda: glossary_read.index_to_json(project),
+                            bad_input="glossary unavailable", failed="glossary index failed",
+                            log_event="glossary_index_error",
+                            fallback=json.dumps({"concepts": []}))
 
         async def glossary_lookup(query: str) -> str:
             """Look up a concept in the term index — by `concept_id` (from glossary_index)
@@ -678,13 +652,10 @@ def build_bridge(
             multi-repo project concept_id is namespaced "<repo>/<id>" and each record carries
             `repo`. Read symbols from the record (single) or from each matches[] entry, then
             search them in real code."""
-            try:
-                return glossary_read.lookup_to_json(project, query)
-            except ValueError as exc:
-                return json.dumps({"error": "glossary unavailable", "detail": str(exc)})
-            except Exception as exc:  # noqa: BLE001
-                logger.error(json.dumps({"event": "glossary_lookup_error", "error": str(exc)}))
-                return json.dumps({"error": "glossary lookup failed"})
+            return _guarded(lambda: glossary_read.lookup_to_json(project, query),
+                            bad_input="glossary unavailable", failed="glossary lookup failed",
+                            log_event="glossary_lookup_error",
+                            fallback=json.dumps({"error": "glossary lookup failed"}))
 
         app.add_tool(glossary_index, name="codegraph_glossary_index",
                      description=(glossary_index.__doc__ or "").strip(),
@@ -828,7 +799,12 @@ def main() -> int:
                    help="repo path codegraph-server indexes (repeat for multi-repo)")
     p.add_argument("--host", default="0.0.0.0")
     p.add_argument("--port", type=int, default=8080)
-    p.add_argument("--mount-root", default=path_align.DEFAULT_MOUNT_ROOT)
+    # DEPRECATED, accepted-but-ignored: paths are always repo-relative now (the agent
+    # mounts no filesystem). The deploy script (activate_project.sh) still passes
+    # --mount-root "" on existing installs, so removing the flag outright would break
+    # startup; keep parsing it, warn when given, and never use it.
+    p.add_argument("--mount-root", default=None,
+                   help="DEPRECATED: ignored (paths are always repo-relative)")
     p.add_argument("--local-workspace", action="append", default=[],
                    help="local-disk copy for fast file search; pairs with --workspace by position "
                         "(grep over EFS is ~225x slower). Repeat for multi-repo.")
@@ -838,6 +814,12 @@ def main() -> int:
     args = p.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
+
+    if args.mount_root is not None:
+        logger.warning(json.dumps({"event": "bridge_deprecated_flag", "flag": "--mount-root",
+                                   "value": args.mount_root,
+                                   "detail": "--mount-root is deprecated and ignored; "
+                                             "paths are always repo-relative"}))
 
     try:
         pairs = pair_workspaces(args.workspace, args.local_workspace)
@@ -859,7 +841,7 @@ def main() -> int:
                             "host": args.host, "port": args.port}))
     # build_bridge starts each repo's resident worker (warming in background).
     app = build_bridge(
-        workspaces=pairs, host=args.host, port=args.port, mount_root=args.mount_root,
+        workspaces=pairs, host=args.host, port=args.port,
         project=args.project,
     )
     app.run(transport="streamable-http")

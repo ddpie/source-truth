@@ -75,8 +75,8 @@
 - **图目录保护**：graph.db / HOME 在工作树内（`<subdir>/.codegraph`、`.home`），刷新的 `git reset --hard`
   通过 `git_fetch.sh` 的 `guard_graph_dirs` 与之隔离：把这两个路径写进 `.git/info/exclude`；若上游仓库 track 了
   同名路径则 fail-loud（不支持）。
-- **机检**：运行期不变量，无静态机检；守卫是 flock（跨进程）+ 进程内 `_restart_lock` + `codegraph_client.
-  _assert_spawn_allowed()` 触发即报错的断言 + 上面的图目录保护（`scripts/tests/test_git_fetch.sh` 覆盖）。
+- **机检**：运行期不变量，无静态机检；守卫是 flock（跨进程）+ 进程内 `_restart_lock` + 上面的图目录保护
+  （`scripts/tests/test_git_fetch.sh` 覆盖）。
 - **违反后果**：两个进程同时写 / 刷新时覆盖掉正在服务的那张图 → graph.db 损坏 → `/health` 报 0 节点 → 该仓问答失败。
   **不要**在 index 实例上手动再启一个 codegraph-server 写同一份图。
 
@@ -126,7 +126,7 @@
 - **不变量**：账号级全局角色（`source-truth-index-role` / `source-truth-dau-lambda-role`）被多区域共用，其
   内联策略里**资源型 ARN 的 region 段必须用 `*`**，不得钉死 `${REGION}`。`put-role-policy` 是覆盖写：若策略
   Resource 写死单区，第二个区域部署会改写它、静默撤销第一个区域的权限。
-- **以谁为准**：`scripts/lib/provision_iam.sh`、`scripts/apply-dau-lambda.sh`——易越权的服务面
+- **以谁为准**：`scripts/lib/provision_iam.sh`、`scripts/lib/apply-dau-lambda.sh`——易越权的服务面
   （logs / bedrock / bedrock-agentcore / secretsmanager / s3）ARN 的 region 段用 `*`，靠 account + 资源名前缀
   兜底。（lambda / events 的 ARN 按区构造是合法用法，不在此列。）
 - **机检**：`scripts/check-invariants.sh` —— grep 上述服务面的 `${REGION}` 钉死写法，命中即失败。
