@@ -283,11 +283,21 @@ def test_reap_orphan_ignores_sibling_repo_server(monkeypatch):
     sess = cs.CodegraphSession("/data/repo/code-5x")
     monkeypatch.setattr(cs.time, "sleep", lambda _s: None)
 
+    # FAITHFUL pgrep mock: a `-P <ppid>` query filters by PARENT pid only (workspace-
+    # blind), so it returns BOTH sibling servers — exactly the mis-kill source. A
+    # workspace `-f` query applies its regex to each cmdline (as real `pgrep -f` does).
+    # NOTE: assert in the TEST BODY, not here — an AssertionError raised inside this
+    # mock would be swallowed by _scan_orphan_servers' `except Exception`, giving a
+    # false green. We record what ran and let the body decide.
+    ran_ppid_query = []
+
     def fake_run(cmd, **k):
-        # No query may filter by parent pid — that's what mis-kills siblings.
-        assert "-P" not in cmd, "reaper must not scan children by ppid (kills sibling repos)"
-        if killed:  # after the kill, a re-scan of the workspace reports empty
+        if killed:  # after the kill, a re-scan reports empty
             return _O("", 1)
+        if "-P" in cmd:
+            # ppid-filtered, workspace-blind → BOTH siblings (the regression path).
+            ran_ppid_query.append(cmd)
+            return _O("%d\n%d\n" % (OUR_PID, SIBLING_PID), 0)
         pat = cmd[-1]  # the -f regex, as pgrep -f would apply it to each cmdline
         matched = [str(pid) for pid, cmdline in proc_table.items() if re.search(pat, cmdline)]
         return _O("\n".join(matched) + ("\n" if matched else ""), 0 if matched else 1)
@@ -296,6 +306,10 @@ def test_reap_orphan_ignores_sibling_repo_server(monkeypatch):
     monkeypatch.setattr(cs.os, "kill", lambda pid, sig: killed.append((pid, sig)))
 
     pids, queried_ok = sess._scan_orphan_servers()
+    # The reaper must NOT run a ppid-filtered query (it would union in the sibling).
+    # If query (a) is ever re-added, this list is non-empty AND pids gains SIBLING_PID
+    # (the ppid mock returns it) → both asserts below fail → the regression is caught.
+    assert ran_ppid_query == [], "reaper must not scan `pgrep -P self` (unions in sibling repos)"
     assert queried_ok is True
     assert pids == {OUR_PID}  # ONLY our workspace's server
     assert SIBLING_PID not in pids  # the sibling repo's healthy server is untouched
