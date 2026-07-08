@@ -76,6 +76,7 @@ bash /tmp/prepare-local-host.sh   # 建议直接复制 launch-host 输出的命�
    `gh` 并已 `gh auth login`（用于克隆仓库 + 拉取 `codegraph-server`）。验证与日常运维要进实例
    （`aws ssm start-session`），需另装 [Session Manager plugin](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html)（不随 aws CLI 附带）。`codegraph-server` 二进制无需手动准备——
    本地与 S3 都没有时，部署会从本仓 Release 自动下载（私有仓经 `gh`，公开仓经直链）。
+   可选：`zip`（仅监控的 DAU 预聚合 Lambda 打包用；缺了不影响问答与其余监控，只是「日活」widget 为空，`--local` 会自动装）。
 3. **Bedrock 模型访问**：确保部署身份有 `bedrock:InvokeModel`（AWS 已不再需要逐模型在控制台「Model access」开通）。
    模型推理档由部署按 `--region` 自动解析，无需手填——部署调 `bedrock list-inference-profiles` 查该区域实际提供的档、
    自动挑最优（地域档 `us.`/`eu.`/`jp.`/`au.` 优先，没有就用 `global.`；如默认模型在东京解析为 `jp.…`、在新加坡保留 `global.…`）。
