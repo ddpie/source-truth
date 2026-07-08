@@ -241,10 +241,10 @@ def test_search_fanout_one_repo_error_does_not_blank_others(monkeypatch, tmp_pat
     import file_search
     real = file_search.search_to_json
 
-    def flaky(pattern, *, local_root, mount_root, glob=None, repo=""):
+    def flaky(pattern, *, local_root, glob=None, repo=""):
         if repo == "alpha":
             raise OSError("simulated disk fault on alpha")
-        return real(pattern, local_root=local_root, mount_root=mount_root, glob=glob, repo=repo)
+        return real(pattern, local_root=local_root, glob=glob, repo=repo)
 
     monkeypatch.setattr(file_search, "search_to_json", flaky)
     out = json.loads(asyncio.run(_fn(app, "codegraph_search_files")(pattern="marker")))
@@ -259,10 +259,10 @@ def test_glob_fanout_one_repo_error_does_not_blank_others(monkeypatch, tmp_path)
     import file_read
     real = file_read.glob_to_json
 
-    def flaky(pattern, *, local_root, mount_root, repo=""):
+    def flaky(pattern, *, local_root, repo=""):
         if repo == "alpha":
             raise OSError("simulated disk fault on alpha")
-        return real(pattern, local_root=local_root, mount_root=mount_root, repo=repo)
+        return real(pattern, local_root=local_root, repo=repo)
 
     monkeypatch.setattr(file_read, "glob_to_json", flaky)
     out = json.loads(asyncio.run(_fn(app, "codegraph_glob_files")(pattern="**/*.cs")))

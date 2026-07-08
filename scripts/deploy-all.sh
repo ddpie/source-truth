@@ -6,7 +6,7 @@
 # Everything is parameterized — no hardcoded account/region/resource IDs — so a
 # fresh AWS account in any region works:
 #
-#   ./scripts/deploy-all.sh --region ap-northeast-1 --repo /path/to/code-5x
+#   ./scripts/deploy-all.sh --region ap-northeast-1
 #
 # Idempotent: every resource is "describe-or-create". Re-running reconciles.
 # State persists to .local/deploy-config (gitignored); later runs read it back.
@@ -17,11 +17,11 @@
 #   2  network    : VPC, public+private subnet, IGW, NAT, route tables (or reuse)
 #   3  index-svc  : security groups + ARM EC2 (Ubuntu 24.04) running bootstrap.sh
 #   4  image      : build the agent container (ARM64) and push to ECR
-#   5  runtime    : AgentCore runtime in VPC mode, CODEGRAPH_MCP_URL set
-#   6  gateway    : write /etc/bot-gateway.env + start bot-gateway.service (co-located
-#                   on the index host) via SSM — once the runtime ARN exists
-#   7  monitoring : CloudWatch metric-filters + dashboards + alarms + DAU lambda
-#                   (best-effort, after the gateway logs to /source-truth/bot-gateway)
+#   5  projects   : per-project deploy, looped over .local/projects.json — each project
+#                   gets its bridge (activate_project.sh), AgentCore runtime, and
+#                   bot-gateway unit (co-located on the index host, via SSM)
+#   7  monitoring : apply-monitoring.sh — CloudWatch metric-filters + dashboards +
+#                   alarms + DAU lambda (best-effort, after the gateway logs)
 #
 # NO EFS: the agent microVM mounts no filesystem; it reads all source code over
 # the index-service HTTP bridge (read_file/glob_files/search_files/codegraph_*).
@@ -59,7 +59,7 @@ IDLE_TIMEOUT=""          # AgentCore session idle timeout (s); gateway session T
 MAX_LIFETIME=""          # AgentCore microVM hard max age (s) before forced recycle
 DEFAULT_INSTANCE_TYPE="t4g.large"
 DEFAULT_MAX_FILES="10000"
-DEFAULT_GLOSSARY_MAX_FILES="400"   # cc scans this many files per glossary build; 0 = no cap (whole repo)
+DEFAULT_GLOSSARY_MAX_FILES="0"   # 0 = no cap (scan whole repo — full 中文→符号 coverage); set >0 to cap cost
 DEFAULT_MODEL="global.anthropic.claude-opus-4-8"
 DEFAULT_ROOT_VOLUME_GB="30"
 # Idle timeout default = AWS's own default (900s/15min). The gateway derives its
@@ -78,7 +78,9 @@ CODEGRAPH_SERVER_TAG="${CODEGRAPH_SERVER_TAG:-codegraph-server-v0.18.5}"
 CODEGRAPH_SERVER_URL_DEFAULT="https://github.com/${CODEGRAPH_SERVER_REPO}/releases/download/${CODEGRAPH_SERVER_TAG}/codegraph-server"
 REFRESH_INDEX=false       # --refresh-index: replace a running index instance if its artifacts are stale
 LOCAL_MODE=false          # --local: this EC2 IS the index host; bootstrap in place, reuse its VPC/subnet
-declare -A SKIP=()
+# bash 3.2 (stock macOS) has no `declare -A` — model the skip set as a space-delimited
+# string ("iam network …") and test membership with a case glob (see skip() below).
+SKIP_PHASES=""
 
 usage() {
   cat <<'EOF'
@@ -96,14 +98,14 @@ Options:
                       project (init-env). Add projects later via ./scripts/install.sh.
   --instance-type <t> index host EC2 type, ARM (default: t4g.large)
   --max-files <n>     codegraph max files to index per repo (default: 10000)
-  --glossary-max-files <n>  term-glossary build file cap per repo (default: 400; 0 = no cap)
+  --glossary-max-files <n>  term-glossary build file cap per repo (default: 0 = no cap; set >0 to cap cost)
   --root-volume-gb <n> index host root EBS size in GiB (default: 30). Grow for large repos:
                       it holds every project's repo clones + graph.db.
   --model <id>        default Bedrock model id (a project may override it in projects.json)
   --idle-timeout <s>  AgentCore session idle timeout, seconds (60..28800; default 900/15min).
                       The gateway's session-reuse TTL is aligned to this.
   --max-lifetime <s>  AgentCore microVM hard max age before forced recycle (60..28800; default 28800/8h)
-  --skip <phase>      Skip a phase: artifacts|iam|network|index-svc|image|runtime|gateway|monitoring (repeatable)
+  --skip <phase>      Skip a phase: artifacts|iam|network|index-svc|image|projects|monitoring (repeatable)
   --refresh-index     Replace the index host if this run staged newer BASE code (bridge/gateway).
                       Repo code is NOT a reason to refresh — repos refresh live via git pull.
   --local             This EC2 IS the index host: bootstrap in place, reuse its VPC/subnet, attach
@@ -136,7 +138,16 @@ while [[ $# -gt 0 ]]; do
     --model) MODEL="$2"; shift 2 ;;
     --idle-timeout) IDLE_TIMEOUT="$2"; shift 2 ;;
     --max-lifetime) MAX_LIFETIME="$2"; shift 2 ;;
-    --skip) SKIP["$2"]=1; shift 2 ;;
+    --skip)
+      case "${2:-}" in
+        # 'runtime'/'gateway' used to be separate phases; they merged into the per-project
+        # phase, and skipping only one of them never worked (both were required to skip
+        # Phase 5). One canonical name now: projects.
+        runtime|gateway) say err "--skip $2 is gone (runtime+gateway merged into the per-project phase): use --skip projects"; exit 2 ;;
+        artifacts|iam|network|index-svc|image|projects|monitoring) SKIP_PHASES="$SKIP_PHASES $2" ;;
+        *) say err "unknown --skip phase: '${2:-}' (want artifacts|iam|network|index-svc|image|projects|monitoring)"; exit 2 ;;
+      esac
+      shift 2 ;;
     --refresh-index) REFRESH_INDEX=true; shift ;;
     --local) LOCAL_MODE=true; shift ;;
     --dry-run) DRY_RUN=true; shift ;;
@@ -157,7 +168,7 @@ fi
 # preflight_docker consults `skip image` — it used to be defined further down, after the preflight
 # call, so `skip` was "command not found" at preflight time (harmless-looking but it silently made
 # preflight_docker's early-return misfire).
-skip() { [[ -n "${SKIP[$1]:-}" ]]; }
+skip() { case " $SKIP_PHASES " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 
 # --- preflight ---
 say step "Phase 0: preflight"
@@ -534,7 +545,7 @@ fi
 # Phase 1b: IAM (instance profile + runtime role) — fresh-account safe
 # ============================================================
 if skip iam; then say warn "skip iam"; else
-  # --local note: the EC2's instance role (pre-created via scripts/create-iam.sh) carries
+  # --local note: the EC2's instance role (pre-created via scripts/lib/create-iam.sh) carries
   # IAM-write perms, so this phase runs the same as the default path — provision_iam.sh creates the
   # AgentCore runtime role and (re)asserts the index role's runtime policies (idempotent).
   say step "Phase 1b: IAM"
@@ -725,8 +736,8 @@ if [[ "$SKIP_PROJECTS" == true ]]; then
   say step "Phase 5: per-project deploy"
   say info "--skip-projects: shared BASE host is provisioned; attaching NO project (init-env)."
   say info "  → run ./scripts/install.sh → 'add a project' to bring a bot online."
-elif skip runtime && skip gateway; then
-  say warn "skip per-project phase (runtime+gateway skipped)"
+elif skip projects; then
+  say warn "skip per-project phase (--skip projects)"
 elif [[ "$DRY_RUN" == true ]]; then
   say step "Phase 5: per-project deploy"
   if [[ -f "$PROJECTS_CFG" ]]; then
@@ -742,26 +753,36 @@ elif [[ ! -f "$PROJECTS_CFG" ]]; then
   say warn "    projects.json entry), or copy config/projects.example.json to .local/projects.json."
 else
   say step "Phase 5: per-project deploy"
-  # LOG_HASH_SALT (host-shared, project-agnostic): ensure the secret EXISTS before any gateway
-  # starts — hashUserId de-identification is only sound if the salt is SECRET (log.ts falls back
-  # to a PUBLIC repo constant when unset). run.sh fetches the VALUE host-side, so it never crosses
-  # an SSM command body. create-secret only on NOT-FOUND (never rotate an existing salt — that
-  # would break DAU/retention correlation). Best-effort: if the deploy identity can't create it,
-  # run.sh still tries to read it (and stamps saltWeak if absent).
-  if [[ "$DRY_RUN" != true ]] && ! aws secretsmanager describe-secret --region "$REGION" --secret-id source-truth/log-hash-salt >/dev/null 2>&1; then
-    GW_SALT="$(openssl rand -hex 32 2>/dev/null || head -c32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
-    if err="$(aws secretsmanager create-secret --region "$REGION" --name source-truth/log-hash-salt \
-         --secret-string "$GW_SALT" --description 'source-truth gateway LOG_HASH_SALT (telemetry de-identification)' 2>&1)"; then
-      say ok "created a random LOG_HASH_SALT in Secrets Manager (source-truth/log-hash-salt)"
-    else
-      say warn "could not create source-truth/log-hash-salt (${err%%$'\n'*}); gateways run with the weak public fallback (telemetry stamps saltWeak)."
-    fi
-    unset GW_SALT
+  # (LOG_HASH_SALT is ensured inside deploy_project.sh — identical describe-or-create there,
+  # so it also covers install.sh's direct deploy_project path; no duplicate block here.)
+  # FAIL-LOUD parse: `mapfile < <(python3 …)` swallows a python failure into an empty list,
+  # which would look like a SUCCESSFUL deploy of zero projects. Validate the file explicitly
+  # first (syntax + a 'projects' object) and abort with the real reason on any problem.
+  if ! _perr="$(python3 -c '
+import json, sys
+try:
+    cfg = json.load(open(sys.argv[1]))
+except Exception as e:
+    sys.exit(f"invalid JSON: {e}")
+p = cfg.get("projects")
+if not isinstance(p, dict):
+    sys.exit("missing/invalid \"projects\" object")
+' "$PROJECTS_CFG" 2>&1)"; then
+    say err "projects.json 解析失败: ${_perr} (${PROJECTS_CFG})"
+    exit 1
   fi
   # Loop every declared project. deploy_project.sh is idempotent; collect failures but keep going
   # (one project's broken git/Feishu must not block the others), then report at the end.
-  mapfile -t _PIDS < <(python3 -c 'import json,sys; print("\n".join(json.load(open(sys.argv[1]))["projects"]))' "$PROJECTS_CFG")
+  # bash 3.2 (stock macOS) has no mapfile — while-read keeps the deploy box portable.
+  _PIDS=(); while IFS= read -r _line; do _PIDS+=("$_line"); done \
+    < <(python3 -c 'import json,sys; print("\n".join(json.load(open(sys.argv[1]))["projects"]))' "$PROJECTS_CFG")
   _failed=()
+  # Count-guard the bare expansion below: on bash 3.2 (stock macOS) `"${arr[@]}"` on an
+  # EMPTY array under `set -u` is an unbound-variable error. Today _PIDS is never empty
+  # (python print() emits a trailing newline even for {} → one blank element), but that's
+  # an implicit invariant; guard so a future writer switching to sys.stdout.write can't
+  # make this blow up ONLY on macOS.
+  if [[ ${#_PIDS[@]} -gt 0 ]]; then
   for _pid in "${_PIDS[@]}"; do
     [[ -n "$_pid" ]] || continue
     if ! bash "$SCRIPT_DIR/lib/deploy_project.sh" "$REGION" "$_pid"; then
@@ -769,6 +790,7 @@ else
       _failed+=("$_pid")
     fi
   done
+  fi
   if [[ ${#_failed[@]} -gt 0 ]]; then
     say err "per-project deploy: ${#_failed[@]} project(s) failed: ${_failed[*]}"
     say err "  the others are up; fix the cause and re-run ./scripts/deploy-all.sh (idempotent)"
@@ -783,48 +805,34 @@ fi
 # ============================================================
 # Runs AFTER the gateway phase so the gateway has (begun to) log to /source-truth/bot-gateway
 # — the metric-filters target that group. BEST-EFFORT: the backend + gateway are already up by
-# here, so a monitoring hiccup must WARN, never fail the deploy. All four applies are
-# idempotent; re-running the deploy reconciles them. Skipped on --dry-run, --skip monitoring,
-# and when the gateway wasn't activated this run (FEISHU_SECRET_ID empty → no log group yet).
+# here, so a monitoring hiccup must WARN, never fail the deploy. apply-monitoring.sh runs all
+# stages idempotently and is itself per-stage best-effort; re-running the deploy reconciles.
+# Skipped on --dry-run, --skip monitoring, and when the gateway wasn't activated this run
+# (no project deployed → no log group yet).
 #
 # EXACT fresh-deploy behavior when the gateway hasn't written its FIRST log line yet (so the
-# log group doesn't exist): dashboards PUT FINE (no data dependency); apply-metric-filters
-# FAILS (its put-metric-filter calls error on the missing group) and is warned; apply-alarms
+# log group doesn't exist): dashboards PUT FINE (no data dependency); the metric-filters stage
+# FAILS (put-metric-filter errors on the missing group) and is warned; the alarms stage
 # ABORTS before creating the SNS topic or any alarm (it applies its backing filters first and
-# bails on their failure) → so a fresh one-click deploy creates NO alarms yet; apply-dau-lambda
-# SUCCEEDS (role/function/schedule don't need the group; only its scheduled query is idle until
-# logs accrue). A deploy RE-RUN after the gateway has logged once creates the filters + alarms
-# (idempotent) — that re-run is how alarm coverage is established. The runbook's manual 4-step
-# is the same reconcile path.
+# bails on their failure) → so a fresh one-click deploy creates NO alarms yet; the DAU-lambda
+# stage SUCCEEDS (role/function/schedule don't need the group; only its scheduled query is idle
+# until logs accrue). A deploy RE-RUN after the gateway has logged once creates the filters +
+# alarms (idempotent) — that re-run is how alarm coverage is established. The runbook's manual
+# path (./scripts/apply-monitoring.sh) is the same reconcile.
 if skip monitoring; then
   say warn "skip monitoring"
 elif [[ "$DRY_RUN" == true ]]; then
   say step "Phase 7: monitoring"
-  say info "[dry-run] apply metric-filters + dashboards + alarms + DAU lambda (CloudWatch, best-effort)"
+  say info "[dry-run] apply-monitoring.sh: metric-filters + dashboards + alarms + DAU lambda (CloudWatch, best-effort)"
 elif [[ "$PROJECTS_DEPLOYED" != true ]]; then
   # No gateway activated this run → /source-truth/bot-gateway likely doesn't exist yet.
   # Dashboards/alarms would build on an empty/absent group; defer to a post-gateway re-run.
   say warn "skip monitoring (no gateway active yet — add a project, then monitoring applies on re-run; see runbook)"
 else
   say step "Phase 7: monitoring (best-effort)"
-  # Dashboards first (put regardless of data); then a-class metric-filters; then alarms
-  # (applies its own dense backing filters first, then creates the SNS topic + alarms — so it
-  # only succeeds once the log group exists); then the DAU lambda. Each warns on failure,
-  # never aborts (the deploy is already past the point where the bot works).
-  bash "$SCRIPT_DIR/apply-dashboards.sh" --region "$REGION" \
-    || say warn "  apply-dashboards failed (non-fatal) — re-run ./scripts/apply-dashboards.sh --region $REGION"
-  bash "$SCRIPT_DIR/apply-metric-filters.sh" --region "$REGION" \
-    || say warn "  apply-metric-filters failed (non-fatal; log group may not exist until the gateway logs once) — re-run later"
-  # Per-project breakdown filters (projectId-dimensioned companions; the by-project dashboard
-  # reads these). Separate defs so the rollup metrics above stay dense/un-dimensioned.
-  bash "$SCRIPT_DIR/apply-metric-filters.sh" --region "$REGION" \
-    --defs "$ROOT/infra/monitoring/queries/metric-filters/by-project-metrics.json" \
-    || say warn "  apply-metric-filters (by-project) failed (non-fatal) — re-run later"
-  bash "$SCRIPT_DIR/apply-alarms.sh" --region "$REGION" \
-    || say warn "  apply-alarms failed (non-fatal) — re-run ./scripts/apply-alarms.sh --region $REGION"
-  bash "$SCRIPT_DIR/apply-dau-lambda.sh" --region "$REGION" \
-    || say warn "  apply-dau-lambda failed (non-fatal) — re-run ./scripts/apply-dau-lambda.sh --region $REGION"
-  say ok "monitoring applied (best-effort; widgets fill once the gateway logs accrue)"
+  bash "$SCRIPT_DIR/apply-monitoring.sh" --region "$REGION" \
+    && say ok "monitoring applied (best-effort; widgets fill once the gateway logs accrue)" \
+    || say warn "  some monitoring stages failed (non-fatal) — re-run ./scripts/apply-monitoring.sh --region $REGION"
 fi
 
 say ok "deploy-all complete"

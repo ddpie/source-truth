@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # test_alarms.sh — offline tests for the alarm renderer (scripts/lib/render_alarms.py)
-# and the apply wrapper's dry-run path. No AWS calls.
+# and the apply stage's dry-run path (scripts/lib/apply-alarms.sh, dispatched by
+# scripts/apply-monitoring.sh). No AWS calls.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 RENDER="$ROOT/scripts/lib/render_alarms.py"
-APPLY="$ROOT/scripts/apply-alarms.sh"
+APPLY="$ROOT/scripts/lib/apply-alarms.sh"
 THRESH="$ROOT/config/alarm-thresholds.json"
 
 _run=0 _fail=0

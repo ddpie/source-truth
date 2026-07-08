@@ -323,7 +323,7 @@ if [[ "$INCLUDE_SHARED" == true ]]; then
     say warn "跳过共享 IAM 角色 + S3 桶：其它区域仍有 source-truth 主机在跑（$OTHER）——删了会让那些机器失权。"
     say info "  等所有区域都拆完，再在最后一个区域跑 --include-shared。"
   else
-  # DAU Lambda's IAM role (account-global, created by apply-dau-lambda.sh).
+  # DAU Lambda's IAM role (account-global, created by apply-monitoring.sh's dau stage).
   for p in $(aws iam list-role-policies --role-name source-truth-dau-lambda-role --query 'PolicyNames[]' --output text 2>/dev/null || echo ""); do
     aws iam delete-role-policy --role-name source-truth-dau-lambda-role --policy-name "$p" >/dev/null 2>&1 || true
   done

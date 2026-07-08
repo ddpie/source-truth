@@ -1,7 +1,7 @@
 """Fast file-content search over a LOCAL-disk copy of the repo.
 
-Why this exists: the agent's builtin Grep runs against the EFS/NFS mount
-(/mnt/repo), where a single whole-repo search costs ~20-47s (a network round-trip
+Why this exists: the agent's builtin Grep used to run against an EFS/NFS mount,
+where a single whole-repo search costs ~20-47s (a network round-trip
 per file open across ~18k files). The SAME search on a local-disk copy is ~0.2s
 (measured 225x faster). So index-service keeps a local copy (bootstrap.sh extracts
 the repo tarball to /data/repo — the same deploy-time snapshot as EFS, just fast)
@@ -9,9 +9,8 @@ and exposes this as an MCP tool; the agent's builtin Grep is disabled so all
 content search goes through here.
 
 `run_search` is pure-ish (shells out to ripgrep/grep over a given root) and
-returns structured matches with paths rewritten into the agent's namespace
-(repo-relative by default), so results are indistinguishable from the old Grep
-except far faster.
+returns structured matches with paths rewritten into the agent's repo-relative
+namespace, so results are indistinguishable from the old Grep except far faster.
 """
 
 from __future__ import annotations
@@ -88,11 +87,11 @@ def build_command(pattern: str, root: str, *, glob: str | None, max_matches: int
     return cmd
 
 
-def _to_mount(path: str, *, local_root: str, mount_root: str) -> str | None:
-    """Rewrite a local-disk path into the agent's namespace (repo-relative by
-    default), or None if it escapes the repo root (don't leak an out-of-repo path)."""
+def _to_mount(path: str, *, local_root: str) -> str | None:
+    """Rewrite a local-disk path into the agent's repo-relative namespace, or None
+    if it escapes the repo root (don't leak an out-of-repo path)."""
     try:
-        return path_align.to_container_path(path, index_root=local_root, mount_root=mount_root)
+        return path_align.to_container_path(path, index_root=local_root)
     except ValueError:
         return None
 
@@ -101,14 +100,13 @@ def run_search(
     pattern: str,
     *,
     local_root: str,
-    mount_root: str,
     glob: str | None = None,
     max_matches: int = MAX_MATCHES,
     repo: str = "",
 ) -> dict[str, Any]:
     """Search the LOCAL repo copy for `pattern`. Returns
-    {"matches": [{"path", "line", "text"}], "truncated": bool} with paths in the
-    agent's namespace (repo-relative by default). Never raises for a no-match
+    {"matches": [{"path", "line", "text"}], "truncated": bool} with repo-relative
+    paths in the agent's namespace. Never raises for a no-match
     (returns empty matches); raises only on a genuine execution failure so the
     bridge reports it honestly.
     ``repo`` (multi-repo): returned match paths are prefixed with ``<repo>/`` so the agent
@@ -165,7 +163,7 @@ def run_search(
         if len(parts) < 3:
             continue
         path, line_s, text = parts
-        mount_path = _to_mount(path, local_root=local_root, mount_root=mount_root)
+        mount_path = _to_mount(path, local_root=local_root)
         if mount_path is None:
             continue
         try:
@@ -181,7 +179,7 @@ def run_search(
         # NOT silent: `duplicates` is returned to the agent as `deduped` so it knows
         # hits were collapsed and can re-search a specific subdir if it needs the
         # individual copies — no invisible recall loss.
-        rel = mount_path[len(mount_root):].lstrip("/") if mount_path.startswith(mount_root) else mount_path.lstrip("/")
+        rel = mount_path.lstrip("/")
         if "/" in rel:
             suffix = rel.split("/", 1)[1]  # drop top-level (copy) dir for nested files
         else:
@@ -223,6 +221,6 @@ def run_search(
     return {"matches": matches, "truncated": truncated, "count": len(matches), "deduped": duplicates}
 
 
-def search_to_json(pattern: str, *, local_root: str, mount_root: str, glob: str | None = None, repo: str = "") -> str:
+def search_to_json(pattern: str, *, local_root: str, glob: str | None = None, repo: str = "") -> str:
     """run_search → JSON string (the MCP tool return shape)."""
-    return json.dumps(run_search(pattern, local_root=local_root, mount_root=mount_root, glob=glob, repo=repo), ensure_ascii=False)
+    return json.dumps(run_search(pattern, local_root=local_root, glob=glob, repo=repo), ensure_ascii=False)

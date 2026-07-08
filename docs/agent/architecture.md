@@ -1,7 +1,6 @@
 # 架构：写给 AI 的系统工作原理
 
-先读本文，再改请求如何流转、代码在哪取证、CardKit 如何回传、会话如何隔离。面向人的文档（README、
-structure）描述系统*是什么*；本文描述*一次提问如何在系统里流转*——改之前应先读懂的正是这部分。
+本文讲一次提问如何在系统里流转；改请求流转 / 代码取证 / CardKit 回传 / 会话隔离前先读。
 
 下文代码指针用「组件 + 概念锚点」给出，请按名字 grep 定位，不要依赖行号（行号会随代码演进漂移）。
 
@@ -16,7 +15,7 @@ structure）描述系统*是什么*；本文描述*一次提问如何在系统�
       · 解析 @提及与问题文本，open_id → 内部 userId
       · 项目路由：本进程的 `PROJECT_ID` → 该项目的仓库集合 + 该项目 bridge 端口
         （src/project-routing.ts）；据此设定取证用的 `CODEGRAPH_MCP_URL` 指向本项目 bridge
-      · 会话路由：(chat_id / thread_id) → runtimeSessionId（src/session-map.ts，DDB+TTL）
+      · 会话路由：(chat_id / thread_id) → runtimeSessionId（src/session-map.ts，进程内内存 Map + TTL）
         —— 同一问答链复用同一个仍存活的 microVM；不同用户/会话绝不共用会话，否则上下文串扰
       · 先创建一张 CardKit 卡片（「正在思考…」），拿到 card_id 供后续流式更新
       · SigV4 签名调 AgentCore InvokeAgentRuntime（src/sigv4.ts），目标为**本项目专属的
@@ -114,7 +113,7 @@ git diff 增量。完整工作原理、grounding 把关与价值边界见 `docs/
   + endpoint）配——因为 Runtime 是快速演进的服务，CloudFormation 支持未稳定。
 
 **含义**：要改 Runtime 的 env / idle timeout / 请求头，编辑 `scripts/lib/deploy_runtime.py` 并重跑
-`deploy-all.sh`（`deploy.sh` 为已废弃转发垫片）——改 CDK 不生效。密钥（飞书 app secret、bot token）走
+`deploy-all.sh`——改 CDK 不生效。密钥（飞书 app secret、bot token）走
 Secrets Manager / SSM，由 `install.sh` 交互式创建（`source-truth/feishu-<projectId>` 与全局
 `source-truth/git-credentials`）；纯 `deploy-all.sh` 路径（CI）要求密钥已存在。重部署不覆盖真实凭证。
 

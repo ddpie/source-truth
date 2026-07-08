@@ -148,12 +148,6 @@ def test_build_prompt_lists_only_target_files():
     assert "JSONL" in p or "one JSON object per line" in p.lower() or "一行一个" in p
 
 
-def test_build_prompt_full_scan_has_no_file_list():
-    # Full build (no file list) scans the repo; prompt should not enumerate files.
-    p = glossary_build.build_prompt(None, project="mangos")
-    assert isinstance(p, str) and len(p) > 0
-
-
 def test_build_prompt_forbids_translation_and_invention():
     # CRITICAL quality rule: cc must NOT translate/guess Chinese aliases. An alias may only be
     # Chinese text that literally appears in the file; an all-English file → symbols only.

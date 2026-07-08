@@ -361,17 +361,6 @@ export function ensureAxisTitlesVisible<T extends { [k: string]: unknown }>(spec
   return { ...spec, axes: fixedAxes };
 }
 
-/** Wrap VChart specs (extracted from the agent's ```chart blocks) as CardKit
- *  chart components. The agent builds specs from real config-table numbers it
- *  read; the gateway only transports them (plus the axis-title-visibility backstop). */
-export function buildChartElements(specs: Array<{ type: string; [k: string]: unknown }>): unknown[] {
-  return specs.map((spec, i) => ({
-    tag: "chart",
-    element_id: `chart_${i}`,
-    chart_spec: ensureAxisTitlesVisible(spec),
-  }));
-}
-
 // Cap on charts actually rendered. CardKit validates an append request
 // atomically AND the card has a body-size limit, so an answer with many (or one
 // huge) chart specs could blow the limit or contend with the per-card 10/s write
@@ -393,23 +382,6 @@ export async function appendOneChart(
     type: "append",
     sequence,
     elements: JSON.stringify([{ tag: "chart", element_id: `chart_${index}`, chart_spec: ensureAxisTitlesVisible(spec) }]),
-  }));
-}
-
-/** Append data charts to the card (after the conclusion, before the footer).
- *  Kept for callers/tests that batch; the live path uses appendOneChart per spec
- *  for per-chart fault isolation. */
-export async function appendCharts(
-  cardId: string,
-  specs: Array<{ type: string; [k: string]: unknown }>,
-  sequence: number,
-): Promise<void> {
-  const elements = buildChartElements(specs);
-  if (elements.length === 0) return;
-  await larkApi("POST", `/open-apis/cardkit/v1/cards/${cardId}/elements`, JSON.stringify({
-    type: "append",
-    sequence,
-    elements: JSON.stringify(elements),
   }));
 }
 

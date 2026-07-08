@@ -64,7 +64,7 @@ artifact_signature() {
 # exists" (InvalidPermission.Duplicate) error, and HARD-FAIL on anything else
 # (throttling, bad CIDR, IAM denial). A blanket `|| true` would silently swallow
 # a real failure and leave the rule missing — which no downstream gate catches
-# (wait_index_health.sh curls :8080 over loopback, never crossing the SG), so
+# (the bridge health checks curl :8080 over loopback, never crossing the SG), so
 # the deploy would falsely report success while the runtime can't reach the
 # bridge. So we narrow the tolerance to the duplicate case only. Defined ABOVE
 # the reuse block so the :8080 rule can be reconciled on BOTH paths.
@@ -159,7 +159,7 @@ if [[ "$LOCAL_MODE" == "true" ]]; then
   fi
   if ! sudo aws s3 ls "s3://${BUCKET}/" --region "$REGION" >/dev/null 2>&1; then
     log err "local mode: this instance's role cannot read s3://${BUCKET} — check the instance role"
-    log err "  created via scripts/create-iam.sh (see runbook), then re-run."
+    log err "  created via scripts/lib/create-iam.sh (see runbook), then re-run."
     exit 1
   fi
   log info "local mode: instance role present + S3 artifact read OK ($SELF_ROLE)"

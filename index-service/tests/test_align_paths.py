@@ -2,8 +2,8 @@
 
 Pure function (no codegraph-server / network): rewrites every file-bearing field
 of the 3 codegraph envelope shapes (symbol_search / get_callers / analyze_impact)
-from index space into the container mount (/mnt/repo), nulls paths that escape the
-repo root, and must NEVER crash on a malformed/partial envelope (best-effort:
+from index space into the agent's REPO-RELATIVE namespace, nulls paths that escape
+the repo root, and must NEVER crash on a malformed/partial envelope (best-effort:
 return unchanged). The bridge is resident, so a crash here would break a query.
 """
 
@@ -22,12 +22,11 @@ if str(SVC_DIR) not in sys.path:
 pytest.importorskip("mcp")  # http_bridge imports mcp at module load
 import http_bridge  # noqa: E402
 
-ROOT = "/mnt/efs/repo"
-MOUNT = "/mnt/repo"
+ROOT = "/data/repo/code-5x"
 
 
 def _align(tool, env):
-    out = http_bridge._align_paths(json.dumps(env), tool, index_root=ROOT, mount_root=MOUNT)
+    out = http_bridge._align_paths(json.dumps(env), tool, index_root=ROOT)
     return json.loads(out)
 
 
@@ -35,15 +34,15 @@ def _align(tool, env):
 def test_symbol_search_aligns_location_file():
     d = _align("codegraph_symbol_search",
                {"results": [{"symbol": {"location": {"file": f"{ROOT}/a.cs", "line": 3}}}]})
-    assert d["results"][0]["symbol"]["location"]["file"] == f"{MOUNT}/a.cs"
+    assert d["results"][0]["symbol"]["location"]["file"] == "a.cs"
 
 
 def test_get_callers_aligns_both_symbol_and_call_site():
     d = _align("codegraph_get_callers",
                {"callers": [{"symbol": {"location": {"file": f"{ROOT}/b.cs"}},
                              "call_site": {"file": f"{ROOT}/c.cs"}}]})
-    assert d["callers"][0]["symbol"]["location"]["file"] == f"{MOUNT}/b.cs"
-    assert d["callers"][0]["call_site"]["file"] == f"{MOUNT}/c.cs"
+    assert d["callers"][0]["symbol"]["location"]["file"] == "b.cs"
+    assert d["callers"][0]["call_site"]["file"] == "c.cs"
 
 
 def test_analyze_impact_aligns_all_impact_lists():
@@ -51,9 +50,9 @@ def test_analyze_impact_aligns_all_impact_lists():
                {"impacted": [{"path": f"{ROOT}/d.cs"}],
                 "indirect_impacted": [{"path": f"{ROOT}/e.cs"}],
                 "direct_impacted": [{"path": f"{ROOT}/f.cs"}]})
-    assert d["impacted"][0]["path"] == f"{MOUNT}/d.cs"
-    assert d["indirect_impacted"][0]["path"] == f"{MOUNT}/e.cs"
-    assert d["direct_impacted"][0]["path"] == f"{MOUNT}/f.cs"
+    assert d["impacted"][0]["path"] == "d.cs"
+    assert d["indirect_impacted"][0]["path"] == "e.cs"
+    assert d["direct_impacted"][0]["path"] == "f.cs"
 
 
 # ── escape paths are nulled, not leaked ─────────────────────────────────────
@@ -75,7 +74,7 @@ def test_null_symbol_with_valid_call_site_still_aligns_call_site():
     d = _align("codegraph_get_callers",
                {"callers": [{"symbol": None, "call_site": {"file": f"{ROOT}/g.cs"}}]})
     assert d["callers"][0]["symbol"] is None
-    assert d["callers"][0]["call_site"]["file"] == f"{MOUNT}/g.cs"
+    assert d["callers"][0]["call_site"]["file"] == "g.cs"
 
 
 def test_non_dict_items_and_missing_keys_do_not_crash():
@@ -87,4 +86,4 @@ def test_wrong_shape_returned_unchanged():
     # Unknown tool / missing container → unchanged, no crash.
     assert _align("codegraph_symbol_search", {"unexpected": 1}) == {"unexpected": 1}
     assert http_bridge._align_paths("not json", "codegraph_symbol_search",
-                                    index_root=ROOT, mount_root=MOUNT) == "not json"
+                                    index_root=ROOT) == "not json"

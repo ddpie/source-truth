@@ -14,13 +14,13 @@
 # metrics created by apply-metric-filters.sh (run that first, or there's no data).
 #
 # Usage:
-#   ./scripts/apply-dashboards.sh [--region <r>] [--namespace <ns>] [--prefix <p>] [--dry-run]
+#   ./scripts/apply-monitoring.sh --only dashboards [--region <r>] [--namespace <ns>] [--prefix <p>] [--dry-run]
 #   --region      AWS region (default: DEPLOY_REGION from .local/deploy-config)
 #   --namespace   metric namespace (default: metricNamespace from the metric-filters defs)
 #   --prefix      dashboard-name prefix (default: source-truth) → "<prefix>-product" / "<prefix>-sre"
 #   --dry-run     render + validate; print the dashboard names + body sizes; NO AWS calls
 set -euo pipefail
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # shellcheck source-path=SCRIPTDIR source=lib/common.sh
 source "$ROOT/scripts/lib/common.sh"
 # shellcheck source-path=SCRIPTDIR source=lib/env-utils.sh
@@ -41,7 +41,7 @@ REGION="" NAMESPACE="" PREFIX="source-truth" DRY_RUN=0
 
 usage() {
   cat <<'EOF'
-Usage: ./scripts/apply-dashboards.sh [--region <r>] [--namespace <ns>] [--prefix <p>] [--dry-run]
+Usage: ./scripts/apply-monitoring.sh --only dashboards [--region <r>] [--namespace <ns>] [--prefix <p>] [--dry-run]
 
 Renders infra/monitoring/dashboard.*.json templates and put-dashboard's them (idempotent).
 
@@ -137,7 +137,11 @@ for entry in "${TEMPLATES[@]}"; do
 done
 
 if [[ "$DRY_RUN" -eq 0 && "$rc" -eq 0 ]]; then
-  say ok "dashboards applied: ${PREFIX}-product, ${PREFIX}-sre (region ${REGION})"
+  # Derive the name list from TEMPLATES (the single source) — a hand-written list here
+  # once omitted the by-project dashboard.
+  NAMES=""
+  for entry in "${TEMPLATES[@]}"; do NAMES+="${NAMES:+, }${PREFIX}-${entry##*:}"; done
+  say ok "dashboards applied: ${NAMES} (region ${REGION})"
   say info "view: https://${REGION}.console.aws.amazon.com/cloudwatch/home?region=${REGION}#dashboards"
 elif [[ "$rc" -ne 0 ]]; then
   say err "some dashboards failed"

@@ -71,10 +71,9 @@ CC_DISALLOWED_TOOLS = (
 )
 
 
-def build_prompt(files: list[str] | None, *, project: str) -> str:
-    """Construct the cc build prompt. ``files`` None => full repo scan; a list =>
-    scan ONLY those files (incremental, token-frugal). The schema block is identical
-    either way so extract_entries() can parse both.
+def build_prompt(files: list[str], *, project: str) -> str:
+    """Construct the cc build prompt scanning ONLY the given files (token-frugal;
+    the caller always hands a concrete list — full scan = the whole candidate set).
 
     The prompt demands JSONL-only output (no prose, no markdown fence) to keep OUTPUT
     tokens minimal; extract_entries() is the safety net if cc adds chatter regardless.
@@ -82,13 +81,7 @@ def build_prompt(files: list[str] | None, *, project: str) -> str:
     # TERSE + imperative ON PURPOSE: a long/explanatory prompt makes cc burn turns
     # "understanding the task" (observed: a verbose prompt times out >180s; this terse
     # form finishes in ~20s) AND costs more tokens. Keep it command-shaped.
-    if files:
-        scope = "Read ONLY these files (no others): " + ", ".join(files) + "."
-    else:
-        scope = ("Scan the repo for player-facing game concepts (races, classes, stats, "
-                 "levels, loot, factions): code enums/fields, config keys, SQL table+column "
-                 "names, data-table headers, AND docs/READMEs/design notes (where Chinese terms "
-                 "and their English code names are often spelled out together). Skip vendored code.")
+    scope = "Read ONLY these files (no others): " + ", ".join(files) + "."
     return (
         f"Build a term glossary for game project '{project}'. {scope}\n"
         "Output ONLY JSONL — one JSON object per line, NO prose, NO markdown fences.\n"
@@ -339,11 +332,12 @@ def _run_with_retry(run: Callable[..., str], *, prompt: str, cwd: str, model: st
             attempt += 1
 
 
-def build(files: list[str] | None, *, project: str, cwd: str, model: str, region: str,
+def build(files: list[str], *, project: str, cwd: str, model: str, region: str,
           runner: Callable[..., str] | None = None, timeout: int = DEFAULT_TIMEOUT_S) -> list[glossary.Entry]:
-    """Run cc for the given scope and parse its output into entries. `files` None =>
-    full scan; a (non-empty) list => incremental over just those files. Returns [] if
-    cc produced nothing parseable (caller decides how to treat an empty build).
+    """Run cc over the given files and parse its output into entries. The caller always
+    hands a concrete list (full scan = the whole candidate set; incremental = the changed
+    files). Returns [] if cc produced nothing parseable (caller decides how to treat an
+    empty build).
 
     `runner` defaults (None) to the module-level run_cc resolved AT CALL TIME, so a test
     monkeypatching glossary_build.run_cc takes effect (a bound default arg would not).
@@ -356,24 +350,18 @@ def build(files: list[str] | None, *, project: str, cwd: str, model: str, region
 
     # Run cc in batches: the file list rides in the ARGV of `claude -p`, so passing thousands of
     # paths at once overflows the OS arg limit. A full scan (files is the whole candidate set) thus
-    # loops many cc calls; a small incremental set is a single batch. files is None => full-repo
-    # prompt with no list (a single call, no arg-limit risk).
-    if files is None:
-        batches: list[list[str] | None] = [None]
-    else:
-        batches = [files[i:i + CC_BATCH_FILES] for i in range(0, len(files), CC_BATCH_FILES)] or [[]]
+    # loops many cc calls; a small incremental set is a single batch.
+    batches = [files[i:i + CC_BATCH_FILES] for i in range(0, len(files), CC_BATCH_FILES)]
     # Progress visibility: a full scan loops dozens of cc batches over 2-3 hours with NO output
     # until the very end (the slice is written atomically once, on completion). Without a per-batch
     # heartbeat there is no way to tell "still working" from "hung" except reverse-engineering the
     # process tree. Emit one structured line per batch (to logging => stderr) so the build is
     # observable; cc's JSONL product still goes only to the runner's captured stdout, unpolluted.
-    real_batches = [b for b in batches if b != []]
-    total = len(real_batches)
+    total = len(batches)
 
-    def _one_batch(idx: int, batch: list[str] | None) -> str:
-        nfiles = "full-repo" if batch is None else len(batch)
+    def _one_batch(idx: int, batch: list[str]) -> str:
         logger.info(json.dumps({"event": "glossary_build_batch", "project": project,
-                                 "batch": idx, "batches": total, "files": nfiles}))
+                                 "batch": idx, "batches": total, "files": len(batch)}))
         prompt = build_prompt(batch, project=project)
         return _run_with_retry(run, prompt=prompt, cwd=cwd, model=model, region=region,
                                timeout=timeout, batch_idx=idx)
@@ -387,7 +375,7 @@ def build(files: list[str] | None, *, project: str, cwd: str, model: str, region
     raw_by_idx: dict[int, str] = {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
         futs = {pool.submit(_one_batch, idx, batch): idx
-                for idx, batch in enumerate(real_batches, start=1)}
+                for idx, batch in enumerate(batches, start=1)}
         for fut in concurrent.futures.as_completed(futs):
             raw_by_idx[futs[fut]] = fut.result()  # re-raises this batch's exhausted error
     raw = "\n".join(raw_by_idx[i] for i in sorted(raw_by_idx))

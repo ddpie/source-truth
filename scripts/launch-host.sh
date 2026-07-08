@@ -86,7 +86,7 @@ print_manual_fallback() {
   cat >&2 <<NEXT
   手动部署（把 <你的key>.pem 换成你的私钥）：
     # ① 本机：把脚本传上去
-    scp -i <你的key>.pem "$HERE/prepare-local-host.sh" ubuntu@${ip}:/tmp/
+    scp -i <你的key>.pem "$HERE/lib/prepare-local-host.sh" ubuntu@${ip}:/tmp/
     # ② 本机：SSH 登录机器
     ssh -t -i <你的key>.pem ubuntu@${ip}
     # ③ 登录后在机器上运行（region 由机器自动检测，无需传）
@@ -106,7 +106,7 @@ deploy_to_host() {
 ✓ EC2 ${iid}（${ip}）。这台机器长期保留：它的仓库 .local/ 会存部署状态，以后升级登录同一台机器重跑即可。
 NEXT
   if [ "$DRY_RUN" = true ]; then
-    say info "[dry-run] would scp scripts/prepare-local-host.sh to ubuntu@${ip} and run it (installs deps, gh login, clone, install.sh)"
+    say info "[dry-run] would scp scripts/lib/prepare-local-host.sh to ubuntu@${ip} and run it (installs deps, gh login, clone, install.sh)"
     return 0
   fi
   # KEY is the chosen key-pair name on the launch path; on the reuse path it's unset — default blank.
@@ -141,7 +141,7 @@ NEXT
     print_manual_fallback "$ip"; return 0
   fi
   say step "把部署脚本传到 EC2（/tmp/prepare-local-host.sh）..."
-  if ! scp "${sshopt[@]}" "$HERE/prepare-local-host.sh" ubuntu@"$ip":/tmp/prepare-local-host.sh; then
+  if ! scp "${sshopt[@]}" "$HERE/lib/prepare-local-host.sh" ubuntu@"$ip":/tmp/prepare-local-host.sh; then
     say warn "scp 失败。请手动执行："; print_manual_fallback "$ip"; return 0
   fi
   say ok "脚本已上传。接下来 SSH 进机器、手动运行它（能看到每一步；卡住就地处理，断了重连再跑即可）："
@@ -155,7 +155,9 @@ NEXT
 
 # --- 1. profile (menu-picked; not pre-filled — pick is cheap and the account isn't known yet) ---
 if [ -z "$PROFILE" ]; then
-  mapfile -t PROFILES < <(aws configure list-profiles 2>/dev/null || true)
+  # bash 3.2 (stock macOS) has no mapfile — while-read keeps the deploy box portable.
+  PROFILES=(); while IFS= read -r _line; do PROFILES+=("$_line"); done \
+    < <(aws configure list-profiles 2>/dev/null || true)
   [ "${#PROFILES[@]}" -gt 0 ] || { say err "no AWS profiles (run aws configure / SSO, or pass --profile)."; exit 1; }
   PROFILE="$(pick_one "选择 AWS profile / pick the AWS profile:" "" "${PROFILES[@]}")"
 fi
@@ -181,7 +183,7 @@ if [ "$DRY_RUN" = true ]; then
   say info "[dry-run] would ensure IAM role + profile via create-iam.sh"
 else
   say step "ensuring IAM roles (create-iam.sh) ..."
-  "$HERE/create-iam.sh" --profile "$PROFILE" --region "$REGION"
+  "$HERE/lib/create-iam.sh" --profile "$PROFILE" --region "$REGION"
 fi
 
 # --- 2b. GitHub token → Secrets Manager --------------------------------------------------------
@@ -216,7 +218,8 @@ fi
 # Only one host is meant to exist (it holds the deploy state). If one is already up — e.g. a prior
 # run that died after launch but before deploy finished — REUSE it by default: IAM is now ensured
 # above, so we just deploy onto that box (scp + run the prepare script). Pass --new-host to force one.
-mapfile -t EXISTING < <(aws ec2 describe-instances \
+# bash 3.2 (stock macOS) has no mapfile — while-read keeps the deploy box portable.
+EXISTING=(); while IFS= read -r _line; do EXISTING+=("$_line"); done < <(aws ec2 describe-instances \
   --filters "Name=tag:Name,Values=source-truth-host" "Name=instance-state-name,Values=running,pending,stopped,stopping" \
   --query 'Reservations[].Instances[].[InstanceId,State.Name,PublicIpAddress]' --output text 2>/dev/null | grep -v '^[[:space:]]*$' || true)
 if [ "${#EXISTING[@]}" -gt 0 ] && [ "$NEW_HOST" != true ]; then
@@ -283,7 +286,9 @@ if ! aws ec2 describe-security-groups --group-ids "$SG" \
     || { [[ "$auth_err" == *Duplicate* ]] || { say err "failed to open SSH 22 for $SSHCIDR on $SG: $auth_err"; exit 1; }; }
 fi
 
-mapfile -t KEYS < <(aws ec2 describe-key-pairs --query 'KeyPairs[].KeyName' --output text 2>/dev/null | tr '\t' '\n')
+# bash 3.2 (stock macOS) has no mapfile — while-read keeps the deploy box portable.
+KEYS=(); while IFS= read -r _line; do KEYS+=("$_line"); done \
+  < <(aws ec2 describe-key-pairs --query 'KeyPairs[].KeyName' --output text 2>/dev/null | tr '\t' '\n')
 if [ "${#KEYS[@]}" -eq 0 ]; then
   say err "no EC2 key pair in $REGION — you need one to SSH in. Create one, e.g.:"
   say err "  aws ec2 create-key-pair --region $REGION --key-name source-truth --query KeyMaterial --output text > source-truth.pem && chmod 600 source-truth.pem"

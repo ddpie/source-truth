@@ -31,14 +31,12 @@ import { rememberCard, rememberAnswer, lookupCard, lookupByCardId, collectChain,
 import { composeFollowUpPrompt } from "./followup-context";
 import { removeReaction } from "./reaction";
 import { redactSensitive, redactSteps, redactDeep } from "./redact";
-import { extractFollowUps, stripFollowUps } from "./extract-followups";
-import { splitEvidence } from "./extract-evidence";
-import { stripPreamble } from "./strip-preamble";
+import { extractFollowUps } from "./extract-followups";
 import { stripToolCallLeak, isToolCallLeakDominant } from "./strip-toolcall-leak";
-import { normalizeBlocks } from "./normalize-blocks";
+import { sanitizeAnswerText, renderFinalText, MAX_CARD_BODY_CHARS, MAX_CARD_EVIDENCE_CHARS } from "./sanitize-answer";
 import { t, initI18n, currentLocale } from "./i18n";
 import { extractClarification } from "./extract-clarify";
-import { handleMessageEvent, type InvokeFn } from "./handle-event";
+import { handleMessageEvent } from "./handle-event";
 import { classifyWsError } from "./index-core";
 import { sdkEventToImEvent } from "./sdk-event";
 import { sendReply } from "./reply";
@@ -50,6 +48,7 @@ import { CardWriter } from "./card-writer";
 import { hashUserId } from "./log";
 import { emitMetric, classifyFailure, countEvidenceCitations, type FailReason } from "./metrics";
 import { isDuplicate, forget } from "./dedup";
+import { STREAM_TIMEOUT_MS, DEFAULT_MAX_CONCURRENT_INVOKES } from "./tunables";
 import { loadProjectsConfig, resolveRoute, ProjectsConfigMissing, type ProjectsConfig, type ResolvedRoute } from "./project-routing";
 
 const RUNTIME_ARN = process.env.RUNTIME_ARN ?? "";
@@ -101,28 +100,8 @@ function traceLogger(traceId: string): (obj: Record<string, unknown>) => void {
   return (obj) => log({ ...obj, traceId });
 }
 
-// Per-field caps for the finalized card body. A Feishu interactive card has a
-// total body-size limit; the finalize step rebuilds the WHOLE card in one PUT
-// (conclusion + reasoning panel + evidence), so an over-long conclusion or a huge
-// echoed config table in the evidence could push the PUT past the limit → CardKit
-// 400s the request. That failure is SWALLOWED by the serial CardWriter (a dropped
-// write must never wedge the queue), so the card would silently stay stuck
-// mid-stream (header blue "正在分析…", no footer) — the exact frozen-card failure the
-// design forbids. Clamp each field well under the limit BEFORE the PUT so finalize
-// always fits and lands. The agent's max_turns + prompt normally keep answers short;
-// this is the backstop for a pathological long answer / large evidence dump.
-const MAX_CARD_BODY_CHARS = 9000;     // conclusion (prose; charts/tables are separate)
-const MAX_CARD_EVIDENCE_CHARS = 9000; // 供研发复核 citations block
-function clampForCard(text: string, max: number): string {
-  if (text.length <= max) return text;
-  // Cut on a line boundary when one is near the limit so we don't slice mid-markup,
-  // and append a clear truncation marker (the dev-review panel still carries the
-  // file:line citations, so a research can read the full source there).
-  const head = text.slice(0, max);
-  const nl = head.lastIndexOf("\n");
-  const cut = nl > max - 400 ? head.slice(0, nl) : head;
-  return `${cut}\n\n_（内容较长，已截断；完整依据见“供研发复核”或直接查阅源码）_`;
-}
+// Per-field card-size caps + the clamp/redact/normalize chain live in
+// sanitize-answer.ts (shared with the live streaming path).
 
 // Message-level dedup uses the shared TTL-bounded `isDuplicate` (dedup.ts) with
 // a "msg:" prefix so it can't collide with event_id keys. This replaces an
@@ -189,9 +168,10 @@ setBusyProbe((sessionId) => sessionSerializer.isBusy(sessionId));
 // would otherwise fire N concurrent AgentCore invokes (cost/throttle/memory). Cap
 // the number running at once across ALL sessions; excess waits for a slot (its card
 // is already sent eagerly, so the user sees 排队中/思考, not silence). Operator-tunable
-// via MAX_CONCURRENT_INVOKES; default 8 balances throughput vs. AgentCore pressure.
+// via MAX_CONCURRENT_INVOKES; the shared default (tunables.ts, also the warm-pool
+// cap in session-map.ts) balances throughput vs. AgentCore pressure.
 const _maxConc = Number(process.env.MAX_CONCURRENT_INVOKES);
-const invokeGate = new Semaphore(Number.isFinite(_maxConc) && _maxConc > 0 ? _maxConc : 8);
+const invokeGate = new Semaphore(Number.isFinite(_maxConc) && _maxConc > 0 ? _maxConc : DEFAULT_MAX_CONCURRENT_INVOKES);
 
 // Monotonic sequence for card-callback (button-disable) updates. Based on Unix
 // seconds since a 2025 epoch (stays int32 for ~60y, and is orders of magnitude
@@ -305,16 +285,34 @@ async function streamingCardInvoke(
     throw e;
   }
 
-  return sessionSerializer.serialize(sessionId, () => {
+  return sessionSerializer.serialize(sessionId, async () => {
     // Recompute the prompt HERE (turn start) if a composer was given: by now the
     // parent turn ahead of us in the serializer has finalized and stored its
     // answer, so collectChain sees the immediate parent turn (the freshness gap a
     // reply-to-a-still-streaming-parent otherwise had).
     const finalPrompt = composePrompt ? (composePrompt() || prompt) : prompt;
+    let liveCard = { ...card, coldStart };
+    // LATE-QUEUE SEED: the `queued` snapshot was taken before sendStreamingCard's
+    // network I/O + the serializer wait above. If the global gate saturated only
+    // DURING that window, this turn will now BLOCK on invokeGate.run with just the
+    // bare "正在分析…" placeholder and NO moving timer or 排队中 hint — the exact
+    // "looks frozen for minutes" case (the heartbeat only starts inside
+    // runStreamingInvoke, i.e. after the slot is acquired). If no status was seeded
+    // at send time AND the gate has no slot right now, seed 排队中 before we wait —
+    // same seq-bump discipline as the send-time seed, so the heartbeat later
+    // OVERWRITES it in place ("排队中" → "正在分析"). Bounded, harmless if a slot
+    // frees in the microsecond after the check (heartbeat overwrites immediately).
+    if (!liveCard.statusSeeded && invokeGate.stats.available === 0) {
+      try {
+        await appendStatusLine(liveCard.cardId, t("card.status.queued"), liveCard.startSeq + 1);
+        liveCard = { ...liveCard, statusSeeded: true, startSeq: liveCard.startSeq + 1 };
+        log({ event: "turn_queued_late", session: sessionId, gateWaiting: invokeGate.stats.waiting });
+      } catch { /* seed failed → heartbeat appends the status element on its first tick */ }
+    }
     // Hold a GLOBAL concurrency slot only around the heavy AgentCore invoke (the card
     // was already sent eagerly above, so a queued caller still shows 排队中/思考). This
     // caps distinct-session stampede without delaying the user-visible card.
-    return invokeGate.run(() => runStreamingInvoke({ ...card, coldStart }, sessionId, finalPrompt, credentials));
+    return invokeGate.run(() => runStreamingInvoke(liveCard, sessionId, finalPrompt, credentials));
   }).finally(() => {
     // SOLE point of AbortController removal. The controller is registered at card-send
     // so 停止 works while the turn is still QUEUED and all through streaming +
@@ -507,11 +505,9 @@ async function runStreamingInvoke(
   // stays at/under the cap; if Feishu ever speeds up materially, add an explicit
   // min-inter-write gate in CardWriter rather than relying on RTT.
   const THROTTLE_MS = 125;
-  // Derive the safety timeout from the external Feishu hard limit so the "must
-  // stay below the hard window" invariant is self-documenting (not a magic 9 vs a
-  // prose "Feishu closes at 10" comment that can drift if either value changes).
-  const FEISHU_STREAM_HARD_LIMIT_MS = 10 * 60 * 1000; // Feishu force-closes a streaming card at 10 min
-  const STREAM_TIMEOUT_MS = FEISHU_STREAM_HARD_LIMIT_MS - 60 * 1000; // 1-min margin to finalize gracefully
+  // STREAM_TIMEOUT_MS lives in tunables.ts (derived from Feishu's 10-min hard
+  // window minus a 1-min finalize margin); dedup.ts derives its replay TTL from
+  // the same constant, so the two can't drift apart.
   const deadline = Date.now() + STREAM_TIMEOUT_MS;
   // The deadline must ACTIVELY abort the invoke, not just set a flag. A flag-only
   // timeout (the old onChunk `if (Date.now() > deadline)` check) only fires when a
@@ -738,50 +734,23 @@ async function runStreamingInvoke(
       }
       if (now - lastUpdate < THROTTLE_MS) return;
       lastUpdate = now;
-      // Strip the evidence (供研发复核) section and the 你可能还想问 follow-up trailer
-      // from the LIVE conclusion so the typewriter shows ONLY clean business prose.
-      // Both helpers are marker-keyed and pure: they no-op when the marker hasn't
-      // streamed yet (so the partial answer shows normally), and once the agent
-      // emits the `供研发复核` heading the raw file:line block stops appearing inline.
-      // Without this, the reader watches the raw evidence block + 💡 trailer type
-      // out and then finalize abruptly re-lays-them-out (the "noise then snap"). The
-      // evidence still appears — folded — at finalize via the unchanged splitEvidence
-      // path. Charts are deliberately NOT stripped live (extractCharts on an
-      // unclosed fence is fragile; the chart fence streams briefly then renders at
-      // finalize, same as before).
+      // Sanitize the LIVE conclusion via the SHARED pipeline (sanitize-answer.ts,
+      // mode "live"): evidence (供研发复核) and the 你可能还想问 trailer are split/
+      // stripped so the typewriter shows ONLY clean business prose; a leaked
+      // preamble / tool-call XML is scrubbed; secrets redacted; clamped to the
+      // per-frame cap. All helpers are marker-keyed and pure: they no-op while a
+      // marker hasn't streamed yet (so the partial answer shows normally). The
+      // order contract (split-first, redact-after-strip, clamp-last) is documented
+      // + test-locked in sanitize-answer.ts. Charts are deliberately NOT stripped
+      // live (extractCharts on an unclosed fence is fragile; the chart fence
+      // streams briefly then renders at finalize, same as before).
       let display = "正在分析…";
-      let liveEvidence = "";
+      let safeEvidence = "";
       if (textSoFar.length > 0) {
-        // Split evidence FIRST, then strip follow-ups from the BODY only. The reverse
-        // order (stripFollowUps then splitEvidence) silently LOSES the evidence block
-        // when the model emits the 你可能还想问 trailer BEFORE 供研发复核 — stripFollowUps'
-        // greedy `…[\s\S]*$` would eat the evidence too (cross-review HIGH). Splitting
-        // evidence off first confines each extractor to its own partition.
-        const split = splitEvidence(textSoFar);
-        const body = stripFollowUps(split.body);
-        // Strip the followup trailer from evidence too (it often follows 供研发复核 in
-        // the model output) so the live dev-review panel never shows it — mirrors the
-        // finalize path; the real buttons render separately.
-        liveEvidence = stripFollowUps(split.evidence);
-        // Drop a planning preamble ("现在我整理答案…" + ---) that leaked into the
-        // conclusion block so the typewriter shows 结论先行 from the first line. Marker-
-        // keyed + conservative: no-op until the preamble's `---` has streamed.
-        // normalizeBlocks (additive newlines only) also repairs jammed ###/---/>
-        // live so the typewriter doesn't briefly show literal markers mid-paragraph.
-        // stripToolCallLeak: on the MCP-init-race failure (cold microVM whose MCP
-        // tools didn't register), the model emits raw <invoke> tool-call XML as text;
-        // strip it LIVE so the user never watches that markup type out (finalize also
-        // strips + may show a clean failure message, but the live stream must not leak).
-        // ORDER: redact LAST (outermost). Stripping a tag can re-join the two halves of
-        // a secret that a `<parameter …>` split, so redaction must run AFTER strip or a
-        // leaked tail survives this live frame (finalize already orders it strip→redact;
-        // the live path had it inverted — cross-review P1).
-        display = redactSensitive(stripToolCallLeak(normalizeBlocks(stripPreamble(body.length > 0 ? body : textSoFar))));
+        const sanitized = sanitizeAnswerText(textSoFar, { mode: "live" });
+        display = sanitized.body;
         if (!display.trim()) display = "正在分析…";
-        // Clamp the LIVE update too: a runaway-long stream could 400 the per-frame PUT
-        // (coalesced → silently dropped → typewriter appears to freeze) before finalize
-        // even runs. Same cap as the finalized body. (finalize re-clamps independently.)
-        display = clampForCard(display, MAX_CARD_BODY_CHARS);
+        safeEvidence = sanitized.evidence;
       }
       // Latest-wins lane: each content update carries the FULL text so far, so a
       // queued-but-not-yet-sent frame is stale and is replaced — the typewriter
@@ -789,9 +758,10 @@ async function runStreamingInvoke(
       writer.coalesce("content", (seq) => updateContent(cardId, display, seq));
       // LIVE 供研发复核 panel: once the evidence section starts streaming, render it
       // (folded) so the dev can watch citations form, instead of only at finalize.
-      // Redact + strip-leak the same as the body. Push when the CLEAN evidence CHANGED
-      // (content compare — see evidenceShown: a length gate sticks shut when strip-leak
-      // shrinks the text). Use a COALESCE lane ("evidence") rather than one-shot write():
+      // safeEvidence is already redacted + strip-leaked by the shared pipeline
+      // above. Push when the CLEAN evidence CHANGED (content compare — see
+      // evidenceShown: a length gate sticks shut when strip-leak shrinks the text).
+      // Use a COALESCE lane ("evidence") rather than one-shot write():
       // coalescing keeps only the latest pending frame (always the newest content) and
       // drops stale intermediates, so two ticks reading the same pre-commit evidenceShown
       // can't land a shorter frame after a longer one (the content-regression window the
@@ -799,9 +769,6 @@ async function runStreamingInvoke(
       // callback: evidenceAppended flips only on a successful append and evidenceShown
       // commits only after the write lands, so a failed append self-heals on the next
       // tick. finalizeCard re-renders the same element_id="evidence" (no re-layout).
-      const safeEvidence = liveEvidence.trim()
-        ? stripToolCallLeak(redactSensitive(liveEvidence)).trim()
-        : "";
       if (safeEvidence && safeEvidence !== evidenceShown) {
         const target = safeEvidence;
         writer.coalesce("evidence", async (seq) => {
@@ -915,7 +882,8 @@ async function runStreamingInvoke(
   // 3. Final update + close streaming. Order matters so the "供研发复核" evidence
   //    folds correctly AND any incompleteness disclaimer stays VISIBLE (not swept
   //    into the folded panel):
-  //    raw answer → extractCharts → stripFollowUps → splitEvidence → THEN append
+  //    raw answer → extractCharts → sanitizeAnswerText (split evidence, strip
+  //    follow-ups/preamble; order locked in sanitize-answer.ts) → THEN append
   //    the aborted/turn-capped disclaimer to the (evidence-free) body.
   let bodyNoEvidence: string;
   let evidence = "";
@@ -931,23 +899,18 @@ async function runStreamingInvoke(
     // (cross-review P1). The prose table the prompt mandates alongside is the fallback,
     // so the user still gets the numbers; this just makes the drop observable.
     if (ex.dropped.length > 0) tlog({ event: "chart_dropped", count: ex.dropped.length, reasons: ex.dropped });
-    // Split evidence FIRST, then strip follow-ups from the body only — see the live
-    // path above: the reverse order loses the evidence block when 你可能还想问 precedes
-    // 供研发复核 (stripFollowUps' greedy tail-eat). Confine each extractor to its partition.
-    const split = splitEvidence(ex.text);
-    const body = stripFollowUps(split.body);
-    // Strip the "💡 你可能还想问" trailer from the EVIDENCE partition too. The model
-    // commonly emits it AFTER 供研发复核 (供研发复核 … --- 💡 你可能还想问 …), so it lands
-    // in split.evidence and gets folded INTO the dev-review panel — redundant noise,
-    // since the real follow-up BUTTONS render separately below (user-reported). Strip
-    // it from both partitions; the buttons still come from extractFollowUps(answer).
-    const ev = stripFollowUps(split.evidence);
-    evidence = ev;
-    // Drop a planning preamble ("现在我整理答案…" + ---) that the model wrote into
-    // the conclusion block, so the finalized body leads with the answer (结论先行).
-    // Then shape the VISIBLE body: append the incompleteness note AFTER evidence is
+    // Shared sanitize front half (sanitize-answer.ts, mode "final"): split the
+    // evidence off FIRST, strip the 你可能还想问 trailer from BOTH partitions (the
+    // model commonly emits it AFTER 供研发复核, where it would fold into the
+    // dev-review panel as redundant noise — the real BUTTONS come from
+    // extractFollowUps(answer) below), and drop a leaked planning preamble so the
+    // finalized body leads with the answer (结论先行). Order contract documented +
+    // test-locked in sanitize-answer.ts.
+    const sanitized = sanitizeAnswerText(ex.text, { mode: "final" });
+    evidence = sanitized.evidence;
+    // Shape the VISIBLE body: append the incompleteness note AFTER evidence is
     // split off, so the note isn't hidden inside the collapsed panel.
-    bodyNoEvidence = shapeBody(stripPreamble(body), { turnCapped, aborted, timedOut });
+    bodyNoEvidence = shapeBody(sanitized.body, { turnCapped, aborted, timedOut });
   }
   // LEAKED TOOL-CALL MARKUP: sometimes the model emits its tool-call XML
   // (<function_calls>/<invoke>) as plain TEXT instead of actually invoking the tools,
@@ -965,8 +928,10 @@ async function runStreamingInvoke(
   // backstop below must not mistake a clarify prompt that happens to name a tool for a
   // cold-start failure (cross-review P2: the backstop ran before this and could turn a
   // valid clarification into a 查询失败 card). The full clarify handling (redaction,
-  // buttons) still happens at its original site below; this is only the early signal.
-  const clarifyDetected = (!hardFailed && !aborted && !turnCapped) && extractClarification(answer) !== null;
+  // buttons) still happens at its original site below; this extraction is computed
+  // ONCE here and reused there (it was previously called twice on the same answer).
+  const clarifyRaw = (!hardFailed && !aborted && !turnCapped) ? extractClarification(answer) : null;
+  const clarifyDetected = clarifyRaw !== null;
   let leakFailed = false;
   if (!hardFailed) {
     // Assess dominance over BOTH body AND evidence: a leak can land after the
@@ -999,14 +964,14 @@ async function runStreamingInvoke(
     }
   }
   // Clarification: when the agent判定 the question is ambiguous it emits a
-  // "🔀 需要你确认 + options" block INSTEAD of an answer. Detect it on the raw answer
-  // (before redaction — the options are business questions, no secrets). If present,
+  // "🔀 需要你确认 + options" block INSTEAD of an answer. Detected above on the raw
+  // answer (before redaction — the options are business questions, no secrets;
+  // clarifyRaw was extracted once, alongside clarifyDetected). If present,
   // the card shows the disambiguation prompt + one-tap option buttons (rendered in
   // the footer section below) and suppresses charts/evidence/follow-ups (there's no
   // answer yet). Only on a clean run — a hard failure / abort / turn-cap is not a
   // clarification. The buttons reuse the follow_up callback so a click re-asks the
   // chosen clarified question WITH context replay.
-  const clarifyRaw = (!hardFailed && !aborted && !turnCapped) ? extractClarification(answer) : null;
   // Redact the question + every option before they reach the group-visible card —
   // same secret/path safety net as the conclusion / follow-ups / reasoning panel.
   // The options are agent-authored business questions (low risk), but the agent is
@@ -1020,17 +985,18 @@ async function runStreamingInvoke(
     evidence = "";
     charts = [];
   }
-  // normalizeBlocks repairs block markers (### / --- / >) the model jammed mid-prose
-  // without a preceding blank line — lark_md only renders them at line start, else
-  // the reader sees literal "###"/"---" inside a paragraph. Runs AFTER stripPreamble
-  // (which keys off inline `---`) and after redaction (additive newlines only, so it
-  // can't move a secret across the redaction boundary). Clarify body is a single
-  // prompt line — no blocks — so it's a harmless no-op there.
-  // Clamp BEFORE normalize/redact-free PUT so an over-long conclusion or a huge echoed
-  // config table can't push the single finalize PUT past Feishu's card-size limit (a
-  // 400 there is swallowed by CardWriter → card stuck mid-stream). See MAX_CARD_* above.
-  const finalText = normalizeBlocks(clampForCard(redactSensitive(bodyNoEvidence), MAX_CARD_BODY_CHARS));
-  const finalEvidence = normalizeBlocks(clampForCard(redactSensitive(evidence), MAX_CARD_EVIDENCE_CHARS));
+  // Terminal render tail (sanitize-answer.ts renderFinalText): redact → clamp →
+  // normalizeBlocks. Redaction runs after all stripping above (order contract #2);
+  // the clamp keeps the single finalize PUT under Feishu's card-size limit (a 400
+  // there is swallowed by CardWriter → card stuck mid-stream); normalizeBlocks
+  // repairs block markers (### / --- / >) the model jammed mid-prose — lark_md only
+  // renders them at line start, else the reader sees literal "###"/"---" inside a
+  // paragraph. It runs AFTER stripPreamble (which keys off inline `---`) and after
+  // redaction (additive newlines only, so it can't move a secret across the
+  // redaction boundary). Clarify body is a single prompt line — no blocks — so it's
+  // a harmless no-op there.
+  const finalText = renderFinalText(bodyNoEvidence, MAX_CARD_BODY_CHARS);
+  const finalEvidence = renderFinalText(evidence, MAX_CARD_EVIDENCE_CHARS);
   // NOTE: do not trust `messages-mget` read-back to verify heading rendering — it
   // collapses the blank line around block markers in its re-serialization (verified:
   // we SEND "…：\n\n### X" but mget returns "…：### X"). The real card renders the
@@ -1269,21 +1235,12 @@ async function main(): Promise<void> {
   // the cached creds are near expiry, so this is cheap to call per request.
   const credentials = fromNodeProviderChain();
 
-  // The InvokeFn for handleMessageEvent: it returns the final answer (for
-  // logging), but the real streaming card lifecycle is driven by
-  // streamingCardInvoke called from the line handler.
-  const invoke: InvokeFn = async (_sessionId, prompt) => {
-    // The real streaming invoke is driven by streamingCardInvoke in the line
-    // handler below. This returns the prompt so res.answer carries it through.
-    return prompt;
-  };
-
   log({ event: "gateway_start", region: REGION });
 
   // After handleMessageEvent decides to answer, drive the streaming card.
   const replyWithCard = async (res: Awaited<ReturnType<typeof handleMessageEvent>>) => {
     if (!res?.handled || !res.messageId || !res.sessionId) return;
-    const question = res.answer ?? ""; // InvokeFn passes the clean question through as `answer`
+    const question = res.prompt ?? ""; // the clean question text (mentions stripped)
     // If this IM message REPLIED to a prior bot card (Feishu 回复/引用), replay that
     // card's whole conversation chain as context — so a TYPED follow-up continues
     // the thread just like the follow-up button does. parentId → registry chain.
@@ -1394,7 +1351,7 @@ async function main(): Promise<void> {
       if (shuttingDown) return;
       const event = sdkEventToImEvent(data);
       if (event) {
-        void handleMessageEvent(event, { invoke }, {
+        void handleMessageEvent(event, {
           botOpenId: BOT_OPEN_ID || undefined,
           // A reply BY THE ASKER to one of our remembered bot cards counts as an
           // implicit mention so group reply-follow-ups don't require an extra @

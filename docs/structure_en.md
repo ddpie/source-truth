@@ -33,8 +33,7 @@ index-service/          Standalone CodeGraph index service + MCP-over-HTTP bridg
   glossary_build.py     Build-time: local cc scans code → concept JSONL (prompt/tolerant parse/Chinese-alias grounding guard/incremental merge)
   glossary_gen.py       Glossary generator CLI: git-diff incremental vs full, candidate-file bounding, atomic write (called by the refresh timer)
   glossary_refresh.sh   Refresh-unit wrapper: after git_fetch, incrementally rebuild this repo's glossary slice over old..new (best-effort, never blocks the pull)
-  path_align.py         Index path ↔ repo-relative lexical alignment (rejects escapes; mount_root defaults to "")
-  codegraph_client.py   codegraph-server client wrapper (dormant: tests only, single-writer tripwire-guarded, never on the resident serving path)
+  path_align.py         Index path ↔ repo-relative lexical alignment (rejects escapes)
   perf.py               Structured latency logging
   bootstrap.sh          EC2 user-data: install deps + codegraph binary + claude(cc) CLI for glossary build + gateway build + systemd templates (base host, no project bound)
   activate_project.sh   Per-project attach (invoked over SSM): write manifest / git repos clone then build graph; a local repo with no code yet DEFERS its graph build to the first push (bridge still starts, empty/unhealthy until then) / start index-bridge-<projectId> + refresh timers (git repos only) / clean up repos dropped since the last manifest
@@ -55,10 +54,7 @@ config/                 Config-driven: i18n.json (card / alarm / error copy), al
 scripts/                Operational lifecycle
   check-invariants.sh   Fast structural lint (AGENTS / CLAUDE / bilingual pairing / top-level dirs ↔ structure doc two-way diff)
   lib/                  common.sh (formatting + dep checks), env-utils.sh (.env / deploy-config shared helper), render_metric_filters.py (metric defs → put-metric-filter plan), render_dashboard.py (dashboard template render + no-type:log guard), render_alarms.py (thresholds → put-metric-alarm plan), render_manifest.py (multi-repo REPO_MANIFEST_JSON validate + per-repo records, pure & testable)
-  apply-metric-filters.sh  Apply the infra/monitoring metric definitions to CloudWatch (idempotent upsert; --defs switches A-class/alarm; --dry-run)
-  apply-dashboards.sh   Render dashboard templates and put-dashboard (idempotent; --dry-run; reads metric-filters' namespace as the single source)
-  apply-alarms.sh       Ensure SNS topic + create CloudWatch alarms from config/alarm-thresholds.json (idempotent; subscription is manual)
-  apply-dau-lambda.sh   Deploy the B-class DAU pre-aggregation Lambda + daily EventBridge schedule (role/package/trigger, idempotent; --dry-run)
+  apply-monitoring.sh   Single entry for the monitoring stack (dashboards→metric filters→alarms→DAU Lambda in order, idempotent; --only picks one stage; --dry-run; implementations in lib/apply-*.sh)
   test.sh               Single tiered test entrypoint (offline default / --full)
   check-versions.sh     Pinned-version drift guard (base digest / requirements pin / Node / claude-code npm)
   get.sh                One-line bootstrap (fetch via curl/gh and run): clones the repo into ./source-truth then hands off to install.sh; re-runnable (git pull if it already exists)
@@ -66,15 +62,13 @@ scripts/                Operational lifecycle
   push-local-repo.sh    Operator-side: rsync a local repo to the index host's staging dir and trigger a rebuild (local-repo refresh entry; no git)
   deploy-all.sh         Canonical one-click deploy (artifacts→IAM→network→index-service→image→Runtime→gateway; idempotent; --local single-host bootstrap)
   launch-host.sh        --local (single-EC2) mode entry (run on your machine): pick profile → create IAM → auto-build the network (VPC/public+private subnets/IGW/NAT, reuses provision_network.sh) + a host SG (SSH 22 from the operator only) → launch a public-subnet ARM64 EC2 with the instance role attached → print next steps
-  create-iam.sh         Create or reuse the --local instance role + profile and add the deploy-time policies (idempotent; usually called by launch-host.sh)
-  prepare-local-host.sh First-run script for the --local EC2 (scp'd up + run by launch-host): install aws/docker/git + gh login + clone + hand off to install.sh
-  lib/provision_*.sh + deploy_runtime.py + wait_index_health.sh  deploy-all.sh phase implementations
+  lib/create-iam.sh     Create or reuse the --local instance role + profile and add the deploy-time policies (idempotent; called by launch-host.sh)
+  lib/prepare-local-host.sh  First-run script for the --local EC2 (scp'd up + run by launch-host): install aws/docker/git + gh login + clone + hand off to install.sh
+  lib/provision_*.sh + deploy_runtime.py  deploy-all.sh phase implementations
   lib/deploy_project.sh + wait_base_host.sh + delete_runtime.py  Multi-project orchestration: build base / await base ready / delete per-project runtime
   lib/resolve_model.sh  Query Bedrock list-inference-profiles to pick a profile that actually exists in the region (no prefix guessing; geo profiles vary by region)
-  lib/resolve_repo.sh   Multi-source repo resolver (local / git / s3); now referenced by tests only, main path branches by source: git clone or local push
   lib/activate_gateway.sh  Write /etc/bot-gateway-<project>.env + start bot-gateway@<project> via SSM (gateway co-located with the index host)
   lib/stop_gateway.sh   Stop the old instance's gateway via SSM (break-before-make on blue-green swap; prevents two gateways racing the Feishu long-connection)
-  deploy.sh             Deprecated compatibility shim (delegates to deploy-all.sh)
   (p2) ops.sh           Ops toolkit (status / logs / reindex)
   teardown.sh           Ordered teardown + retained-resource list
   trace.sh              Merge-query the gateway + agent microVM log groups by traceId for a full-chain timeline (--since-hours / --raw)
@@ -98,7 +92,7 @@ docs/
     glossary.md         Term bridge: Chinese question → English code symbol (build/query time, grounding, value boundary)
     invariants.md       source → generated map + change-X-must-change-Y couplings (9 invariants)
     playbooks.md        change playbooks (7 change scenarios)
-    *-spike.md          Research notes (cardkit streaming / indexing perf / storage selection / template)
+    *-spike.md          Research notes (cardkit streaming / indexing perf / template)
     perf-comparison.md  Latency comparison against native Claude Code
   assets/               Doc diagrams (hand-authored SVG: architecture / data-plane / session-isolation / glossary / glossary-build / glossary-confidence / security-defense / sequence; architecture / sequence / security-defense also have English `*.en.svg` for the English README; plus demo-qa.gif, a real Q&A screen recording)
 .local/                 (gitignored) account-specific deploy state: deploy-config, projects.json (project routing)

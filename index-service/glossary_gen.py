@@ -60,13 +60,14 @@ _BINARY_EXTS = (
     # game/binary asset blobs
     ".dbc", ".m2", ".blp", ".mdx", ".unity3d", ".asset", ".fbx", ".prefab",
 )
-# Hard cap on files handed to cc in ONE build, so even a huge repo (or a giant commit) can't
-# launch an unbounded scan. Beyond this we log a dropped-count (never silently truncate).
-# Default 400 (a one-time full build; cost scales with file count — order of $10 at 400 files on
-# a large Chinese game codebase used for testing, more for larger caps).
-# Overridable per project: env GLOSSARY_MAX_FILES, or --max-files (flag wins). Raise it to trade
-# Bedrock cost for coverage on a big repo; 0/negative means "no cap" (whole candidate set).
-MAX_BUILD_FILES = int(os.environ.get("GLOSSARY_MAX_FILES", "400") or "400")
+# Optional cap on files handed to cc in ONE build. DEFAULT 0 = NO CAP (scan the whole candidate
+# set) — a 400-file cap truncated by path order dropped the Chinese-dense files (config tables,
+# deep business code), leaving a glossary with 0 Chinese terms; the whole point of the glossary is
+# 中文→英文符号, so full coverage is the right default. Cost scales with file count (order of $10
+# per few hundred files on a large Chinese game repo, more for a full scan).
+# Overridable per project: env GLOSSARY_MAX_FILES, or --max-files (flag wins). Set a positive value
+# to cap coverage and save Bedrock cost; 0/negative means "no cap" (whole candidate set).
+MAX_BUILD_FILES = int(os.environ.get("GLOSSARY_MAX_FILES", "0") or "0")
 
 
 def _is_term_file(path: str) -> bool:
@@ -183,7 +184,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--strict", action="store_true", help="treat a cc build failure as fatal")
     p.add_argument("--timeout", type=int, default=glossary_build.DEFAULT_TIMEOUT_S)
     p.add_argument("--max-files", type=int, default=None,
-                   help="per-build file cap (wins over GLOSSARY_MAX_FILES env / default 400); "
+                   help="per-build file cap (wins over GLOSSARY_MAX_FILES env; default 0 = no cap); "
                         "0 or negative = no cap (scan the whole candidate set)")
     args = p.parse_args(argv)
 
@@ -197,7 +198,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     # Resolve the per-build file cap: --max-files flag wins, else the module default
-    # (GLOSSARY_MAX_FILES env or 400). <=0 means "no cap" (whole candidate set).
+    # (GLOSSARY_MAX_FILES env; default 0 = no cap). <=0 means "no cap" (whole candidate set).
     cap = args.max_files if args.max_files is not None else MAX_BUILD_FILES
     uncapped = cap <= 0
 

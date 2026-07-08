@@ -14,7 +14,7 @@
 # the product dashboard's DAU widget reads). See infra/monitoring/lambda/dau_preaggregate.py.
 #
 # Usage:
-#   ./scripts/apply-dau-lambda.sh [--region <r>] [--log-group <g>] [--tz <zone>] [--schedule <cron>] [--dry-run]
+#   ./scripts/apply-monitoring.sh --only dau [--region <r>] [--log-group <g>] [--tz <zone>] [--schedule <cron>] [--dry-run]
 #   --region     AWS region (default: DEPLOY_REGION from .local/deploy-config)
 #   --log-group  gateway log group (default: /source-truth/bot-gateway)
 #   --tz         ops timezone for the day window (default: Asia/Shanghai = 东八区 UTC+8)
@@ -22,7 +22,7 @@
 #                i.e. ~90min after local midnight so the prior day's logs have settled)
 #   --dry-run    print the plan; make NO AWS calls
 set -euo pipefail
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # shellcheck source-path=SCRIPTDIR source=lib/common.sh
 source "$ROOT/scripts/lib/common.sh"
 # shellcheck source-path=SCRIPTDIR source=lib/env-utils.sh
@@ -42,7 +42,7 @@ SCHEDULE="cron(30 16 * * ? *)" DRY_RUN=0
 
 usage() {
   cat <<'EOF'
-Usage: ./scripts/apply-dau-lambda.sh [--region <r>] [--log-group <g>] [--tz <zone>] [--schedule <cron>] [--dry-run]
+Usage: ./scripts/apply-monitoring.sh --only dau [--region <r>] [--log-group <g>] [--tz <zone>] [--schedule <cron>] [--dry-run]
 
 Provisions the B-class DAU pre-aggregation Lambda + daily EventBridge schedule (idempotent).
 

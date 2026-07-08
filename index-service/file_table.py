@@ -290,7 +290,7 @@ def _read_sqlite(local_path: str) -> tuple[str, bool]:
         con.close()
 
 
-def read_table(requested: str, *, local_root: str, mount_root: str, repo: str = "") -> dict[str, Any]:
+def read_table(requested: str, *, local_root: str, repo: str = "") -> dict[str, Any]:
     """Parse a structured table/binary config file (Excel/CSV/TSV/SQLite) to text.
 
     ``requested`` is an agent-space path; it's confined to ``local_root`` first.
@@ -298,7 +298,7 @@ def read_table(requested: str, *, local_root: str, mount_root: str, repo: str = 
     namespace. Raises ValueError on a bad/escaping path, a missing file, or an
     unsupported extension (so the bridge reports a clean, actionable error)."""
     t0 = perf_counter()
-    local_path = path_align.to_local_path(requested, local_root=local_root, mount_root=mount_root, repo=repo)
+    local_path = path_align.to_local_path(requested, local_root=local_root, repo=repo)
     if not os.path.isfile(local_path):
         raise ValueError(f"not a readable file: {requested!r}")
     # Size ceiling BEFORE parsing: bounds the parse footprint (openpyxl/sqlite load
@@ -334,12 +334,12 @@ def read_table(requested: str, *, local_root: str, mount_root: str, repo: str = 
     if len(content) > MAX_OUTPUT_CHARS:
         content = content[:MAX_OUTPUT_CHARS]
         truncated = True
-    mount_path = path_align.to_container_path(local_path, index_root=os.path.realpath(local_root), mount_root=mount_root, repo=repo)
+    mount_path = path_align.to_container_path(local_path, index_root=os.path.realpath(local_root), repo=repo)
     logger.info(perf_entry("read_table", (perf_counter() - t0) * 1000, path=mount_path[:120],
                            kind=kind, truncated=truncated))
     return {"path": mount_path, "kind": kind, "content": content, "truncated": truncated}
 
 
-def read_table_to_json(requested: str, *, local_root: str, mount_root: str, repo: str = "") -> str:
+def read_table_to_json(requested: str, *, local_root: str, repo: str = "") -> str:
     """read_table → JSON string (the MCP tool return shape)."""
-    return json.dumps(read_table(requested, local_root=local_root, mount_root=mount_root, repo=repo), ensure_ascii=False)
+    return json.dumps(read_table(requested, local_root=local_root, repo=repo), ensure_ascii=False)
