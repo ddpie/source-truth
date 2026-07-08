@@ -285,16 +285,34 @@ async function streamingCardInvoke(
     throw e;
   }
 
-  return sessionSerializer.serialize(sessionId, () => {
+  return sessionSerializer.serialize(sessionId, async () => {
     // Recompute the prompt HERE (turn start) if a composer was given: by now the
     // parent turn ahead of us in the serializer has finalized and stored its
     // answer, so collectChain sees the immediate parent turn (the freshness gap a
     // reply-to-a-still-streaming-parent otherwise had).
     const finalPrompt = composePrompt ? (composePrompt() || prompt) : prompt;
+    let liveCard = { ...card, coldStart };
+    // LATE-QUEUE SEED: the `queued` snapshot was taken before sendStreamingCard's
+    // network I/O + the serializer wait above. If the global gate saturated only
+    // DURING that window, this turn will now BLOCK on invokeGate.run with just the
+    // bare "正在分析…" placeholder and NO moving timer or 排队中 hint — the exact
+    // "looks frozen for minutes" case (the heartbeat only starts inside
+    // runStreamingInvoke, i.e. after the slot is acquired). If no status was seeded
+    // at send time AND the gate has no slot right now, seed 排队中 before we wait —
+    // same seq-bump discipline as the send-time seed, so the heartbeat later
+    // OVERWRITES it in place ("排队中" → "正在分析"). Bounded, harmless if a slot
+    // frees in the microsecond after the check (heartbeat overwrites immediately).
+    if (!liveCard.statusSeeded && invokeGate.stats.available === 0) {
+      try {
+        await appendStatusLine(liveCard.cardId, t("card.status.queued"), liveCard.startSeq + 1);
+        liveCard = { ...liveCard, statusSeeded: true, startSeq: liveCard.startSeq + 1 };
+        log({ event: "turn_queued_late", session: sessionId, gateWaiting: invokeGate.stats.waiting });
+      } catch { /* seed failed → heartbeat appends the status element on its first tick */ }
+    }
     // Hold a GLOBAL concurrency slot only around the heavy AgentCore invoke (the card
     // was already sent eagerly above, so a queued caller still shows 排队中/思考). This
     // caps distinct-session stampede without delaying the user-visible card.
-    return invokeGate.run(() => runStreamingInvoke({ ...card, coldStart }, sessionId, finalPrompt, credentials));
+    return invokeGate.run(() => runStreamingInvoke(liveCard, sessionId, finalPrompt, credentials));
   }).finally(() => {
     // SOLE point of AbortController removal. The controller is registered at card-send
     // so 停止 works while the turn is still QUEUED and all through streaming +
