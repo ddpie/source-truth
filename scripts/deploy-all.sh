@@ -78,7 +78,9 @@ CODEGRAPH_SERVER_TAG="${CODEGRAPH_SERVER_TAG:-codegraph-server-v0.18.5}"
 CODEGRAPH_SERVER_URL_DEFAULT="https://github.com/${CODEGRAPH_SERVER_REPO}/releases/download/${CODEGRAPH_SERVER_TAG}/codegraph-server"
 REFRESH_INDEX=false       # --refresh-index: replace a running index instance if its artifacts are stale
 LOCAL_MODE=false          # --local: this EC2 IS the index host; bootstrap in place, reuse its VPC/subnet
-declare -A SKIP=()
+# bash 3.2 (stock macOS) has no `declare -A` — model the skip set as a space-delimited
+# string ("iam network …") and test membership with a case glob (see skip() below).
+SKIP_PHASES=""
 
 usage() {
   cat <<'EOF'
@@ -142,7 +144,7 @@ while [[ $# -gt 0 ]]; do
         # phase, and skipping only one of them never worked (both were required to skip
         # Phase 5). One canonical name now: projects.
         runtime|gateway) say err "--skip $2 is gone (runtime+gateway merged into the per-project phase): use --skip projects"; exit 2 ;;
-        artifacts|iam|network|index-svc|image|projects|monitoring) SKIP["$2"]=1 ;;
+        artifacts|iam|network|index-svc|image|projects|monitoring) SKIP_PHASES="$SKIP_PHASES $2" ;;
         *) say err "unknown --skip phase: '${2:-}' (want artifacts|iam|network|index-svc|image|projects|monitoring)"; exit 2 ;;
       esac
       shift 2 ;;
@@ -166,7 +168,7 @@ fi
 # preflight_docker consults `skip image` — it used to be defined further down, after the preflight
 # call, so `skip` was "command not found" at preflight time (harmless-looking but it silently made
 # preflight_docker's early-return misfire).
-skip() { [[ -n "${SKIP[$1]:-}" ]]; }
+skip() { case " $SKIP_PHASES " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 
 # --- preflight ---
 say step "Phase 0: preflight"
@@ -771,7 +773,9 @@ if not isinstance(p, dict):
   fi
   # Loop every declared project. deploy_project.sh is idempotent; collect failures but keep going
   # (one project's broken git/Feishu must not block the others), then report at the end.
-  mapfile -t _PIDS < <(python3 -c 'import json,sys; print("\n".join(json.load(open(sys.argv[1]))["projects"]))' "$PROJECTS_CFG")
+  # bash 3.2 (stock macOS) has no mapfile — while-read keeps the deploy box portable.
+  _PIDS=(); while IFS= read -r _line; do _PIDS+=("$_line"); done \
+    < <(python3 -c 'import json,sys; print("\n".join(json.load(open(sys.argv[1]))["projects"]))' "$PROJECTS_CFG")
   _failed=()
   for _pid in "${_PIDS[@]}"; do
     [[ -n "$_pid" ]] || continue

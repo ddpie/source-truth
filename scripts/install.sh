@@ -297,6 +297,10 @@ if [[ "$DEPS_OK" != true ]]; then
   say info "  aws CLI v2, python3, docker (ARM64-capable buildx), git"
   exit 1
 fi
+# zip is OPTIONAL: only the monitoring DAU-lambda stage needs it (apply-dau-lambda.sh packages
+# the function with `zip`). Its absence is non-fatal — the deploy + bot work fine, only the 日活
+# widget stays empty — so WARN, don't block. (--local's prepare-local-host.sh installs it.)
+have_cmd zip || say info "zip 未安装 / zip absent — fine, but the monitoring 日活 widget stays empty until you 'apt install zip' and re-run: ./scripts/apply-monitoring.sh --only dau"
 # (No docker-daemon liveness check here: deploy-all.sh's preflight_docker runs the same
 # `docker info` probe up front — before any billable resource — so this would be a duplicate.)
 # gh is OPTIONAL — only needed to auto-download codegraph-server from a PRIVATE repo's Release (gh
@@ -613,7 +617,9 @@ flow_redeploy() {
   # failure into an empty list and mis-report it as "no projects".
   local _plist
   _plist="$(project_ids)" || { say err "修复 .local/projects.json 后重试 / fix projects.json and retry"; exit 1; }
-  mapfile -t PIDS < <(printf '%s\n' "$_plist" | grep -v '^$' || true)
+  # bash 3.2 (stock macOS) has no mapfile — while-read keeps the deploy box portable.
+  local _line; PIDS=(); while IFS= read -r _line; do PIDS+=("$_line"); done \
+    < <(printf '%s\n' "$_plist" | grep -v '^$' || true)
   [[ ${#PIDS[@]} -gt 0 ]] || { say err "清单无项目 / no projects in projects.json — use 'add a project' first"; exit 1; }
   local SEL; pick SEL 0 "${PIDS[@]}"
   exec bash "$SCRIPT_DIR/lib/deploy_project.sh" "$REGION" "$SEL"
@@ -628,7 +634,9 @@ flow_remove_project() {
   # Same fail-loud capture as flow_redeploy (a broken projects.json is NOT "no projects").
   local _plist
   _plist="$(project_ids)" || { say err "修复 .local/projects.json 后重试 / fix projects.json and retry"; exit 1; }
-  mapfile -t PIDS < <(printf '%s\n' "$_plist" | grep -v '^$' || true)
+  # bash 3.2 (stock macOS) has no mapfile — while-read keeps the deploy box portable.
+  local _line; PIDS=(); while IFS= read -r _line; do PIDS+=("$_line"); done \
+    < <(printf '%s\n' "$_plist" | grep -v '^$' || true)
   [[ ${#PIDS[@]} -gt 0 ]] || { say err "清单无项目 / no projects to remove"; exit 1; }
   local SEL; pick SEL 0 "${PIDS[@]}"
   say warn "删除项目 '$SEL' 是破坏性操作：停 bridge@/gateway@、删 runtime、删其代码副本、从清单移除。"

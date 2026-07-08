@@ -77,7 +77,9 @@ run_stage() { # run_stage <name> : true if <name> was selected (or no --only giv
 # Stage-specific flags only make sense for a single stage (they differ per script).
 if [[ ${#EXTRA[@]} -gt 0 ]]; then
   # count DISTINCT selected stages (default = all four)
-  mapfile -t _distinct < <(printf '%s\n' "${ONLY[@]:-}" | grep -v '^$' | sort -u)
+  # bash 3.2 (stock macOS) has no mapfile — while-read keeps the deploy box portable.
+  _distinct=(); while IFS= read -r _line; do _distinct+=("$_line"); done \
+    < <(printf '%s\n' "${ONLY[@]:-}" | grep -v '^$' | sort -u)
   if [[ ${#_distinct[@]} -ne 1 ]]; then
     say err "stage-specific flags (${EXTRA[*]}) need exactly one --only stage"
     usage >&2; exit 2
