@@ -300,7 +300,7 @@ fi
 # zip is OPTIONAL: only the monitoring DAU-lambda stage needs it (apply-dau-lambda.sh packages
 # the function with `zip`). Its absence is non-fatal — the deploy + bot work fine, only the 日活
 # widget stays empty — so WARN, don't block. (--local's prepare-local-host.sh installs it.)
-have_cmd zip || say info "zip 未安装 / zip absent — fine, but the monitoring 日活 widget stays empty until you 'apt install zip' and re-run: ./scripts/apply-monitoring.sh --only dau"
+have_cmd zip || say info "zip 未安装 / zip absent — fine, but the monitoring 日活 widget stays empty until you install zip (用你系统的包管理器 / your OS package manager) and re-run: ./scripts/apply-monitoring.sh --only dau"
 # (No docker-daemon liveness check here: deploy-all.sh's preflight_docker runs the same
 # `docker info` probe up front — before any billable resource — so this would be a duplicate.)
 # gh is OPTIONAL — only needed to auto-download codegraph-server from a PRIVATE repo's Release (gh

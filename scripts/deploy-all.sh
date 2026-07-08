@@ -777,6 +777,12 @@ if not isinstance(p, dict):
   _PIDS=(); while IFS= read -r _line; do _PIDS+=("$_line"); done \
     < <(python3 -c 'import json,sys; print("\n".join(json.load(open(sys.argv[1]))["projects"]))' "$PROJECTS_CFG")
   _failed=()
+  # Count-guard the bare expansion below: on bash 3.2 (stock macOS) `"${arr[@]}"` on an
+  # EMPTY array under `set -u` is an unbound-variable error. Today _PIDS is never empty
+  # (python print() emits a trailing newline even for {} → one blank element), but that's
+  # an implicit invariant; guard so a future writer switching to sys.stdout.write can't
+  # make this blow up ONLY on macOS.
+  if [[ ${#_PIDS[@]} -gt 0 ]]; then
   for _pid in "${_PIDS[@]}"; do
     [[ -n "$_pid" ]] || continue
     if ! bash "$SCRIPT_DIR/lib/deploy_project.sh" "$REGION" "$_pid"; then
@@ -784,6 +790,7 @@ if not isinstance(p, dict):
       _failed+=("$_pid")
     fi
   done
+  fi
   if [[ ${#_failed[@]} -gt 0 ]]; then
     say err "per-project deploy: ${#_failed[@]} project(s) failed: ${_failed[*]}"
     say err "  the others are up; fix the cause and re-run ./scripts/deploy-all.sh (idempotent)"
