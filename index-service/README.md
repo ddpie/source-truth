@@ -33,7 +33,7 @@ CodeGraph 引擎原生仅 stdio MCP，本服务（`http_bridge.py`）把它转�
 | `perf.py` | 结构化耗时日志 |
 | `bootstrap.sh` | EC2 user-data（base host，不挂项目）：装依赖 / codegraph 二进制 / systemd `index-build`→`index-bridge` 模板；仓库由 `activate_project.sh` 按项目挂载 |
 
-依赖单一来源是 `requirements.txt`（`mcp` + `uvicorn` + `typing_extensions`，全部 `==` 固定；`bootstrap.sh` 用 `pip install -r` 安装，`scripts/check-versions.sh` 守卫不漂移）。
+依赖单一来源是 `requirements.txt`（`mcp` + `uvicorn` + `typing_extensions` + `openpyxl`，全部 `==` 固定；`bootstrap.sh` 用 `pip install -r` 安装，`scripts/check-versions.sh` 守卫不漂移）。
 
 ## 存储模型（唯一一份代码，本地副本）
 

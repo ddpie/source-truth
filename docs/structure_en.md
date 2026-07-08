@@ -92,7 +92,7 @@ docs/
     glossary.md         Term bridge: Chinese question → English code symbol (build/query time, grounding, value boundary)
     invariants.md       source → generated map + change-X-must-change-Y couplings (9 invariants)
     playbooks.md        change playbooks (7 change scenarios)
-    *-spike.md          Research notes (cardkit streaming / indexing perf / storage selection / template)
+    *-spike.md          Research notes (cardkit streaming / indexing perf / template)
     perf-comparison.md  Latency comparison against native Claude Code
   assets/               Doc diagrams (hand-authored SVG: architecture / data-plane / session-isolation / glossary / glossary-build / glossary-confidence / security-defense / sequence; architecture / sequence / security-defense also have English `*.en.svg` for the English README; plus demo-qa.gif, a real Q&A screen recording)
 .local/                 (gitignored) account-specific deploy state: deploy-config, projects.json (project routing)

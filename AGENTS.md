@@ -94,7 +94,7 @@ pre-push 跑离线套件。结构自检 `./scripts/check-invariants.sh` 由 lint
 
 **Never:**
 - 提交密钥 / token（gitleaks pre-commit；飞书凭证走 Secrets Manager——`install.sh` 交互式创建
-  `source-truth/feishu-app` 密钥，bot-gateway 的 `run.sh` 启动时取出注入进程环境，不落盘、不入仓库）。
+  `source-truth/feishu-<projectId>` 密钥，bot-gateway 的 `run.sh` 启动时取出注入进程环境，不落盘、不入仓库）。
 - 手改生成物。
 - 让 MVP 越过只读边界（写回代码、跑引擎、提交）。
 
