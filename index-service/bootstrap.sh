@@ -37,9 +37,14 @@
 #     there is no shared EFS to populate. graph.db + repo copy both live on the
 #     single root volume (size it via provision_index_service's root volume).
 #
-# Sets up the BASE host only — NO project is bound here. user-data runs once at first boot, so
-# it cannot add a project to a running host; projects are attached (and added/removed over the
-# host's life) by index-service/activate_project.sh, invoked per project over SSM by
+# Sets up the BASE host only — NO project is bound here. This script runs BOTH as EC2 user-data on
+# a brand-new host AND as an in-place RE-BOOTSTRAP over SSM on the existing host (provision_index_
+# service.sh re-runs it when the staged base-code artifacts no longer match what the host booted
+# from — the host is never replaced). Every step below is therefore written to be idempotent and
+# must never assume a blank disk or an idle host: it installs/refreshes base code and unit files
+# only, and does not touch a running project's bridge. It also cannot add a project to the host;
+# projects are attached (and added/removed over the host's life) by
+# index-service/activate_project.sh, invoked per project over SSM by
 # deploy_project.sh. Each repo is a git source or a local source: activate_project.sh git-clones a
 # git repo to /data/repo/<subdir> (read-only credential fetched host-side from Secrets Manager) and
 # writes its per-repo refresh unit; a local repo is pushed in via push-local-repo.sh + applied by
@@ -203,10 +208,16 @@ echo "base host ready (build template installed; no project bound yet — attach
 # The gateway runs ON this same host (a second resident service alongside the
 # index bridge). It is BUILT + INSTALLED here but deliberately NOT started: it
 # hard-requires RUNTIME_ARN, which doesn't exist until the AgentCore runtime is
-# created in a LATER deploy phase. deploy-all.sh writes /etc/bot-gateway.env and
-# starts bot-gateway.service AFTER the runtime is ready (via SSM). On a REBOOT the
+# created in a LATER deploy phase. activate_gateway.sh writes /etc/bot-gateway-<projectId>.env
+# and starts bot-gateway@<projectId> AFTER the runtime is ready (via SSM). On a REBOOT the
 # unit (WantedBy=multi-user.target) restarts on its own — by then the env file
 # persists on disk, so it comes straight back up.
+#
+# ON AN IN-PLACE RE-BOOTSTRAP the per-project gateways may already be RUNNING. We still
+# only rebuild files here and start nothing: a running process keeps executing the dist it
+# already loaded, and activate_gateway.sh restarts it afterwards. Never start a gateway from
+# here — a second live process for the same Feishu app would steal the long-connection's
+# events (the connection is a global singleton per app).
 #
 # Backend-only deploys (no gateway tarball staged) skip this gracefully.
 GW_APP=/opt/bot-gateway
@@ -215,6 +226,10 @@ if aws s3api head-object --bucket "$BUCKET" --key bot-gateway.tar.gz --region "$
   ensure_node   # Node 24 (defined above for the cc install); no-op if already present
   mkdir -p "$GW_APP"
   retry_net aws s3 cp "s3://$BUCKET/bot-gateway.tar.gz" /tmp/gw.tar.gz --region "$REGION"
+  # Content hash of the tarball — the SAME stamp activate_gateway.sh compares against to decide
+  # whether to rebuild. Recorded (after a verified build, below) so the dist we just built is not
+  # immediately rebuilt a second time by the activation that follows.
+  GW_SRC_SIG="$(sha256sum /tmp/gw.tar.gz | cut -d' ' -f1)"
   tar xzf /tmp/gw.tar.gz -C "$GW_APP"
   rm -f /tmp/gw.tar.gz
   # The gateway resolves card copy at __dirname/../../config/i18n.json — from
@@ -233,6 +248,9 @@ if aws s3api head-object --bucket "$BUCKET" --key bot-gateway.tar.gz --region "$
   chmod +x "$GW_APP/run.sh"
   # Sanity: the compiled entrypoint must exist, else the unit would crash-loop later.
   [ -f "$GW_APP/dist/index.js" ] || { echo "BOOTSTRAP_FAILED: bot-gateway build produced no dist/index.js"; exit 1; }
+  # Stamp ONLY after the build is verified: if this bootstrap dies mid-build, the absent/old
+  # stamp makes activate_gateway.sh rebuild instead of trusting a half-installed tree.
+  echo "$GW_SRC_SIG" > "$GW_APP/.src_sig"
 
   # PER-PROJECT gateway TEMPLATE: bot-gateway@<projectId>. %i = projectId. One gateway process
   # per project, each connected to its OWN Feishu app (long-connection, NOT an HTTP listener — so
@@ -287,7 +305,8 @@ UNIT
     rm -f "$CW_DEB"
     mkdir -p /opt/aws/amazon-cloudwatch-agent/etc
     # collect_list tails the gateway log → /source-truth/bot-gateway (leading slash: matches
-    # the IAM scope). instance-id stream so multiple hosts (blue-green) don't interleave.
+    # the IAM scope). instance-id in the stream name so hosts in different regions/accounts
+    # sharing a log group don't interleave (and a re-bootstrap keeps writing the same stream).
     cat > /opt/aws/amazon-cloudwatch-agent/etc/cw-config.json <<CWCFG
 {
   "agent": { "run_as_user": "root" },

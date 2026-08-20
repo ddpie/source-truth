@@ -92,10 +92,10 @@ echo '${PROJECTS_B64}' | base64 -d > '${HOST_PROJECTS_PATH}'
 chmod 644 '${HOST_PROJECTS_PATH}'"
 fi
 # REBUILD-IF-STALE (cross-review: a re-staged bot-gateway.tar.gz never took effect because
-# activate only restarted — the gateway is BUILT on the instance at bootstrap, so without a
-# fresh instance the dist stayed old; a deploy without --refresh-index silently shipped stale
-# gateway code). Re-pull the tarball, and rebuild ONLY when its content hash changed (a stamp
-# gates the ~90s npm ci+build so a flagless reconcile re-run is still fast). Needs BUCKET.
+# activate only restarted — the gateway is BUILT on the instance, and the host is updated IN
+# PLACE, so nothing else ever refreshes dist/ and the deploy silently shipped stale gateway
+# code). Re-pull the tarball, and rebuild ONLY when its content hash changed (a stamp
+# gates the ~90s npm ci+build so a no-change re-run is still fast). Needs BUCKET.
 if [[ -n "$BUCKET" ]]; then
   REMOTE_CMD="${REMOTE_CMD}
 GW=/opt/bot-gateway

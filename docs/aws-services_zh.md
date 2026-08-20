@@ -29,7 +29,7 @@
 | **NAT Gateway**（+ 弹性 IP） | 置于公有子网 | 1 | 私有子网出站（拉取 S3 产物、调用 Bedrock） |
 | **Internet Gateway** | — | 1 | 公有子网入口 |
 | **Security Group** | 入站仅 `8080-8099`、限同 SG 成员 | 1（AgentCore Runtime 的 ENI 也加入此 SG） | 限制各项目 bridge 端口仅本 VPC 内可达 |
-| **Route 53**（私有托管区） | 私有域 `source-truth.internal`，A 记录 TTL 30s | 1 | 给 index 主机稳定 DNS 名（蓝绿换实例时存活中的 microVM 缓存仍有效） |
+| **Route 53**（私有托管区） | 私有域 `source-truth.internal`，A 记录 TTL 30s | 1 | 给 index 主机稳定 DNS 名（agent 侧不写死私有 IP；索引主机就地更新、不换实例，这个名字始终指向同一台在跑的主机） |
 
 ## 4. 安全与运维（凭证、权限、远程管理）
 

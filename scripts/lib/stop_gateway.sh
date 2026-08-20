@@ -4,13 +4,13 @@
 # Best-effort SYNCHRONOUS stop of bot-gateway.service on an instance, via SSM.
 # Used to enforce break-before-make for the gateway: the Feishu long-connection is
 # a GLOBAL singleton per app (cluster mode — two live clients steal each other's
-# events), so before a blue-green refresh terminates the OLD index instance (which
-# also runs the gateway), we must positively drop its long-connection FIRST, so it
-# can never overlap with the NEW instance's gateway started later (deploy Phase 6).
+# events), so whenever a gateway process for the same app is about to be started,
+# the one already holding the connection must be positively dropped FIRST — the two
+# must never overlap, or events get split between them at random.
 #
 # `systemctl stop` returns only once the process has exited, so when this returns
 # the long-connection is down. Best-effort: a stop hiccup must not fail the deploy
-# (the subsequent instance terminate drops the connection anyway, just less cleanly).
+# (the gateway unit's own restart is itself stop-then-start, just less explicit).
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/common.sh"
@@ -26,7 +26,7 @@ CID="$(aws ssm send-command --region "$REGION" --instance-ids "$IID" \
   --parameters 'commands=["systemctl stop \"bot-gateway@*\" bot-gateway.service 2>/dev/null || true; systemctl list-units --state=active --plain --no-legend \"bot-gateway@*\" || true"]' \
   --query Command.CommandId --output text 2>/dev/null || echo "")"
 if [[ -z "$CID" ]]; then
-  say warn "stop_gateway: send-command failed for $IID (SSM unreachable / instance already gone) — relying on instance terminate to drop the connection"
+  say warn "stop_gateway: send-command failed for $IID (SSM unreachable / instance already gone) — could not confirm the long-connection is down"
   exit 0
 fi
 # Bounded wait for the command to finish so the stop is synchronous wrt the caller.

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# provision_index_service.sh <region> <config> <bucket> <max_files> <instance_type> [refresh] [root_volume_gb] [model] [glossary_max_files]
+# provision_index_service.sh <region> <config> <bucket> <max_files> <instance_type> [root_volume_gb] [model] [glossary_max_files]
 # Provisions the BASE index host only — an idempotent ARM EC2 (Ubuntu 24.04, glibc 2.39 for
 # codegraph-server) in the private subnet running index-service/bootstrap.sh as user-data. Binds
 # NO project (projects are attached later by activate_project.sh over SSM). Prints the instance's
@@ -9,15 +9,25 @@
 # project (multiple projects share this host, each bridge on its own port). The runtime reaches
 # its project's bridge over the private network. No EFS (each repo copy is local to this instance).
 #
-# refresh (7th arg, "true"/"false", default false): when true, a reused instance
-# whose bootstrapped artifacts are STALE (S3 tarballs re-staged since it booted)
-# is terminated so a fresh one re-bootstraps the new code/repo. When false, a
-# stale reuse only WARNs (loudly) — it never silently serves old code as "green".
+# IN-PLACE UPDATES ONLY — 只做原地更新，不再做蓝绿替换 (blue-green replacement REMOVED).
+# WHY: this deployment is a SINGLE-HOST sample, not a fleet — there is no traffic tier that
+# needs make-before-break, so the cost of the replacement path far exceeded its benefit:
+#   - it had a real MIS-KILL risk: deciding "which instance is safe to terminate" depended on
+#     a Route53 lookup + an INDEX_OLD_INSTANCE marker in the config file, and any wrong /
+#     unreadable answer meant terminating the box that was still serving;
+#   - a failed refresh (health gate red, deploy aborted, marker never cleared) left ORPHANED
+#     paid instances behind that nobody reconciled reliably.
+# NEW SEMANTICS: an existing instance is NEVER terminated and NEVER replaced. When the staged
+# base-code artifacts differ from what the instance booted from, we re-run bootstrap.sh ON THAT
+# INSTANCE over SSM (it is idempotent — the same thing local mode does on every run) and then
+# re-stamp its ArtifactSig tag. A fresh instance is launched only when there genuinely is none
+# (first deploy / someone terminated it) — that is normal provisioning, not blue-green.
+# 唯一仍会 run-instances 的情况：确实没有存活实例（首次部署或实例已被销毁）。
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 source "$SCRIPT_DIR/common.sh"; source "$SCRIPT_DIR/env-utils.sh"
-REGION="$1"; CONFIG="$2"; BUCKET="$3"; MAX_FILES="$4"; ITYPE="$5"; REFRESH="${6:-false}"; ROOT_VOLUME_GB="${7:-30}"; MODEL="${8:-global.anthropic.claude-opus-4-8}"; GLOSSARY_MAX_FILES="${9:-400}"
+REGION="$1"; CONFIG="$2"; BUCKET="$3"; MAX_FILES="$4"; ITYPE="$5"; ROOT_VOLUME_GB="${6:-30}"; MODEL="${7:-global.anthropic.claude-opus-4-8}"; GLOSSARY_MAX_FILES="${8:-400}"
 safe_source_env "$CONFIG"
 Q() { aws ec2 "$@" --region "$REGION"; }
 QS() { aws s3api "$@" --region "$REGION"; }
@@ -40,15 +50,16 @@ imds_field() {
 # A signature of the BASE-HOST artifacts an instance bootstraps from: the ETags of the
 # index-service code tarball + the bot-gateway tarball in S3. Repos are NO LONGER part of
 # this — they arrive via git (activate_project.sh git-clones + a refresh timer git-pulls),
-# so a repo change is picked up live and never requires replacing the host. The host is
-# replaced (--refresh-index) only when the BASE CODE (bridge / gateway / its deps) changes.
+# so a repo change is picked up live and never touches the host. The signature therefore
+# tracks the BASE CODE only (bridge / gateway / its deps); when it changes we re-bootstrap
+# the existing host IN PLACE (see below) — 只重跑 bootstrap，不换机器.
 # ETag is S3's content hash, so this changes iff the staged base code changed.
 artifact_signature() {
   local idx gw
   idx="$(QS head-object --bucket "$BUCKET" --key index-service.tar.gz --query ETag --output text 2>/dev/null || echo none)"
-  # bot-gateway runs ON this instance, so its tarball is part of what a fresh bootstrap
-  # installs — include it so a gateway-only code change is detected as STALE and (with
-  # --refresh-index) replaces the instance. Absent (backend-only) → "none", stable.
+  # bot-gateway runs ON this instance, so its tarball is part of what a bootstrap run
+  # installs — include it so a gateway-only code change is detected as STALE and triggers
+  # the in-place re-bootstrap. Absent (backend-only) → "none", stable.
   gw="$(QS head-object --bucket "$BUCKET" --key bot-gateway.tar.gz --query ETag --output text 2>/dev/null || echo none)"
   # S3 returns ETags WITH literal surrounding double-quotes (e.g. "abc123"). Strip them
   # before this lands in the run-instances --tag-specifications SHORTHAND: a Value= starting
@@ -92,20 +103,20 @@ reconcile_index_sg_ingress() { # <sg>
     --group-id "$1" --protocol tcp --port 8080-8099 --source-group "$1"
 }
 
-# Reuse a running index-service instance if present.
-# A reused instance does NOT re-run bootstrap.sh (that's EC2 user-data, fires
-# only on first boot), so it will NOT pick up index-service code or repo changes
-# re-staged to S3 this run. The single-writer invariant (exactly one instance may
-# ever build graph.db on its local disk) forbids just launching a second one. So:
+# Reuse a running index-service instance if present — ALWAYS reuse, never replace.
+# A reused instance does NOT re-run bootstrap.sh by itself (that's EC2 user-data, which
+# fires only on first boot), so on its own it would NOT pick up index-service / gateway
+# code re-staged to S3 this run. So:
 #   - compute the current artifact signature (S3 ETags) and compare to the tag we
 #     stamped on the instance when it last bootstrapped;
-#   - if they match → genuine reuse, fast-path;
-#   - if they differ and REFRESH=true → terminate it so a fresh instance
-#     re-bootstraps from the new artifacts (sequential — the old one is gone
-#     before the new one builds, preserving single-writer);
-#   - if they differ and REFRESH=false → LOUD WARN and reuse anyway, so the green
-#     deploy is never a SILENT no-op (the operator is told their changes aren't
-#     live and how to apply them).
+#   - if they match → nothing to do, fast-path reuse (idempotent: no re-bootstrap,
+#     签名一致就直接复用，不做任何多余动作);
+#   - if they differ → re-run bootstrap.sh IN PLACE on that same instance over SSM,
+#     then re-stamp the tag. The instance id / private IP / EBS volume / graph.db all
+#     survive, so the stable name index.source-truth.internal keeps resolving to a host
+#     that exists throughout — no terminate, no replacement launch, no DNS cutover.
+# The old refresh-gated behaviour is gone: there is no "warn and serve stale code" mode
+# (a deploy that re-staged code always applies it) and no "terminate + rebuild" mode.
 CURRENT_SIG="$(artifact_signature)"
 
 # --- EC2 auto-recovery + termination protection (C2: runtime reliability) --------
@@ -151,6 +162,72 @@ arm_instance_resilience() {
     log warn "failed to enable termination protection (non-fatal)"
     log warn "  → $(printf '%s' "$err" | tr '\n' ' ' | cut -c1-300)"
   fi
+}
+
+# Re-run bootstrap.sh ON AN EXISTING instance, over SSM. This is what REPLACED the
+# blue-green launch: the base code (bridge / gateway / their deps) is brought up to date
+# on the machine that is already serving, keeping its instance id, private IP, EBS volume
+# and already-built graph.db. 原地重跑 bootstrap，机器不动。
+#
+# Safe to call on a signature match too (bootstrap.sh is idempotent — local mode runs it
+# on every single invocation), but the caller SKIPS it when the signature already matches
+# so a no-op deploy stays fast.
+#
+# HARD-FAILS on error instead of falling back to "reuse the stale box": the whole point of
+# this path is that a deploy which re-staged code actually applies it. A silent stale reuse
+# is exactly the failure mode the old REFRESH=false branch had.
+rebootstrap_in_place() { # <instance-id>
+  local iid="$1" cid st err out param_file remote_cmd deadline
+
+  # Stage the CURRENT bootstrap.sh so the host pulls this run's copy (the fresh-launch path
+  # does the same upload for its user-data). The instance already has the aws CLI + an
+  # instance profile from its first bootstrap, so it can read S3 itself — no presign needed.
+  aws s3 cp "$ROOT/index-service/bootstrap.sh" "s3://$BUCKET/bootstrap.sh" --region "$REGION" >&2
+
+  remote_cmd="set -e
+cat > /etc/index-service.env <<ENV
+BUCKET='$BUCKET'
+REGION='$REGION'
+MAX_FILES='$MAX_FILES'
+MODEL='$MODEL'
+GLOSSARY_MAX_FILES='$GLOSSARY_MAX_FILES'
+ENV
+aws s3 cp s3://${BUCKET}/bootstrap.sh /opt/bootstrap.sh --region ${REGION}
+bash /opt/bootstrap.sh"
+
+  # --parameters as a JSON FILE, one array element per LINE (the shape SSM expects; a single
+  # element containing literal \n runs the lines glued together). Same helper the gateway /
+  # project activation steps use.
+  param_file="$(mktemp /tmp/idx-rebootstrap-ssm.XXXXXX)"  # X's at end (BSD/macOS-safe)
+  printf '%s' "$remote_cmd" | python3 -c 'import sys,json; print(json.dumps({"commands": sys.stdin.read().split("\n")}))' > "$param_file"
+  cid="$(aws ssm send-command --region "$REGION" --instance-ids "$iid" \
+    --document-name AWS-RunShellScript --parameters "file://$param_file" \
+    --query Command.CommandId --output text 2>/dev/null || echo "")"
+  rm -f "$param_file"
+  [[ -n "$cid" ]] || { log err "in-place re-bootstrap: SSM send-command failed for $iid (SSM agent down? NAT egress? instance profile missing ssm:*)"; exit 1; }
+
+  # Bootstrap installs apt/pip deps and rebuilds the gateway — minutes, not seconds.
+  log info "re-running bootstrap.sh in place on $iid (base code update; no instance replacement) ..."
+  deadline=$(( SECONDS + ${INDEX_REBOOTSTRAP_TIMEOUT_SECS:-1800} ))
+  while (( SECONDS < deadline )); do
+    sleep 10
+    st="$(aws ssm get-command-invocation --region "$REGION" --command-id "$cid" --instance-id "$iid" \
+      --query Status --output text 2>/dev/null || echo "")"
+    case "$st" in
+      Success) log ok "in-place re-bootstrap finished on $iid"; return 0 ;;
+      Failed|Cancelled|TimedOut)
+        err="$(aws ssm get-command-invocation --region "$REGION" --command-id "$cid" --instance-id "$iid" \
+          --query StandardErrorContent --output text 2>/dev/null || echo "")"
+        out="$(aws ssm get-command-invocation --region "$REGION" --command-id "$cid" --instance-id "$iid" \
+          --query StandardOutputContent --output text 2>/dev/null || echo "")"
+        log err "in-place re-bootstrap $st on $iid — ${err:0:300}"
+        printf '%s\n' "$out" | tail -20 >&2
+        log err "  → inspect: aws ssm start-session --target $iid ; tail -100 /var/log/index-svc-bootstrap.log"
+        exit 1 ;;
+    esac
+  done
+  log err "in-place re-bootstrap timed out on $iid after ${INDEX_REBOOTSTRAP_TIMEOUT_SECS:-1800}s"
+  exit 1
 }
 
 if [[ "$LOCAL_MODE" == "true" ]]; then
@@ -253,53 +330,33 @@ ENV
   echo "$SELF_IP"; exit 0
 fi
 
-# RECONCILE a stale blue-green leftover — CAREFULLY. INDEX_OLD_INSTANCE is the prior
-# instance recorded during a --refresh-index, normally terminated LAST by deploy-all
-# after the new one is healthy + DNS cut over. If that refresh FAILED the health gate,
-# deploy-all exits before the terminate, leaving the marker set. CRITICAL: on a failed
-# refresh the recorded instance is the OLD one that is STILL SERVING (DNS still points
-# at it) — so we must NOT blindly terminate it (that re-introduces the very
-# terminate-first outage blue-green exists to prevent). Only GC it when it's safe:
-# i.e. it is NOT the instance the stable DNS name currently resolves to (so a healthy
-# replacement is already serving). Otherwise leave it running (it's the live host) and
-# let a normal --refresh-index replace it via the make-before-break path. Best-effort.
-if [[ -n "${INDEX_OLD_INSTANCE:-}" ]]; then
-  st="$(Q describe-instances --instance-ids "$INDEX_OLD_INSTANCE" --query 'Reservations[0].Instances[0].State.Name' --output text 2>/dev/null || echo "")"
-  old_ip="$(Q describe-instances --instance-ids "$INDEX_OLD_INSTANCE" --query 'Reservations[0].Instances[0].PrivateIpAddress' --output text 2>/dev/null || echo "")"
-  dns_ip="$(aws route53 list-resource-record-sets --hosted-zone-id "${INDEX_DNS_ZONE_ID:-}" --query "ResourceRecordSets[?Name=='${INDEX_DNS_NAME:-none}.'].ResourceRecords[0].Value | [0]" --output text 2>/dev/null || echo "")"
-  [[ "$dns_ip" == "None" ]] && dns_ip=""
-  # FAIL-CLOSED on an EMPTY dns_ip: a Route53 query that errored (throttle / transient /
-  # missing INDEX_DNS_ZONE_ID) is swallowed to "" above — that means "couldn't look", NOT
-  # "DNS points elsewhere". Terminating on unknown would kill the live host the DNS may
-  # still point at (the terminate-first outage this reconcile exists to prevent). Only GC
-  # when the lookup POSITIVELY returned a different IP.
-  if [[ ( "$st" == "running" || "$st" == "pending" || "$st" == "stopping" ) && -n "$old_ip" && -n "$dns_ip" && "$old_ip" != "$dns_ip" ]]; then
-    log warn "reconcile: terminating stale blue-green leftover $INDEX_OLD_INSTANCE ($old_ip, state=$st; DNS points elsewhere at ${dns_ip:-?} so it's safe)"
-    Q terminate-instances --instance-ids "$INDEX_OLD_INSTANCE" >/dev/null 2>&1 || true
-    update_env "$CONFIG" INDEX_OLD_INSTANCE ""
-  elif [[ "$st" != "running" && "$st" != "pending" && "$st" != "stopping" ]]; then
-    update_env "$CONFIG" INDEX_OLD_INSTANCE ""  # already gone — just clear the marker
-  else
-    log info "reconcile: leftover $INDEX_OLD_INSTANCE is the LIVE host DNS still points at ($old_ip) — leaving it; a --refresh-index will replace it safely"
-  fi
-fi
+# NOTE: there is no blue-green leftover to reconcile any more. The old code read an
+# INDEX_OLD_INSTANCE marker from the config here and decided whether it was safe to
+# terminate — a decision that hinged on a Route53 lookup and could kill the LIVE host when
+# the lookup failed, and that silently leaked paid instances whenever a refresh aborted
+# before the marker was cleared. Nothing writes that key now and nothing reads it; a marker
+# left over in an old config file is simply ignored (dead key, never terminates anything).
+# 蓝绿替换已移除，不再有"旧实例"需要回收。
+#
 # SINGLE-INSTANCE GUARD: keep exactly one index-service alive at a time. An
 # instance still in a TRANSIENT shutdown state (stopping / shutting-down) isn't
-# seen by the reuse filter below (which only matches running/pending), so without
+# seen by the existing-instance filter below (which only matches running/pending), so without
 # this a fresh launch could briefly run alongside a draining peer. Each instance
 # holds its OWN local repo copy + graph now (no shared EFS), so this is no longer
 # a corruption risk — just hygiene to avoid two paid instances. Wait for any such
-# peer to fully terminate first.
+# peer to fully terminate first. (This script never terminates anything itself, so
+# a draining instance can only come from an operator / console action.)
 DRAINING="$(Q describe-instances --filters "Name=tag:Name,Values=source-truth-index-service" "Name=instance-state-name,Values=stopping,shutting-down,stopped" --query 'Reservations[0].Instances[0].InstanceId' --output text 2>/dev/null)"
 if [[ "$DRAINING" != "None" && -n "$DRAINING" ]]; then
   log warn "an index-service instance ($DRAINING) is still draining (stopping/shutting-down); waiting for it to terminate before launching, to avoid running two paid instances"
   Q wait instance-terminated --instance-ids "$DRAINING" 2>/dev/null || true
 fi
-# DETERMINISTIC selection: if two index instances are briefly running (blue-green
-# overlap, or a stale leftover the reconcile above didn't catch), a blind
+# DETERMINISTIC selection: if more than one index instance is somehow running (a leftover
+# from an older blue-green deploy, or a hand-launched box), a blind
 # Reservations[0].Instances[0] could pick the WRONG (old-artifact) one. Prefer the
-# instance whose ArtifactSig matches CURRENT_SIG (the correct/current build); only if
-# none match, fall back to any running/pending one (the genuine "needs refresh" case).
+# instance whose ArtifactSig matches CURRENT_SIG (already on the current build → no work to
+# do); only if none match, fall back to any running/pending one — that one gets re-bootstrapped
+# in place below.
 EXISTING="$(Q describe-instances --filters "Name=tag:Name,Values=source-truth-index-service" "Name=tag:ArtifactSig,Values=$CURRENT_SIG" "Name=instance-state-name,Values=running,pending" --query 'Reservations[0].Instances[0].InstanceId' --output text 2>/dev/null)"
 if [[ "$EXISTING" == "None" || -z "$EXISTING" ]]; then
   EXISTING="$(Q describe-instances --filters "Name=tag:Name,Values=source-truth-index-service" "Name=instance-state-name,Values=running,pending" --query 'Reservations[0].Instances[0].InstanceId' --output text 2>/dev/null)"
@@ -307,53 +364,58 @@ fi
 if [[ "$EXISTING" != "None" && -n "$EXISTING" ]]; then
   BOOTED_SIG="$(Q describe-instances --instance-ids "$EXISTING" --query "Reservations[0].Instances[0].Tags[?Key=='ArtifactSig'].Value | [0]" --output text 2>/dev/null)"
   if [[ "$BOOTED_SIG" != "$CURRENT_SIG" ]]; then
-    if [[ "$REFRESH" == "true" ]]; then
-      # BLUE-GREEN: do NOT terminate the old instance here. Terminating up-front
-      # (before the new one is healthy + DNS re-pointed) leaves the stable name
-      # index.source-truth.internal resolving to a DEAD host for the whole multi-
-      # minute cold bootstrap → warm agent microVMs get connection-refused → empty
-      # codegraph → empty answer cards (the residual we observed). And if the new
-      # build fails health, the old (working) instance is already gone = total
-      # outage. So we RECORD the old id for deploy-all to terminate LAST (after the
-      # new instance is /health-green and DNS is cut over + TTL-drained), and fall
-      # through to launch the new one alongside it. Two instances briefly coexist —
-      # SAFE: each holds its OWN local graph.db (no shared writer), only paid-cost.
-      log warn "index-service artifacts changed since $EXISTING booted (sig: ${BOOTED_SIG:-none} → $CURRENT_SIG); --refresh-index set → blue-green: launching a fresh instance, old ($EXISTING) terminated AFTER new is healthy + DNS cut over"
-      update_env "$CONFIG" INDEX_OLD_INSTANCE "$EXISTING"
-      EXISTING="None"  # fall through to fresh launch below (old left running)
-    else
-      log warn "STALE index-service: instance $EXISTING booted from older artifacts (sig ${BOOTED_SIG:-none}, current $CURRENT_SIG)."
-      log warn "  → This deploy re-staged index-service code/repo to S3 but reuse does NOT re-bootstrap, so those changes are NOT live."
-      log warn "  → Re-run with --refresh-index to replace the instance, or terminate $EXISTING manually, then re-run."
-    fi
+    # IN-PLACE UPDATE (replaces the old blue-green branch entirely). The base code this host
+    # booted from is out of date, so re-run bootstrap.sh on THIS host over SSM and re-stamp
+    # the tag. No terminate, no replacement launch, no DNS cutover: the id/IP/EBS/graph.db
+    # are preserved, so the stable name never resolves to a dead box.
+    # 签名不一致 → 原地重跑 bootstrap 把 bridge/gateway 依赖更新到位，再写回新签名。
+    log warn "index-service base artifacts changed since $EXISTING booted (sig: ${BOOTED_SIG:-none} → $CURRENT_SIG) — updating IN PLACE on $EXISTING (no instance replacement)"
+    rebootstrap_in_place "$EXISTING"
+    # Stamp the new signature only AFTER a successful run (rebootstrap_in_place exits on
+    # failure), so a failed update leaves the tag stale and the NEXT deploy retries instead
+    # of assuming the host is current. create-tags overwrites the existing key → idempotent.
+    Q create-tags --resources "$EXISTING" --tags "Key=ArtifactSig,Value=$CURRENT_SIG" >/dev/null
+    log info "recorded ArtifactSig=$CURRENT_SIG on $EXISTING"
+  else
+    log info "index-service $EXISTING already on the current base artifacts (sig $CURRENT_SIG) — skipping re-bootstrap"
   fi
-fi
-if [[ "$EXISTING" != "None" && -n "$EXISTING" ]]; then
+  # Same block continues: EXISTING is never cleared any more (the old code set it back to
+  # "None" here to fall through into a replacement launch — that path is gone), so the
+  # signature handling and the state-persisting reuse below are one single branch.
   IP="$(Q describe-instances --instance-ids "$EXISTING" --query 'Reservations[0].Instances[0].PrivateIpAddress' --output text)"
   if [[ -z "$IP" || "$IP" == "None" ]]; then
-    log err "reuse: instance $EXISTING has no private IP yet"; exit 1
+    log err "existing instance $EXISTING has no private IP yet"; exit 1
   fi
   SG="$(Q describe-instances --instance-ids "$EXISTING" --query 'Reservations[0].Instances[0].SecurityGroups[0].GroupId' --output text)"
-  # If the operator asked for a DIFFERENT instance type than the reused instance
-  # actually runs, the reuse path silently ignores --instance-type (no relaunch), so
-  # they'd think the machine changed when it didn't. WARN with the actionable flag
-  # rather than silently honor the stale type (cross-review).
+  # If the operator asked for a DIFFERENT instance type than the existing instance
+  # actually runs, we do NOT act on it: this script never replaces an instance, and
+  # resizing needs a stop/modify/start (a deliberate, disruptive operator action).
+  # WARN rather than silently pretending --instance-type took effect (cross-review).
   RUNNING_TYPE="$(Q describe-instances --instance-ids "$EXISTING" --query 'Reservations[0].Instances[0].InstanceType' --output text 2>/dev/null || echo "")"
   if [[ -n "$RUNNING_TYPE" && "$RUNNING_TYPE" != "None" && "$RUNNING_TYPE" != "$ITYPE" ]]; then
-    log warn "reused instance $EXISTING runs $RUNNING_TYPE, not the requested $ITYPE; instance-type change needs --refresh-index to relaunch"
+    log warn "existing instance $EXISTING runs $RUNNING_TYPE, not the requested $ITYPE — this script updates IN PLACE and never relaunches; resize it yourself (stop → modify-instance-attribute --instance-type → start) if you really want $ITYPE"
   fi
-  # Repair the :8080 ingress on the reused instance's SG too — otherwise a
-  # missing/dropped rule on a running instance would never be re-added (the
-  # reuse path exits before the fresh-instance reconcile below).
+  # Repair the :8080 ingress on the existing instance's SG too — otherwise a
+  # missing/dropped rule on a running instance would never be re-added (this
+  # path exits before the fresh-instance reconcile below).
   reconcile_index_sg_ingress "$SG"
   # Persist the same state the new-instance path does, so deploy-all's health
   # gate runs and the runtime gets a valid SG (not skipped/unset).
   update_env "$CONFIG" INDEX_SERVICE_SG "$SG"
   update_env "$CONFIG" INDEX_SERVICE_INSTANCE "$EXISTING"
-  log info "reusing index-service $EXISTING ($IP, sg=$SG)"
+  # Arm resilience on the REUSED host as well, not just on a freshly launched one. A host
+  # provisioned before these guards existed would otherwise never get auto-recovery or
+  # termination protection no matter how many times it was redeployed — the same
+  # unreachable-path bug the fresh-launch-only placement originally had. Idempotent.
+  arm_instance_resilience "$EXISTING"
+  log info "using existing index-service $EXISTING ($IP, sg=$SG)"
   echo "$IP"; exit 0
 fi
 
+# ── No live instance at all → FIRST-DEPLOY provisioning (not blue-green) ─────────────
+# Reaching here means describe-instances found nothing running/pending: a first deploy, or
+# someone terminated the host. Launching one here is the only run-instances in this script.
+# 到这里说明确实没有实例（首次部署或被人销毁），这才 launch 新机器。
 # index-service security group: 8080 in from VPC.
 SG="$(Q describe-security-groups --filters "Name=group-name,Values=source-truth-index-svc" "Name=vpc-id,Values=$VPC_ID" --query 'SecurityGroups[0].GroupId' --output text 2>/dev/null)"
 if [[ "$SG" == "None" || -z "$SG" ]]; then

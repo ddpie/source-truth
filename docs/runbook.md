@@ -178,7 +178,7 @@ codegraph 索引占用内存较高，且随仓库增大而增长，按仓库规�
 - **权限较大、建议专机专用**：`--local` 调用 AWS 用的是这台机器的**实例角色**（不是你本地的 profile——登录 EC2 后即不再可用），它既需建资源的权限，也需运行期权限，**范围偏大，这台机器不建议与其它业务共用**。角色名 `source-truth-index-role` 与默认部署共用（IAM 角色为账号级、不分区域）：`create-iam.sh` 幂等复用、只补权限不重建；但需注意，**若同账号已有默认部署在使用该角色，补上部署期权限后那台机器也会一并获得**——如需让默认部署保持最小权限，请换一个账号运行 `--local`。
 - **NAT 不可省略**：实例位于公有子网（有公网 IP 供 SSH），但 AgentCore Runtime 位于私有子网、经 **NAT** 访问 Bedrock——Runtime 的网卡由 AWS 托管、无公网 IP，无法经 IGW 访问外网，因此必须配置 NAT（固定费用约每月 $32 起）。bridge 端口（8080-8099）仅对同一安全组内成员开放，外部无法访问。
 
-**升级**：登录**同一台实例**（部署状态 `.local/` 均保存于其上），运行 `cd sample-code-qa-on-agentcore && git pull && ./scripts/deploy-all.sh --region <r> --local`。此模式不采用一键部署的蓝绿换机，而是就地重建镜像、更新 runtime、重启网关与索引服务；其间会有一段服务中断（时长与首次部署相当），建议在低峰期操作。
+**升级**：登录**同一台实例**（部署状态 `.local/` 均保存于其上），运行 `cd sample-code-qa-on-agentcore && git pull && ./scripts/deploy-all.sh --region <r> --local`。部署就地更新这台机器：重跑 bootstrap 落地新的基础代码、重建镜像、更新 runtime、重启网关与索引服务，实例 ID / 私有 IP / 已建好的 graph.db 均保留，不新建实例。重跑 bootstrap 与重启服务期间会有一段服务中断（时长与首次部署相当），建议在低峰期操作。
 
 ## 三、接入飞书
 
@@ -259,12 +259,19 @@ aws ssm start-session --region <r> --target <INDEX_SERVICE_INSTANCE>
 
 **代码更新了，刷新索引**：**无需手动操作**。每个仓库按 `refreshIntervalSec`（默认 300 秒）由 systemd timer
 定时 `git pull`，常驻 codegraph 的 file-watcher 在几秒内增量重建该仓的内存图——不重启、无中断。改频率就改
-`.local/projects.json` 里该仓/该项目的 `refreshIntervalSec`，再「重新部署该项目」。`--refresh-index` 现在只
-用于**换索引服务自身的代码/机型**（蓝绿换整机），不再用于刷新业务代码。多项目部署见第七节。
+`.local/projects.json` 里该仓/该项目的 `refreshIntervalSec`，再「重新部署该项目」。多项目部署见第七节。
 
-**改术语表构建上限（`GLOSSARY_MAX_FILES`）**：该值在主机首次启动时写入 `/etc/index-service.env`，**对已在
-运行的主机上修改后重新部署不会生效**（复用实例不重写该文件）。要让新上限生效，用 `--refresh-index` 蓝绿换整机；或
-临时进实例手改 `/etc/index-service.env` 的 `GLOSSARY_MAX_FILES`，等下一轮刷新构建按新值跑。日常无需调整。
+**升级索引服务自身的代码**（bridge / 网关及其依赖，与业务代码无关）：在部署机上 `git pull` 后重新运行
+`deploy-all.sh --region <r>`。索引主机**就地更新**——部署发现 S3 上的基础代码产物有变化，就经 SSM 在同一台
+实例上重跑 `bootstrap.sh`，实例 ID、私有 IP、EBS 卷与已建好的 graph.db 全部保留，不新建实例、不切 DNS。重跑
+期间 bridge 与网关会重启，有短暂中断；产物没变化时部署直接复用，不做多余动作。换机型不在部署职责内（部署
+从不替换实例）：确需更换就自行 `stop` → `modify-instance-attribute --instance-type` → `start`，带
+`--instance-type` 重新部署只会在机型不一致时给出警告。
+
+**改术语表构建上限（`GLOSSARY_MAX_FILES`）**：该值写在实例的 `/etc/index-service.env` 里。带新值重新部署时，
+只有这一轮**基础代码有更新**、触发原地重跑 bootstrap，该文件才会被重写、新上限随之生效；基础代码没变时部署走
+快速复用、不重跑 bootstrap，新值不会落到实例上——此时进实例手改 `/etc/index-service.env` 的 `GLOSSARY_MAX_FILES`，
+下一轮刷新构建即按新值跑。日常无需调整。
 
 **只重部署 runtime**（修改 agent 镜像 / system prompt 后）：重新运行 `deploy-all.sh`（镜像与 runtime 阶段幂等）。
 注意仍存活的 microVM 会使用旧镜像约 15 分钟，直到被回收。
@@ -374,7 +381,7 @@ refreshIntervalSec?}`，`source` 默认 `git`、本地仓写 `local`）。顶层
 | 网关 `condition failed` 未启动 | `/etc/bot-gateway-<项目>.env` 尚未写入（runtime 未就绪 / gateway 阶段被跳过） | 重新运行 `install.sh` 或 `deploy-all.sh`（不跳 gateway）；确认 `FEISHU_SECRET_ID` 已配 |
 | 卡片回「查询失败」/ 日志 `AccessDenied` | 部署身份缺 `bedrock:InvokeModel`，或该模型在此区域无可用推理档 | 给部署身份补 `bedrock:InvokeModel`；模型档由部署按区域自动解析，查不到时 preflight 会列出该区域可用的档（见前置条件 3） |
 | 部署在 index-service 阶段超时 | 全新账号 NAT 路由未收敛 / 实例仍在冷启动建立索引 | 再等待一轮（bootstrap 对网络操作有重试）；查看 `/var/log/` 与 `journalctl -u 'index-build@*'` |
-| `/health` 长期非 200 | 索引损坏 / graph.db 空 / worker 反复重启 | 进实例查看 index-bridge-<项目> 日志；必要时 `--refresh-index` 重建（蓝绿，不破坏运行中实例）。注：本地仓在首次 `push-local-repo.sh` 之前本就是空图、`/health` 非 200，属正常，推代码后恢复 |
+| `/health` 长期非 200 | 索引损坏 / graph.db 空 / worker 反复重启 | 进实例查看 index-bridge-<项目> 日志；基础代码落后就重新运行 `deploy-all.sh`（就地重跑 bootstrap，实例与 graph.db 不动）；图确实损坏则在实例上 `sudo systemctl start index-build@<仓库子目录>` 全量重建该仓的图。注：本地仓在首次 `push-local-repo.sh` 之前本就是空图、`/health` 非 200，属正常，推代码后恢复 |
 | 重新部署后行为仍是旧版本 | 仍存活的 microVM 继续使用旧镜像（约 15 分钟）/ 网关未重启 | 等待该 microVM 回收；重启网关以确保运行新代码 |
 | 中文问答未用上项目专属命名 / 术语表疑似为空 | 术语表后台构建未完成或失败（cc 未成功安装 / Bedrock 不可达或无权限） | 进实例查看 `journalctl` 与 `/var/log/glossary-build-*`，查 `glossary_gen_done`（成功）/ `glossary_gen_cc_failed`（构建失败）；不影响问答，问答会自动退回常规检索 |
 

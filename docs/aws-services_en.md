@@ -31,7 +31,7 @@ project count); the rest are globally shared.
 | **NAT Gateway** (+ Elastic IP) | in the public subnet | 1 | Private-subnet egress (pull S3 artifacts, call Bedrock) |
 | **Internet Gateway** | — | 1 | Public-subnet ingress |
 | **Security Group** | inbound `8080-8099` only, restricted to same-SG members | 1 (the AgentCore Runtime ENI joins this SG too) | Restricts per-project bridge ports to in-VPC reachability only |
-| **Route 53** (private hosted zone) | private domain `source-truth.internal`, A record TTL 30s | 1 | Stable DNS name for the index host (warm-microVM cache stays valid across blue-green instance swaps) |
+| **Route 53** (private hosted zone) | private domain `source-truth.internal`, A record TTL 30s | 1 | Stable DNS name for the index host (the agent side never hard-codes a private IP; the index host is updated in place, never replaced, so the name always resolves to the same running host) |
 
 ## 4. Security & ops (credentials, permissions, remote management)
 

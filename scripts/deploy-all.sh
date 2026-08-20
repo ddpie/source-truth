@@ -76,7 +76,6 @@ DEFAULT_MAX_LIFETIME="28800"
 CODEGRAPH_SERVER_REPO="${CODEGRAPH_SERVER_REPO:-ddpie/source-truth}"
 CODEGRAPH_SERVER_TAG="${CODEGRAPH_SERVER_TAG:-codegraph-server-v0.18.5}"
 CODEGRAPH_SERVER_URL_DEFAULT="https://github.com/${CODEGRAPH_SERVER_REPO}/releases/download/${CODEGRAPH_SERVER_TAG}/codegraph-server"
-REFRESH_INDEX=false       # --refresh-index: replace a running index instance if its artifacts are stale
 LOCAL_MODE=false          # --local: this EC2 IS the index host; bootstrap in place, reuse its VPC/subnet
 # bash 3.2 (stock macOS) has no `declare -A` — model the skip set as a space-delimited
 # string ("iam network …") and test membership with a case glob (see skip() below).
@@ -106,8 +105,6 @@ Options:
                       The gateway's session-reuse TTL is aligned to this.
   --max-lifetime <s>  AgentCore microVM hard max age before forced recycle (60..28800; default 28800/8h)
   --skip <phase>      Skip a phase: artifacts|iam|network|index-svc|image|projects|monitoring (repeatable)
-  --refresh-index     Replace the index host if this run staged newer BASE code (bridge/gateway).
-                      Repo code is NOT a reason to refresh — repos refresh live via git pull.
   --local             This EC2 IS the index host: bootstrap in place, reuse its VPC/subnet, attach
                       a dedicated SG. No second EC2 is created. ARM64 host only; needs an instance
                       role with the index-host policies (see runbook) + passwordless sudo.
@@ -150,7 +147,6 @@ while [[ $# -gt 0 ]]; do
         *) say err "unknown --skip phase: '${2:-}' (want artifacts|iam|network|index-svc|image|projects|monitoring)"; exit 2 ;;
       esac
       shift 2 ;;
-    --refresh-index) REFRESH_INDEX=true; shift ;;
     --local) LOCAL_MODE=true; shift ;;
     --dry-run) DRY_RUN=true; shift ;;
     --force) FORCE=true; shift ;;
@@ -513,7 +509,7 @@ else
   # timestamp in the gzip header). Otherwise the tarball's bytes — hence its S3 ETag —
   # change on every run even when content is identical, which makes the index-host
   # ArtifactSig staleness check (provision_index_service.sh) ALWAYS report stale and
-  # makes --refresh-index rebuild the instance every run for no reason (cross-review HIGH).
+  # makes the index host look out-of-date every run for no reason (cross-review HIGH).
   IDX_STAGE="$(mktemp -d /tmp/idx-stage.XXXX)"
   # Ship the top-level *.py AND *.sh (git_fetch.sh + activate_project.sh — the host runs them to
   # clone repos + attach projects) + requirements.txt + the shared manifest parser. tests/ live in
@@ -604,7 +600,7 @@ if skip index-svc; then say warn "skip index-svc"; elif [[ "$DRY_RUN" == true ]]
 else
   say step "Phase 3: index-service EC2 (BASE host — no project bound)"
   INDEX_IP="$(ST_LOCAL_MODE="$LOCAL_MODE" "$SCRIPT_DIR/lib/provision_index_service.sh" \
-    "$REGION" "$CONFIG_FILE" "$BUCKET" "$MAX_FILES" "$INSTANCE_TYPE" "$REFRESH_INDEX" "$ROOT_VOLUME_GB" "$MODEL" "$GLOSSARY_MAX_FILES")"
+    "$REGION" "$CONFIG_FILE" "$BUCKET" "$MAX_FILES" "$INSTANCE_TYPE" "$ROOT_VOLUME_GB" "$MODEL" "$GLOSSARY_MAX_FILES")"
   update_env "$CONFIG_FILE" INDEX_SERVICE_IP "$INDEX_IP"
   safe_source_env "$CONFIG_FILE"
   # Wait for the BASE host bootstrap to finish before attaching any project. The base host
@@ -623,69 +619,18 @@ else
     "$SCRIPT_DIR/lib/wait_base_host.sh" "$REGION" "$INDEX_SERVICE_INSTANCE" || {
       say err "index base host never finished bootstrap — aborting before attaching projects."
       say err "  inspect: aws ssm start-session --target $INDEX_SERVICE_INSTANCE ; tail /var/log/index-svc-bootstrap.log"
-      # FAILED BLUE-GREEN REFRESH cleanup (cross-review P1): when this is a --refresh-index
-      # run, INDEX_OLD_INSTANCE holds the still-HEALTHY old host (DNS still points at it),
-      # and INDEX_SERVICE_INSTANCE is the BROKEN new one we just launched. If we just exit,
-      # the broken new instance (a) bills forever and (b) — because its ArtifactSig ==
-      # CURRENT_SIG — gets RE-SELECTED and reused by every later run's deterministic
-      # selector, so the deploy never converges and the healthy old host bills in parallel.
-      # So terminate the broken NEW instance and restore INDEX_SERVICE_INSTANCE to the old
-      # healthy one, leaving the service exactly as it was before this failed refresh.
-      if [[ -n "${INDEX_OLD_INSTANCE:-}" && "$INDEX_OLD_INSTANCE" != "${INDEX_SERVICE_INSTANCE:-}" ]]; then
-        say warn "failed refresh: terminating the unhealthy NEW instance ${INDEX_SERVICE_INSTANCE} and keeping the healthy old one ${INDEX_OLD_INSTANCE} (still DNS target)"
-        aws ec2 terminate-instances --region "$REGION" --instance-ids "$INDEX_SERVICE_INSTANCE" >/dev/null 2>&1 \
-          && say ok "unhealthy new instance ${INDEX_SERVICE_INSTANCE} terminated" \
-          || say warn "could not terminate unhealthy new instance ${INDEX_SERVICE_INSTANCE} — terminate manually to avoid a paid orphan"
-        update_env "$CONFIG_FILE" INDEX_SERVICE_INSTANCE "$INDEX_OLD_INSTANCE"
-        update_env "$CONFIG_FILE" INDEX_OLD_INSTANCE ""
-      fi
       exit 1
     }
   fi
   # STABLE ENDPOINT: point the agent at a Route53 private DNS name, not the raw IP.
-  # On a --refresh-index the instance (and its IP) change, but we just re-point the
-  # SAME DNS name — so the runtime's CODEGRAPH_MCP_URL never changes, and AgentCore's
-  # warm microVMs (which cache the env for 30+ min) never end up pointed at a dead,
-  # terminated IP. This eliminates the intermittent empty-answer cards a refresh used
-  # to cause. The runtime phase below uses INDEX_DNS_NAME instead of INDEX_SERVICE_IP.
+  # The index host is updated IN PLACE, but if it ever has to be replaced by hand the
+  # DNS name is re-pointed instead of the runtime being reconfigured — so the runtime's
+  # CODEGRAPH_MCP_URL never changes, and AgentCore's warm microVMs (which cache the env
+  # for 30+ min) never end up pointed at a stale IP. The runtime phase below uses
+  # INDEX_DNS_NAME instead of INDEX_SERVICE_IP.
   if [[ "$DRY_RUN" != true ]]; then
     "$SCRIPT_DIR/lib/provision_index_dns.sh" "$REGION" "$CONFIG_FILE" "$VPC_ID" "$INDEX_IP" >/dev/null
     safe_source_env "$CONFIG_FILE"
-    # BLUE-GREEN terminate-last: provision_index_service recorded the OLD instance
-    # in INDEX_OLD_INSTANCE (refresh path) instead of killing it up-front. Now that
-    # the NEW instance is /health-green (the wait above) AND the DNS name is cut over
-    # to it, drain the TTL (30s) so resolver caches expire, then terminate the old
-    # one. This makes --refresh-index seamless (no dead-host window) and makes a
-    # FAILED refresh a no-op (we never reach here — the health gate exited — so the
-    # old instance keeps serving). Best-effort: a terminate hiccup must not fail the
-    # otherwise-successful deploy.
-    if [[ -n "${INDEX_OLD_INSTANCE:-}" && "$INDEX_OLD_INSTANCE" != "$INDEX_SERVICE_INSTANCE" ]]; then
-      # Drain longer than the A-record TTL so warm-VM resolvers pick up the new IP
-      # before we kill the old host. Derive the wait from the SAME TTL the DNS
-      # record was written with (INDEX_DNS_TTL, persisted by provision_index_dns)
-      # + a 5s margin, so the two can't silently drift apart. Fallback 35 if unset
-      # (older config) — still > the historical 30s TTL.
-      DRAIN_S=$(( ${INDEX_DNS_TTL:-30} + 5 ))
-      # BREAK-BEFORE-MAKE for the gateway: the old instance also runs bot-gateway,
-      # whose Feishu long-connection is a GLOBAL singleton per app (cluster mode —
-      # two live clients steal each other's events). Synchronously stop the OLD
-      # gateway NOW (systemctl stop returns after the process exits → connection
-      # dropped), BEFORE Phase 6 starts the NEW instance's gateway, so the two can
-      # never overlap. (Index/codegraph CAN run two instances — separate graph.db —
-      # which is why index is make-before-break but gateway must be break-before-make.)
-      bash "$SCRIPT_DIR/lib/stop_gateway.sh" "$REGION" "$INDEX_OLD_INSTANCE" || true
-      say info "blue-green: new index healthy + DNS cut over; draining ${DRAIN_S}s (TTL ${INDEX_DNS_TTL:-30}+5) then terminating old instance $INDEX_OLD_INSTANCE"
-      sleep "$DRAIN_S"
-      # Clear INDEX_OLD_INSTANCE only on a SUCCESSFUL terminate: if terminate fails
-      # (throttle/IAM), keep the id so the next deploy's reconcile can still GC the
-      # orphan (clearing it unconditionally would leak a paid instance silently).
-      if aws ec2 terminate-instances --region "$REGION" --instance-ids "$INDEX_OLD_INSTANCE" >/dev/null 2>&1; then
-        say ok "old index instance $INDEX_OLD_INSTANCE terminated"
-        update_env "$CONFIG_FILE" INDEX_OLD_INSTANCE ""   # clear so a later run doesn't re-terminate
-      else
-        say warn "could not terminate old index $INDEX_OLD_INSTANCE (kept in config for next-run GC; terminate manually if needed); deploy still OK"
-      fi
-    fi
   fi
   say ok "index-service at $INDEX_IP:8080 (stable name: ${INDEX_DNS_NAME:-pending})"
 fi

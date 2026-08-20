@@ -69,23 +69,25 @@ is_set() { [[ -n "${1:-}" && "${1:-}" != "None" ]]; }
 
 # --- discover (config first, then tag) ---
 # (AgentCore runtimes are enumerated directly at delete time — see phase 1 below — not from config.)
-# Discover ALL index-service instances by tag, then UNION with the two config-recorded
-# ids — there can be MORE than one alive (a blue-green overlap window, or a failed-refresh
-# leftover), and the old tag query used `Reservations[].Instances[0]` (first per
-# reservation) + only the 2 config vars, so it could miss a second tagged instance and
+# Discover ALL index-service instances by tag, then UNION with the config-recorded id.
+# The TAG SWEEP is the load-bearing half and stays that way: deploys only ever update the
+# one host in place, but more than one tagged instance can still be alive (a hand-launched
+# box, an instance the config never captured because the deploy died mid-run, a stale
+# config file), and the old tag query used `Reservations[].Instances[0]` (first per
+# reservation) + only the config var, so it could miss a second tagged instance and
 # leave it billing after reporting "teardown complete" (cross-review P1). Collect every
-# `Instances[].InstanceId` across all reservations + the config ids, dedup, terminate all.
+# `Instances[].InstanceId` across all reservations + the config id, dedup, terminate all.
 # Both tag names: source-truth-index-service (default two-machine) AND source-truth-host (the
 # --local single host launch-host.sh creates). Missing the latter left the --local box billing and,
 # because its ENI kept the VPC's SG/subnet pinned, cascaded into DependencyViolation on VPC delete.
 TAGGED_INSTANCES="$(Q describe-instances --filters "Name=tag:Name,Values=source-truth-index-service,source-truth-host" "Name=instance-state-name,Values=pending,running,stopping,stopped" --query 'Reservations[].Instances[].InstanceId' --output text 2>/dev/null || echo "")"
-# space-separated, deduped union of config ids + every tagged id. CRITICAL: `|| true`
+# space-separated, deduped union of the config id + every tagged id. CRITICAL: `|| true`
 # on the pipeline — `grep -v` exits 1 when NOTHING matches (the zero-instances case: EC2
 # already torn down but NAT/EIP/zone still billing), and under `set -euo pipefail` that
 # rc-1 would ABORT teardown right here, BEFORE the plan/confirm/delete phases — i.e. the
 # script would refuse to run in the exact leak scenario it exists to clean up (2nd-pass
 # cross-review P1). The `|| true` makes an empty result a clean empty string.
-ALL_INSTANCES="$( { printf '%s\n' ${INDEX_SERVICE_INSTANCE:-} ${INDEX_OLD_INSTANCE:-} $TAGGED_INSTANCES | grep -vE '^(None)?$' | sort -u | tr '\n' ' '; } || true )"
+ALL_INSTANCES="$( { printf '%s\n' ${INDEX_SERVICE_INSTANCE:-} $TAGGED_INSTANCES | grep -vE '^(None)?$' | sort -u | tr '\n' ' '; } || true )"
 # (No separate EC2_ID: the full deduped ALL_INSTANCES set is both displayed in the plan
 # and terminated in the loop below; the SG/ENI-drain later discovers the SG by group-name,
 # not via an instance id, so no single "primary" id is needed.)
@@ -171,8 +173,8 @@ PY
 # keyed on the index SG further down.
 
 # ---- 2. EC2 index-service instance(s) — terminate EVERY discovered one ----
-# Iterate the full deduped union (tag-discovered + both config ids), not just the two
-# config vars, so a leaked blue-green/failed-refresh peer can't survive teardown.
+# Iterate the full deduped union (tag-discovered + the config id), not just the config
+# var, so an instance the config never recorded can't survive teardown and keep billing.
 for inst in $ALL_INSTANCES; do
   if is_set "$inst"; then
     # Termination protection is enabled at provision time (arm_instance_resilience) to stop an

@@ -68,7 +68,7 @@ scripts/                Operational lifecycle
   lib/deploy_project.sh + wait_base_host.sh + delete_runtime.py  Multi-project orchestration: build base / await base ready / delete per-project runtime
   lib/resolve_model.sh  Query Bedrock list-inference-profiles to pick a profile that actually exists in the region (no prefix guessing; geo profiles vary by region)
   lib/activate_gateway.sh  Write /etc/bot-gateway-<project>.env + start bot-gateway@<project> via SSM (gateway co-located with the index host)
-  lib/stop_gateway.sh   Stop the old instance's gateway via SSM (break-before-make on blue-green swap; prevents two gateways racing the Feishu long-connection)
+  lib/stop_gateway.sh   Stop the instance's bot-gateway@* via SSM (break-before-make: the Feishu long-connection is a global singleton, so the running gateway must exit before a new one starts)
   (p2) ops.sh           Ops toolkit (status / logs / reindex)
   teardown.sh           Ordered teardown + retained-resource list
   trace.sh              Merge-query the gateway + agent microVM log groups by traceId for a full-chain timeline (--since-hours / --raw)

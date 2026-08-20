@@ -68,7 +68,7 @@ scripts/                运维生命周期
   lib/deploy_project.sh + wait_base_host.sh + delete_runtime.py  多项目编排：建底座 / 等底座就绪 / 删 per-project runtime
   lib/resolve_model.sh  查 Bedrock list-inference-profiles 选区域真实存在的推理配置（不猜前缀；geo profile 因区域而异）
   lib/activate_gateway.sh  经 SSM 写 /etc/bot-gateway-<项目>.env + 启动 bot-gateway@<项目>（gateway 与索引同主机）
-  lib/stop_gateway.sh   经 SSM 停止旧实例 gateway（蓝绿换实例 break-before-make，避免双网关抢占飞书长连接）
+  lib/stop_gateway.sh   经 SSM 停掉实例上的 bot-gateway@*（break-before-make：飞书长连接是全局单例，起新网关前先确认旧网关已退出）
   (p2) ops.sh           运维工具（status / logs / reindex）
   teardown.sh           有序销毁 + 保留资源清单
   trace.sh              按 traceId 合并查询网关 + agent microVM 两个 log group 的全链路时间线（--since-hours / --raw）
