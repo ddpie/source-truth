@@ -123,8 +123,12 @@ CURRENT_SIG="$(artifact_signature)"
 arm_instance_resilience() {
   local iid="$1"
   local alarm_name="source-truth-index-auto-recover-${REGION}"
+  local err
 
-  aws cloudwatch put-metric-alarm --region "$REGION" \
+  # Capture stderr rather than discarding it: an opaque "failed" line cost a live
+  # debugging round (the real cause was an IAM AccessDenied on the service-linked
+  # role) — a non-fatal warning must still say WHY.
+  if err="$(aws cloudwatch put-metric-alarm --region "$REGION" \
     --alarm-name "$alarm_name" \
     --namespace AWS/EC2 --metric-name StatusCheckFailed_System \
     --dimensions "Name=InstanceId,Value=$iid" \
@@ -132,15 +136,21 @@ arm_instance_resilience() {
     --threshold 1 --comparison-operator GreaterThanOrEqualToThreshold \
     --alarm-actions "arn:aws:automate:${REGION}:ec2:recover" \
     --alarm-description "Auto-recover source-truth index-service on system status-check failure" \
-    >/dev/null 2>&1 \
-    && log info "auto-recovery alarm '$alarm_name' armed for $iid" \
-    || log warn "failed to create auto-recovery alarm (non-fatal — instance runs, but won't auto-heal on HW failure)"
+    2>&1 >/dev/null)"; then
+    log info "auto-recovery alarm '$alarm_name' armed for $iid"
+  else
+    log warn "failed to create auto-recovery alarm (non-fatal — instance runs, but won't auto-heal on HW failure)"
+    log warn "  → $(printf '%s' "$err" | tr '\n' ' ' | cut -c1-300)"
+  fi
 
   # Termination protection: prevent accidental termination via console / CLI.
-  aws ec2 modify-instance-attribute --region "$REGION" \
-    --instance-id "$iid" --disable-api-termination >/dev/null 2>&1 \
-    && log info "termination protection enabled for $iid" \
-    || log warn "failed to enable termination protection (non-fatal)"
+  if err="$(aws ec2 modify-instance-attribute --region "$REGION" \
+    --instance-id "$iid" --disable-api-termination 2>&1 >/dev/null)"; then
+    log info "termination protection enabled for $iid"
+  else
+    log warn "failed to enable termination protection (non-fatal)"
+    log warn "  → $(printf '%s' "$err" | tr '\n' ' ' | cut -c1-300)"
+  fi
 }
 
 if [[ "$LOCAL_MODE" == "true" ]]; then

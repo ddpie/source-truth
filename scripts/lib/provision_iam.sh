@@ -77,6 +77,25 @@ aws iam put-role-policy --role-name "$INDEX_ROLE" --policy-name cloudwatch-logs 
     {\"Effect\":\"Allow\",\"Action\":[\"logs:CreateLogStream\",\"logs:PutLogEvents\",\"logs:DescribeLogStreams\",\"logs:PutRetentionPolicy\"],
      \"Resource\":[\"arn:aws:logs:*:${ACCOUNT}:log-group:/source-truth/*\",
                    \"arn:aws:logs:*:${ACCOUNT}:log-group:/source-truth/*:*\"]}]}" >/dev/null
+# Inline policy: arm the EC2 auto-recovery alarm from the host itself (C2).
+# provision_index_service.sh runs under THIS instance role in --local mode, so without
+# this the put-metric-alarm fails and the host silently never auto-heals from a system
+# status-check failure (observed 2026-08-20: AccessDenied on a live single-host deploy).
+#
+# iam:CreateServiceLinkedRole is required because the FIRST auto-recovery alarm in an
+# account creates AWSServiceRoleForCloudWatchEvents. It is scoped by the
+# iam:AWSServiceName condition so this role can create ONLY that one AWS-managed
+# service-linked role — it cannot mint an arbitrary role.
+# ⚠️ REGION WILDCARD: same shared-global-role reason as cloudwatch-logs above — this role
+# is shared by index hosts in every region, and put-role-policy OVERWRITES.
+aws iam put-role-policy --role-name "$INDEX_ROLE" --policy-name ec2-self-recovery --policy-document "{
+  \"Version\":\"2012-10-17\",\"Statement\":[
+    {\"Effect\":\"Allow\",\"Action\":[\"cloudwatch:PutMetricAlarm\",\"cloudwatch:DescribeAlarms\"],
+     \"Resource\":[\"arn:aws:cloudwatch:*:${ACCOUNT}:alarm:source-truth-*\"]},
+    {\"Effect\":\"Allow\",\"Action\":[\"ec2:ModifyInstanceAttribute\",\"ec2:DescribeInstanceAttribute\"],
+     \"Resource\":\"*\"},
+    {\"Effect\":\"Allow\",\"Action\":[\"iam:CreateServiceLinkedRole\"],\"Resource\":\"*\",
+     \"Condition\":{\"StringEquals\":{\"iam:AWSServiceName\":\"events.amazonaws.com\"}}}]}" >/dev/null
 # Inline policy: the co-located bot-gateway invokes the AgentCore Runtime. The gateway runs
 # as a systemd unit ON the index host (co-location) and therefore uses THIS instance role —
 # but the role had no bedrock-agentcore perm, so every invoke 403'd ("not authorized to
