@@ -175,6 +175,12 @@ PY
 # config vars, so a leaked blue-green/failed-refresh peer can't survive teardown.
 for inst in $ALL_INSTANCES; do
   if is_set "$inst"; then
+    # Termination protection is enabled at provision time (arm_instance_resilience) to stop an
+    # accidental console/CLI terminate. It also makes terminate-instances fail outright, so
+    # teardown MUST clear it first or the host survives every teardown and the operator is left
+    # with an instance they cannot delete from the documented path. Best-effort: an instance that
+    # never had it set, or is already gone, must not abort the teardown.
+    Q modify-instance-attribute --instance-id "$inst" --no-disable-api-termination >/dev/null 2>&1 || true
     del "instance $inst" Q terminate-instances --instance-ids "$inst"
     Q wait instance-terminated --instance-ids "$inst" 2>/dev/null || true
   fi

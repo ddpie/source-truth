@@ -182,15 +182,38 @@ fi
 FLOW_LOG_ID="$(Q describe-flow-logs --filter "Name=tag:Name,Values=source-truth-vpc-flow-log" "Name=resource-id,Values=$VPC_ID" \
   --query 'FlowLogs[0].FlowLogId' --output text 2>/dev/null)"
 if [[ "$FLOW_LOG_ID" == "None" || -z "$FLOW_LOG_ID" ]]; then
-  ACCOUNT="$(aws sts get-caller-identity --query Account --output text)"
-  FLOW_BUCKET="source-truth-repo-${ACCOUNT}-${REGION}"
-  FLOW_LOG_ID="$(Q create-flow-logs --resource-type VPC --resource-ids "$VPC_ID" \
+  # Bucket name: take the AUTHORITATIVE value Phase 1 wrote to deploy-config. Deriving it here
+  # is what broke this on first live run — the bucket convention strips the dashes out of the
+  # region (…-uswest2), so a locally-built "…-${REGION}" name (…-us-west-2) pointed at a bucket
+  # that does not exist and create-flow-logs failed. Fall back to the same tr -d '-' rule
+  # deploy-all.sh uses, for a standalone invocation with no config yet.
+  FLOW_BUCKET="$(sed -n 's/^ARTIFACT_BUCKET=//p' "$CONFIG" 2>/dev/null | tail -1)"
+  if [[ -z "$FLOW_BUCKET" ]]; then
+    ACCOUNT="$(aws sts get-caller-identity --query Account --output text)"
+    FLOW_BUCKET="source-truth-repo-${ACCOUNT}-$(printf '%s' "$REGION" | tr -d '-')"
+  fi
+  # create-flow-logs returns 0 even when it creates NOTHING: the per-resource error lands in
+  # .Unsuccessful and FlowLogIds comes back empty. The first version of this block only read
+  # FlowLogIds[0] and logged success unconditionally, so a failed creation reported
+  # "✓ vpc flow log created: None" and the VPC silently had no flow log. Inspect both fields.
+  FLOW_JSON="$(Q create-flow-logs --resource-type VPC --resource-ids "$VPC_ID" \
     --traffic-type ALL --log-destination-type s3 \
     --log-destination "arn:aws:s3:::${FLOW_BUCKET}/vpc-flow-logs/" \
     --max-aggregation-interval 600 \
     --tag-specifications "ResourceType=vpc-flow-log,Tags=[{Key=Name,Value=source-truth-vpc-flow-log}]" \
-    --query 'FlowLogIds[0]' --output text)"
-  say ok "vpc flow log created: $FLOW_LOG_ID → s3://${FLOW_BUCKET}/vpc-flow-logs/"
+    --output json 2>&1)" || true
+  FLOW_LOG_ID="$(printf '%s' "$FLOW_JSON" | python3 -c 'import json,sys
+try: d=json.load(sys.stdin)
+except Exception: print(""); raise SystemExit
+ids=d.get("FlowLogIds") or []
+print(ids[0] if ids else "")' 2>/dev/null)"
+  if [[ -n "$FLOW_LOG_ID" ]]; then
+    say ok "vpc flow log created: $FLOW_LOG_ID → s3://${FLOW_BUCKET}/vpc-flow-logs/"
+  else
+    # Non-fatal: flow logs are an audit aid, not a serving dependency. But say WHY.
+    say warn "vpc flow log NOT created (non-fatal — no network audit trail for $VPC_ID)"
+    say warn "  → $(printf '%s' "$FLOW_JSON" | tr -d '\n' | cut -c1-300)"
+  fi
 fi
 
 update_env "$CONFIG" VPC_ID "$VPC_ID"
