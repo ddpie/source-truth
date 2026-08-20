@@ -168,8 +168,22 @@ aws iam put-role-policy --role-name "$RUNTIME_ROLE" --policy-name runtime-perms 
     {\"Effect\":\"Allow\",\"Action\":[\"ec2:CreateNetworkInterface\",\"ec2:DescribeNetworkInterfaces\",\"ec2:DeleteNetworkInterface\",\"ec2:DescribeSecurityGroups\",\"ec2:DescribeSubnets\"],\"Resource\":\"*\"},
     {\"Effect\":\"Allow\",\"Action\":[\"logs:CreateLogGroup\",\"logs:CreateLogStream\",\"logs:PutLogEvents\"],
      \"Resource\":[\"arn:aws:logs:*:${ACCOUNT}:log-group:/source-truth/*\",
-                   \"arn:aws:logs:*:${ACCOUNT}:log-group:/source-truth/*:*\"]}
+                   \"arn:aws:logs:*:${ACCOUNT}:log-group:/source-truth/*:*\"]},
+    {\"Effect\":\"Allow\",\"Action\":[\"bedrock-agentcore:GetWorkloadAccessToken\",\"bedrock-agentcore:GetWorkloadAccessTokenForJWT\",\"bedrock-agentcore:GetWorkloadAccessTokenForUserId\"],
+     \"Resource\":\"*\"},
+    {\"Effect\":\"Allow\",\"Action\":[\"xray:PutTraceSegments\",\"xray:PutTelemetryRecords\",\"xray:GetSamplingRules\",\"xray:GetSamplingTargets\"],
+     \"Resource\":\"*\"},
+    {\"Effect\":\"Allow\",\"Action\":[\"cloudwatch:PutMetricData\"],\"Resource\":\"*\",
+     \"Condition\":{\"StringEquals\":{\"cloudwatch:namespace\":[\"SourceTruth/Agent\",\"SourceTruth/Gateway\",\"bedrock-agentcore\"]}}}
   ]}" >/dev/null
+# NOTE (2026-08-20): the three statements above (workload identity / X-Ray / PutMetricData) were
+# absent here and were being supplied ONLY by a pre-existing hand-made inline policy
+# (SourceTruthAgentRuntimePolicy) that this repo does not create. On the long-lived dev account
+# that masked the gap; a FRESH-account deploy — the path a sample user takes — would have produced
+# an under-permissioned runtime role (no workload token, no traces, no custom metrics).
+# EFS grants are deliberately NOT re-added: the /mnt/repo layer was removed (9d23ec3) and the
+# session microVM mounts no filesystem, so elasticfilesystem:* is dead permission surface.
+# ⚠️ REGION WILDCARD throughout: same shared-global-role reason as the index-role policies above.
 
 # ---- 3. AgentCore SERVICE-LINKED role (fresh-account safe) ----
 # On a brand-new account, AgentCore's VPC mode needs the AWS service-linked role
