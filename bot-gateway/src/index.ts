@@ -1763,8 +1763,17 @@ async function main(): Promise<void> {
   // sdk_wsclient_connected log from onReady above.
   log({ event: "sdk_wsclient_started" });
 
-  // HEALTH CHECK SERVER: lightweight HTTP on :18080 for liveness probes / systemd watchdog.
-  const HEALTH_PORT = Number(process.env.HEALTH_PORT || 18080);
+  // HEALTH CHECK SERVER: lightweight HTTP for liveness probes / systemd watchdog.
+  // The DEFAULT port is derived from this project's bridge port (8080 → 18080, 8081 → 18081)
+  // because one index host runs one gateway PER PROJECT: a single hard-coded port would have
+  // every gateway but the first fail to bind. HEALTH_PORT still wins when set explicitly.
+  // (health.ts also degrades gracefully if the port is taken, so a collision is never fatal.)
+  const derivedHealthPort = (() => {
+    const m = /:(\d+)\b/.exec(activeRoute?.endpoint ?? "");
+    const bridgePort = m ? Number(m[1]) : NaN;
+    return Number.isFinite(bridgePort) ? 10000 + bridgePort : 18080;
+  })();
+  const HEALTH_PORT = Number(process.env.HEALTH_PORT || derivedHealthPort);
   startHealthServer(HEALTH_PORT);
   log({ event: "health_server_started", port: HEALTH_PORT });
 

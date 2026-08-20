@@ -61,6 +61,23 @@ export function startHealthServer(port = 18080): http.Server {
     res.end(body);
   });
 
+  // An http.Server with NO 'error' listener turns EADDRINUSE into an uncaught exception that
+  // KILLS the gateway. That is a real topology, not a hypothetical: one index host runs one
+  // bot-gateway per project (bot-gateway@<projectId>), so several gateways start on the same
+  // box and a fixed shared port means every process after the first would die and then
+  // crash-loop under Restart=always. Health reporting is an aid, never a serving dependency:
+  // log and carry on without it.
+  server.on("error", (err: NodeJS.ErrnoException) => {
+    console.log(
+      JSON.stringify({
+        event: "health_server_unavailable",
+        port,
+        code: err.code ?? "unknown",
+        detail: err.code === "EADDRINUSE" ? "port already bound (another gateway on this host?)" : String(err.message ?? err),
+      }),
+    );
+  });
+
   server.listen(port, "127.0.0.1", () => {
     // intentionally no log here — caller logs if desired
   });
