@@ -209,6 +209,12 @@ ids=d.get("FlowLogIds") or []
 print(ids[0] if ids else "")' 2>/dev/null)"
   if [[ -n "$FLOW_LOG_ID" ]]; then
     say ok "vpc flow log created: $FLOW_LOG_ID → s3://${FLOW_BUCKET}/vpc-flow-logs/"
+  elif printf '%s' "$FLOW_JSON" | grep -q FlowLogAlreadyExists; then
+    # AWS enforces uniqueness on (resource, traffic-type, destination) — NOT on our tag. A flow
+    # log with this exact config already exists (older script version, another tool, or an
+    # operator), so the desired state already holds; the tag-only lookup above just could not
+    # see it. Treat as success rather than warning on every single deploy.
+    say ok "vpc flow log already present for $VPC_ID → s3://${FLOW_BUCKET}/vpc-flow-logs/ (untagged/pre-existing)"
   else
     # Non-fatal: flow logs are an audit aid, not a serving dependency. But say WHY.
     say warn "vpc flow log NOT created (non-fatal — no network audit trail for $VPC_ID)"
