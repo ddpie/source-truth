@@ -387,7 +387,7 @@ IID="$(Q run-instances --image-id "$AMI" --instance-type "$ITYPE" \
   --subnet-id "$PRIVATE_SUBNET" --security-group-ids "$SG" \
   "${PROFILE_ARG[@]}" \
   --user-data "$UD" \
-  --block-device-mappings "[{\"DeviceName\":\"/dev/sda1\",\"Ebs\":{\"VolumeSize\":${ROOT_VOLUME_GB},\"VolumeType\":\"gp3\"}}]" \
+  --block-device-mappings "[{\"DeviceName\":\"/dev/sda1\",\"Ebs\":{\"VolumeSize\":${ROOT_VOLUME_GB},\"VolumeType\":\"gp3\",\"Encrypted\":true}}]" \
   --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=source-truth-index-service},{Key=ArtifactSig,Value=$CURRENT_SIG}]" \
   --query 'Instances[0].InstanceId' --output text)"
 log info "launched index-service $IID (Ubuntu 24.04 ARM); bootstrap runs build→serve"
@@ -401,4 +401,29 @@ if [[ -z "$IP" || "$IP" == "None" ]]; then
 fi
 update_env "$CONFIG" INDEX_SERVICE_SG "$SG"
 update_env "$CONFIG" INDEX_SERVICE_INSTANCE "$IID"
+
+# --- EC2 auto-recovery + termination protection (C2: runtime reliability) --------
+# System status-check failures (underlying hardware / hypervisor) are unrecoverable
+# without migrating the instance. A CloudWatch alarm triggers EC2 auto-recovery
+# (live-migrates to healthy hardware, preserving instance-id / IP / EBS). Idempotent:
+# put-metric-alarm overwrites if the alarm already exists for a prior run's instance.
+ALARM_NAME="source-truth-index-auto-recover-${REGION}"
+aws cloudwatch put-metric-alarm --region "$REGION" \
+  --alarm-name "$ALARM_NAME" \
+  --namespace AWS/EC2 --metric-name StatusCheckFailed_System \
+  --dimensions "Name=InstanceId,Value=$IID" \
+  --statistic Maximum --period 60 --evaluation-periods 2 \
+  --threshold 1 --comparison-operator GreaterThanOrEqualToThreshold \
+  --alarm-actions "arn:aws:automate:${REGION}:ec2:recover" \
+  --alarm-description "Auto-recover source-truth index-service on system status-check failure" \
+  >/dev/null 2>&1 \
+  && log info "auto-recovery alarm '$ALARM_NAME' armed for $IID" \
+  || log warn "failed to create auto-recovery alarm (non-fatal — instance runs, but won't auto-heal on HW failure)"
+
+# Termination protection: prevent accidental termination via console / CLI.
+aws ec2 modify-instance-attribute --region "$REGION" \
+  --instance-id "$IID" --disable-api-termination >/dev/null 2>&1 \
+  && log info "termination protection enabled for $IID" \
+  || log warn "failed to enable termination protection (non-fatal)"
+
 echo "$IP"

@@ -14,13 +14,8 @@ ok()  { printf '  ✓ %s\n' "$1"; }
 
 echo "check-invariants: $ROOT"
 
-# 1. AGENTS.md 存在，CLAUDE.md 仅 import @AGENTS.md
+# 1. AGENTS.md 存在
 if [[ -f AGENTS.md ]]; then ok "AGENTS.md 存在"; else err "缺少 AGENTS.md（AI 约定的唯一依据）"; fi
-if [[ -f CLAUDE.md ]]; then
-  if grep -qx '@AGENTS.md' CLAUDE.md && [[ "$(grep -c -v '^[[:space:]]*$' CLAUDE.md)" -eq 1 ]]; then
-    ok "CLAUDE.md 仅 import @AGENTS.md"
-  else err "CLAUDE.md 应仅含一行 '@AGENTS.md'（不得追加其他内容，约定只写 AGENTS.md）"; fi
-else err "缺少 CLAUDE.md"; fi
 
 # 2. docs/agent/architecture.md 存在且被 AGENTS.md 引用
 if [[ -f docs/agent/architecture.md ]]; then ok "docs/agent/architecture.md 存在"

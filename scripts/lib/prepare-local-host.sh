@@ -24,7 +24,7 @@ if [ -z "$REGION" ]; then
   REGION="$(curl -fsS ${_tok:+-H "X-aws-ec2-metadata-token: $_tok"} "http://169.254.169.254/latest/meta-data/placement/region" 2>/dev/null || true)"
 fi
 [ -n "$REGION" ] || { echo "✗ could not detect region from IMDS — pass REGION=<r> explicitly." >&2; exit 2; }
-REPO_URL="${REPO_URL:-https://github.com/ddpie/source-truth.git}"
+REPO_URL="${REPO_URL:-https://github.com/aws-samples/sample-code-qa-on-agentcore.git}"
 REPO_REF="${REPO_REF:-main}"
 TOKEN_SECRET="${TOKEN_SECRET:-source-truth/deploy-github-token}"
 REPO_DIR="${REPO_DIR:-source-truth}"

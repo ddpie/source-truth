@@ -201,6 +201,11 @@ WorkingDirectory=${APP}
 ExecStart=${SERVE_FLOCKS} /usr/bin/python3 -m http_bridge ${SERVE_ARGS} --host 0.0.0.0 --port ${BRIDGE_PORT} --mount-root "" --project ${PROJECT_ID}
 Restart=always
 RestartSec=5
+# OOM ISOLATION: cap bridge memory so a leak restarts this project's bridge
+# (OOMPolicy=stop) without the kernel OOM-killer targeting the codegraph writer.
+MemoryHigh=1536M
+MemoryMax=2G
+OOMPolicy=stop
 [Install]
 WantedBy=multi-user.target
 UNIT

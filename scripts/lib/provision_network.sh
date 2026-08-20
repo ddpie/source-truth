@@ -132,6 +132,67 @@ mk_rt source-truth-public-rt "$PUB" --gateway-id "$IGW"
 mk_rt source-truth-private-rt "$PRIV" --nat-gateway-id "$NAT"
 
 VPC_CIDR="$(Q describe-vpcs --vpc-ids "$VPC_ID" --query 'Vpcs[0].CidrBlock' --output text)"
+
+# ---- H5: Restrictive Network ACL on private subnet ----
+# Allows only: TCP 8080-8099 + 443 from VPC CIDR (index bridge + internal HTTPS),
+# ephemeral return traffic inbound, all outbound (NAT egress). Denies all else.
+NACL_ID="$(by_name network-acls source-truth-private-nacl NetworkAcls NetworkAclId)"
+if [[ "$NACL_ID" == "None" || -z "$NACL_ID" ]]; then
+  NACL_ID="$(Q create-network-acl --vpc-id "$VPC_ID" --query NetworkAcl.NetworkAclId --output text)"
+  tag "$NACL_ID" source-truth-private-nacl
+fi
+# Replace ALL entries on every run (idempotent convergence). Custom NACLs start with
+# a default deny-all pair (rule 32767), so we only need to add our ALLOW rules.
+# First, remove any prior custom entries (rule numbers < 32767) to avoid drift.
+_nacl_rules="$(Q describe-network-acls --network-acl-ids "$NACL_ID" \
+  --query 'NetworkAcls[0].Entries[?RuleNumber < `32767`].[RuleNumber,Egress]' --output text 2>/dev/null || echo "")"
+while IFS=$'\t' read -r _rnum _egress; do
+  [[ -z "$_rnum" ]] && continue
+  Q delete-network-acl-entry --network-acl-id "$NACL_ID" --rule-number "$_rnum" \
+    "$( [[ "$_egress" == "True" || "$_egress" == "true" ]] && echo "--egress" || echo "--ingress" )" >/dev/null 2>&1 || true
+done <<< "$_nacl_rules"
+# Inbound rules (deny-all is implicit at rule 32767):
+#   100: TCP 8080-8099 from VPC (index bridge ports)
+Q create-network-acl-entry --network-acl-id "$NACL_ID" --ingress \
+  --rule-number 100 --protocol 6 --port-range "From=8080,To=8099" \
+  --cidr-block "$VPC_CIDR" --rule-action allow >/dev/null
+#   110: TCP 443 from VPC (internal HTTPS)
+Q create-network-acl-entry --network-acl-id "$NACL_ID" --ingress \
+  --rule-number 110 --protocol 6 --port-range "From=443,To=443" \
+  --cidr-block "$VPC_CIDR" --rule-action allow >/dev/null
+#   120: TCP ephemeral 1024-65535 (return traffic from NAT / internet)
+Q create-network-acl-entry --network-acl-id "$NACL_ID" --ingress \
+  --rule-number 120 --protocol 6 --port-range "From=1024,To=65535" \
+  --cidr-block "0.0.0.0/0" --rule-action allow >/dev/null
+# Outbound: allow all (NAT egress needs it).
+Q create-network-acl-entry --network-acl-id "$NACL_ID" --egress \
+  --rule-number 100 --protocol -1 --port-range "From=0,To=65535" \
+  --cidr-block "0.0.0.0/0" --rule-action allow >/dev/null
+# Associate NACL with private subnet (replace the default). A subnet has exactly one
+# NACL association — replacing it is idempotent (just points to the same NACL again).
+NACL_ASSOC="$(Q describe-network-acls --filters "Name=association.subnet-id,Values=$PRIV" \
+  --query 'NetworkAcls[0].Associations[?SubnetId==`'"$PRIV"'`].NetworkAclAssociationId | [0]' --output text 2>/dev/null)"
+if [[ -n "$NACL_ASSOC" && "$NACL_ASSOC" != "None" ]]; then
+  Q replace-network-acl-association --association-id "$NACL_ASSOC" --network-acl-id "$NACL_ID" >/dev/null
+fi
+
+# ---- H7: VPC Flow Logs to S3 ----
+# Uses the project's artifact bucket with a vpc-flow-logs/ prefix (cheapest: S3 destination,
+# no extra CloudWatch Logs cost). Idempotent: skip if a flow log with our tag already exists.
+FLOW_LOG_ID="$(Q describe-flow-logs --filter "Name=tag:Name,Values=source-truth-vpc-flow-log" "Name=resource-id,Values=$VPC_ID" \
+  --query 'FlowLogs[0].FlowLogId' --output text 2>/dev/null)"
+if [[ "$FLOW_LOG_ID" == "None" || -z "$FLOW_LOG_ID" ]]; then
+  ACCOUNT="$(aws sts get-caller-identity --query Account --output text)"
+  FLOW_BUCKET="source-truth-repo-${ACCOUNT}-${REGION}"
+  FLOW_LOG_ID="$(Q create-flow-logs --resource-type VPC --resource-ids "$VPC_ID" \
+    --traffic-type ALL --log-destination-type s3 \
+    --log-destination "arn:aws:s3:::${FLOW_BUCKET}/vpc-flow-logs/" \
+    --max-aggregation-interval 600 \
+    --tag-specifications "ResourceType=vpc-flow-log,Tags=[{Key=Name,Value=source-truth-vpc-flow-log}]" \
+    --query 'FlowLogIds[0]' --output text)"
+  say ok "vpc flow log created: $FLOW_LOG_ID → s3://${FLOW_BUCKET}/vpc-flow-logs/"
+fi
+
 update_env "$CONFIG" VPC_ID "$VPC_ID"
 update_env "$CONFIG" VPC_CIDR "$VPC_CIDR"
 update_env "$CONFIG" PUBLIC_SUBNET "$PUB"

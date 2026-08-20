@@ -341,7 +341,7 @@ IID="$(aws ec2 run-instances --image-id "$AMI" --instance-type "$ITYPE" \
   --subnet-id "$PUBLIC_SUBNET" --associate-public-ip-address --security-group-ids "$SG" --key-name "$KEY" \
   --iam-instance-profile Name=source-truth-index-profile \
   --metadata-options 'HttpTokens=required,HttpPutResponseHopLimit=1,HttpEndpoint=enabled' \
-  --block-device-mappings "[{\"DeviceName\":\"/dev/sda1\",\"Ebs\":{\"VolumeSize\":${DISK},\"VolumeType\":\"gp3\"}}]" \
+  --block-device-mappings "[{\"DeviceName\":\"/dev/sda1\",\"Ebs\":{\"VolumeSize\":${DISK},\"VolumeType\":\"gp3\",\"Encrypted\":true}}]" \
   --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=source-truth-host}]' \
   --query 'Instances[0].InstanceId' --output text)"
 say info "launched $IID — waiting for it to run ..."

@@ -263,6 +263,9 @@ StandardError=append:/var/log/bot-gateway-%i.log
 # restarts it) instead of the kernel picking the codegraph writer and corrupting graph.db.
 MemoryHigh=768M
 MemoryMax=1G
+OOMPolicy=stop
+# Health-check probe: verify the health endpoint binds after start (best-effort, non-blocking).
+ExecStartPost=/bin/bash -c 'for i in 1 2 3 4 5; do sleep 1; curl -sf http://127.0.0.1:18080/health >/dev/null 2>&1 && exit 0; done; echo "WARN: health endpoint not yet reachable after 5s"'
 [Install]
 WantedBy=multi-user.target
 UNIT
@@ -299,6 +302,16 @@ UNIT
             "retention_in_days": 90
           }
         ]
+      },
+      "journal": {
+        "collect_list": [
+          {
+            "unit": "index-bridge-*",
+            "log_group_name": "/source-truth/index-bridge",
+            "log_stream_name": "{instance_id}",
+            "retention_in_days": 90
+          }
+        ]
       }
     }
   }
@@ -307,7 +320,7 @@ CWCFG
     # fetch-config (not append-config) so a re-run replaces, not duplicates, the input.
     if /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
         -a fetch-config -m ec2 -s -c file:/opt/aws/amazon-cloudwatch-agent/etc/cw-config.json; then
-      echo "cloudwatch-agent shipping /var/log/bot-gateway*.log → /source-truth/bot-gateway"
+      echo "cloudwatch-agent shipping /var/log/bot-gateway*.log → /source-truth/bot-gateway + journal(index-bridge-*) → /source-truth/index-bridge"
     else
       echo "WARN: cloudwatch-agent fetch-config failed — gateway runs, telemetry shipping degraded"
     fi

@@ -1,0 +1,155 @@
+This product includes or depends on the following third-party software:
+
+================================================================================
+COMPONENT: agent-container
+================================================================================
+
+---
+
+claude-agent-sdk
+Version: 0.2.103
+License: MIT
+URL: https://github.com/anthropics/claude-agent-sdk-python
+Agent reasoning loop (query / ClaudeAgentOptions); HTTP MCP native.
+
+---
+
+bedrock-agentcore
+Version: 1.14.1
+License: Apache-2.0
+URL: https://github.com/aws/bedrock-agentcore-sdk-python
+MicroVM HTTP/streaming host (BedrockAgentCoreApp).
+
+---
+
+boto3
+Version: 1.43.31
+License: Apache-2.0
+URL: https://github.com/boto/boto3
+AWS SDK for Python.
+
+---
+
+httpx
+Version: 0.28.1
+License: BSD-3-Clause
+URL: https://github.com/encode/httpx
+HTTP client for CodeGraph MCP-over-HTTP evidence channel.
+
+---
+
+aws-opentelemetry-distro
+Version: 0.17.1
+License: Apache-2.0
+URL: https://github.com/aws-observability/aws-otel-python-instrumentation
+AWS distribution of OpenTelemetry Python instrumentation.
+
+---
+
+================================================================================
+COMPONENT: bot-gateway
+================================================================================
+
+---
+
+@larksuiteoapi/node-sdk
+Version: ^1.67.0
+License: MIT
+URL: https://github.com/larksuite/node-sdk
+Feishu/Lark Open Platform SDK for Node.js.
+
+---
+
+@aws-crypto/sha256-js
+Version: ^5.2.0
+License: Apache-2.0
+URL: https://github.com/aws/aws-sdk-js-crypto-helpers
+AWS cryptographic SHA-256 implementation in JavaScript.
+
+---
+
+@aws-sdk/credential-providers
+Version: ^3.1070.0
+License: Apache-2.0
+URL: https://github.com/aws/aws-sdk-js-v3
+AWS SDK credential providers.
+
+---
+
+@aws-sdk/signature-v4
+Version: ^3.370.0
+License: Apache-2.0
+URL: https://github.com/aws/aws-sdk-js-v3
+AWS Signature Version 4 request signing.
+
+---
+
+@smithy/protocol-http
+Version: ^5.5.0
+License: Apache-2.0
+URL: https://github.com/smithy-lang/smithy-typescript
+Smithy HTTP protocol bindings for AWS SDK.
+
+---
+
+================================================================================
+COMPONENT: index-service
+================================================================================
+
+---
+
+mcp
+Version: 1.23.3
+License: MIT
+URL: https://github.com/modelcontextprotocol/python-sdk
+Model Context Protocol SDK; drives codegraph-server over stdio + FastMCP HTTP bridge.
+
+---
+
+uvicorn
+Version: 0.44.0
+License: BSD-3-Clause
+URL: https://github.com/encode/uvicorn
+ASGI server backing the streamable-HTTP bridge.
+
+---
+
+typing_extensions
+Version: 4.15.0
+License: PSF-2.0
+URL: https://github.com/python/typing_extensions
+Backports and extensions to the typing module.
+
+---
+
+openpyxl
+Version: 3.1.5
+License: MIT
+URL: https://foss.heptapod.net/openpyxl/openpyxl
+Read/write Excel (.xlsx) files; used for config table parsing.
+
+---
+
+================================================================================
+COMPONENT: runtime-tools (not managed via package files)
+================================================================================
+
+---
+
+codegraph-server
+Version: 0.18.5
+License: Proprietary (Amazon/AWS internal)
+URL: N/A (internal binary)
+Code indexing and graph query engine. Amazon-internal tool; not open-source.
+Provisioned outside pip — see index-service/README.md for binary sourcing.
+
+---
+
+@anthropic-ai/claude-code (Claude Code Agent SDK)
+Version: latest
+License: Proprietary (Anthropic Commercial Terms of Service)
+URL: https://www.npmjs.com/package/@anthropic-ai/claude-code
+Claude Code agentic coding tool. Not open-source; governed by Anthropic's
+Commercial Terms of Service.
+
+---

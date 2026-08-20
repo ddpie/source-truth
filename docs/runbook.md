@@ -18,7 +18,7 @@
 在操作机（你的电脑或 CI）上执行：
 
 ```bash
-git clone https://github.com/ddpie/source-truth.git && cd source-truth
+git clone https://github.com/aws-samples/sample-code-qa-on-agentcore.git && cd sample-code-qa-on-agentcore
 ./scripts/install.sh          # 按交互提示填写区域 / 代码仓 / 飞书凭证，一次装好后端与网关
 ```
 详见[第二节](#二一键安装交互式推荐)；完成后按[第五节](#五验证端到端冒烟)验证。
@@ -30,7 +30,7 @@ git clone https://github.com/ddpie/source-truth.git && cd source-truth
 **第一步 · 创建主机**（本机执行）：创建 EC2 实例，脚本结束时会输出一条登录用的 `ssh` 命令，供下一步使用。
 
 ```bash
-git clone https://github.com/ddpie/source-truth.git && cd source-truth
+git clone https://github.com/aws-samples/sample-code-qa-on-agentcore.git && cd sample-code-qa-on-agentcore
 ./scripts/launch-host.sh
 ```
 
@@ -95,8 +95,8 @@ bash /tmp/prepare-local-host.sh   # 建议直接复制 launch-host 输出的命�
 安装命令见[快速开始](#快速开始)；还没克隆仓库时也可以一行命令引导（自动克隆到 `./source-truth/` 再进入交互安装）：
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/ddpie/source-truth/main/scripts/get.sh)   # 公开仓
-bash <(gh api repos/ddpie/source-truth/contents/scripts/get.sh --jq '.content' | base64 -d)   # 私有仓，先 gh auth login
+bash <(curl -fsSL https://raw.githubusercontent.com/aws-samples/sample-code-qa-on-agentcore/main/scripts/get.sh)   # 公开仓
+bash <(gh api repos/aws-samples/sample-code-qa-on-agentcore/contents/scripts/get.sh --jq '.content' | base64 -d)   # 私有仓，先 gh auth login
 ```
 
 `install.sh` 是一个交互菜单（键盘上下键选择、回车确认），四个流程见 [第七节 多项目](#七多项目一台机器多个机器人)。
@@ -169,7 +169,7 @@ codegraph 索引占用内存较高，且随仓库增大而增长，按仓库规�
 
 首次部署约 10–20 分钟（bootstrap 与镜像构建均在本机串行执行，比一键部署略慢）。
 
-**中断后重新运行**：每一步均幂等，从中断处重新运行即可，无需从头执行。脚本已在实例上时，SSH 登录后重新运行 `bash /tmp/prepare-local-host.sh`（或 `cd source-truth && ./scripts/install.sh --local`）即可从中断处继续。若实例已创建、之后才中断，重新运行 `launch-host.sh` 会**自动复用该实例**（已停止的先启动），照常提示 SSH 私钥、重新传脚本并输出登录命令，不会重复创建；确需全新实例时加 `--new-host`。
+**中断后重新运行**：每一步均幂等，从中断处重新运行即可，无需从头执行。脚本已在实例上时，SSH 登录后重新运行 `bash /tmp/prepare-local-host.sh`（或 `cd sample-code-qa-on-agentcore && ./scripts/install.sh --local`）即可从中断处继续。若实例已创建、之后才中断，重新运行 `launch-host.sh` 会**自动复用该实例**（已停止的先启动），照常提示 SSH 私钥、重新传脚本并输出登录命令，不会重复创建；确需全新实例时加 `--new-host`。
 
 **四点需要注意**
 
@@ -178,7 +178,7 @@ codegraph 索引占用内存较高，且随仓库增大而增长，按仓库规�
 - **权限较大、建议专机专用**：`--local` 调用 AWS 用的是这台机器的**实例角色**（不是你本地的 profile——登录 EC2 后即不再可用），它既需建资源的权限，也需运行期权限，**范围偏大，这台机器不建议与其它业务共用**。角色名 `source-truth-index-role` 与默认部署共用（IAM 角色为账号级、不分区域）：`create-iam.sh` 幂等复用、只补权限不重建；但需注意，**若同账号已有默认部署在使用该角色，补上部署期权限后那台机器也会一并获得**——如需让默认部署保持最小权限，请换一个账号运行 `--local`。
 - **NAT 不可省略**：实例位于公有子网（有公网 IP 供 SSH），但 AgentCore Runtime 位于私有子网、经 **NAT** 访问 Bedrock——Runtime 的网卡由 AWS 托管、无公网 IP，无法经 IGW 访问外网，因此必须配置 NAT（固定费用约每月 $32 起）。bridge 端口（8080-8099）仅对同一安全组内成员开放，外部无法访问。
 
-**升级**：登录**同一台实例**（部署状态 `.local/` 均保存于其上），运行 `cd source-truth && git pull && ./scripts/deploy-all.sh --region <r> --local`。此模式不采用一键部署的蓝绿换机，而是就地重建镜像、更新 runtime、重启网关与索引服务；其间会有一段服务中断（时长与首次部署相当），建议在低峰期操作。
+**升级**：登录**同一台实例**（部署状态 `.local/` 均保存于其上），运行 `cd sample-code-qa-on-agentcore && git pull && ./scripts/deploy-all.sh --region <r> --local`。此模式不采用一键部署的蓝绿换机，而是就地重建镜像、更新 runtime、重启网关与索引服务；其间会有一段服务中断（时长与首次部署相当），建议在低峰期操作。
 
 ## 三、接入飞书
 

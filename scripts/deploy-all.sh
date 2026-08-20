@@ -112,6 +112,7 @@ Options:
                       a dedicated SG. No second EC2 is created. ARM64 host only; needs an instance
                       role with the index-host policies (see runbook) + passwordless sudo.
   --dry-run           Print the plan and resolved IDs, make no changes
+  --force             Bypass hard-block preflight checks (e.g. vCPU quota) with explicit acknowledgment
   -h, --help
 
 PREREQUISITES (not auto-provisioned — the deploy hard-fails / WARNs if missing):
@@ -127,6 +128,7 @@ EOF
 }
 
 DRY_RUN=false
+FORCE=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --region) REGION="$2"; shift 2 ;;
@@ -151,6 +153,7 @@ while [[ $# -gt 0 ]]; do
     --refresh-index) REFRESH_INDEX=true; shift ;;
     --local) LOCAL_MODE=true; shift ;;
     --dry-run) DRY_RUN=true; shift ;;
+    --force) FORCE=true; shift ;;
     -h|--help) usage; exit 0 ;;
     *) say err "Unknown flag: $1"; usage >&2; exit 2 ;;
   esac
@@ -320,7 +323,7 @@ PY
 # front (non-blocking — a deploy reuses its own tagged EIP/VPC, so a clean account is fine).
 preflight_quota() {
   command -v aws >/dev/null || return 0
-  local eips vpcs
+  local eips vpcs fail=0
   eips="$(aws ec2 describe-addresses --region "$REGION" --query 'length(Addresses)' --output text 2>/dev/null || echo "")"
   vpcs="$(aws ec2 describe-vpcs --region "$REGION" --query 'length(Vpcs)' --output text 2>/dev/null || echo "")"
   # NB: use `if`, NOT `[[ … ]] && say` — under `set -e`, a `[[ … ]] && cmd` whose
@@ -336,19 +339,29 @@ preflight_quota() {
   # vCPU (On-Demand Standard family, quota L-1216C47A): a BRAND-NEW account often caps
   # standard On-Demand vCPUs low (historically as low as 5, sometimes 0 until raised). The
   # index instance is a Standard-family Graviton (t4g.large = 2 vCPU). Without this, a fresh
-  # account fails LATE in Phase 3 with a raw VcpuLimitExceeded instead of an early WARN like
-  # EIP/VPC. Best-effort: service-quotas may be unavailable/denied → silently skip (return 0).
+  # account fails LATE in Phase 3 with a raw VcpuLimitExceeded instead of an early block.
+  # HARD BLOCK (not WARN): a quota this low makes Phase 3 certain to fail — abort early with
+  # the fix. Pass --force to bypass if you know the quota is being raised or the check is stale.
   local vcpu_quota
   vcpu_quota="$(aws service-quotas get-service-quota --region "$REGION" \
     --service-code ec2 --quota-code L-1216C47A \
     --query 'Quota.Value' --output text 2>/dev/null || echo "")"
-  # Value comes back like "5.0"; compare the integer part. Only WARN when implausibly low
-  # for one t4g.large (need ≥2 vCPU; warn at <4 to leave headroom + flag near-zero caps).
+  # Value comes back like "5.0"; compare the integer part.
   if [[ "$vcpu_quota" =~ ^([0-9]+) ]]; then
     local vcpu_int="${BASH_REMATCH[1]}"
     if [[ "$vcpu_int" -lt 4 ]]; then
-      say warn "On-Demand Standard vCPU 配额仅 ${vcpu_int}（quota L-1216C47A）——index 实例需 2 vCPU（t4g.large）。若 run-instances 报 VcpuLimitExceeded，去 Service Quotas 提额。"
+      say err "On-Demand Standard vCPU 配额仅 ${vcpu_int}（quota L-1216C47A）——index 实例需 2 vCPU（t4g.large）。Phase 3 的 run-instances 必定报 VcpuLimitExceeded。"
+      say err "  → 去 Service Quotas 提额（至少 4 vCPU），或用 --force 强制跳过此检查。"
+      if [[ "$FORCE" != true ]]; then
+        fail=1
+      else
+        say warn "  --force: 跳过 vCPU 配额硬阻断（操作者已确认）"
+      fi
     fi
+  fi
+  if [[ "$fail" -ne 0 ]]; then
+    say err "preflight quota check failed — fix the above or re-run with --force"
+    exit 1
   fi
   return 0
 }
@@ -585,6 +598,9 @@ fi
 if skip index-svc; then say warn "skip index-svc"; elif [[ "$DRY_RUN" == true ]]; then
   say step "Phase 3: index-service EC2"
   say info "[dry-run] provision_index_service.sh (ARM EC2 + bootstrap, reuse if running) + /health wait"
+  say info "[dry-run]   instance_type=$INSTANCE_TYPE  AMI=Ubuntu 24.04 ARM64 (resolved at provision time)"
+  say info "[dry-run]   subnet=${PRIVATE_SUBNET:-<from Phase 2>}  region=$REGION"
+  say info "[dry-run]   root_volume=${ROOT_VOLUME_GB}GiB  max_files=$MAX_FILES  model=$MODEL"
 else
   say step "Phase 3: index-service EC2 (BASE host — no project bound)"
   INDEX_IP="$(ST_LOCAL_MODE="$LOCAL_MODE" "$SCRIPT_DIR/lib/provision_index_service.sh" \
@@ -684,7 +700,11 @@ fi
 # requirements/Dockerfile separately).
 if skip image; then say warn "skip image"; elif [[ "$DRY_RUN" == true ]]; then
   say step "Phase 4: build + push agent image"
-  say info "[dry-run] ECR create-if-absent + docker build --platform linux/arm64 + push source-truth/agent:latest"
+  ECR_REPO="source-truth/agent"
+  GIT_SHA="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo "unknown")"
+  say info "[dry-run] ECR repo: ${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com/${ECR_REPO}"
+  say info "[dry-run] image tags: :latest  :${GIT_SHA}"
+  say info "[dry-run] ECR create-if-absent + docker build --platform linux/arm64 + push (both tags)"
 else
   say step "Phase 4: build + push agent image"
   require_cmd docker "install Docker (buildx, ARM64 capable)" || exit 1
@@ -701,7 +721,10 @@ else
     fi
   fi
   ECR_REPO="source-truth/agent"
-  ECR_URI="${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com/${ECR_REPO}:latest"
+  GIT_SHA="$(git -C "$ROOT" rev-parse --short HEAD)"
+  ECR_BASE="${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com/${ECR_REPO}"
+  ECR_URI_LATEST="${ECR_BASE}:latest"
+  ECR_URI_SHA="${ECR_BASE}:${GIT_SHA}"
   aws ecr describe-repositories --repository-names "$ECR_REPO" --region "$REGION" >/dev/null 2>&1 \
     || aws ecr create-repository --repository-name "$ECR_REPO" --region "$REGION" >/dev/null
   # ECR login must SUCCEED before build/push. Don't swallow it with `>/dev/null 2>&1`:
@@ -716,10 +739,19 @@ else
     say err "check: deploy identity has ecr:GetAuthorizationToken; clock is in sync; region/account correct; docker daemon running."
     exit 1
   fi
-  docker build --platform linux/arm64 -t "$ECR_URI" "$ROOT/agent-container"
-  docker push "$ECR_URI"
-  update_env "$CONFIG_FILE" ECR_IMAGE "$ECR_URI"
-  say ok "image pushed: $ECR_URI"
+  docker build --platform linux/arm64 -t "$ECR_URI_LATEST" "$ROOT/agent-container"
+  # Content-addressable tagging: tag with git SHA for deterministic rollback via --image-digest
+  docker tag "$ECR_URI_LATEST" "$ECR_URI_SHA"
+  docker push "$ECR_URI_LATEST"
+  docker push "$ECR_URI_SHA"
+  # Compute and persist the image digest for rollback support
+  DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' "$ECR_URI_LATEST" 2>/dev/null \
+    || docker images --digests --format '{{.Digest}}' "$ECR_URI_LATEST")
+  update_env "$CONFIG_FILE" ECR_IMAGE "$ECR_URI_LATEST"
+  update_env "$CONFIG_FILE" ECR_IMAGE_SHA "$ECR_URI_SHA"
+  # Enables rollback to a known-good image via --image-digest
+  update_env "$CONFIG_FILE" LAST_IMAGE_DIGEST "$DIGEST"
+  say ok "image pushed: $ECR_URI_LATEST + $ECR_URI_SHA (digest: ${DIGEST##*@})"
 fi
 
 # ============================================================
@@ -743,6 +775,8 @@ elif [[ "$DRY_RUN" == true ]]; then
   if [[ -f "$PROJECTS_CFG" ]]; then
     _pids="$(python3 -c 'import json,sys; print(" ".join(json.load(open(sys.argv[1]))["projects"]))' "$PROJECTS_CFG" 2>/dev/null || echo "")"
     say info "[dry-run] for each project [${_pids}]: activate_project.sh (clone+build+bridge) + deploy_runtime.py + activate_gateway.sh"
+    say info "[dry-run]   model=$MODEL  idle_timeout=${IDLE_TIMEOUT}s  max_lifetime=${MAX_LIFETIME}s"
+    say info "[dry-run]   image=${ECR_IMAGE:-<from Phase 4>}  index_host=${INDEX_DNS_NAME:-${INDEX_SERVICE_IP:-<from Phase 3>}}"
   else
     say info "[dry-run] no .local/projects.json — base host only; add a project via ./scripts/install.sh"
   fi

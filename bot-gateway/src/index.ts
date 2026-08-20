@@ -50,6 +50,7 @@ import { emitMetric, classifyFailure, countEvidenceCitations, type FailReason } 
 import { isDuplicate, forget } from "./dedup";
 import { STREAM_TIMEOUT_MS, DEFAULT_MAX_CONCURRENT_INVOKES } from "./tunables";
 import { loadProjectsConfig, resolveRoute, ProjectsConfigMissing, type ProjectsConfig, type ResolvedRoute } from "./project-routing";
+import { startHealthServer, markConnected, markReconnecting, markReconnected, markConnecting, markEventReceived } from "./health";
 
 const RUNTIME_ARN = process.env.RUNTIME_ARN ?? "";
 // Region: AWS_REGION (deploy sets it) → AWS_DEFAULT_REGION → derived from the RUNTIME_ARN
@@ -1349,6 +1350,7 @@ async function main(): Promise<void> {
       // (an event can already be buffered in the SDK when SIGTERM lands), so this in-handler
       // gate is the real guard (cross-review: confirmed-still-present P1).
       if (shuttingDown) return;
+      markEventReceived();
       const event = sdkEventToImEvent(data);
       if (event) {
         void handleMessageEvent(event, {
@@ -1384,6 +1386,7 @@ async function main(): Promise<void> {
       // exit). Still return a valid ack so Feishu doesn't surface a tap error to the user;
       // the tap is simply a no-op this shutdown (cross-review confirmed-still-present P1).
       if (shuttingDown) return {};
+      markEventReceived();
       try {
         const d = data as {
           header?: { event_id?: string };
@@ -1717,9 +1720,9 @@ async function main(): Promise<void> {
     appId: APP_ID,
     appSecret: APP_SECRET,
     loggerLevel: lark.LoggerLevel.warn,
-    onReady: () => log({ event: "sdk_wsclient_connected" }), // the REAL "receiving events" signal
-    onReconnecting: () => log({ event: "sdk_wsclient_reconnecting" }),
-    onReconnected: () => log({ event: "sdk_wsclient_reconnected" }),
+    onReady: () => { markConnected(); log({ event: "sdk_wsclient_connected" }); }, // the REAL "receiving events" signal
+    onReconnecting: () => { markReconnecting(); log({ event: "sdk_wsclient_reconnecting" }); },
+    onReconnected: () => { markReconnected(); log({ event: "sdk_wsclient_reconnected" }); },
     onError: (err: unknown) => {
       // Redact: a Feishu SDK auth error could carry an app_access_token / URL in its
       // message; match the redaction the answer-path error logs already do.
@@ -1753,11 +1756,17 @@ async function main(): Promise<void> {
     },
   });
   wsRef = ws as unknown as { stop?: () => void }; // let gracefulShutdown best-effort stop intake
+  markConnecting();
   ws.start({ eventDispatcher: dispatcher });
   // NOTE: start() resolves before the connection is established; this marks only
   // "start() invoked". The real "connected + receiving events" signal is the
   // sdk_wsclient_connected log from onReady above.
   log({ event: "sdk_wsclient_started" });
+
+  // HEALTH CHECK SERVER: lightweight HTTP on :18080 for liveness probes / systemd watchdog.
+  const HEALTH_PORT = Number(process.env.HEALTH_PORT || 18080);
+  startHealthServer(HEALTH_PORT);
+  log({ event: "health_server_started", port: HEALTH_PORT });
 
   // LIVENESS HEARTBEAT: emit gateway_heartbeat every HEARTBEAT_SECS regardless of traffic.
   // The log-pipeline-liveness alarm watches the metric this produces (GatewayHeartbeat, via a

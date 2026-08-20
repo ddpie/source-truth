@@ -25,7 +25,7 @@ Bash（`scripts/`）。会话容器 ARM64-only。
 当前已实现（init 骨架阶段）：
 
 ```bash
-./scripts/check-invariants.sh   # 结构自检：AGENTS / CLAUDE / structure / 双语配对 / 顶层目录
+./scripts/check-invariants.sh   # 结构自检：AGENTS / structure / 双语配对 / 顶层目录
 
 # 各组件依赖见其 README（agent-container: uv；bot-gateway: npm）。
 ./scripts/test.sh           # 已实现。离线默认：lint + unit + typecheck（pre-push 跑这个）

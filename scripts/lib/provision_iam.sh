@@ -133,13 +133,24 @@ if ! aws iam get-role --role-name "$RUNTIME_ROLE" >/dev/null 2>&1; then
     \"Condition\":{\"StringEquals\":{\"aws:SourceAccount\":\"${ACCOUNT}\"}}}]}" >/dev/null
 fi
 # Inline policy: pull ECR image, invoke Bedrock, attach ENIs (VPC), logs. No EFS.
-aws iam put-role-policy --role-name "$RUNTIME_ROLE" --policy-name runtime-perms --policy-document '{
-  "Version":"2012-10-17","Statement":[
-    {"Effect":"Allow","Action":["bedrock:InvokeModel","bedrock:InvokeModelWithResponseStream"],"Resource":"*"},
-    {"Effect":"Allow","Action":["ecr:GetDownloadUrlForLayer","ecr:BatchGetImage","ecr:BatchCheckLayerAvailability","ecr:GetAuthorizationToken"],"Resource":"*"},
-    {"Effect":"Allow","Action":["ec2:CreateNetworkInterface","ec2:DescribeNetworkInterfaces","ec2:DeleteNetworkInterface","ec2:DescribeSecurityGroups","ec2:DescribeSubnets"],"Resource":"*"},
-    {"Effect":"Allow","Action":["logs:CreateLogGroup","logs:CreateLogStream","logs:PutLogEvents"],"Resource":"*"}
-  ]}' >/dev/null
+# SCOPED: each action is restricted to the minimum resource set:
+#   - bedrock: only anthropic foundation models + this account's inference profiles
+#   - ecr: only this project's repo (GetAuthorizationToken requires "*" per AWS docs)
+#   - ec2: ENI management (requires "*" — ENIs are created dynamically by AgentCore)
+#   - logs: only this project's log group prefix
+aws iam put-role-policy --role-name "$RUNTIME_ROLE" --policy-name runtime-perms --policy-document "{
+  \"Version\":\"2012-10-17\",\"Statement\":[
+    {\"Effect\":\"Allow\",\"Action\":[\"bedrock:InvokeModel\",\"bedrock:InvokeModelWithResponseStream\"],
+     \"Resource\":[\"arn:aws:bedrock:*::foundation-model/anthropic.*\",
+                   \"arn:aws:bedrock:*:${ACCOUNT}:inference-profile/*\"]},
+    {\"Effect\":\"Allow\",\"Action\":[\"ecr:GetAuthorizationToken\"],\"Resource\":\"*\"},
+    {\"Effect\":\"Allow\",\"Action\":[\"ecr:GetDownloadUrlForLayer\",\"ecr:BatchGetImage\",\"ecr:BatchCheckLayerAvailability\"],
+     \"Resource\":[\"arn:aws:ecr:*:${ACCOUNT}:repository/source-truth/*\"]},
+    {\"Effect\":\"Allow\",\"Action\":[\"ec2:CreateNetworkInterface\",\"ec2:DescribeNetworkInterfaces\",\"ec2:DeleteNetworkInterface\",\"ec2:DescribeSecurityGroups\",\"ec2:DescribeSubnets\"],\"Resource\":\"*\"},
+    {\"Effect\":\"Allow\",\"Action\":[\"logs:CreateLogGroup\",\"logs:CreateLogStream\",\"logs:PutLogEvents\"],
+     \"Resource\":[\"arn:aws:logs:*:${ACCOUNT}:log-group:/source-truth/*\",
+                   \"arn:aws:logs:*:${ACCOUNT}:log-group:/source-truth/*:*\"]}
+  ]}" >/dev/null
 
 # ---- 3. AgentCore SERVICE-LINKED role (fresh-account safe) ----
 # On a brand-new account, AgentCore's VPC mode needs the AWS service-linked role

@@ -50,3 +50,9 @@ Thumbs.db
 .home/
 .codegraph/
 .artifact_sig
+
+# Agent scratch space (drafts, scratch files) — not part of the repo
+.agent/
+
+# Internal / dev-only
+.superpowers/
