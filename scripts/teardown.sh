@@ -285,7 +285,40 @@ if is_set "$VPC"; then
     del "route table $rt" Q delete-route-table --route-table-id "$rt"
   done
 
-  del "VPC $VPC" Q delete-vpc --vpc-id "$VPC"
+  # Flow logs + custom NACLs (both added by provision_network.sh: H7 / H5). Removed explicitly
+  # rather than relying on delete-vpc cascade, so they can never be the thing that pins the VPC.
+  for fl in $(Q describe-flow-logs --filter "Name=resource-id,Values=$VPC" --query 'FlowLogs[].FlowLogId' --output text 2>/dev/null || echo ""); do
+    is_set "$fl" && del "flow log $fl" Q delete-flow-logs --flow-log-ids "$fl"
+  done
+  for acl in $(Q describe-network-acls --filters "Name=vpc-id,Values=$VPC" --query 'NetworkAcls[?IsDefault==`false`].NetworkAclId' --output text 2>/dev/null || echo ""); do
+    is_set "$acl" && del "network acl $acl" Q delete-network-acl --network-acl-id "$acl"
+  done
+
+  # delete-vpc with a BOUNDED RETRY. A NAT gateway's ENI keeps draining for a while after the NAT
+  # is deleted, so the first attempt can lose a race and fail with DependencyViolation. The old
+  # code made one attempt through `del`, which reports "may already be gone" on failure — so a
+  # VPC that was very much still there leaked silently, burning one of the account's 5 VPC slots
+  # on every teardown (observed 2026-08-20). Retry, then report the REAL API error.
+  vpc_err=""
+  for attempt in 1 2 3 4 5 6; do
+    if vpc_err="$(Q delete-vpc --vpc-id "$VPC" 2>&1 >/dev/null)"; then
+      say ok "deleted VPC $VPC"
+      vpc_err=""
+      break
+    fi
+    # Gone already (a 2nd-pass teardown) is success, not a failure to retry.
+    if printf '%s' "$vpc_err" | grep -q InvalidVpcID.NotFound; then
+      say ok "VPC $VPC already gone"
+      vpc_err=""
+      break
+    fi
+    [[ $attempt -lt 6 ]] && sleep 10
+  done
+  if [[ -n "$vpc_err" ]]; then
+    say err "VPC $VPC NOT deleted — it is still billable-adjacent and holds a VPC-quota slot"
+    say err "  → $(printf '%s' "$vpc_err" | tr -d '\n' | cut -c1-300)"
+    say err "  re-run this teardown, or delete the remaining dependency shown above by hand"
+  fi
 fi
 
 # ---- 6. monitoring stack (region-scoped, best-effort — Phase 7 of deploy-all builds it) ----
