@@ -108,6 +108,41 @@ reconcile_index_sg_ingress() { # <sg>
 #     live and how to apply them).
 CURRENT_SIG="$(artifact_signature)"
 
+# --- EC2 auto-recovery + termination protection (C2: runtime reliability) --------
+# System status-check failures (underlying hardware / hypervisor) are unrecoverable
+# without migrating the instance. A CloudWatch alarm triggers EC2 auto-recovery
+# (live-migrates to healthy hardware, preserving instance-id / IP / EBS). Idempotent:
+# put-metric-alarm overwrites, modify-instance-attribute is a no-op when already set.
+#
+# Called from BOTH provisioning paths — local mode (this host) and the two-machine
+# path (the instance we just launched). It MUST stay a function rather than an inline
+# tail block: local mode returns early (`echo "$SELF_IP"; exit 0`), so anything placed
+# after the two-machine run-instances never runs for a single-host deploy. All output
+# goes through `log` (stderr) and AWS output is discarded, so this never pollutes the
+# stdout the caller captures as the host IP.
+arm_instance_resilience() {
+  local iid="$1"
+  local alarm_name="source-truth-index-auto-recover-${REGION}"
+
+  aws cloudwatch put-metric-alarm --region "$REGION" \
+    --alarm-name "$alarm_name" \
+    --namespace AWS/EC2 --metric-name StatusCheckFailed_System \
+    --dimensions "Name=InstanceId,Value=$iid" \
+    --statistic Maximum --period 60 --evaluation-periods 2 \
+    --threshold 1 --comparison-operator GreaterThanOrEqualToThreshold \
+    --alarm-actions "arn:aws:automate:${REGION}:ec2:recover" \
+    --alarm-description "Auto-recover source-truth index-service on system status-check failure" \
+    >/dev/null 2>&1 \
+    && log info "auto-recovery alarm '$alarm_name' armed for $iid" \
+    || log warn "failed to create auto-recovery alarm (non-fatal — instance runs, but won't auto-heal on HW failure)"
+
+  # Termination protection: prevent accidental termination via console / CLI.
+  aws ec2 modify-instance-attribute --region "$REGION" \
+    --instance-id "$iid" --disable-api-termination >/dev/null 2>&1 \
+    && log info "termination protection enabled for $iid" \
+    || log warn "failed to enable termination protection (non-fatal)"
+}
+
 if [[ "$LOCAL_MODE" == "true" ]]; then
   log step "local mode: this host IS the index host — provisioning in place"
   SELF_ID="$(imds_field instance-id)"
@@ -203,6 +238,7 @@ ENV
   update_env "$CONFIG" VPC_ID "$SELF_VPC"
   update_env "$CONFIG" INDEX_SERVICE_SG "$SG"
   update_env "$CONFIG" INDEX_SERVICE_INSTANCE "$SELF_ID"
+  arm_instance_resilience "$SELF_ID"
   log info "local mode: index host ready at $SELF_IP (instance $SELF_ID, dedicated sg $SG)"
   echo "$SELF_IP"; exit 0
 fi
@@ -402,28 +438,8 @@ fi
 update_env "$CONFIG" INDEX_SERVICE_SG "$SG"
 update_env "$CONFIG" INDEX_SERVICE_INSTANCE "$IID"
 
-# --- EC2 auto-recovery + termination protection (C2: runtime reliability) --------
-# System status-check failures (underlying hardware / hypervisor) are unrecoverable
-# without migrating the instance. A CloudWatch alarm triggers EC2 auto-recovery
-# (live-migrates to healthy hardware, preserving instance-id / IP / EBS). Idempotent:
-# put-metric-alarm overwrites if the alarm already exists for a prior run's instance.
-ALARM_NAME="source-truth-index-auto-recover-${REGION}"
-aws cloudwatch put-metric-alarm --region "$REGION" \
-  --alarm-name "$ALARM_NAME" \
-  --namespace AWS/EC2 --metric-name StatusCheckFailed_System \
-  --dimensions "Name=InstanceId,Value=$IID" \
-  --statistic Maximum --period 60 --evaluation-periods 2 \
-  --threshold 1 --comparison-operator GreaterThanOrEqualToThreshold \
-  --alarm-actions "arn:aws:automate:${REGION}:ec2:recover" \
-  --alarm-description "Auto-recover source-truth index-service on system status-check failure" \
-  >/dev/null 2>&1 \
-  && log info "auto-recovery alarm '$ALARM_NAME' armed for $IID" \
-  || log warn "failed to create auto-recovery alarm (non-fatal — instance runs, but won't auto-heal on HW failure)"
-
-# Termination protection: prevent accidental termination via console / CLI.
-aws ec2 modify-instance-attribute --region "$REGION" \
-  --instance-id "$IID" --disable-api-termination >/dev/null 2>&1 \
-  && log info "termination protection enabled for $IID" \
-  || log warn "failed to enable termination protection (non-fatal)"
+# EC2 auto-recovery + termination protection for the instance just launched
+# (local mode arms its own host earlier, before its early return).
+arm_instance_resilience "$IID"
 
 echo "$IP"
