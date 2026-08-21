@@ -146,7 +146,7 @@ codegraph 索引占用内存较高，且随仓库增大而增长，按仓库规�
 
 **术语表构建上限**（初始化环境时会询问一次「术语表构建文件上限」）：术语表将中文业务词对应到代码中
 真实出现的英文符号，使策划用中文也能命中英文代码——它在 index 主机后台离线构建（首次启动时自动安装
-本地 `claude` CLI 作为构建引擎），不在问答路径上。该上限控制每次构建扫描的文件数：
+本地 `claude` CLI（日志事件名里写作 `cc`） 作为构建引擎），不在问答路径上。该上限控制每次构建扫描的文件数：
 
 | 选项 | 适用场景 | 成本量级（一次性） |
 |---|---|---|
@@ -364,7 +364,7 @@ AgentCore 空闲时 CPU 免费、内存照常计费。调大延长 microVM 存�
 多数会话在一次问答后即结束，故默认 15 分钟；追问密集（如客服式高频问答）可调大，需控制成本则调小。
 详见 [`agent/architecture.md`](agent/architecture.md)「Runtime 调参与成本权衡」。
 
-**查看网关日志**（每项目一个 `bot-gateway@<项目>.service`，结构化 JSON 日志进 journald）：
+**查看网关日志**（每项目一个 `bot-gateway@<项目>.service`，结构化 JSON 日志写 `/var/log/bot-gateway-<project>.log`）：
 
 ```bash
 aws ssm start-session --region <r> --target <INDEX_SERVICE_INSTANCE>

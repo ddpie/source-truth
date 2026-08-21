@@ -1,7 +1,7 @@
 # Deployment and operations runbook
 
 How to deploy source-truth from scratch, connect it to Feishu / Lark, and run it day to day. For how
-it works, see [`agent/architecture.md`](agent/architecture.md); this document only covers **what to do**.
+it works, see [`agent/architecture.md`](agent/architecture.md) (Chinese only); this document only covers **what to do**.
 
 The system has two parts, both brought up by the deploy scripts: the **backend** (S3 artifacts → IAM → network → index-service EC2 → container image → AgentCore Runtime) and **bot-gateway** (the Feishu/Lark long-connection gateway, co-located with the index service, which routes messages that @-mention the bot in a group to the backend and streams answers back into a card).
 
@@ -141,7 +141,7 @@ The codegraph index is memory-hungry and grows with repository size, so pick the
 
 The disk defaults to 30 GiB, with 50 / 100 / 200 GiB or a custom size available.
 
-**Glossary build cap** (initializing the environment asks once for the "glossary build file cap"): the glossary maps business terms in Chinese to the English symbols that actually appear in the code, so a designer writing in Chinese still hits English code. It is built offline in the background on the index host (which installs a local `claude` CLI as the build engine on first start) and is not on the Q&A path. The cap bounds how many files each build scans:
+**Glossary build cap** (initializing the environment asks once for the "glossary build file cap"): the glossary maps business terms in Chinese to the English symbols that actually appear in the code, so a designer writing in Chinese still hits English code. It is built offline in the background on the index host (which installs a local `claude` CLI (referred to as `cc` in log event names) as the build engine on first start) and is not on the Q&A path. The cap bounds how many files each build scans:
 
 | Option | When | Cost order of magnitude (one-off) |
 |---|---|---|
@@ -370,9 +370,9 @@ AgentCore charges no CPU while idle but still charges memory. A larger value kee
 raises the chance a follow-up lands on a live instance, at the cost of paying for that idle memory.
 Most sessions end after a single question, hence the 15-minute default; raise it for follow-up-heavy usage
 (support-desk style, high frequency) and lower it when cost matters more.
-See "Runtime tuning and cost trade-offs" in [`agent/architecture.md`](agent/architecture.md).
+See "Runtime tuning and cost trade-offs" in [`agent/architecture.md`](agent/architecture.md) (Chinese only).
 
-**Reading the gateway log** (one `bot-gateway@<project>.service` per project; structured JSON logs go to journald):
+**Reading the gateway log** (one `bot-gateway@<project>.service` per project; structured JSON logs go to `/var/log/bot-gateway-<project>.log`):
 
 ```bash
 aws ssm start-session --region <r> --target <INDEX_SERVICE_INSTANCE>
@@ -514,7 +514,7 @@ Troubleshooting a specific project: on the host every unit name carries the proj
   publication-content checks), and fails if any sub-suite was skipped.
   There is **no** pre-commit / pre-push hook in this repository, and no gitleaks hook — whether you run the
   suite locally before committing is up to you; the gate is CI.
-- **Out-of-scope capabilities are deferred**: multiple branches, reading design documents, writing back, a second engine and so on are all post-MVP; see "MVP scope" in [`../README.md`](../README.md) and the design source of truth in [`design/`](design/).
+- **Out-of-scope capabilities are deferred**: multiple branches, reading design documents, writing back, a second engine and so on are all post-MVP; see "Scope" in [`../README.md`](../README.md) and the design source of truth in [`design/`](design/).
 
 ### Local-repository upload
 
@@ -589,7 +589,7 @@ The remaining flags (all combinable with the above):
 | `--max-files <n>` | 10000 | Cap on files codegraph indexes per repository |
 | `--glossary-max-files <n>` | `0` (unlimited) | Cap on files the glossary build scans per repository. **This is the main cost knob**: unlimited, one full build on a large repository can reach hundreds of dollars (measured ~$372 for 14000 files). Note it only reaches the instance when this round triggers an in-place bootstrap re-run; otherwise edit `/etc/index-service.env` on the instance — see section 6, "Changing the glossary build cap" |
 | `--idle-timeout <seconds>` | 900 | microVM idle-reclaim time (60–28800); also aligns the gateway's session-reuse TTL |
-| `--max-lifetime <seconds>` | 28800 (8h) | Hard ceiling before a microVM is force-reclaimed (60–28800); semantics in [`agent/architecture.md`](agent/architecture.md) |
+| `--max-lifetime <seconds>` | 28800 (8h) | Hard ceiling before a microVM is force-reclaimed (60–28800); semantics in [`agent/architecture.md`](agent/architecture.md) (Chinese only) |
 | `--force` | off | Skip phase 0's hard-blocking preflight (an insufficient vCPU quota, say), treating the operator as having confirmed. Use only when the increase is already granted, or you know the check result is stale |
 
 **Precondition**: the Feishu secret named by each project's `feishuSecretId` in `.local/projects.json`, plus the
