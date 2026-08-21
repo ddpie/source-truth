@@ -740,14 +740,28 @@ def build_bridge(
             import time as _t
             t0 = _t.perf_counter()
             total_entries = 0
+            empty_repos: list[str] = []
             for r in repos:
                 pr = r.local or r.workspace
                 entries = os.listdir(pr)  # 1 metadata read per repo
                 total_entries += len(entries)
                 if entries:
                     os.stat(os.path.join(pr, entries[0]))  # stat read
+                else:
+                    # An EMPTY directory used to count as a successful probe. That is exactly the
+                    # shape of "repo copy wiped" and "local repo before its first push", both of
+                    # which end with the bot answering 'not found' while /health stays green.
+                    empty_repos.append(getattr(r, "name", pr))
             disk_ms = round((_t.perf_counter() - t0) * 1000, 1)
+            if empty_repos:
+                logger.warning(json.dumps({
+                    "event": "repo_probe_empty", "repos": empty_repos,
+                    "detail": "repo copy has no files on disk — the graph will be empty and every "
+                              "answer will be an honest 'not found'. For a local-repo project this "
+                              "is expected until the first push.",
+                }))
             logger.info(json.dumps({"event": "repo_probe", "perf": True,
+                                    "empty_repos": empty_repos,
                                     "latency_ms": disk_ms, "entries": total_entries,
                                     "repos": len(repos)}))
         except Exception as exc:  # noqa: BLE001

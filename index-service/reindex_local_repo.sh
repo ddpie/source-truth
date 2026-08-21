@@ -106,7 +106,7 @@ apply_staged() {
   mkdir -p "$WS/.codegraph" "$WS/.home/.codegraph"
   : > "$CHANGED_LIST"; : > "$DELETED_LIST"
   rsync -a --delete --delay-updates --itemize-changes \
-    --filter='P .codegraph/' --filter='P .home/' \
+    --filter='H .codegraph/' --filter='H .home/' --filter='P .codegraph/' --filter='P .home/' \
     --exclude='.git' --no-links \
     "$STAGE/" "$WS/" | while IFS= read -r line; do
       # itemize lines are "<flags> <path>": an 11-char flag field for a change (e.g. ">f+++++++++"),
@@ -209,6 +209,20 @@ do_build() {
     echo "reindex: first build for $SUBDIR — stopping $BRIDGE to build the graph (single-writer)"
     echo "reindex: NOTE — this takes ALL of project ${PID}'s repos offline until the build finishes."
     systemctl stop "$BRIDGE" 2>/dev/null || true
+    # The bridge is now DOWN and everything below runs under `set -euo pipefail`, so any failure
+    # (an rsync error in apply_staged is the likely one) exits the script with the bridge still
+    # stopped. The bridge is PER PROJECT, so that takes every repo in the project offline until a
+    # human notices — the existing EXIT trap only removes two temp files.
+    # activate_project.sh has exactly this guard (restore_bridge_on_abort) and its comment claims
+    # this file "already handles this correctly"; it only handled the index-build branch.
+    _restore_bridge_on_abort() {
+      _rc=$?
+      [ "$_rc" -eq 0 ] && return 0
+      echo "REINDEX_ABORTED (rc=$_rc): restarting $BRIDGE so the project keeps serving" >&2
+      systemctl reset-failed "$BRIDGE" 2>/dev/null || true
+      systemctl start "$BRIDGE" 2>/dev/null || true
+    }
+    trap _restore_bridge_on_abort EXIT
     apply_staged
     stamp_snapshot
     # Kick the glossary build off NOW, BEFORE the (blocking, minutes-long) graph build — it scans the

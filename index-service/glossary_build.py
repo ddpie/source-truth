@@ -38,6 +38,7 @@ import json
 import logging
 import os
 import random
+import dataclasses
 import re
 import subprocess
 import time
@@ -153,9 +154,15 @@ _CREDENTIAL_RES = (
     re.compile(r"eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\."),     # JWT
     # Keyword rule. `bearer`, `authorization`, `credential`, `passphrase` and `client_secret` were
     # missing, so `Authorization: <token>` and `bearer=<token>` published cleanly.
+    # Boundary is (start | non-alphanumeric | an identifier prefix like `client_`), NOT \b:
+    # `_` is a word character, so \b never fires inside `client_secret` / `app_secret` /
+    # `refresh_token`, and no trailing \b either, so `secretKey:` is reached. This was the widest
+    # remaining hole and the comment above used to claim otherwise.
     re.compile(
-        r"(?i)\b(?:aws_)?(?:secret|password|passwd|passphrase|credential|api[_-]?key"
-        r"|token|bearer|authorization)\b\s*[:=]\s*\S{8,}"
+        r"(?i)(?:^|[^A-Za-z0-9]|[A-Za-z0-9]{0,32}_)"
+        r"(?:aws_)?(?:secret|password|passwd|passphrase|credential|api[_-]?key"
+        r"|token|bearer|authorization|access|private[_-]?key|signature|pwd|cookie|session)"
+        r"[A-Za-z0-9_-]{0,16}\s*[:=]\s*\S{8,}"
     ),
     # `Authorization: Bearer <token>` — the scheme sits BETWEEN the keyword and the value, so the
     # keyword-then-separator rule above does not reach it. Match the scheme and its value directly.
@@ -163,7 +170,9 @@ _CREDENTIAL_RES = (
     # Hex digest / hex-encoded secret (40+ hex chars: SHA-1 and up). Word-bounded rather than
     # whole-string anchored, so a secret with any surrounding character no longer escapes. This
     # also matches a bare git SHA, which costs at most one dropped glossary entry.
-    re.compile(r"\b[0-9a-fA-F]{40,}\b"),
+    # 32, not 40: MD5 digests, Twilio auth tokens and several providers' secret keys are exactly
+    # 32 hex chars, so a floor of 40 excluded a whole class the threat model names.
+    re.compile(r"\b[0-9a-fA-F]{32,}\b"),
     # Base64/base64url blob carrying a padding or non-alphanumeric marker — session tokens,
     # encoded keys. The marker is what keeps a long camelCase identifier out of this rule.
     re.compile(r"^(?=[A-Za-z0-9+/=_\-]{40,}$)[A-Za-z0-9+/=_\-]*[+/=][A-Za-z0-9+/=_\-]*$"),
@@ -175,7 +184,11 @@ _CREDENTIAL_RES = (
 # two), which is why the digit floor is what separates them. Kept deliberately narrow: a false
 # positive silently costs ONE glossary entry (and is counted in the warning line), a false negative
 # publishes a secret into an answer.
-_OPAQUE_MIN_LEN = 40
+# 24, not 40. The old floor let a 32-character credential through, and a Feishu app_secret —
+# named in this module's own threat model as the high-value secret on the host — is exactly 32
+# characters. Length is the weakest of the signals here; the entropy and character-class checks
+# below do the discriminating, so lowering the floor costs little precision.
+_OPAQUE_MIN_LEN = 24
 _OPAQUE_MIN_DIGITS = 4
 # Shannon entropy floor, bits per character. A base64url token is near-uniform over its alphabet
 # (~5.5-6.0); a real code identifier of the same length is word-shaped and repeats characters, so
@@ -200,7 +213,13 @@ def _looks_opaque_secret(value: str) -> bool:
     digits = sum(c.isdigit() for c in value)
     has_lower = any(c.islower() for c in value)
     has_upper = any(c.isupper() for c in value)
-    if not (digits >= _OPAQUE_MIN_DIGITS and has_lower and has_upper):
+    # has_lower AND has_upper let every all-lowercase (or all-uppercase) high-entropy token through
+    # — e.g. a 40-char lowercase alphanumeric API token matched nothing. Mixed case is EVIDENCE of
+    # opacity, not a requirement for it: accept either mixed case or a digit-bearing single-case
+    # token, and let the entropy floor below carry the rest.
+    if digits < _OPAQUE_MIN_DIGITS:
+        return False
+    if not (has_lower or has_upper):
         return False
     # A separator used to disqualify outright, which was the WIDEST hole in this filter: any 40+
     # character secret containing `-` or `_` and no `+/=` padding matched nothing at all — and that
@@ -336,7 +355,7 @@ def extract_entries(raw: str, *, reader: Callable[[str], str] | None = None) -> 
         # to Entry later cannot silently bypass this gate.
         if any(
             isinstance(v, str) and _looks_like_credential(v)
-            for v in (e.concept_id, e.value, e.source)
+            for v in (getattr(e, f.name) for f in dataclasses.fields(e) if isinstance(getattr(e, f.name), str))
         ):
             cred_dropped += 1
             continue

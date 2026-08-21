@@ -17,39 +17,57 @@ SVC_DIR = Path(__file__).resolve().parent.parent
 if str(SVC_DIR) not in sys.path:
     sys.path.insert(0, str(SVC_DIR))
 
+import http_bridge  # noqa: E402  (requires the sys.path insert above)
+
 
 def test_workspace_lock_refuses_second_holder():
+    """A second process taking the SAME workspace must be refused by the PRODUCT function.
+
+    This previously called fcntl.flock directly and therefore asserted that the Linux kernel
+    implements advisory locks — deleting acquire_singleton_writer_lock left it passing. The
+    single-writer guard is what the entire no-corruption invariant rests on, so it has to be the
+    thing under test.
+    """
+    import subprocess
+
     ws = tempfile.mkdtemp() + "/repo"
-    lock_path = ws.rstrip("/") + ".bridge.lock"
+    Path(ws).mkdir(parents=True, exist_ok=True)
 
-    fd1 = open(lock_path, "w")  # noqa: SIM115
-    fcntl.flock(fd1, fcntl.LOCK_EX | fcntl.LOCK_NB)  # first bridge acquires
+    # Hold the lock in THIS process via the product API.
+    http_bridge.acquire_singleton_writer_lock(ws)
 
-    fd2 = open(lock_path, "w")  # noqa: SIM115 - a forked worker's fresh open
-    refused = False
-    try:
-        fcntl.flock(fd2, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except (OSError, BlockingIOError):
-        refused = True
-    assert refused, "second bridge for the same workspace MUST be refused (single-writer)"
+    # A genuinely separate process must be refused. Same interpreter, same function.
+    code = (
+        "import sys; sys.path.insert(0, %r)\n"
+        "import http_bridge\n"
+        "try:\n"
+        "    http_bridge.acquire_singleton_writer_lock(%r)\n"
+        "except BaseException as e:\n"
+        "    print(type(e).__name__); sys.exit(0)\n"
+        "print('ACQUIRED'); sys.exit(1)\n"
+    ) % (str(SVC_DIR), ws)
+    r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, (
+        "a second process acquired the SAME workspace lock — single-writer is not enforced: "
+        f"stdout={r.stdout!r} stderr={r.stderr[-400:]!r}"
+    )
+    assert "ACQUIRED" not in r.stdout
 
-    # After the first releases (process exit), the lock is reusable.
-    fcntl.flock(fd1, fcntl.LOCK_UN)
-    fcntl.flock(fd2, fcntl.LOCK_EX | fcntl.LOCK_NB)  # must not raise now
-    fd1.close()
-    fd2.close()
 
 
 def test_different_workspaces_do_not_collide():
-    # Two bridges serving DIFFERENT repos on the same host must both start.
+    """Two bridges serving DIFFERENT repos on one host must both start.
+
+    Also previously a bare fcntl.flock exercise. Driving the product function is what makes this
+    assert the lock is keyed PER WORKSPACE rather than process-wide — the property that lets one
+    host serve several projects at all.
+    """
     a = tempfile.mkdtemp() + "/repoA"
     b = tempfile.mkdtemp() + "/repoB"
-    fda = open(a.rstrip("/") + ".bridge.lock", "w")  # noqa: SIM115
-    fdb = open(b.rstrip("/") + ".bridge.lock", "w")  # noqa: SIM115
-    fcntl.flock(fda, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    fcntl.flock(fdb, fcntl.LOCK_EX | fcntl.LOCK_NB)  # different key → no conflict
-    fda.close()
-    fdb.close()
+    Path(a).mkdir(parents=True, exist_ok=True)
+    Path(b).mkdir(parents=True, exist_ok=True)
+    http_bridge.acquire_singleton_writer_lock(a)
+    http_bridge.acquire_singleton_writer_lock(b)  # different key → must not raise
 
 
 def _reset_locks(http_bridge):

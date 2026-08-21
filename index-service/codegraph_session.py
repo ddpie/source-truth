@@ -390,6 +390,19 @@ class CodegraphSession:
         warning = str(data.get("warning", ""))
         if "0 nodes" in warning or "only 0" in warning:
             return True, "graph has 0 nodes (corrupt/unindexed)"
+        # STRUCTURAL check, because the substring test above is the engine's wording and nothing
+        # else. If codegraph-server rewords that warning or stops emitting it, the only
+        # empty-graph assertion in the system silently stops working — and the symptom is the bot
+        # answering 'not found' forever with /health green. When the response reports a count, use
+        # it; a reported zero is unambiguous regardless of wording.
+        for count_key in ("nodeCount", "node_count", "totalNodes", "total_nodes", "entityCount"):
+            if count_key in data:
+                try:
+                    if int(data[count_key]) <= 0:
+                        return True, f"graph reports {count_key}=0 (corrupt/unindexed)"
+                except (TypeError, ValueError):
+                    pass
+                break
         return False, "ok"
 
     @property

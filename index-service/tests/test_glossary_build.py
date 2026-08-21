@@ -549,3 +549,45 @@ def test_credential_shapes_are_refused(value):
 ])
 def test_ordinary_identifiers_are_not_refused(value):
     assert not _looks_like_credential(value), f"false positive drops a real entry: {value[:40]}"
+
+
+# --- 凭据过滤器：曾经漏过的形状 ------------------------------------------------
+# 这些全部是实测漏过的，不是假想。列在这里是因为它们各自对应一个具体的失效原因，
+# 而不是"再加几个样本"。
+@pytest.mark.parametrize(
+    "sample, why",
+    [
+        # `_` 是 word char，所以关键字规则开头的 \b 在 snake_case 里永远不匹配。
+        # 上一版注释明确声称 client_secret 已覆盖 —— 而那条测试其实是被 base64 长度规则命中的
+        # （样本恰好 44 字符），把这个漏洞掩盖住了。
+        ("client_secret=abc12345", "snake_case 前缀让 \\b 失效"),
+        ("app_secret=abc12345", "同上"),
+        ("refresh_token=abc12345", "同上"),
+        # 结尾的 \b 让 `secretKey:` 这种驼峰后缀也进不来。
+        ("secretKey: abc12345", "驼峰后缀让结尾 \\b 失效"),
+        # 长度地板曾是 40，而飞书 app_secret 恰好 32 位 —— 正是本模块 threat model 点名的目标。
+        ("kZ8mQ3vXpL0aRt7YbN2wEcHs6UdFjG1i", "32 位混合大小写，旧地板 40 放行"),
+        # has_lower AND has_upper 让纯单一大小写的高熵 token 整类漏过。
+        ("k3j9d0s8a7f6g5h4z2x1c9v8b7n6m5q4w3e2r1t0", "纯小写高熵，AND 条件放行"),
+        # hex 地板曾是 40，漏掉 MD5 / Twilio auth token 这一类 32 位 hex。
+        ("d41d8cd98f00b204e9800998ecf8427e", "32 位 hex，旧地板 40 放行"),
+    ],
+)
+def test_previously_leaking_credential_shapes_are_caught(sample, why):
+    assert _looks_like_credential(sample), f"应被拦下（{why}）: {sample}"
+
+
+@pytest.mark.parametrize(
+    "sample",
+    [
+        "背包格子数量上限",
+        "InventorySlots",
+        "MAX_BAG_SIZE",
+        "player health regeneration rate",
+        "GetBagSize",
+        "BankBagSlotPrices.dbc",
+    ],
+)
+def test_legitimate_glossary_terms_still_pass(sample):
+    # 放宽地板后最大的风险是误杀真实术语，所以正向用例和反向用例一起钉住。
+    assert not _looks_like_credential(sample), f"不应被拦下: {sample}"

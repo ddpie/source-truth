@@ -84,7 +84,15 @@ def candidate_files(repo_root: str) -> list[str]:
     root = os.path.realpath(repo_root)
     out: list[str] = []
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in (".git", "node_modules", ".venv")]
+        # .home / .codegraph MUST be pruned: http_bridge sets HOME=<workspace>/.home, which puts the
+        # RocksDB graph store INSIDE the very tree being scanned, and its files (.sst, .log,
+        # MANIFEST-*, CURRENT, OPTIONS-*, LOCK) are not in _BINARY_EXTS. Without this, a full build
+        # feeds hundreds of megabytes of binary graph data to the model — burning cost on content
+        # that can never yield a glossary term, and shipping internal index state into a prompt.
+        dirnames[:] = [
+            d for d in dirnames
+            if d not in (".git", "node_modules", ".venv", ".home", ".codegraph", "__pycache__")
+        ]
         for fn in filenames:
             if not _is_term_file(fn):
                 continue
