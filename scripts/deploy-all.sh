@@ -135,6 +135,14 @@ while [[ $# -gt 0 ]]; do
     --glossary-max-files) GLOSSARY_MAX_FILES="$2"; shift 2 ;;
     --root-volume-gb) ROOT_VOLUME_GB="$2"; shift 2 ;;
     --model) MODEL="$2"; shift 2 ;;
+    # Tenant domain: feishu (China) or lark (international). Drives BOTH the gateway's event
+    # long-connection and its REST base — they must not be set independently.
+    --feishu-domain)
+      case "$2" in
+        feishu|lark) FEISHU_DOMAIN="$2" ;;
+        *) say err "--feishu-domain must be 'feishu' (China) or 'lark' (international), got '$2'"; exit 2 ;;
+      esac
+      shift 2 ;;
     --idle-timeout) IDLE_TIMEOUT="$2"; shift 2 ;;
     --max-lifetime) MAX_LIFETIME="$2"; shift 2 ;;
     --skip)
@@ -180,6 +188,11 @@ REGION="${REGION:-${DEPLOY_REGION:-}}"
 # reconcile re-run keeps the earlier choice instead of reverting to the default
 # (which would flip the live runtime's model via the in-place update).
 MODEL="${MODEL:-${DEPLOY_MODEL:-$DEFAULT_MODEL}}"
+# Tenant domain, same flag > persisted > default chain as the settings above. Persisted so a
+# per-project deploy (deploy_project.sh) and every later re-run inherit it without the flag.
+FEISHU_DOMAIN="${FEISHU_DOMAIN:-${DEPLOY_FEISHU_DOMAIN:-feishu}}"
+export FEISHU_DOMAIN
+update_env "$CONFIG_FILE" DEPLOY_FEISHU_DOMAIN "$FEISHU_DOMAIN"
 # Keep the operator's declared choice for persistence (DEPLOY_MODEL should record what
 # they asked for, not a per-region derivative), but the RUNTIME needs a profile that
 # actually exists in THIS region. The default is a global.* profile; many regions
@@ -295,6 +308,19 @@ preflight_docker() {
     say err "docker is installed but its daemon isn't running — Phase 4 (image build) needs it."
     say err "  → start Docker Desktop (or dockerd), wait until ready, then re-run. Verify: docker info"
     [[ "$DRY_RUN" == true ]] || exit 1
+  fi
+  # ARM64 BUILD CAPABILITY — checked HERE, in preflight, not at Phase 4 where it used to live.
+  # The agent container is ARM64-only, and most laptops are x86. Failing at Phase 4 meant the
+  # operator had already paid for Phase 2's NAT gateway (billing starts at creation) and waited
+  # through Phase 3's EC2 launch + bootstrap — roughly ten minutes and real money before being
+  # told their machine cannot build the image at all.
+  if [[ "$(uname -m)" != "aarch64" && "$(uname -m)" != "arm64" ]]; then
+    if ! docker buildx inspect --bootstrap 2>/dev/null | grep -q "linux/arm64"; then
+      say err "host is $(uname -m) and cannot build linux/arm64. Set up emulation first:"
+      say err "  docker run --privileged --rm tonistiigi/binfmt --install arm64"
+      say err "  (or run the deploy from an arm64 host). The agent container is ARM64-only."
+      [[ "$DRY_RUN" == true ]] || exit 1
+    fi
   fi
 }
 # Phase 5 configures the AgentCore Runtime via boto3 (lib/deploy_runtime.py), NOT the
@@ -702,16 +728,8 @@ else
   require_cmd docker "install Docker (buildx, ARM64 capable)" || exit 1
   # The agent image is ARM64-only. On an x86_64 host without arm64 emulation, the
   # build silently produces an unusable image that Phase 5 then consumes. Fail LOUD
-  # with the fix command unless the host is arm64 OR a linux/arm64 buildx target is
-  # available. (On the ARM dev host this passes immediately.)
-  if [[ "$(uname -m)" != "aarch64" && "$(uname -m)" != "arm64" ]]; then
-    if ! docker buildx inspect --bootstrap 2>/dev/null | grep -q "linux/arm64"; then
-      say err "host is $(uname -m) and cannot build linux/arm64. Set up emulation first:"
-      say err "  docker run --privileged --rm tonistiigi/binfmt --install arm64"
-      say err "  (or run the deploy from an arm64 host). The agent container is ARM64-only."
-      exit 1
-    fi
-  fi
+  # ARM64 build capability is verified in preflight_docker (Phase 0) — before any billable
+  # resource exists — so there is no gate here.
   ECR_REPO="source-truth/agent"
   GIT_SHA="$(git -C "$ROOT" rev-parse --short HEAD)"
   ECR_BASE="${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com/${ECR_REPO}"

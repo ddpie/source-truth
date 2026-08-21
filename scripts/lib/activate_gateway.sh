@@ -65,6 +65,10 @@ PROJECT_ID='${PROJECT_ID}'"
 LOG_HASH_SALT='${LOG_HASH_SALT}'"
 [[ -n "$FEISHU_API_BASE" ]] && ENV_BODY="${ENV_BODY}
 FEISHU_API_BASE='${FEISHU_API_BASE}'"
+# Tenant domain: drives BOTH the event long-connection and the REST base in the gateway. Emitted
+# only when non-default so an existing deploy's env file is unchanged.
+[[ -n "${FEISHU_DOMAIN:-}" && "${FEISHU_DOMAIN}" != "feishu" ]] && ENV_BODY="${ENV_BODY}
+FEISHU_DOMAIN='${FEISHU_DOMAIN}'"
 # The runtime's idle timeout (seconds) — the gateway derives its session-reuse TTL
 # from this so "reusable on the gateway" never outlives "still warm on AgentCore".
 [[ -n "$IDLE_TIMEOUT" ]] && ENV_BODY="${ENV_BODY}

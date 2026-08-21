@@ -83,26 +83,44 @@ purpose for all 23 services and resources: [`docs/aws-services_en.md`](docs/aws-
 
 ## Prerequisites
 
-On the machine you deploy **from**:
+On the machine you deploy **from** — these are what the deploy actually checks and hard-fails on:
 
 - **AWS account** with permissions for EC2, Bedrock, ECR, S3, Secrets Manager, IAM
 - **Bedrock AgentCore** access (Runtime API enabled in your region)
 - **AWS CLI v2** — v1 is not supported
+- **Python 3** with a recent **boto3** that has `bedrock-agentcore-control`. Upgrade with
+  `python3 -m pip install -U boto3`; on a PEP-668 system (recent macOS/Ubuntu) use a virtualenv
+  or add `--break-system-packages`, or the upgrade silently does nothing.
+- **Docker** with a running daemon, able to build **linux/arm64** — the agent container is
+  ARM64-only. On an x86 host, enable emulation first:
+  `docker run --privileged --rm tonistiigi/binfmt --install arm64`
+- **GNU tar** — stock macOS ships BSD tar, which cannot produce reproducible archives. Without
+  it the index host reads the artifacts as changed on every deploy and re-bootstraps in place,
+  interrupting every bot on it. `brew install gnu-tar` provides `gtar`, which is picked up
+  automatically.
 - **Session Manager plugin** — required for every verification and day-2 operation
   ([install guide](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html));
   it does not ship with the AWS CLI
-- **Docker** with a running daemon — Phase 4 builds the ARM64 agent image locally
 - **git**, and **`gh`** (authenticated via `gh auth login`) if your target repository is private
-- **Node.js 24** — for bot-gateway
-- **Python 3.11** (agent-container, matching its container base image) / **3.12** (index-service)
+- **An EC2 key pair** plus its local `.pem` — only for `--local`, whose host you SSH into
+- **`rsync`** — only if you push a local repository snapshot instead of cloning from git
 - **`zip`** — optional, only for the DAU pre-aggregation Lambda
+
+Node.js and Python toolchains are **not** needed locally: the gateway is built on the index host
+and the agent runs in a container.
 
 Also required:
 
-- **Feishu (Lark) bot credentials** — App ID, App Secret, Bot Open ID. The installer creates the
-  Secrets Manager entry for you; you supply the values interactively.
-- **codegraph-server** — the index engine binary. See
-  [`docs/runbook.md`](docs/runbook.md) for how to obtain and stage it.
+- **Feishu / Lark bot credentials** — App ID, App Secret, Bot Open ID. The installer creates the
+  Secrets Manager entry for you; you supply the values interactively. See
+  [`docs/runbook.md`](docs/runbook.md) §3 for the console walkthrough.
+  Both tenants are supported: pass `--feishu-domain feishu` for Feishu (China, the default) or
+  `--feishu-domain lark` for international Lark. That one switch drives both the event
+  long-connection and the REST base URL — setting only one of them yields an app that
+  authenticates and then never receives events.
+- **codegraph-server** — the index engine binary, downloaded automatically from this repository's
+  GitHub Release during the artifacts phase. Override with `CODEGRAPH_SERVER_BIN=/path/to/binary`
+  if you are staging it yourself.
 
 ## Cost
 

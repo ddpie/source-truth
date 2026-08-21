@@ -95,10 +95,23 @@ fi
 # shell/JSON escaping games. The git credential is fetched HOST-SIDE by activate_project (only
 # its secret id crosses SSM, never the token).
 MANIFEST_B64="$(printf '%s' "$REPO_MANIFEST_JSON" | base64 | tr -d '\n')"
+# Publish the index-service tree via a STAGING dir + rsync, not `tar xzf` straight over
+# /opt/idx/app. Every other project's index-bridge is live out of that directory, and the
+# transient glossary-build / index-refresh units run from it too, so extracting in place swaps
+# files under running Python. rsync renames per file, so an open fd keeps its old inode, and
+# --delete-after removes modules dropped upstream (a plain untar left them behind forever).
+# Same fix bootstrap.sh got; this path runs far more often — on every per-project deploy.
 REMOTE_CMD="set -e
 aws s3 cp s3://${ARTIFACT_BUCKET}/index-service.tar.gz /tmp/idx-refresh.tar.gz --region ${REGION}
-tar xzf /tmp/idx-refresh.tar.gz -C /opt/idx/app && rm -f /tmp/idx-refresh.tar.gz
-chmod +x /opt/idx/app/activate_project.sh /opt/idx/app/git_fetch.sh /opt/idx/app/glossary_refresh.sh /opt/idx/app/reindex_local_repo.sh
+IDX_STAGE=\$(mktemp -d /opt/idx/app.stage.XXXX)
+trap 'rm -rf \"\$IDX_STAGE\"' EXIT
+tar xzf /tmp/idx-refresh.tar.gz -C \"\$IDX_STAGE\" && rm -f /tmp/idx-refresh.tar.gz
+# Refuse to publish an incomplete extract — a truncated download would otherwise wipe the
+# live tree via --delete-after.
+[ -f \"\$IDX_STAGE/http_bridge.py\" ] && [ -f \"\$IDX_STAGE/activate_project.sh\" ] || { echo 'ACTIVATE_FAILED: staged index-service tree is incomplete'; exit 1; }
+chmod +x \"\$IDX_STAGE\"/activate_project.sh \"\$IDX_STAGE\"/git_fetch.sh \"\$IDX_STAGE\"/glossary_refresh.sh \"\$IDX_STAGE\"/reindex_local_repo.sh
+mkdir -p /opt/idx/app
+rsync -a --delay-updates --delete-after \"\$IDX_STAGE\"/ /opt/idx/app/
 mkdir -p /etc/index-projects
 echo '${MANIFEST_B64}' | base64 -d > /tmp/manifest-${PID}.json
 PROJECT_ID='${PID}' GIT_SECRET_ID='${GIT_SECRET_ID}' MODEL='${RT_MODEL}' REPO_MANIFEST_JSON=\"\$(cat /tmp/manifest-${PID}.json)\" bash /opt/idx/app/activate_project.sh
@@ -178,7 +191,9 @@ if ! aws secretsmanager describe-secret --region "$REGION" --secret-id source-tr
     || say warn "could not create source-truth/log-hash-salt; gateway runs with weak public fallback (saltWeak)"
   unset GW_SALT
 fi
-PROJECT_ID="$PID" bash "$SCRIPT_DIR/activate_gateway.sh" \
+PROJECT_ID="$PID" \
+FEISHU_DOMAIN="${FEISHU_DOMAIN:-$(sed -n 's/^DEPLOY_FEISHU_DOMAIN=//p' "$CONFIG_FILE" 2>/dev/null | tail -1)}" \
+  bash "$SCRIPT_DIR/activate_gateway.sh" \
   "$REGION" "$IID" "$RT_ARN" "$FEISHU_SECRET" \
   "${LOCALE:-zh}" "" "${FEISHU_API_BASE:-}" "${DEPLOY_IDLE_TIMEOUT:-900}" "$ARTIFACT_BUCKET" \
   || { say err "gateway activation failed for $PID — backend is up; fix and re-run"; exit 1; }

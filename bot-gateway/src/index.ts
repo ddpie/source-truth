@@ -53,6 +53,20 @@ import { loadProjectsConfig, resolveRoute, ProjectsConfigMissing, type ProjectsC
 import { startHealthServer, deriveHealthPort, markConnected, markReconnecting, markReconnected, markConnecting, markDisconnected, markDraining, markEventReceived } from "./health";
 
 const RUNTIME_ARN = process.env.RUNTIME_ARN ?? "";
+// Tenant domain: "feishu" (China, open.feishu.cn) or "lark" (international, open.larksuite.com).
+// One switch drives BOTH the event long-connection (WSClient below) and the REST base URL
+// (src/feishu-http.ts), because setting only one of them yields an app that authenticates but
+// never receives events. Anything unrecognised falls back to feishu rather than failing the
+// gateway, and is logged so the operator sees the typo.
+const FEISHU_DOMAIN = (() => {
+  const raw = (process.env.FEISHU_DOMAIN ?? "feishu").trim().toLowerCase();
+  if (raw === "feishu" || raw === "lark") return raw;
+  console.log(JSON.stringify({
+    ts: new Date().toISOString(), event: "feishu_domain_invalid",
+    value: raw.slice(0, 32), fallback: "feishu",
+  }));
+  return "feishu";
+})();
 // Region: AWS_REGION (deploy sets it) → AWS_DEFAULT_REGION → derived from the RUNTIME_ARN
 // (arn:aws:bedrock-agentcore:<region>:...). NEVER hardcode a region default — this ships to
 // customer accounts in any region, and a wrong silent default (e.g. Tokyo) would point the
@@ -1727,6 +1741,11 @@ async function main(): Promise<void> {
   const ws = new lark.WSClient({
     appId: APP_ID,
     appSecret: APP_SECRET,
+    // TENANT DOMAIN. Without this the SDK targets Feishu (China) regardless, so an
+    // international Lark app configured correctly in its own console would authenticate on
+    // REST calls (which honour FEISHU_API_BASE) and then never connect the event socket —
+    // a silent, hard-to-diagnose split. FEISHU_DOMAIN=lark selects open.larksuite.com.
+    domain: FEISHU_DOMAIN === "lark" ? lark.Domain.Lark : lark.Domain.Feishu,
     loggerLevel: lark.LoggerLevel.warn,
     onReady: () => { markConnected(); log({ event: "sdk_wsclient_connected" }); }, // the REAL "receiving events" signal
     onReconnecting: () => { markReconnecting(); log({ event: "sdk_wsclient_reconnecting" }); },
