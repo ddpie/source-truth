@@ -60,7 +60,7 @@ scripts/                运维生命周期
   check-versions.sh     版本固定防漂移守卫（base digest / requirements pin / Node / claude-code npm）
   get.sh                一行引导脚本（curl/gh 取来跑）：把仓库 clone 到 ./source-truth 再交给 install.sh；可重跑（已存在则 git pull）
   install.sh            交互式一键安装（查依赖→飞书凭证→配置→确认→调 deploy-all；重跑预填；添加项目可选 git 仓或 local 仓）
-  push-local-repo.sh    客户机侧：rsync 直推本地仓到索引主机暂存目录并触发重建（local 仓刷新入口；不经 git）
+  push-local-repo.sh    本机侧：rsync 直推本地仓到索引主机暂存目录并触发重建（local 仓刷新入口；不经 git）
   deploy-all.sh         一键部署的权威入口（artifacts→IAM→network→index-service→镜像→Runtime→gateway；幂等；--local 在本机就地部署）
   launch-host.sh        --local（单台 EC2）模式入口（运维本地跑）：选 profile → 建 IAM → 自动建净网（VPC/公私子网/IGW/NAT，复用 provision_network.sh）+ host 安全组（只放行运维 IP 的 22）→ 起公有子网 ARM64 EC2 挂好实例角色 → 打印后续步骤
   lib/create-iam.sh     建/复用 --local 模式实例角色 + instance profile，并补部署期权限（幂等；由 launch-host.sh 内部调用）
@@ -85,8 +85,8 @@ docs/
   aws-services_zh.md    用到的 AWS 服务清单：干什么用 / 计费点（双语配对 aws-services_en.md）
   design/               设计权威依据（仅中文，暂不翻译）
     README.md                   目录说明 + 与架构 / 不变量文档的关系
-    requirements_zh.md          需求与方案评审纪要（导入）
-    architecture-overview_zh.md POC 架构方案（导入）
+    requirements_zh.md          需求与设计决策（MVP 边界）
+    architecture-overview_zh.md POC 架构方案
     agent-container_zh.md       agent-container 组件实现契约
     multi-repo-isolation_zh.md  多仓隔离方案（每仓独立 CodeGraph + 服务端 scope gate + fan-out）
   agent/                AI 面向文档

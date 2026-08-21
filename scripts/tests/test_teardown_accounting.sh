@@ -6,7 +6,7 @@
 # 另外 wait_gone 的 `return 0` 是承重的：它一度返回 1，而每个调用点都是 `set -euo pipefail`
 # 下的裸命令，于是第一个慢 NAT 就把整个 teardown 中断 —— EIP 没释放、VPC/子网/安全组没动、
 # 监控没清，而屏幕上那句警告写着"continuing"。这两条性质都只差一次随手修改就会静默回退，
-# 而症状是客户的账单，所以用最便宜的方式（纯 bash，不需要 aws 桩）把它们钉住。
+# 而症状是使用者的 AWS 账单，所以用最便宜的方式（纯 bash，不需要 aws 桩）把它们钉住。
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 _run=0; _fail=0

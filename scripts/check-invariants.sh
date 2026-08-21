@@ -41,7 +41,7 @@ shopt -u nullglob
 #     改成白名单模型：新增一份中文独有文档，必须显式写进 DOC_CHINESE_ONLY —— 那是一个在 review
 #     里看得见的决定，而不是一次悄悄的默认。
 DOC_CHINESE_ONLY=(
-  # 内部交付物导入的设计依据，已在 docs/design/README.md 自我声明为中文
+  # 设计依据文档，已在 docs/design/README.md 自我声明为中文
   "docs/design/README.md"
   "docs/design/requirements_zh.md"
   "docs/design/architecture-overview_zh.md"
@@ -146,7 +146,7 @@ else
 fi
 
 # 9. 公开仓不得包含真实人名 / 客户环境 / 竞品名
-#    docs/design/ 由内部交付物导入，曾带负责人姓名、客户环境描述、交付责任人表和竞品对比。
+#    规则：公开仓不得含客户环境描述、交付责任人/交付物表、真实人名或竞品名。
 #
 #    这一条曾经只 grep 五个写死的人名、且只扫 docs/ —— 结果它在一棵仍然含有整节「客户环境（会上已
 #    澄清）」（仓库拓扑、团队规模、自建 Git、分支策略）和一张带「责任人 / 交付物」列的交付行动表的
@@ -157,8 +157,15 @@ PII_PATTERNS=(
   '客户环境' '客户侧' '客户内网' '贵司' '会上已' '会上澄清' '责任人' '交付物'
   'PoC 客户' '试点客户'   # 注：'内网地址' 曾在此，但它是通用安全术语（system.md 用它写
                         # 「绝不输出内网地址」这条规则），属于低信号高误报，已移除。
+  '需求评审' '需客户'
   'WorkBuddy' 'GenSpark'
 )
+# 裸「客户」单独处理：它是最强的信号，但 '客户端'（client-side）是完全合法的技术词，
+# 全仓都在用。所以先删掉 '客户端' 再匹配剩下的「客户」—— 这样 '客户调研' / '贴近客户特征'
+# / '客户的' / '客户商业美术资源' / '客户接入时' 都会命中，而 '客户端引擎' 不会。
+# 为什么加这条：前两版守卫都是固定词表，而真正漏掉的内容（一整节客户确认问卷、五处
+# 「客户」归因、客户技术栈）没有一处用到词表里的词。词表拦得住已经知道的，拦不住下一份。
+PII_BARE_CUSTOMER='客户'
 pii_re="$(IFS='|'; printf '%s' "${PII_PATTERNS[*]}")"
 # 这个守卫本身必然包含上面的字面量，扫自己等于永远失败，所以排除它。
 # 只看被跟踪的文本文件；.local/ 等未跟踪内容不属于发布物。
@@ -174,19 +181,30 @@ pii_hits="$(git ls-files -z 2>/dev/null \
   | grep -zv '^scripts/check-invariants\.sh$' \
   | xargs -0 -r grep -lE "$pii_re" 2>"$pii_err")"
 pii_rc=$?
+# 裸「客户」：逐文件把 '客户端' 抹掉后再找「客户」，避免 client-side 的误报。
+pii_bare=""
+while IFS= read -r _f; do
+  [[ -z "$_f" || "$_f" == "scripts/check-invariants.sh" ]] && continue
+  if sed 's/客户端//g' "$_f" 2>/dev/null | grep -q "$PII_BARE_CUSTOMER" 2>/dev/null; then
+    pii_bare="${pii_bare}${_f}"$'\n'
+  fi
+done <<< "$(git ls-files 2>/dev/null || true)"
 set -e
 if [[ $pii_rc -gt 1 && -s "$pii_err" ]]; then
   err "PII 扫描本身失败（模式非法或文件不可读），不能据此判定干净："
   printf '      %s\n' "$(head -3 "$pii_err")" >&2
   rm -f "$pii_err"
-elif [[ -n "$pii_hits" ]]; then
+elif [[ -n "$pii_hits" || -n "$pii_bare" ]]; then
   rm -f "$pii_err"
-  err "文件中出现客户环境 / 交付责任人 / 真实人名 / 竞品名信号（公开仓不可含）："
-  printf '      %s\n' "$pii_hits" >&2
+  err "文件中出现客户 / 交付责任人 / 真实人名 / 竞品名信号（公开仓不可含）："
+  [[ -n "$pii_hits" ]] && printf '      %s\n' "$pii_hits" >&2
+  [[ -n "$pii_bare" ]] && printf '      [裸「客户」，已排除「客户端」] %s\n' "$(printf '%s' "$pii_bare" | tr '\n' ' ')" >&2
   printf '      命中的模式集见 check-invariants.sh 第 9 项；若为误报请改写措辞，不要放宽模式。\n' >&2
 else
   rm -f "$pii_err"
-  ok "无客户环境 / 交付责任人 / 人名 / 竞品名信号"
+  # 措辞刻意保守：这是一个词表 + 一个裸词，拦不住纯叙述性的段落。前三轮每一次漏掉的都是
+  # 叙述而不是关键词，所以这里只能声称"未命中已知信号"，不能声称"干净"。
+  ok "未命中已知客户 / 交付 / 人名 / 竞品信号（词表检查，不替代人工审阅 docs/design 与 docs/agent/*spike*）"
 fi
 
 if [[ $fail -ne 0 ]]; then

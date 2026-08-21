@@ -168,7 +168,7 @@ source-truth 不同于「在容器外把 AI 当远程 MCP 客户端」的常见�
 
 ## 待验证技术点（POC 优先，影响架构定型）
 
-- CodeGraph 对前端 Unity 风格 C# 与后端 Node.js（及 Lua 元表等动态模式）的索引召回率；
+- CodeGraph 对 C# / TypeScript / Lua 等动态特性较强语言的索引召回率；
 - 首次全量索引耗时（社区 13 万文件约 1 小时量级）；
 - CodeGraph stdio→HTTP 转换（mcp-proxy 类）的稳定性、并发、路径对齐（工具返回仓库相对路径，如 `Assets/Scripts/Foo.cs`）；
 - 经 HTTP 接口读文件的延迟（索引精准读取 vs 全仓文本检索兜底两条路径）；

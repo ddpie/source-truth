@@ -85,8 +85,8 @@ docs/
   aws-services_zh.md    AWS services in use: what for / billing points (bilingual pair aws-services_en.md)
   design/               Design source of truth (Chinese only, not yet translated)
     README.md                   Directory notes + relation to architecture / invariants docs
-    requirements_zh.md          Requirements & solution review notes (imported)
-    architecture-overview_zh.md POC architecture plan (imported)
+    requirements_zh.md          Requirements & design decisions (MVP scope)
+    architecture-overview_zh.md POC architecture plan
     agent-container_zh.md       agent-container component implementation contract
     multi-repo-isolation_zh.md  Multi-repo isolation design (per-repo CodeGraph + server-side scope gate + fan-out)
   agent/                AI-facing docs
