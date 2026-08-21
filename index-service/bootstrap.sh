@@ -282,8 +282,17 @@ StandardError=append:/var/log/bot-gateway-%i.log
 MemoryHigh=768M
 MemoryMax=1G
 OOMPolicy=stop
-# Health-check probe: verify the health endpoint binds after start (best-effort, non-blocking).
-ExecStartPost=/bin/bash -c 'for i in 1 2 3 4 5; do sleep 1; curl -sf http://127.0.0.1:18080/health >/dev/null 2>&1 && exit 0; done; echo "WARN: health endpoint not yet reachable after 5s"'
+# Readiness probe. Two things this must get right, both of which a hard-coded
+# `http://127.0.0.1:18080/health` got wrong:
+#   - PORT: the health port is per-project (bridge+10000), so 18080 is only correct for a
+#     project whose bridge is 8080. activate_gateway.sh pins HEALTH_PORT in this instance's
+#     env file; read it from there and skip the probe when it is absent.
+#   - ROUTE: /health is LIVENESS and answers 200 as soon as the port is bound, which makes it
+#     a vacuous gate. /ready is 200 only once the Feishu long-connection is actually up, which
+#     is what "did this gateway come up" means.
+# Best-effort by construction: the loop always exits 0, so a slow connect warns but never marks
+# the unit failed.
+ExecStartPost=/bin/bash -c 'p="$(. /etc/bot-gateway-%i.env 2>/dev/null; echo "${HEALTH_PORT:-}")"; [ -n "$p" ] || { echo "NOTE: HEALTH_PORT unset for %i — skipping readiness probe"; exit 0; }; for i in 1 2 3 4 5 6 7 8 9 10; do sleep 1; curl -sf "http://127.0.0.1:$p/ready" >/dev/null 2>&1 && exit 0; done; echo "WARN: gateway %i not ready after 10s (port $p)"'
 [Install]
 WantedBy=multi-user.target
 UNIT

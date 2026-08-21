@@ -134,46 +134,86 @@ mk_rt source-truth-private-rt "$PRIV" --nat-gateway-id "$NAT"
 VPC_CIDR="$(Q describe-vpcs --vpc-ids "$VPC_ID" --query 'Vpcs[0].CidrBlock' --output text)"
 
 # ---- H5: Restrictive Network ACL on private subnet ----
-# Allows only: TCP 8080-8099 + 443 from VPC CIDR (index bridge + internal HTTPS),
-# ephemeral return traffic inbound, all outbound (NAT egress). Denies all else.
+# Inbound: TCP 8080-8099 and 443 from the VPC CIDR (index bridge + internal HTTPS), plus
+# ephemeral RETURN traffic (TCP and UDP) and ICMP fragmentation-needed. Outbound: allow all,
+# which NAT egress requires. Everything else hits the implicit deny at 32767.
 NACL_ID="$(by_name network-acls source-truth-private-nacl NetworkAcls NetworkAclId)"
 if [[ "$NACL_ID" == "None" || -z "$NACL_ID" ]]; then
   NACL_ID="$(Q create-network-acl --vpc-id "$VPC_ID" --query NetworkAcl.NetworkAclId --output text)"
   tag "$NACL_ID" source-truth-private-nacl
 fi
-# Replace ALL entries on every run (idempotent convergence). Custom NACLs start with
-# a default deny-all pair (rule 32767), so we only need to add our ALLOW rules.
-# First, remove any prior custom entries (rule numbers < 32767) to avoid drift.
+
+# ADDITIVE convergence, never delete-then-recreate.
+#
+# The previous version deleted every custom entry and then re-created them. A custom NACL's
+# baseline is deny-all, so that opened a window where the private subnet denied ALL traffic in
+# both directions — and under `set -euo pipefail` any failure among the re-creates (throttle,
+# IAM denial, transient) exited the script and left the subnet at deny-all permanently: bridge
+# down, NAT egress down, SSM down, i.e. no way back in except the console. Self-inflicted and
+# exactly the kind of outage a "security hardening" step must not cause.
+#
+# Instead: create each desired rule, and if that rule number already exists, REPLACE it in
+# place. There is no moment at which a needed rule is absent. Same tolerate-duplicate pattern
+# authorize_ingress already uses for security-group rules.
+nacl_rule() { # <ingress|egress> <rule-number> <aws-cli args...>
+  local dir="$1" num="$2"; shift 2
+  local flag="--ingress"; [[ "$dir" == "egress" ]] && flag="--egress"
+  if ! Q create-network-acl-entry --network-acl-id "$NACL_ID" "$flag" --rule-number "$num" "$@" >/dev/null 2>&1; then
+    Q replace-network-acl-entry --network-acl-id "$NACL_ID" "$flag" --rule-number "$num" "$@" >/dev/null
+  fi
+}
+
+# 100: TCP 8080-8099 from the VPC only — the index bridge ports.
+nacl_rule ingress 100 --protocol 6 --port-range "From=8080,To=8099" --cidr-block "$VPC_CIDR" --rule-action allow
+# 110: TCP 443 from the VPC only — internal HTTPS between co-located components.
+nacl_rule ingress 110 --protocol 6 --port-range "From=443,To=443" --cidr-block "$VPC_CIDR" --rule-action allow
+# 120/130: ephemeral RETURN traffic for connections this subnet originated through the NAT.
+# Scoped to the Linux ephemeral range (32768-60999), NOT 1024-65535: the wider range fully
+# contained rule 100, so the bridge ports were in practice reachable from 0.0.0.0/0 and rule
+# 100's VPC-CIDR restriction was dead. UDP is listed too — egress allows all protocols, so a
+# TCP-only return rule silently blackholes UDP replies (an NTP fallback off the link-local
+# source then drifts the clock until SigV4 signatures start failing, which looks like an IAM
+# fault). The VPC resolver, IMDS and Amazon Time Sync are link-local and unaffected by NACLs.
+nacl_rule ingress 120 --protocol 6 --port-range "From=32768,To=60999" --cidr-block "0.0.0.0/0" --rule-action allow
+nacl_rule ingress 130 --protocol 17 --port-range "From=32768,To=60999" --cidr-block "0.0.0.0/0" --rule-action allow
+# 140: ICMP type 3 code 4 (fragmentation needed) so Path MTU Discovery works. Without it large
+# TLS transfers hang rather than fail — ECR layer pulls, npm ci, apt — which is intermittent and
+# very expensive to diagnose.
+nacl_rule ingress 140 --protocol 1 --icmp-type-code "Type=3,Code=4" --cidr-block "0.0.0.0/0" --rule-action allow
+# Outbound: allow all. No --port-range: with protocol -1 it is meaningless and reads as if ports
+# were constrained when they are not.
+nacl_rule egress 100 --protocol -1 --cidr-block "0.0.0.0/0" --rule-action allow
+
+# Remove any stale custom entry that is NOT in the desired set — AFTER the desired rules are in
+# place, so convergence never passes through a deny-all state.
+_DESIRED_IN="100 110 120 130 140"
+_DESIRED_OUT="100"
 _nacl_rules="$(Q describe-network-acls --network-acl-ids "$NACL_ID" \
   --query 'NetworkAcls[0].Entries[?RuleNumber < `32767`].[RuleNumber,Egress]' --output text 2>/dev/null || echo "")"
 while IFS=$'\t' read -r _rnum _egress; do
   [[ -z "$_rnum" ]] && continue
-  Q delete-network-acl-entry --network-acl-id "$NACL_ID" --rule-number "$_rnum" \
-    "$( [[ "$_egress" == "True" || "$_egress" == "true" ]] && echo "--egress" || echo "--ingress" )" >/dev/null 2>&1 || true
+  if [[ "$_egress" == "True" || "$_egress" == "true" ]]; then
+    [[ " $_DESIRED_OUT " == *" $_rnum "* ]] && continue
+    Q delete-network-acl-entry --network-acl-id "$NACL_ID" --rule-number "$_rnum" --egress >/dev/null 2>&1 || true
+  else
+    [[ " $_DESIRED_IN " == *" $_rnum "* ]] && continue
+    Q delete-network-acl-entry --network-acl-id "$NACL_ID" --rule-number "$_rnum" --ingress >/dev/null 2>&1 || true
+  fi
 done <<< "$_nacl_rules"
-# Inbound rules (deny-all is implicit at rule 32767):
-#   100: TCP 8080-8099 from VPC (index bridge ports)
-Q create-network-acl-entry --network-acl-id "$NACL_ID" --ingress \
-  --rule-number 100 --protocol 6 --port-range "From=8080,To=8099" \
-  --cidr-block "$VPC_CIDR" --rule-action allow >/dev/null
-#   110: TCP 443 from VPC (internal HTTPS)
-Q create-network-acl-entry --network-acl-id "$NACL_ID" --ingress \
-  --rule-number 110 --protocol 6 --port-range "From=443,To=443" \
-  --cidr-block "$VPC_CIDR" --rule-action allow >/dev/null
-#   120: TCP ephemeral 1024-65535 (return traffic from NAT / internet)
-Q create-network-acl-entry --network-acl-id "$NACL_ID" --ingress \
-  --rule-number 120 --protocol 6 --port-range "From=1024,To=65535" \
-  --cidr-block "0.0.0.0/0" --rule-action allow >/dev/null
-# Outbound: allow all (NAT egress needs it).
-Q create-network-acl-entry --network-acl-id "$NACL_ID" --egress \
-  --rule-number 100 --protocol -1 --port-range "From=0,To=65535" \
-  --cidr-block "0.0.0.0/0" --rule-action allow >/dev/null
 # Associate NACL with private subnet (replace the default). A subnet has exactly one
 # NACL association — replacing it is idempotent (just points to the same NACL again).
 NACL_ASSOC="$(Q describe-network-acls --filters "Name=association.subnet-id,Values=$PRIV" \
   --query 'NetworkAcls[0].Associations[?SubnetId==`'"$PRIV"'`].NetworkAclAssociationId | [0]' --output text 2>/dev/null)"
 if [[ -n "$NACL_ASSOC" && "$NACL_ASSOC" != "None" ]]; then
   Q replace-network-acl-association --association-id "$NACL_ASSOC" --network-acl-id "$NACL_ID" >/dev/null
+else
+  # A running subnet ALWAYS has exactly one NACL association, so an empty read is an API glitch,
+  # not a valid state. Skipping silently left the subnet on its default allow-all NACL while the
+  # deploy reported network success — the control appears to exist but does not, which is worse
+  # than not having it. Same reasoning already applied to the security-group read in
+  # provision_index_service.sh.
+  say err "could not read the NACL association for subnet $PRIV — refusing to leave it on the default allow-all NACL; re-run"
+  exit 1
 fi
 
 # ---- H7: VPC Flow Logs to S3 ----

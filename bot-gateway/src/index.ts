@@ -50,7 +50,7 @@ import { emitMetric, classifyFailure, countEvidenceCitations, type FailReason } 
 import { isDuplicate, forget } from "./dedup";
 import { STREAM_TIMEOUT_MS, DEFAULT_MAX_CONCURRENT_INVOKES } from "./tunables";
 import { loadProjectsConfig, resolveRoute, ProjectsConfigMissing, type ProjectsConfig, type ResolvedRoute } from "./project-routing";
-import { startHealthServer, markConnected, markReconnecting, markReconnected, markConnecting, markEventReceived } from "./health";
+import { startHealthServer, deriveHealthPort, markConnected, markReconnecting, markReconnected, markConnecting, markDisconnected, markDraining, markEventReceived } from "./health";
 
 const RUNTIME_ARN = process.env.RUNTIME_ARN ?? "";
 // Region: AWS_REGION (deploy sets it) → AWS_DEFAULT_REGION → derived from the RUNTIME_ARN
@@ -126,11 +126,19 @@ let wsRef: { stop?: () => void } | undefined;
 // on a fixed interval regardless of traffic, so the log-pipeline-liveness alarm has a metric
 // that is NONZERO during idle — distinguishing "alive but idle" from "pipeline dead".
 let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
+// Held so gracefulShutdown can close it — a still-bound health port keeps answering "healthy"
+// for the whole drain window otherwise.
+let healthServer: import("node:http").Server | undefined;
 let shuttingDown = false;
 function gracefulShutdown(sig: string): void {
   if (shuttingDown) return;
   shuttingDown = true;
   if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = undefined; }
+  // /ready must go 503 the moment we start draining: both dispatcher handlers already drop
+  // every incoming event, so a rollout gated on readiness would otherwise keep sending here
+  // for the whole drain window. /health stays 200 — the process IS still alive.
+  markDraining();
+  try { healthServer?.close(); } catch { /* never listening / already closed — not load-bearing */ }
   log({ event: "shutdown_begin", signal: sig, inflight: abortControllers.size });
   try { wsRef?.stop?.(); } catch { /* no-op if absent — abort-all below is load-bearing */ }
   for (const ctrl of abortControllers.values()) {
@@ -1744,7 +1752,17 @@ async function main(): Promise<void> {
           // crash-loop, dark throughout. Back off + re-start in-process instead.
           const backoffMs = 3000 + Math.floor(Math.random() * 4000);
           log({ event: "ws_conn_limit_retry", error: msg, backoffMs });
-          setTimeout(() => { try { ws.start({ eventDispatcher: dispatcher }); } catch (e) { log({ event: "ws_retry_failed", error: redactSensitive(String(e)).slice(0, 300) }); } }, backoffMs);
+          // The socket is down for the whole backoff window. Without these marks /ready keeps
+          // reporting "connected" while the gateway is dark — and if the re-start throws it
+          // stays dark forever with a healthy-looking readiness verdict.
+          markDisconnected();
+          setTimeout(() => {
+            markConnecting();
+            try { ws.start({ eventDispatcher: dispatcher }); } catch (e) {
+              markDisconnected();
+              log({ event: "ws_retry_failed", error: redactSensitive(String(e)).slice(0, 300) });
+            }
+          }, backoffMs);
           return;
         }
         case "exit":
@@ -1763,19 +1781,23 @@ async function main(): Promise<void> {
   // sdk_wsclient_connected log from onReady above.
   log({ event: "sdk_wsclient_started" });
 
-  // HEALTH CHECK SERVER: lightweight HTTP for liveness probes / systemd watchdog.
-  // The DEFAULT port is derived from this project's bridge port (8080 → 18080, 8081 → 18081)
-  // because one index host runs one gateway PER PROJECT: a single hard-coded port would have
-  // every gateway but the first fail to bind. HEALTH_PORT still wins when set explicitly.
-  // (health.ts also degrades gracefully if the port is taken, so a collision is never fatal.)
-  const derivedHealthPort = (() => {
-    const m = /:(\d+)\b/.exec(activeRoute?.endpoint ?? "");
-    const bridgePort = m ? Number(m[1]) : NaN;
-    return Number.isFinite(bridgePort) ? 10000 + bridgePort : 18080;
-  })();
-  const HEALTH_PORT = Number(process.env.HEALTH_PORT || derivedHealthPort);
-  startHealthServer(HEALTH_PORT);
-  log({ event: "health_server_started", port: HEALTH_PORT });
+  // HEALTH SERVER: liveness on /health, readiness on /ready (see src/health.ts).
+  // Port resolution lives in deriveHealthPort so it is unit-testable — the previous inline
+  // regex mis-parsed IPv6 and userinfo authorities, and nothing could reach it to prove that.
+  const health = deriveHealthPort(activeRoute?.endpoint, process.env.HEALTH_PORT);
+  if (health.invalidEnv !== undefined) {
+    log({ event: "health_port_invalid", value: health.invalidEnv, fallback: health.port });
+  }
+  if (!activeRoute && health.source !== "env") {
+    // No resolved route → every co-located gateway would derive the SAME default port and all
+    // but one would silently have no health endpoint. Say so instead of pretending.
+    log({ event: "health_server_skipped", reason: "no resolved project route", hint: "set HEALTH_PORT to enable" });
+  } else {
+    healthServer = startHealthServer(health.port, { logger: log });
+    // NOTE: startHealthServer logs health_server_started from the listening callback with the
+    // real bound port, and health_server_unavailable when the bind fails. Do not log success
+    // here — the caller cannot yet know whether the bind worked.
+  }
 
   // LIVENESS HEARTBEAT: emit gateway_heartbeat every HEARTBEAT_SECS regardless of traffic.
   // The log-pipeline-liveness alarm watches the metric this produces (GatewayHeartbeat, via a

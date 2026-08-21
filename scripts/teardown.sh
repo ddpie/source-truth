@@ -118,7 +118,34 @@ fi
 
 # Helper: run a delete, tolerate "already gone", log each step. Never aborts the
 # whole teardown on one resource's failure — we want to remove as much as possible.
-del() { local what="$1"; shift; if "$@" >/dev/null 2>&1; then say ok "deleted $what"; else say warn "skip/failed $what (may already be gone)"; fi; }
+TEARDOWN_INCOMPLETE=0
+LEFT_BEHIND=""
+
+# del <what> <cmd...> — delete one resource, telling the truth about the outcome.
+#
+# The previous one-liner collapsed EVERY failure into "may already be gone" with stdout and
+# stderr discarded, so AccessDenied, DependencyViolation, DeleteConflict, BucketNotEmpty,
+# throttling and genuinely-absent were indistinguishable — and the script still exited 0. Two
+# structural bugs (an EventBridge target id mismatch and an undetached managed policy) sat
+# invisible behind that message while printing a green check.
+del() {
+  local what="$1"; shift
+  local err
+  if err="$("$@" 2>&1 >/dev/null)"; then
+    say ok "deleted $what"
+    return 0
+  fi
+  # Resource-specific not-found codes are the ONLY genuine success-by-absence.
+  if printf '%s' "$err" | grep -qE 'NotFound|NoSuchEntity|NoSuchBucket|ResourceNotFoundException|does not exist|NoSuchHostedZone'; then
+    say ok "$what already gone"
+    return 0
+  fi
+  say warn "FAILED $what — $(printf '%s' "$err" | tr -d '\n' | cut -c1-200)"
+  TEARDOWN_INCOMPLETE=$((TEARDOWN_INCOMPLETE + 1))
+  LEFT_BEHIND="${LEFT_BEHIND}
+  • ${what}"
+  return 0
+}
 
 # wait_gone <desc> <max_secs> <cmd...> — poll until <cmd> prints empty/None (the
 # resource is gone), or the timeout elapses. AWS deletes for NAT/ENI are ASYNC, so a
@@ -134,7 +161,14 @@ wait_gone() {
     sleep 5; waited=$((waited + 5))
   done
   say warn "$desc still present after ${max}s — continuing (may strand a dependent resource; re-run teardown)"
-  return 1
+  # MUST be 0, not 1: every call site is a bare command under `set -euo pipefail`, so returning
+  # non-zero here ABORTED the whole teardown at the first slow NAT — the EIP was never released,
+  # the VPC/SGs/subnets were never touched, and monitoring cleanup never ran, all while the
+  # operator read a warning that promised the opposite ("continuing"). A wait timeout is a
+  # degraded outcome to record, not a reason to stop cleaning up. TEARDOWN_INCOMPLETE carries
+  # the signal to the final exit code instead.
+  TEARDOWN_INCOMPLETE=$((TEARDOWN_INCOMPLETE + 1))
+  return 0
 }
 
 # ---- 1. AgentCore runtime(s) (boto3; no aws-cli verb in older CLIs) ----
@@ -325,7 +359,16 @@ fi
 
 # ---- 6. monitoring stack (region-scoped, best-effort — Phase 7 of deploy-all builds it) ----
 # DAU Lambda + its EventBridge daily rule (+ the lambda permission that rule installs).
-del "EventBridge rule source-truth-dau-daily targets" aws events remove-targets --region "$REGION" --rule source-truth-dau-daily --ids 1
+# Enumerate the target ids instead of guessing one. `--ids 1` never matched: apply-dau-lambda.sh
+# registers Id=dau. remove-targets is a BATCH api that exits 0 and reports per-entry failure only
+# in its response body, so the mismatch printed a green check while the target survived — and
+# EventBridge then refuses to delete a rule that still has targets, so the rule leaked too
+# (firing daily at a Lambda this script had already deleted).
+_DAU_TARGET_IDS="$(aws events list-targets-by-rule --region "$REGION" --rule source-truth-dau-daily --query 'Targets[].Id' --output text 2>/dev/null || echo "")"
+if is_set "$_DAU_TARGET_IDS"; then
+  # shellcheck disable=SC2086  # deliberate word-split: --ids takes a list
+  del "EventBridge rule source-truth-dau-daily targets ($_DAU_TARGET_IDS)" aws events remove-targets --region "$REGION" --rule source-truth-dau-daily --ids $_DAU_TARGET_IDS
+fi
 del "EventBridge rule source-truth-dau-daily" aws events delete-rule --region "$REGION" --name source-truth-dau-daily
 del "Lambda source-truth-dau-preaggregate" aws lambda delete-function --region "$REGION" --function-name source-truth-dau-preaggregate
 # Dashboards (both pages).
@@ -365,6 +408,13 @@ if [[ "$INCLUDE_SHARED" == true ]]; then
     say info "  等所有区域都拆完，再在最后一个区域跑 --include-shared。"
   else
   # DAU Lambda's IAM role (account-global, created by apply-monitoring.sh's dau stage).
+  # Detach MANAGED policies before deleting the role. apply-dau-lambda.sh attaches
+  # AWSLambdaBasicExecutionRole, and delete-role fails with DeleteConflict while any managed
+  # policy is still attached — so this role could never be removed, masked as "may already be
+  # gone". Enumerate rather than name it, so a future added policy is covered too.
+  for pa in $(aws iam list-attached-role-policies --role-name source-truth-dau-lambda-role --query 'AttachedPolicies[].PolicyArn' --output text 2>/dev/null || echo ""); do
+    aws iam detach-role-policy --role-name source-truth-dau-lambda-role --policy-arn "$pa" >/dev/null 2>&1 || true
+  done
   for p in $(aws iam list-role-policies --role-name source-truth-dau-lambda-role --query 'PolicyNames[]' --output text 2>/dev/null || echo ""); do
     aws iam delete-role-policy --role-name source-truth-dau-lambda-role --policy-name "$p" >/dev/null 2>&1 || true
   done
@@ -394,3 +444,21 @@ fi
 
 say ok "teardown complete for $REGION"
 say info "verify no billable orphans:  aws ec2 describe-nat-gateways --region $REGION --filter Name=tag:Name,Values=source-truth-nat"
+
+# RETAINED BY DESIGN — these are never deleted by a default run, and staying silent about them
+# is how a "complete" teardown quietly keeps billing. Secrets are ~$0.40/mo each and the log
+# groups keep storage charges (the Lambda one has no retention at all).
+say info "RETAINED (billable, delete by hand or with --include-shared):"
+say info "  • Secrets Manager: source-truth/feishu-<projectId>, /log-hash-salt, /git-credentials, /deploy-github-token"
+say info "  • Log groups: /source-truth/bot-gateway, /source-truth/index-bridge, /aws/lambda/source-truth-dau-preaggregate"
+if [[ "$INCLUDE_SHARED" != true ]]; then
+  say info "  • IAM roles + instance profile + S3 artifact bucket (pass --include-shared to remove)"
+fi
+
+# Exit non-zero when anything actually failed, so CI and the operator can tell a partial
+# teardown from a clean one. The old script exited 0 unconditionally.
+if [[ "$TEARDOWN_INCOMPLETE" -gt 0 ]]; then
+  say err "teardown INCOMPLETE — ${TEARDOWN_INCOMPLETE} operation(s) failed:${LEFT_BEHIND}"
+  say err "re-run this teardown; resources above may still be billable"
+  exit 1
+fi

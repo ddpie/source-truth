@@ -162,6 +162,34 @@ arm_instance_resilience() {
     log warn "failed to enable termination protection (non-fatal)"
     log warn "  → $(printf '%s' "$err" | tr '\n' ' ' | cut -c1-300)"
   fi
+
+  # IMDSv2 — enforce on EVERY run, not just at launch. run-instances defaults to
+  # HttpTokens=optional, so a host provisioned before that flag was added still answers
+  # unauthenticated IMDSv1 requests, and this script never replaces an instance: without a
+  # reconcile here those hosts would stay on v1 forever. IMDSv1 is one unauthenticated GET away
+  # from this instance's role credentials, and the same host runs an unauthenticated bridge.
+  if err="$(aws ec2 modify-instance-metadata-options --region "$REGION" \
+    --instance-id "$iid" --http-tokens required --http-put-response-hop-limit 1 --http-endpoint enabled 2>&1 >/dev/null)"; then
+    log info "IMDSv2 enforced for $iid"
+  else
+    log warn "failed to enforce IMDSv2 (non-fatal, but the instance role is reachable via IMDSv1)"
+    log warn "  → $(printf '%s' "$err" | tr '\n' ' ' | cut -c1-300)"
+  fi
+
+  # Root-volume encryption cannot be changed in place, so a host launched before the Encrypted
+  # flag existed keeps an unencrypted root disk permanently. Say so loudly rather than letting it
+  # drift silently — the remediation is a snapshot-and-replace, an operator decision.
+  local root_vol enc
+  root_vol="$(aws ec2 describe-instances --region "$REGION" --instance-ids "$iid" \
+    --query 'Reservations[0].Instances[0].BlockDeviceMappings[0].Ebs.VolumeId' --output text 2>/dev/null || echo "")"
+  if [[ -n "$root_vol" && "$root_vol" != "None" ]]; then
+    enc="$(aws ec2 describe-volumes --region "$REGION" --volume-ids "$root_vol" \
+      --query 'Volumes[0].Encrypted' --output text 2>/dev/null || echo "")"
+    if [[ "$enc" == "False" ]]; then
+      log warn "root volume $root_vol of $iid is NOT encrypted — encryption cannot be enabled in place;"
+      log warn "  remediate by snapshot → encrypted copy → replace, or enable EBS encryption by default account-wide"
+    fi
+  fi
 }
 
 # Re-run bootstrap.sh ON AN EXISTING instance, over SSM. This is what REPLACED the
@@ -495,7 +523,8 @@ IID="$(Q run-instances --image-id "$AMI" --instance-type "$ITYPE" \
   --subnet-id "$PRIVATE_SUBNET" --security-group-ids "$SG" \
   "${PROFILE_ARG[@]}" \
   --user-data "$UD" \
-  --block-device-mappings "[{\"DeviceName\":\"/dev/sda1\",\"Ebs\":{\"VolumeSize\":${ROOT_VOLUME_GB},\"VolumeType\":\"gp3\",\"Encrypted\":true}}]" \
+  --metadata-options 'HttpTokens=required,HttpPutResponseHopLimit=1,HttpEndpoint=enabled' \
+  --block-device-mappings "[{\"DeviceName\":\"/dev/sda1\",\"Ebs\":{\"VolumeSize\":${ROOT_VOLUME_GB},\"VolumeType\":\"gp3\",\"Encrypted\":true,\"DeleteOnTermination\":true}}]" \
   --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=source-truth-index-service},{Key=ArtifactSig,Value=$CURRENT_SIG}]" \
   --query 'Instances[0].InstanceId' --output text)"
 log info "launched index-service $IID (Ubuntu 24.04 ARM); bootstrap runs build→serve"

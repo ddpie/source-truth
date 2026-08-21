@@ -63,6 +63,12 @@ run_lint() {
   bash "$ROOT/scripts/check-invariants.sh" || rc=1
   say step "lint：版本钉死防漂移 check-versions"
   bash "$ROOT/scripts/check-versions.sh" || rc=1
+  # IAM policy documents are strings inside shell scripts, so a malformed one is invisible until
+  # a deploy fails with MalformedPolicyDocument — after the phases that cost real minutes. This
+  # also blocks the two privilege-escalation shapes (unconditioned iam:PassRole,
+  # iam:AttachRolePolicy without an iam:PolicyARN condition) from coming back.
+  say step "lint：IAM 策略文档校验 validate_iam_policies"
+  python3 "$ROOT/scripts/tests/validate_iam_policies.py" || rc=1
   return "$rc"
 }
 

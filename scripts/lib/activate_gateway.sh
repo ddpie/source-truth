@@ -40,6 +40,28 @@ FEISHU_API_BASE='${FEISHU_API_BASE}'"
 [[ -n "$IDLE_TIMEOUT" ]] && ENV_BODY="${ENV_BODY}
 RUNTIME_IDLE_TIMEOUT_SECS='${IDLE_TIMEOUT}'"
 
+# HEALTH_PORT — pinned EXPLICITLY per project rather than left to the gateway's own derivation.
+# The gateway derives bridge+10000 when this is unset, but the systemd unit's ExecStartPost
+# probe also has to know the number, and a template unit cannot compute it. Writing it here
+# gives one authoritative value that both the process and the probe read, so a project whose
+# bridge port is not 8080 no longer has its startup probe poll the wrong port.
+_HP=""
+# Defined here (and reused at the projects-shipping step below) because this block runs BEFORE
+# the original declaration site — an ordering slip that silently yields an empty path.
+LOCAL_PROJECTS="$SCRIPT_DIR/../../.local/projects.json"
+if [[ -f "$LOCAL_PROJECTS" && -n "${PROJECT_ID:-}" ]]; then
+  _HP="$(python3 -c 'import json,sys
+try:
+    cfg=json.load(open(sys.argv[1]))
+    p=cfg.get("projects",{}).get(sys.argv[2],{})
+    port=p.get("port")
+    print(10000+int(port) if isinstance(port,int) and 0 < port < 55536 else "")
+except Exception:
+    print("")' "$LOCAL_PROJECTS" "$PROJECT_ID" 2>/dev/null || echo "")"
+fi
+[[ -n "$_HP" ]] && ENV_BODY="${ENV_BODY}
+HEALTH_PORT='${_HP}'"
+
 # PROJECT ROUTING (multi-repo plan 阶段1): the gateway's project config is DEPLOYMENT-SPECIFIC
 # and lives at .local/projects.json on the DEPLOY machine (gitignored, not in the gateway
 # tarball). The gateway on the host resolves its config from PROJECTS_CONFIG_PATH (NOT a
@@ -49,6 +71,8 @@ RUNTIME_IDLE_TIMEOUT_SECS='${IDLE_TIMEOUT}'"
 # the env; omitted = the gateway's sole-project default. All OPTIONAL — a deploy with no
 # projects.json simply runs without a projectId dimension (the loader's soft path).
 HOST_PROJECTS_PATH="/etc/source-truth-projects.json"
+# LOCAL_PROJECTS is declared earlier (HEALTH_PORT derivation needs it); kept assigned here too
+# so this block stays readable on its own and tolerates the earlier one being moved again.
 LOCAL_PROJECTS="$SCRIPT_DIR/../../.local/projects.json"
 PROJECTS_B64=""
 if [[ -f "$LOCAL_PROJECTS" ]]; then
