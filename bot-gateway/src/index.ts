@@ -51,6 +51,7 @@ import { isDuplicate, forget } from "./dedup";
 import { STREAM_TIMEOUT_MS, DEFAULT_MAX_CONCURRENT_INVOKES } from "./tunables";
 import { loadProjectsConfig, resolveRoute, ProjectsConfigMissing, type ProjectsConfig, type ResolvedRoute } from "./project-routing";
 import { resolveTenant, wsDomainFor, type FeishuTenant } from "./feishu-domain";
+import { getHealthState } from "./health";
 import { startHealthServer, deriveHealthPort, markConnected, markReconnecting, markReconnected, markConnecting, markDisconnected, markDraining, markEventReceived } from "./health";
 
 const RUNTIME_ARN = process.env.RUNTIME_ARN ?? "";
@@ -1360,6 +1361,10 @@ async function main(): Promise<void> {
     // outcome distinguishes them, which is what an operator needs when every answer is degrading
     // to text (the signature of a missing CardKit permission).
     log({ event: "turn_finished", outcome, message: hashUserId(res.messageId), session: sessionId });
+    // Also a METRIC, not only a log line: outcome=text_fallback is how a missing CardKit
+    // permission looks in production, and it is invisible to every existing alarm because the
+    // fallback send succeeds so no answer_failed is emitted either.
+    emitMetric("turn_finished", { outcome }, { sessionId, projectId: PROJECT_ID });
   };
 
   // Single Feishu SDK WSClient long-connection: IM events + card action
@@ -1396,6 +1401,7 @@ async function main(): Promise<void> {
         // envelope nesting, 100% of messages disappear with no log line, /ready still 200 and the
         // heartbeat still green — the exact failure shape event_dropped was added to end, one
         // layer up. Log the shape, not the content: keys only, no values.
+        emitMetric("event_dropped", { reason: "unparseable_event" }, { projectId: PROJECT_ID });
         log({
           event: "event_dropped", reason: "unparseable_event",
           keys: data && typeof data === "object" ? Object.keys(data as object).slice(0, 10) : [],
@@ -1425,6 +1431,7 @@ async function main(): Promise<void> {
             // separates "Feishu is not delivering" from "delivery works, the gate is
             // misconfigured", which is the single most useful discriminator when a bot is silent.
             if (res && !res.handled && res.reason) {
+              emitMetric("event_dropped", { reason: res.reason }, { projectId: PROJECT_ID });
               log({
                 event: "event_dropped", reason: res.reason,
                 chat: hashUserId(event.chat_id),
@@ -1863,11 +1870,24 @@ async function main(): Promise<void> {
   // traffic-driven metric like question_received can't make that distinction: an idle night
   // and a dead gateway both look like no data. unref() so the timer never keeps the process
   // alive on its own (shutdown clears it explicitly anyway).
-  const HEARTBEAT_SECS = Number(process.env.HEARTBEAT_SECS || 60);
-  emitMetric("gateway_heartbeat", {});   // one immediately so the metric exists from t0
+  // Clamped at BOTH ends: the dense alarm metrics (AnswerFailedTotal, CardHealth*) publish a 0
+  // only when some event reaches the log group, so on an idle night this heartbeat is the only
+  // traffic keeping them dense. Letting HEARTBEAT_SECS exceed the 5-minute alarm period would
+  // quietly turn those alarms sparse — an upper bound is part of the contract, not tidiness.
+  const HEARTBEAT_SECS = Math.min(120, Math.max(10, Number(process.env.HEARTBEAT_SECS || 60)));
+  // wsState and projectId travel WITH the heartbeat. Without wsState a gateway that is up but
+  // whose long-connection is dead keeps the liveness alarm green while answering nothing; without
+  // projectId one dead gateway on a host running six is invisible, because the alarm sums a log
+  // group shared by every project.
+  const heartbeatFields = () => ({
+    wsState: getHealthState().wsState,
+    draining: getHealthState().draining,
+  });
+  emitMetric("gateway_heartbeat", heartbeatFields(), { projectId: PROJECT_ID });   // one at t0
   heartbeatTimer = setInterval(() => {
-    try { emitMetric("gateway_heartbeat", {}); } catch { /* best-effort, never crash the gateway */ }
-  }, Math.max(10, HEARTBEAT_SECS) * 1000);
+    try { emitMetric("gateway_heartbeat", heartbeatFields(), { projectId: PROJECT_ID }); }
+    catch { /* best-effort, never crash the gateway */ }
+  }, HEARTBEAT_SECS * 1000);
   heartbeatTimer.unref?.();
 
   // (SIGTERM/SIGINT handlers were registered at the top of main(); gracefulShutdown

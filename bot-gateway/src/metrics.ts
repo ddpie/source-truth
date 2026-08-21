@@ -127,6 +127,14 @@ export type DiagnosticEvent =
   // A traffic-driven metric (question_received) can't make that distinction — an idle
   // night and a dead agent both look like no data. See monitoring plan 阶段3 liveness.
   | "gateway_heartbeat"
+  // OUTCOME of a finished turn. outcome=text_fallback means the card path failed and the
+  // answer degraded to plain text — the signature of a missing CardKit permission, which
+  // emits no answer_failed (the fallback send succeeded) and so had no alarm at all.
+  | "turn_finished"
+  // An inbound event we did NOT answer, with the reason. Covers the two silent-loss modes:
+  // an unparseable SDK envelope (100% message loss) and a wrong bot open_id (all group
+  // traffic dropped at the mention gate) — both leave /ready at 200 and the heartbeat green.
+  | "event_dropped"
   // RUNTIME COLD START — emitted once per invoke that landed on a freshly-minted session
   // (no warm microVM behind it), carrying spinupMs = time-to-first-token (which on a cold
   // invoke folds in AgentCore microVM spin-up + routing). Lets CloudWatch chart cold-start

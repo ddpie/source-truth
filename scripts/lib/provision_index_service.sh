@@ -609,6 +609,11 @@ ENV
   [[ ${#PRIV_SUBNETS[@]} -gt 1 ]] && log warn "local mode: ${#PRIV_SUBNETS[@]} subnets tagged source-truth-private in $SELF_VPC — using $PRIV_SUBNET; verify it routes 0.0.0.0/0 → NAT"
   update_env "$CONFIG" PRIVATE_SUBNET "$PRIV_SUBNET"
   update_env "$CONFIG" VPC_ID "$SELF_VPC"
+  # NOT ours: in --local the VPC is this instance's own pre-existing VPC, created by the
+  # operator (or by their org), and it carries no source-truth-vpc tag. teardown MUST NOT
+  # enumerate-and-delete inside it — it would take out subnets, security groups, the IGW and
+  # route tables that belong to the operator. Recorded explicitly rather than inferred.
+  update_env "$CONFIG" VPC_OWNED false
   update_env "$CONFIG" INDEX_SERVICE_SG "$SG"
   update_env "$CONFIG" INDEX_SERVICE_INSTANCE "$SELF_ID"
   arm_instance_resilience "$SELF_ID"

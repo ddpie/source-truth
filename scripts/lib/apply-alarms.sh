@@ -175,7 +175,34 @@ done <<< "$PLAN"
 
 if [[ "$rc" -eq 0 ]]; then
   say ok "all alarms applied (topic: $TOPIC_ARN)"
-  say warn "SUBSCRIBE someone or no one is paged: aws sns subscribe --region $REGION --topic-arn $TOPIC_ARN --protocol email --notification-endpoint you@example.com  (then confirm the email)"
+  # Check whether anyone is ACTUALLY subscribed, rather than printing advice unconditionally.
+  # This line used to fire on every single run — advice printed on run #40 is invisible, and a topic
+  # with zero subscriptions (or an email left at PendingConfirmation because nobody clicked the
+  # link) was indistinguishable in the deploy output from a working setup. With no confirmed
+  # subscriber all of these alarms are decoration, so this is a stage FAILURE, not a hint.
+  _subs="$(aws sns list-subscriptions-by-topic --region "$REGION" --topic-arn "$TOPIC_ARN" \
+    --query 'Subscriptions[].SubscriptionArn' --output text 2>/dev/null || echo "")"
+  _confirmed=0; _pending=0
+  for _s in $_subs; do
+    case "$_s" in
+      PendingConfirmation) _pending=$((_pending + 1)) ;;
+      arn:*)               _confirmed=$((_confirmed + 1)) ;;
+    esac
+  done
+  if [[ "$_confirmed" -gt 0 ]]; then
+    say ok "$_confirmed confirmed alarm subscriber(s) on $TOPIC_NAME"
+    [[ "$_pending" -gt 0 ]] && say warn "  ($_pending more still PendingConfirmation — those will NOT be paged until confirmed)"
+  else
+    if [[ "$_pending" -gt 0 ]]; then
+      say err "all $_pending subscription(s) on $TOPIC_NAME are still PendingConfirmation — NOBODY will be paged."
+      say err "  Confirm the subscription from the email/SMS, then re-run this stage."
+    else
+      say err "NOBODY is subscribed to $TOPIC_NAME — every alarm below is decoration."
+    fi
+    say err "  aws sns subscribe --region $REGION --topic-arn $TOPIC_ARN --protocol email --notification-endpoint you@example.com"
+    say err "  (then confirm the email, and re-run: ./scripts/apply-monitoring.sh --only alarms)"
+    rc=1
+  fi
 else
   say err "some alarms failed"
 fi

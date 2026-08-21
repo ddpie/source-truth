@@ -342,6 +342,9 @@ print(ids[0] if ids else "")' 2>/dev/null)"
 fi
 
 update_env "$CONFIG" VPC_ID "$VPC_ID"
+# Ours: this script created the VPC (or adopted one carrying the source-truth-vpc tag it
+# created earlier), so teardown may clean up inside it. See teardown.sh section 5.
+update_env "$CONFIG" VPC_OWNED true
 update_env "$CONFIG" VPC_CIDR "$VPC_CIDR"
 update_env "$CONFIG" PUBLIC_SUBNET "$PUB"
 update_env "$CONFIG" PRIVATE_SUBNET "$PRIV"

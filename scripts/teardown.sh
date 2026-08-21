@@ -92,6 +92,28 @@ ALL_INSTANCES="$( { printf '%s\n' ${INDEX_SERVICE_INSTANCE:-} $TAGGED_INSTANCES 
 # and terminated in the loop below; the SG/ENI-drain later discovers the SG by group-name,
 # not via an instance id, so no single "primary" id is needed.)
 VPC="${VPC_ID:-}"; is_set "$VPC" || VPC="$(by_tag vpcs source-truth-vpc Vpcs VpcId)"
+# OWNERSHIP GATE. A vpc-id in deploy-config does NOT mean we created it: on the --local path the
+# id written there is the operator's own pre-existing VPC. Deleting inside it would destroy
+# subnets, security groups, the IGW and route tables this tool never created — worse than leaving
+# something billable behind. The TAG is authoritative (provision_network.sh sets it on the VPC it
+# creates); VPC_OWNED=false in config is a second, explicit signal from the --local path.
+VPC_IS_OURS=false
+if is_set "$VPC"; then
+  _vpc_tag="$(Q describe-vpcs --vpc-ids "$VPC" \
+    --query "Vpcs[0].Tags[?Key=='Name'].Value | [0]" --output text 2>/dev/null || echo "")"
+  if [[ "$_vpc_tag" == "source-truth-vpc" ]]; then
+    VPC_IS_OURS=true
+  fi
+  if [[ "${VPC_OWNED:-}" == "false" ]]; then
+    VPC_IS_OURS=false
+  fi
+  if [[ "$VPC_IS_OURS" != true ]]; then
+    say warn "VPC $VPC is NOT tagged source-truth-vpc (or is marked VPC_OWNED=false) — it was not"
+    say warn "  created by this tool, most likely a --local deploy onto an existing host. Its"
+    say warn "  subnets / security groups / IGW / route tables will NOT be touched. Only the"
+    say warn "  security groups this tool created by name are removed."
+  fi
+fi
 NAT="${NAT_GATEWAY:-}"; is_set "$NAT" || NAT="$(Q describe-nat-gateways --filter "Name=tag:Name,Values=source-truth-nat" "Name=state,Values=available,pending" --query 'NatGateways[0].NatGatewayId' --output text 2>/dev/null || echo "")"
 ZONE_ID="${INDEX_DNS_ZONE_ID:-}"
 
@@ -282,7 +304,7 @@ is_set "${EIP_ALLOC:-}" || EIP_ALLOC="$(Q describe-addresses --filters "Name=tag
 is_set "${EIP_ALLOC:-}" && del "Elastic IP $EIP_ALLOC" Q release-address --allocation-id "$EIP_ALLOC"
 
 # ---- 5. VPC teardown (subnets, route tables, IGW, SG) then the VPC ----
-if is_set "$VPC"; then
+if is_set "$VPC" && [[ "$VPC_IS_OURS" == true ]]; then
   # The AgentCore runtime + the index EC2 leave requester-managed ENIs in the VPC that
   # AWS releases asynchronously; deleting a subnet/SG/VPC while one is still attached
   # fails with DependencyViolation and STRANDS that resource (cross-review P1). Wait

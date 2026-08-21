@@ -944,6 +944,27 @@ else
     || say warn "  some monitoring stages failed (non-fatal) — re-run ./scripts/apply-monitoring.sh --region $REGION"
 fi
 
+# VERIFY THE OBSERVABLE END STATE, not the stage exit codes. Phase 7 is skipped entirely unless a
+# project deployed, and even when it runs apply-alarms can abort before creating anything because
+# its backing metric-filters fail while the log group does not yet exist. Both paths previously
+# ended with `deploy-all complete` and a warn line the operator was expected to notice — which is
+# how a whole class of first-time deploys ended up with NO alarms at all while reporting success.
+# Ask CloudWatch what actually exists instead.
+if [[ "$DRY_RUN" != true ]]; then
+  _want_alarms="$(python3 -c 'import json;print(len(json.load(open("config/alarm-thresholds.json"))["alarms"]))' 2>/dev/null || echo 0)"
+  _have_alarms="$(aws cloudwatch describe-alarms --region "$REGION" \
+    --alarm-name-prefix source-truth --query 'length(MetricAlarms)' --output text 2>/dev/null || echo 0)"
+  case "$_have_alarms" in ''|*[!0-9]*) _have_alarms=0 ;; esac
+  if [[ "$_have_alarms" -lt "$_want_alarms" ]]; then
+    say warn "ALARMS INCOMPLETE: $_have_alarms of $_want_alarms source-truth alarms exist in $REGION."
+    say warn "  Nothing (or not everything) will page you. The usual cause on a FIRST deploy is that"
+    say warn "  the gateway log group did not exist yet when the metric-filters were applied."
+    say warn "  Re-run once the gateway has logged:  ./scripts/apply-monitoring.sh --region $REGION"
+  else
+    say ok "alarms verified: $_have_alarms/$_want_alarms present in $REGION"
+  fi
+fi
+
 say ok "deploy-all complete"
 
 if [[ "$DRY_RUN" != true && "$PROJECTS_DEPLOYED" != true ]]; then
