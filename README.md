@@ -256,7 +256,10 @@ index is worth building at all, are in
 ## Testing
 
 ```bash
-./scripts/test.sh       # Runs lint + unit tests + type checking (offline, no AWS needed)
+./scripts/test.sh       # Lint + Python unit tests (offline, no AWS needed).
+                        # TypeScript typecheck / eslint / jest need `cd bot-gateway && npm ci`
+                        # first — without it they are SKIPPED and the script says which, so a
+                        # clean clone reports green having asserted almost nothing.
 ```
 
 For integration testing against a live deployment, see the testing section in [`docs/runbook_en.md`](docs/runbook_en.md).

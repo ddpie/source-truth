@@ -339,18 +339,18 @@ MODEL_OPTIONS=(
 # index-service host (ARM Graviton). codegraph indexing is memory-bound and scales
 # with repo size; t4g = burstable/cheap, m7g = sustained memory-optimized for big repos.
 INSTANCE_OPTIONS=(
-  "t4g.large     2 vCPU /  8 GiB   小中仓·默认"
-  "t4g.xlarge    4 vCPU / 16 GiB   中大仓"
-  "m7g.large     2 vCPU /  8 GiB   稳定性能"
-  "m7g.xlarge    4 vCPU / 16 GiB   大仓·稳定"
-  "m7g.2xlarge   8 vCPU / 32 GiB   超大仓/多仓"
+  "t4g.large     2 vCPU /  8 GiB   小中仓·默认 (small/medium repo, default)"
+  "t4g.xlarge    4 vCPU / 16 GiB   中大仓 (medium/large repo)"
+  "m7g.large     2 vCPU /  8 GiB   稳定性能 (steadier CPU)"
+  "m7g.xlarge    4 vCPU / 16 GiB   大仓·稳定 (large repo, steadier CPU)"
+  "m7g.2xlarge   8 vCPU / 32 GiB   超大仓/多仓 (very large, or several repos on one host)"
 )
 # Root gp3 volume: holds the repo copy + graph.db + staged tarball.
 DISK_OPTIONS=(
-  "30   GiB   小中仓·默认"
+  "30   GiB   小中仓·默认 (small/medium repo, default)"
   "50   GiB"
-  "100  GiB   大仓"
-  "200  GiB   超大仓/多仓"
+  "100  GiB   大仓 (large repo)"
+  "200  GiB   超大仓/多仓 (very large, or several repos on one host)"
   "$MANUAL_SENTINEL"
 )
 
@@ -358,10 +358,10 @@ DISK_OPTIONS=(
 # 中文→英文符号 map; higher = more coverage but more $ (a full scan of a large repo
 # can run into the hundreds of USD, one-time). 0 = no cap (whole repo).
 GLOSSARY_OPTIONS=(
-  "0      不限·全量·默认 (no cap — full coverage)"
-  "4000   大仓深覆盖 (deep)"
-  "1000   更广覆盖 (more coverage)"
-  "400    控成本 (cap cost — may miss Chinese-dense files)"
+  "400    控成本·推荐首次部署 (bounded cost — recommended for a first deploy)"
+  "1000   更广覆盖 (wider coverage, higher one-off cost)"
+  "4000   大仓深覆盖 (deep coverage on a large repo, higher one-off cost)"
+  "0      不限·全量·扫每个文件 (NO CAP — scans every file; measured ~\$372 on a 14k-file repo)"
   "$MANUAL_SENTINEL"
 )
 
@@ -491,8 +491,11 @@ flow_init_env() {
     GLOSSARY_MAX_FILES="${GMF_FLAG[1]}"
     say info "术语表构建文件上限 / glossary build cap: ${GLOSSARY_MAX_FILES}（来自 --glossary-max-files）"
   else
-  pick_field GLOSSARY_MAX_FILES "术语表构建文件上限 (中文→代码符号；0=不限) / glossary build cap" \
-    "${DEPLOY_GLOSSARY_MAX_FILES:-0}" "文件数 (0=不限)" "${GLOSSARY_OPTIONS[@]}"
+  # Pre-select 400, not 0. The option list is only half the decision — this argument is what the
+  # cursor lands on, so leaving it at 0 kept "unbounded" as the Enter-key answer no matter how the
+  # list was reordered. An operator who has already chosen a cap keeps their choice.
+  pick_field GLOSSARY_MAX_FILES "术语表构建文件上限 (中文→代码符号；0=不限，可能数百美元) / glossary build cap (0 = uncapped, may cost hundreds of USD)" \
+    "${DEPLOY_GLOSSARY_MAX_FILES:-400}" "文件数 (0=不限) / file cap (0 = uncapped)" "${GLOSSARY_OPTIONS[@]}"
   while ! [[ "$GLOSSARY_MAX_FILES" =~ ^[0-9]+$ ]]; do
     [[ "$ASSUME_YES" == true ]] && { say err "术语表上限无效 / invalid glossary cap '$GLOSSARY_MAX_FILES'"; exit 1; }
     say warn "需为非负整数 (0=不限) / must be a non-negative integer (0 = no cap)."
@@ -807,9 +810,13 @@ json.dump(cfg,open(sys.argv[1],"w"),ensure_ascii=False,indent=2)' "$PROJECTS_CFG
   # the "init environment" flow is where a cap can be chosen. (--local skips: init took the default
   # knowingly there; confirm() auto-accepts under --yes.)
   if [[ -z "${INDEX_SERVICE_INSTANCE:-}" && "$LOCAL_MODE" != true ]]; then
-    say warn "底座尚未初始化，将自动创建。注意：术语表默认全量构建（GLOSSARY_MAX_FILES=0，扫全仓），"
-    say warn "大仓一次性成本可达数百美元。要控制成本，可先取消、运行「初始化环境」选择文件上限。"
-    confirm "接受全量术语表构建并继续？/ proceed with the full glossary build?" \
+    say warn "底座尚未初始化，将自动创建 / the shared base does not exist yet and will be created."
+    say warn "术语表将全量构建（GLOSSARY_MAX_FILES=0，扫全仓），大仓一次性成本可达数百美元。"
+    say warn "COST WARNING: the glossary build is UNCAPPED (scans every file in the repo)."
+    say warn "  This is a ONE-OFF model cost, measured at ~\$372 on a 14k-file repository."
+    say warn "  To bound it: cancel now, run 'initialize environment' and pick a file cap"
+    say warn "  (400 is the recommended first-deploy value), then come back and add the project."
+    confirm "接受不限量的术语表构建（可能数百美元）并继续？/ proceed with an UNCAPPED glossary build (may cost hundreds of USD)?" \
       || { say info "已取消。清单已保存；先跑「初始化环境」设上限，再用「重新部署」/ cancelled — run init-env to set a cap, then redeploy"; exit 0; }
   fi
   # Ensure the shared base exists (idempotent no-op if already up), then deploy this project.

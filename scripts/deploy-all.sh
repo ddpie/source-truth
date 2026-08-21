@@ -39,7 +39,14 @@ source "$SCRIPT_DIR/lib/resolve_model.sh"
 
 CONFIG_DIR="$ROOT/.local"
 CONFIG_FILE="$CONFIG_DIR/deploy-config"
-mkdir -p "$CONFIG_DIR"
+# Deliberately pre-scan "$@" instead of testing $DRY_RUN: the arg loop runs ~90 lines below, so at
+# this point DRY_RUN is still unset and any gate on it passes unconditionally — which is why
+# --dry-run still created this directory after being "fixed" once. --help promises "make no
+# changes", and an empty .local/ is exactly the promise a cautious first-time user checks.
+case " $* " in
+  *" --dry-run "*) ;;
+  *) mkdir -p "$CONFIG_DIR" ;;
+esac
 
 # --- defaults / flags ---
 REGION=""
@@ -126,18 +133,55 @@ EOF
 
 DRY_RUN=false
 FORCE=false
+# Flag-value guards. Every value-taking flag below was a bare `VAR="$2"; shift 2`, which means a
+# flag given no value silently consumed the NEXT FLAG as its value. That is not a cosmetic gap:
+# `--root-volume-gb --dry-run` swallowed --dry-run and performed a real deploy, so the one command
+# a cautious operator runs first is the one that could spend money. Values are also validated at
+# parse time, because the alternative is failing in Phase 3 AFTER the NAT gateway is billing.
+_need_val() {  # _need_val <flag> <remaining-argc>
+  [[ "$2" -ge 2 ]] || { say err "flag $1 needs a value"; exit 2; }
+}
+_reject_flaglike() {  # _reject_flaglike <value> <flag>
+  case "$1" in -?*) say err "flag $2: '$1' looks like another flag, not a value"; exit 2 ;; esac
+}
+_val() {  # _val <flag> <value> <argc>  -> echo the value after both guards
+  _need_val "$1" "$3"; _reject_flaglike "$2" "$1"; printf '%s' "$2"
+}
+_val_region() {
+  local v; v="$(_val "$1" "$2" "$3")"
+  [[ "$v" =~ ^[a-z]{2}(-[a-z]+)+-[0-9]+$ ]] || { say err "--region '$v' is not an AWS region code"; exit 2; }
+  printf '%s' "$v"
+}
+_val_int() {  # _val_int <flag> <value> <argc> [min] [max]
+  local v; v="$(_val "$1" "$2" "$3")"
+  [[ "$v" =~ ^[0-9]+$ ]] || { say err "$1 must be a non-negative integer, got '$v'"; exit 2; }
+  if [[ -n "${4:-}" ]] && (( v < $4 )); then say err "$1 must be >= $4, got $v"; exit 2; fi
+  if [[ -n "${5:-}" ]] && (( v > $5 )); then say err "$1 must be <= $5, got $v"; exit 2; fi
+  printf '%s' "$v"
+}
+_val_arm_instance() {
+  local v; v="$(_val "$1" "$2" "$3")"
+  # The index host image is ARM64-only (Ubuntu 24.04 arm64; the agent image is built
+  # --platform linux/arm64). An x86 type was accepted here and then failed in Phase 3, AFTER the
+  # NAT gateway had started billing. Graviton families are the a1/*g* ones.
+  [[ "$v" =~ ^[a-z]+[0-9]+g[a-z]*\.[a-z0-9]+$ || "$v" =~ ^a1\. ]] \
+    || { say err "--instance-type '$v' is not an ARM64/Graviton type (the index host image is arm64-only; try t4g.large or m7g.large)"; exit 2; }
+  printf '%s' "$v"
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --region) REGION="$2"; shift 2 ;;
+    --region) REGION="$(_val_region --region "${2:-}" $#)"; shift 2 ;;
     --skip-projects) SKIP_PROJECTS=true; shift ;;
-    --instance-type) INSTANCE_TYPE="$2"; shift 2 ;;
-    --max-files) MAX_FILES="$2"; shift 2 ;;
-    --glossary-max-files) GLOSSARY_MAX_FILES="$2"; shift 2 ;;
-    --root-volume-gb) ROOT_VOLUME_GB="$2"; shift 2 ;;
-    --model) MODEL="$2"; shift 2 ;;
+    --instance-type) INSTANCE_TYPE="$(_val_arm_instance --instance-type "${2:-}" $#)"; shift 2 ;;
+    --max-files) MAX_FILES="$(_val_int --max-files "${2:-}" $#)"; shift 2 ;;
+    --glossary-max-files) GLOSSARY_MAX_FILES="$(_val_int --glossary-max-files "${2:-}" $#)"; shift 2 ;;
+    --root-volume-gb) ROOT_VOLUME_GB="$(_val_int --root-volume-gb "${2:-}" $# 8 16384)"; shift 2 ;;
+    --model) MODEL="$(_val --model "${2:-}" $#)"; shift 2 ;;
     # Tenant domain: feishu (China) or lark (international). Drives BOTH the gateway's event
     # long-connection and its REST base — they must not be set independently.
     --feishu-domain)
+      _need_val --feishu-domain $#; _reject_flaglike "${2:-}" --feishu-domain
       case "$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')" in
         feishu|lark) FEISHU_DOMAIN="$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')" ;;
         *) say err "--feishu-domain must be 'feishu' (China) or 'lark' (international), got '$2'"; exit 2 ;;
@@ -147,13 +191,14 @@ while [[ $# -gt 0 ]]; do
     # independent (a China tenant may want English cards), but the DEFAULT is derived from the
     # domain below, since an international tenant getting Chinese cards is never intentional.
     --locale)
+      _need_val --locale $#; _reject_flaglike "${2:-}" --locale
       case "$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')" in
         zh|en) LOCALE="$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')" ;;
         *) say err "--locale must be 'zh' or 'en', got '$2'"; exit 2 ;;
       esac
       shift 2 ;;
-    --idle-timeout) IDLE_TIMEOUT="$2"; shift 2 ;;
-    --max-lifetime) MAX_LIFETIME="$2"; shift 2 ;;
+    --idle-timeout) IDLE_TIMEOUT="$(_val_int --idle-timeout "${2:-}" $# 60 28800)"; shift 2 ;;
+    --max-lifetime) MAX_LIFETIME="$(_val_int --max-lifetime "${2:-}" $# 60 86400)"; shift 2 ;;
     --skip)
       case "${2:-}" in
         # 'runtime'/'gateway' used to be separate phases; they merged into the per-project
@@ -193,6 +238,24 @@ require_cmd python3 || exit 1
 safe_source_env "$CONFIG_FILE"
 REGION="${REGION:-${DEPLOY_REGION:-}}"
 [[ -n "$REGION" ]] || { say err "--region required"; exit 2; }
+# Does this region actually exist and is it enabled for the account? A well-formed but non-existent
+# code (xx-bogus-9) passes any regex and used to surface as an opaque endpoint error mid-deploy.
+# --output text separates with TABS. Normalise BEFORE matching, not only for the message —
+# matching on spaces against tab-separated data rejected every legitimate region, which is the
+# dangerous direction for a guard: it would have blocked every deploy rather than letting one slip.
+_known_regions="$(aws ec2 describe-regions --query 'Regions[].RegionName' --output text 2>/dev/null | tr '\t\n' '  ' || echo "")"
+if [[ -n "$_known_regions" ]]; then
+  case " $_known_regions " in
+    *" $REGION "*) ;;
+    *) say err "region '$REGION' is not an enabled region for this account."
+       say err "  enabled: $_known_regions"
+       exit 2 ;;
+  esac
+else
+  # Could not enumerate (no permission / throttled). Do NOT fail the deploy on that — but say so,
+  # because it means the region was accepted on its shape alone.
+  say warn "could not enumerate regions (ec2:DescribeRegions denied?) — '$REGION' accepted on format only"
+fi
 # Resolve flag > persisted > default for the operator-tunable knobs, so a flagless
 # reconcile re-run keeps the earlier choice instead of reverting to the default
 # (which would flip the live runtime's model via the in-place update).
@@ -449,8 +512,12 @@ preflight_quota() {
 # The AWS-touching probes stay off in dry-run. Order for real runs is unchanged (boto3 → docker → …).
 [[ "$DRY_RUN" == true ]] || preflight_boto3
 preflight_docker
+# These are READ-ONLY probes (Bedrock model listing, AgentCore reachability), so they run in
+# --dry-run as well. Withholding them made `--dry-run` answer "what would be built" while staying
+# silent on "can this machine and account actually do it" — which is the question the operator was
+# asking by running a plan first.
+preflight_model_access; preflight_agentcore
 if [[ "$DRY_RUN" != true ]]; then
-  preflight_model_access; preflight_agentcore
   # preflight_quota checks EIP/VPC/vCPU headroom — all for resources we're about to CREATE. --local
   # creates none of them (reuses this host's VPC/subnet, doesn't run-instances or allocate an EIP),
   # so the checks are irrelevant and their warnings just mislead. Skip in --local.
