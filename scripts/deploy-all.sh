@@ -392,23 +392,29 @@ export DEPLOY_IDLE_TIMEOUT="$IDLE_TIMEOUT" DEPLOY_MAX_LIFETIME="$MAX_LIFETIME"
 
 run() { if [[ "$DRY_RUN" == true ]]; then say info "[dry-run] $*"; else "$@"; fi; }
 
-# det_tar — archive the given paths to stdout, deterministically WHEN POSSIBLE. GNU tar
-# (or `gtar`) supports --sort/--mtime/--owner, which pin byte order so the gzipped tarball
-# (hence its S3 ETag) is identical across runs with identical content — that's what keeps
-# the index-host ArtifactSig staleness check from reporting "stale" every deploy.
-# macOS ships BSD tar, which REJECTS those flags (`Option --sort=name is not supported`),
-# so we fall back to a plain archive there. Determinism is an OPTIMIZATION, not correctness:
-# the fallback works fine, it just may re-stage a byte-different (but content-identical)
-# tarball, at worst causing an extra upload / a stale-WARN on reuse. `gzip -n` (no name/
-# timestamp in the gzip header) is portable and applied by the caller either way.
-# `brew install gnu-tar` on macOS restores full determinism.
+# det_tar — archive the given paths to stdout, DETERMINISTICALLY. GNU tar (or `gtar`) supports
+# --sort/--mtime/--owner, which pin byte order so the gzipped tarball (hence its S3 ETag) is
+# identical across runs with identical content — that is what keeps the index-host ArtifactSig
+# comparison from reporting "stale" on every deploy.
+#
+# THIS IS NOW A CORRECTNESS REQUIREMENT, NOT AN OPTIMIZATION. It used to be fine to fall back to
+# BSD tar: a byte-different-but-content-identical tarball merely caused an extra upload and a
+# stale WARN. Since blue-green replacement was removed, a stale signature triggers an IN-PLACE
+# re-bootstrap, which stops every bot-gateway@* and index-bridge-* on the host for minutes. So on
+# a BSD-tar box (stock macOS) the old fallback meant EVERY deploy caused an outage. Fail loudly
+# instead, with the one-line fix.
 det_tar() {  # caller sets cwd; args = files/dirs to include
   if tar --version 2>/dev/null | grep -qi 'gnu tar'; then
     tar --sort=name --mtime='UTC 2020-01-01' --owner=0 --group=0 --numeric-owner -cf - "$@"
   elif command -v gtar >/dev/null 2>&1; then
     gtar --sort=name --mtime='UTC 2020-01-01' --owner=0 --group=0 --numeric-owner -cf - "$@"
   else
-    tar -cf - "$@"
+    say err "GNU tar is required to build reproducible artifacts, and this box has only BSD tar."
+    say err "  Without --sort/--mtime the tarball bytes differ every run, so the index host reads"
+    say err "  the artifacts as CHANGED on every deploy and re-bootstraps in place — stopping every"
+    say err "  gateway and bridge for minutes, each time, for no reason."
+    say err "  Fix: brew install gnu-tar   (provides gtar, which this script picks up automatically)"
+    exit 1
   fi
 }
 

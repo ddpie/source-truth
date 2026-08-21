@@ -98,7 +98,7 @@ head_object_etag() { # <key> — prints the quote-free ETag, or "none" iff the k
   return 1
 }
 artifact_signature() {
-  local idx gw bs
+  local idx gw bs cg
   idx="$(head_object_etag index-service.tar.gz)" || return 1
   # The artifacts phase ALWAYS stages this one, so "absent" means the deploy ran out of order or
   # points at the wrong bucket — fatal, never a legitimate "none".
@@ -113,7 +113,13 @@ artifact_signature() {
   gw="$(head_object_etag bot-gateway.tar.gz)" || return 1
   bs="$(sha256sum "$ROOT/index-service/bootstrap.sh" 2>/dev/null | cut -c1-16)"
   [[ -n "$bs" ]] || { log err "cannot hash $ROOT/index-service/bootstrap.sh — incomplete checkout?"; return 1; }
-  echo "${idx}|${gw}|${bs}"
+  # codegraph-server: bootstrap.sh installs this binary, and since the host is never replaced a
+  # bootstrap run is the ONLY channel that reaches an existing one. Omitting it meant bumping
+  # CODEGRAPH_SERVER_TAG re-staged the binary to S3, the comparison saw no change, and the new
+  # binary never landed — the same silent no-op the bootstrap.sh component was added to close,
+  # left open for the largest artifact. Absent → "none" (a host may predate the staged layout).
+  cg="$(head_object_etag bin/codegraph-server)" || return 1
+  echo "${idx}|${gw}|${bs}|${cg}"
 }
 
 # Never DOWNGRADE a signature component to "none" (C2, second half). "none" means the key is
@@ -130,13 +136,17 @@ _sig_component() { # <current> <booted>
   fi
 }
 effective_sig() { # <booted-sig> — the signature to COMPARE against and to STAMP
-  local cur=() boot=()
+  local cur=() boot=() out=() i
   IFS='|' read -r -a cur <<< "$CURRENT_SIG"
   IFS='|' read -r -a boot <<< "${1:-}"
-  printf '%s|%s|%s' \
-    "$(_sig_component "${cur[0]:-none}" "${boot[0]:-}")" \
-    "$(_sig_component "${cur[1]:-none}" "${boot[1]:-}")" \
-    "$(_sig_component "${cur[2]:-none}" "${boot[2]:-}")"
+  # Iterate over however many components CURRENT_SIG has, rather than a fixed printf. The fixed
+  # three-slot form silently DROPPED any component added later, which would have made adding the
+  # codegraph-server component a no-op — the same class of miss the component was closing.
+  for (( i = 0; i < ${#cur[@]}; i++ )); do
+    out+=( "$(_sig_component "${cur[$i]:-none}" "${boot[$i]:-}")" )
+  done
+  local IFS='|'
+  printf '%s' "${out[*]}"
 }
 
 # Authorize an ingress rule idempotently: tolerate ONLY the benign "rule already
