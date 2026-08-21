@@ -167,6 +167,15 @@ ask_valid() {
     if [[ -z "$__val" && -n "$__empty" ]]; then printf -v "$__var" '%s' ""; return; fi
     if [[ "$__val" =~ $__re ]]; then printf -v "$__var" '%s' "$__val"; return; fi
     say warn "$__err"
+    # Headless runs cannot answer a re-prompt. `ask` returns the (empty) default instantly under
+    # --yes, which never matches a required pattern, so this loop spun forever printing the same
+    # warning — a documented unattended path that hung instead of failing. Fail loudly instead.
+    if [[ "$ASSUME_YES" == true ]]; then
+      say err "--yes 模式下无法重新询问「${__prompt}」/ cannot re-prompt under --yes; supply this value non-interactively or run interactively"
+      exit 1
+    fi
+    # A closed stdin (a pipe that ended) cannot answer either, and would spin identically.
+    [[ -t 0 ]] || { say err "stdin 非交互且取值无效「${__prompt}」/ non-interactive stdin with no valid value"; exit 1; }
   done
 }
 
@@ -596,6 +605,14 @@ if clash:
       ask_secret FEISHU_APP_SECRET "飞书 App Secret（输入以 * 回显）/ (echoed as *)"
       [[ -n "$FEISHU_APP_SECRET" ]] && break
       say warn "App Secret 必填 / App Secret is required"
+      # ask_secret has no --yes branch and returns empty at EOF, so on a pipe this loop spun
+      # forever. There is no non-interactive way to supply a secret here by design (it must not
+      # come from argv, where it would land in the process list and shell history).
+      if [[ "$ASSUME_YES" == true || ! -t 0 ]]; then
+        say err "无法在非交互模式下读取 App Secret / cannot read App Secret non-interactively"
+        say info "请交互运行安装器，或先手动创建密钥 source-truth/feishu-<projectId>（含 app_id / app_secret / bot_open_id）后再运行。"
+        exit 1
+      fi
     done
     # REAL validation, not just a shape check. The regex above only proves the App ID looks like
     # an App ID; the comment claiming a typo is "caught here, not 10 minutes later" was false

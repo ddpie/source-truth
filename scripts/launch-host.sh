@@ -32,6 +32,13 @@ source "$HERE/lib/env-utils.sh"
 # out the SAME code, not a stale main. Falls back to main if we can't tell (not a git checkout).
 REPO_REF="$(git -C "$HERE" rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)"
 [ -n "$REPO_REF" ] && [ "$REPO_REF" != HEAD ] || REPO_REF=main
+# The URL must travel WITH the ref. We used to send only REPO_REF, so the instance cloned the
+# upstream aws-samples URL and then checked out a branch that exists only in the operator's fork —
+# a bare `error: pathspec ... did not match` under set -e. The README explicitly anticipates forks,
+# so this was the common case, not an edge one. Derive origin from the very checkout that produced
+# the ref; fall back to upstream only when there is no origin at all (a tarball download).
+REPO_URL="${REPO_URL:-$(git -C "$HERE" remote get-url origin 2>/dev/null || true)}"
+[ -n "$REPO_URL" ] || REPO_URL=https://github.com/aws-samples/sample-code-qa-on-agentcore.git
 
 # Prior-choice state for pre-fill is per-account (set once ACCOUNT is known, below): keys like the
 # SSH key name / CIDR / region only make sense within one account, so a single shared file would
@@ -90,7 +97,7 @@ print_manual_fallback() {
     # ② 本机：SSH 登录机器
     ssh -t -i <你的key>.pem ubuntu@${ip}
     # ③ 登录后在机器上运行（region 由机器自动检测，无需传）
-    REPO_REF=${REPO_REF} bash /tmp/prepare-local-host.sh
+    REPO_URL=${REPO_URL} REPO_REF=${REPO_REF} bash /tmp/prepare-local-host.sh
 NEXT
 }
 
@@ -149,7 +156,7 @@ NEXT
 
   ssh -t -i ${key} ubuntu@${ip}
   # 登录后，在机器上运行（region 由机器自动检测，无需传）：
-  REPO_REF=${REPO_REF} bash /tmp/prepare-local-host.sh
+  REPO_URL=${REPO_URL} REPO_REF=${REPO_REF} bash /tmp/prepare-local-host.sh
 NEXT
 }
 

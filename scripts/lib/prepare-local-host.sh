@@ -115,7 +115,12 @@ if [ -d "$REPO_DIR/.git" ]; then
   git -C "$REPO_DIR" pull --ff-only origin "$REPO_REF"
 else
   git clone "$REPO_URL" "$REPO_DIR"
-  git -C "$REPO_DIR" checkout "$REPO_REF"
+  # Name both halves on failure: the usual cause is a ref that exists in the operator's fork while
+  # REPO_URL still points at upstream, and the raw git pathspec error names neither.
+  git -C "$REPO_DIR" checkout "$REPO_REF" || {
+    echo "ref '$REPO_REF' not found in $REPO_URL — if you are working from a fork, pass REPO_URL=<your fork> (and REPO_REF=<your branch>) to launch-host.sh" >&2
+    exit 1
+  }
 fi
 
 # --- 6. hand off to the installer in --local mode, inside the docker group -----------------------
