@@ -416,3 +416,26 @@ describe("redactDeep (chart specs)", () => {
     expect(Object.keys(out.data.values[0])).toEqual(["name", "secret"]); // keys intact
   });
 });
+
+describe("Feishu object identifiers", () => {
+  // These reach the logs through the URL PATH of a failed API call, e.g.
+  // `feishu POST /open-apis/im/v1/messages/om_xxx/reactions HTTP 400: ...`. Before this pattern
+  // existed, every error string that had been passed through redactSensitive still published raw
+  // message / chat / user ids — breaking log.ts's own contract while looking redacted.
+  it("redacts message, chat, user and bot ids", () => {
+    const s = redactSensitive(
+      "feishu POST /open-apis/im/v1/messages/om_x100b674b2af884a8deb907ad58a6aa7/reactions HTTP 400",
+    );
+    expect(s).not.toContain("om_x100b674b2af884a8deb907ad58a6aa7");
+    expect(redactSensitive("asker ou_bd45b9d1fe7e95cdfc3b0e3bfe704c78")).not.toContain("ou_bd45");
+    expect(redactSensitive("chat oc_1b38d6cb6c22cdd9d2bff6b02040ead5")).not.toContain("oc_1b38");
+  });
+
+  it("keeps the CardKit card id, which is the operator's correlation key and identifies no user", () => {
+    expect(redactSensitive("card 7676398624397905194 failed")).toContain("7676398624397905194");
+  });
+
+  it("leaves short lookalikes alone so ordinary prose is not mangled", () => {
+    expect(redactSensitive("om_short")).toContain("om_short");
+  });
+});

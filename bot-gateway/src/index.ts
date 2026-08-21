@@ -258,7 +258,13 @@ async function streamingCardInvoke(
   // clicks (chatId target) are deliberate user actions — never dedup them, or a
   // second follow-up in the same chat would be silently dropped. Done BEFORE any
   // card/session work so a re-delivery creates no duplicate card.
-  if ("messageId" in target && isDuplicate(`msg:${target.messageId}`)) return;
+  if ("messageId" in target && isDuplicate(`msg:${target.messageId}`)) {
+    // Was a bare `return`, which contradicted "every gate drop is logged" AND let the caller go on
+    // to log `replied` for a turn that sent no card at all — the worst kind of observability lie,
+    // because a user reporting "it never answered" is contradicted by the log.
+    log({ event: "event_dropped", reason: "duplicate_message", message: hashUserId(target.messageId) });
+    return;
+  }
 
   // "排队中" shows when this turn won't start streaming immediately — either the
   // SAME session is mid-turn (serializer busy) OR the GLOBAL invoke gate is
@@ -1317,9 +1323,11 @@ async function main(): Promise<void> {
           return composeFollowUpPrompt(question, chain);
         }
       : undefined;
+    let outcome: "card" | "text_fallback" = "card";
     try {
       await streamingCardInvoke(sessionId, prompt, { messageId: res.messageId }, credentials, question, parentId, res.senderId, composePrompt, res.eventId, coldStart);
     } catch (cardErr) {
+      outcome = "text_fallback";
       // streamingCardInvoke now finalizes the card itself on backend failure
       // (non-200 / stream error), so reaching here means something unexpected
       // broke (e.g. the initial card create/send). Fall back to plain text and
@@ -1347,7 +1355,11 @@ async function main(): Promise<void> {
       await sendReply({ messageId: res.messageId, answer: `${t("msg.serviceError")}${traceLine}\n\n${redactSensitive(prompt)}` })
         .catch((e) => log({ event: "fallback_error", traceId: fbTrace, error: redactSensitive(String(e)).slice(0, 300) }));
     }
-    log({ event: "replied", message: hashUserId(res.messageId), session: sessionId });
+    // Was `event: "replied"` logged unconditionally — including from the catch branch, so a turn
+    // that produced only the plain-text "service error" fallback still reported as a normal reply.
+    // outcome distinguishes them, which is what an operator needs when every answer is degrading
+    // to text (the signature of a missing CardKit permission).
+    log({ event: "turn_finished", outcome, message: hashUserId(res.messageId), session: sessionId });
   };
 
   // Single Feishu SDK WSClient long-connection: IM events + card action
@@ -1378,6 +1390,17 @@ async function main(): Promise<void> {
       if (shuttingDown) return;
       markEventReceived();
       const event = sdkEventToImEvent(data);
+      if (!event) {
+        // The silent path ABOVE the mention gate. sdkEventToImEvent returns null when the
+        // payload lacks `message` or a string chat_id, so if Feishu or the SDK ever changes the
+        // envelope nesting, 100% of messages disappear with no log line, /ready still 200 and the
+        // heartbeat still green — the exact failure shape event_dropped was added to end, one
+        // layer up. Log the shape, not the content: keys only, no values.
+        log({
+          event: "event_dropped", reason: "unparseable_event",
+          keys: data && typeof data === "object" ? Object.keys(data as object).slice(0, 10) : [],
+        });
+      }
       if (event) {
         void handleMessageEvent(event, {
           botOpenId: BOT_OPEN_ID || undefined,

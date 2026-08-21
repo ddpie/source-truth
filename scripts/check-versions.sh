@@ -61,11 +61,20 @@ else err "缺少 ${LOCK}（应由 docker build + pip freeze 生成的全传递�
 
 # 4. Node 主版本钉死（非浮动 lts）
 if [[ -f "$DOCKERFILE" ]]; then
-  if grep -qE 'setup_lts\.x' "$DOCKERFILE"; then
-    err "Node 用了浮动 setup_lts.x（应钉主版本 setup_<N>.x）"
-  elif grep -qE 'setup_[0-9]+\.x' "$DOCKERFILE"; then
-    ok "Node 主版本钉死（setup_<N>.x）"
-  else err "未找到 Node 安装行（setup_<N>.x）"; fi
+  # 只看真正的安装行、且先剥掉注释：这条守卫曾经 grep 'setup_<N>.x'，而 Dockerfile 里唯一
+  # 匹配它的是一行**注释**（解释 `curl … setup_24.x | bash -` 这个管道已被移除）。真正的钉版本
+  # 在 apt 源那行 `node_24.x`。于是把 node_24.x 改成 node_lts.x 守卫照样报绿 —— 只要注释还在。
+  # 这与第 5 项 claude-code 的注释「只看 npm install 行，不看注释」是同一个坑，那里防住了，这里没有。
+  node_line="$(sed -E 's/#.*$//' "$DOCKERFILE" | grep -E 'deb\.nodesource\.com/node_[0-9a-z]+\.x' || true)"
+  if [[ -z "$node_line" ]]; then
+    err "未找到 Node 的 apt 源安装行（deb.nodesource.com/node_<N>.x）"
+  elif printf '%s' "$node_line" | grep -qE 'node_lts\.x'; then
+    err "Node 用了浮动 node_lts.x（应钉主版本 node_<N>.x）"
+  elif printf '%s' "$node_line" | grep -qE 'node_[0-9]+\.x'; then
+    ok "Node 主版本钉死（$(printf '%s' "$node_line" | grep -oE 'node_[0-9]+\.x' | head -1)）"
+  else
+    err "Node 安装行未钉主版本：$node_line"
+  fi
 
   # 5. claude-code npm: EXACT-pin OR @latest (operator choice 2026-06-19 — track
   #    latest, trading reproducibility for fastest upstream fixes). A bare

@@ -11,6 +11,13 @@ import { stripToolCallLeak } from "./strip-toolcall-leak";
 const REDACTED = "[已隐藏]";
 
 const PATTERNS: Array<[RegExp, string | ((...args: string[]) => string)]> = [
+  // Feishu/Lark object identifiers. These arrive via the URL PATH of a failed API call
+  // (`POST /open-apis/im/v1/messages/om_xxx/reactions HTTP 400: ...`), so every error string
+  // wrapped in redactSensitive was publishing raw message / chat / user ids to CloudWatch —
+  // systematically breaking log.ts's own stated contract that message_id is PII, and doing it
+  // under the appearance of having been redacted. Deliberately NOT matching CardKit card ids
+  // (bare digits): those are the correlation key an operator greps by and identify no user.
+  [/\b(?:om|ou|oc|on)_[A-Za-z0-9]{10,}/g, REDACTED],
   // AWS access key IDs.
   [/AKIA[0-9A-Z]{16}/g, REDACTED],
   // AWS SigV4 Authorization header (Credential=AKIA…/… + Signature=<hex>). The

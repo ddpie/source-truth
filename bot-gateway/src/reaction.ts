@@ -10,6 +10,7 @@
 
 import { imAddReaction, imDeleteReaction, feishuConfigured } from "./feishu-http";
 import { hashUserId } from "./log";
+import { redactSensitive } from "./redact";
 
 const PROCESSING_EMOJI = "OnIt";
 
@@ -32,7 +33,7 @@ function log(event: string, messageId: string, extra: Record<string, unknown> = 
 
 function deleteReaction(messageId: string, reactionId: string): void {
   void imDeleteReaction(messageId, reactionId)
-    .catch((e) => log("reaction_delete_error", messageId, { error: String(e) }));
+    .catch((e) => log("reaction_delete_error", messageId, { error: redactSensitive(String(e)).slice(0, 200) }));
 }
 
 /** Add a "processing" reaction to a message. Best-effort (never throws). */
@@ -54,7 +55,7 @@ export function ackWithReaction(messageId: string): void {
         if (oldest !== undefined) reactionIds.delete(oldest);
       }
     })
-    .catch((e) => log("reaction_add_error", messageId, { error: String(e) }));
+    .catch((e) => log("reaction_add_error", messageId, { error: redactSensitive(String(e)).slice(0, 200) }));
 }
 
 /** Remove the processing reaction after the real reply is sent. Best-effort.
