@@ -49,6 +49,18 @@ A question flows through three resident components:
 - **Cross-language term mapping** — an offline glossary maps business terms (in any language) to the actual symbols in code, so questions phrased in natural language still hit the right code paths ([glossary details](docs/glossary.md)).
 - **Interactive streaming cards** — answers stream in real-time with progress indicators, collapsible source citations, and follow-up buttons for contextual conversation.
 
+## Scope
+
+The system does exactly one thing: **read-only Q&A over the main branch**. It looks things up and
+answers; it changes nothing. Explicitly out of scope:
+
+- Running the game engine or simulating numbers
+- Writing code back, committing, or modifying any file
+- Reading design documents, working across branches or worktrees, or sharing memory between sessions
+- A second reasoning engine, or a complete audit trail
+
+Planned capabilities are tracked in [`docs/agent/architecture.md`](docs/agent/architecture.md) and the design docs.
+
 ## Components
 
 | Directory | Responsibility | Language |
@@ -61,6 +73,13 @@ A question flows through three resident components:
 | [`scripts/`](scripts/) | Deploy / ops / test lifecycle | Bash |
 
 Full directory tree: [`docs/structure_en.md`](docs/structure_en.md)
+
+## AWS services used
+
+Everything lands in a single account and a single region (Tokyo `ap-northeast-1` by default). The
+core is one shared ARM EC2 instance holding the resident index, one Bedrock AgentCore Runtime per
+project (session-isolated microVMs), Bedrock model inference, plus S3 and ECR. Specs, counts, and
+purpose for all 23 services and resources: [`docs/aws-services_en.md`](docs/aws-services_en.md).
 
 ## Prerequisites
 
@@ -127,7 +146,16 @@ On a machine with AWS credentials configured:
 bash <(curl -fsSL https://raw.githubusercontent.com/aws-samples/sample-code-qa-on-agentcore/main/scripts/get.sh)
 ```
 
-This clones the repo, then launches an interactive installer that prompts for region, target repositories, model selection, and chat platform credentials.
+If your fork of this repository is private, a bare `curl` cannot reach it. Run `gh auth login` once,
+then fetch the bootstrap script through the authenticated API instead:
+
+```bash
+bash <(gh api repos/aws-samples/sample-code-qa-on-agentcore/contents/scripts/get.sh --jq '.content' | base64 -d)
+```
+
+Either way the script clones into `./source-truth/` (override with `SOURCE_TRUTH_DIR`), using `gh`
+credentials automatically for a private repository, then launches an interactive installer that
+prompts for region, target repositories, model selection, and chat platform credentials.
 
 With the repo already cloned:
 
@@ -139,16 +167,35 @@ With the repo already cloned:
 ### Deployment topologies
 
 - **Default (two machines)**: run the script on a deploy box; it creates and configures the index-host EC2 instance.
-- **Single EC2 (`--local`)**: one machine serves as both deployer and the resident index + gateway host. Run `./scripts/launch-host.sh` to provision the infrastructure automatically.
+- **Single EC2 (`--local`)**: one machine serves as both deployer and the resident index + gateway
+  host. Run `./scripts/launch-host.sh` locally — it creates the network and IAM, launches an ARM64
+  EC2 instance in the public subnet with the instance role attached, uploads the bootstrap script,
+  and prints an `ssh` command. Log in as instructed and run the printed script: it installs
+  dependencies, authenticates to GitHub, clones the repo, and drops you into `./scripts/install.sh --local`.
 
 The AgentCore Runtime is always AWS-managed regardless of topology.
 
+## How code enters the system and stays fresh
+
+Each target repository is cloned onto the index-service host, where a file watcher rebuilds the
+index incrementally. Two kinds of source:
+
+- **git repositories** (default): a systemd timer runs `git pull` on an interval
+  (`refreshIntervalSec`, 300s by default), so a change on the main branch shows up in answers within
+  minutes — no redeploy, no manual step.
+- **Local repositories** (nothing to pull from): push snapshots with `scripts/push-local-repo.sh`
+  over rsync. Refresh is manual — change the code, run the push command again.
+
+A single project can span multiple repositories, and one index-service host can serve several
+projects as separate processes on separate ports. The refresh mechanics, and measurements of why the
+index is worth building at all, are in
+[`docs/agent/architecture.md`](docs/agent/architecture.md); local-repo pushes and single-EC2
+(`--local`) deployment are covered in [`docs/runbook.md`](docs/runbook.md).
+
 ## Configuration
 
-- **Code sources**: each target repo is cloned to index-service locally; a systemd timer runs `git pull` for minute-level freshness with no redeploy.
-- **Local repos** (no git remote): push snapshots via `scripts/push-local-repo.sh` over rsync.
-- **Multi-repo**: a single project can span multiple repositories; one index-service host can serve several projects (separate processes and ports).
 - **Credentials**: chat platform credentials go through AWS Secrets Manager — never written to disk or committed to the repository.
+- **Ports and models**: declared per project in `.local/projects.json`; the model can be overridden per project at deploy time.
 
 ## Testing
 

@@ -226,6 +226,8 @@ aws ssm start-session --region <r> --target <INDEX_SERVICE_INSTANCE>
 #   sudo tail -f /var/log/bot-gateway-<项目>.log        # 期望日志：sdk_wsclient_started → sdk_wsclient_connected
 #   （单元用 StandardOutput=append: 直接写文件，journalctl -u 只有启停记录，看不到应用日志；
 #     CloudWatch agent 同时把这个文件投到 /source-truth/bot-gateway）
+#   curl -s 127.0.0.1:$(grep HEALTH_PORT /etc/bot-gateway-<项目>.env | cut -d\' -f2)/ready
+#     # 就绪探针：200 = 长连接已连上；503 = 启动中 / 重连中 / 正在优雅退出（详见第五节）
 ```
 
 > **只能有一个网关实例连接同一个飞书应用**：飞书长连接是集群模式，每个事件只投给一个 client，
@@ -247,7 +249,19 @@ aws ssm start-session --region <r> --target <INDEX_SERVICE_INSTANCE>
 
    > 本地仓项目要先完成 Quick Start 第三步（推代码），否则 `/health` 非 200、机器人答「未找到」——这是推代码前的正常状态，不是故障。
 
-2. **在群里 @ 机器人**并提问（如「装备耐久怎么算？」）。预期：
+2. **网关健康**（同一台实例，端口是该项目 bridge 端口 + 10000，第一个项目即 `18080`；`activate_gateway.sh`
+   按项目把这个值写进 `/etc/bot-gateway-<项目>.env` 的 `HEALTH_PORT`，不确定时先 `grep HEALTH_PORT` 该文件）：
+
+   ```bash
+   curl -s 127.0.0.1:18080/health   # 存活：进程活着就 200，看响应体里的 wsState
+   curl -s -w '\n%{http_code}\n' 127.0.0.1:18080/ready   # 就绪：期望 200 + "wsState":"connected"
+   ```
+
+   `/ready` 只在飞书长连接已连上、且进程不在优雅退出时才 200，否则 503——这是判断「长连接到底通不通」
+   最快的一步，比翻日志直接。`/health` 在重连期间照样 200（有意如此：SDK 重连只要两秒，不该据此重启）。
+   两条路由只绑 `127.0.0.1`，从 VPC 外访问不到。
+
+3. **在群里 @ 机器人**并提问（如「装备耐久怎么算？」）。预期：
    - 几秒内出现一张卡片，标题带实时计时（思考→分析→完成）；
    - 结论先行、用业务语言表述，底部「供研发复核」折叠区列 `文件:行号` 出处；
    - 可点「继续追问」或直接回复卡片，延续上文继续提问。
@@ -270,9 +284,10 @@ aws ssm start-session --region <r> --target <INDEX_SERVICE_INSTANCE>
 从不替换实例）：确需更换就自行 `stop` → `modify-instance-attribute --instance-type` → `start`，带
 `--instance-type` 重新部署只会在机型不一致时给出警告。
 
-**改术语表构建上限（`GLOSSARY_MAX_FILES`）**：该值写在实例的 `/etc/index-service.env` 里。带新值重新部署时，
-只有这一轮**基础代码有更新**、触发原地重跑 bootstrap，该文件才会被重写、新上限随之生效；基础代码没变时部署走
-快速复用、不重跑 bootstrap，新值不会落到实例上——此时进实例手改 `/etc/index-service.env` 的 `GLOSSARY_MAX_FILES`，
+**改术语表构建上限（`GLOSSARY_MAX_FILES`）**：常规做法是部署时带 `deploy-all.sh --glossary-max-files <n>`
+（`0` = 不限，见[附录 A](#附录-a手动-deploy-allsh)）。该值最终写在实例的 `/etc/index-service.env` 里，但只有这一轮
+**基础代码有更新**、触发原地重跑 bootstrap，该文件才会被重写、新上限随之生效；基础代码没变时部署走快速复用、
+不重跑 bootstrap，新值不会落到实例上——此时进实例手改 `/etc/index-service.env` 的 `GLOSSARY_MAX_FILES`，
 下一轮刷新构建即按新值跑。日常无需调整。
 
 **只重部署 runtime**（修改 agent 镜像 / system prompt 后）：重新运行 `deploy-all.sh`（镜像与 runtime 阶段幂等）。
@@ -306,6 +321,8 @@ aws ssm start-session --region <r> --target <INDEX_SERVICE_INSTANCE>
 ```bash
 ./scripts/trace.sh st-731080073903468d83a0fbe1249b5dc3   # traceId 取自卡片底部或 answer_* 日志行
 #   --since-hours N（默认 6）扩大回溯窗；--raw 不合并、两侧原样输出
+#   --runtime <id> 指定 AgentCore runtime id（默认从 .local/deploy-config 的 RUNTIME_ARN_* 推导；
+#     多项目时会取第一条并提示，查另一个项目就用这个参数指明）
 ```
 
 输出按时间合并、标 `GW`/`AGT` 来源，并自动抽取关键字段（status / detail / error / reason / tool /
@@ -380,7 +397,7 @@ refreshIntervalSec?}`，`source` 默认 `git`、本地仓写 `local`）。顶层
 |------|----------|------|
 | 卡片一直「正在分析…」不结束 | 后端流被中断 / finalize 异常 | 查看网关日志 `finalize_error` / `card_closed failed:true`；偶发时重新提问，持续出现则检查 runtime / index 健康 |
 | 卡片里出现异常的 `<invoke>` 代码标记 | 冷启动那次问答，底层的代码检索工具尚未就绪，agent 就提前作答 | 网关会自动重试一次，预热后不再出现。查日志 `num_turns`/`cache_read` 确认是否冷启动 |
-| 机器人在群里**完全无响应** | 网关未启动 / 未 @ 到机器人 / 同一 app 运行了两个网关争抢事件 | 进实例 `systemctl status 'bot-gateway@*'` 确认 active + 日志 `sdk_wsclient_connected`；确认 @ 的是 `FEISHU_BOT_OPEN_ID`；停止多余网关，只保留一个 |
+| 机器人在群里**完全无响应** | 网关未启动 / 未 @ 到机器人 / 同一 app 运行了两个网关争抢事件 | 进实例先 `curl -s -w '%{http_code}\n' 127.0.0.1:<HEALTH_PORT>/ready`（端口见 `/etc/bot-gateway-<项目>.env`）：503 就是长连接没连上；再 `systemctl status 'bot-gateway@*'` 确认 active + 日志 `sdk_wsclient_connected`；确认 @ 的是 `FEISHU_BOT_OPEN_ID`；停止多余网关，只保留一个 |
 | 网关 `condition failed` 未启动 | `/etc/bot-gateway-<项目>.env` 尚未写入（runtime 未就绪 / gateway 阶段被跳过） | 重新运行 `install.sh` 或 `deploy-all.sh`（不跳 gateway）；确认 `FEISHU_SECRET_ID` 已配 |
 | 卡片回「查询失败」/ 日志 `AccessDenied` | 部署身份缺 `bedrock:InvokeModel`，或该模型在此区域无可用推理档 | 给部署身份补 `bedrock:InvokeModel`；模型档由部署按区域自动解析，查不到时 preflight 会列出该区域可用的档（见前置条件 3） |
 | 部署在 index-service 阶段超时 | 全新账号 NAT 路由未收敛 / 实例仍在冷启动建立索引 | 再等待一轮（bootstrap 对网络操作有重试）；查看 `/var/log/` 与 `journalctl -u 'index-build@*'` |
@@ -453,6 +470,16 @@ sudo journalctl -u reindex-<subdir> -f          # 或 sudo tail -f /var/log/rein
 ./scripts/lib/deploy_project.sh <r> <projectId>
 ```
 
+其余参数（都可与上面组合）：
+
+| 参数 | 默认 | 作用 |
+|------|------|------|
+| `--max-files <n>` | 10000 | 每个仓库 codegraph 建索引的文件数上限 |
+| `--glossary-max-files <n>` | `0`（不限） | 每个仓库术语表构建的文件数上限。**这是控成本的主要旋钮**：不限时大仓一次全量构建可达数百美元（14000 文件实测约 $372）。改这个值不必进实例改 env 文件，见第六节「改术语表构建上限」 |
+| `--idle-timeout <秒>` | 900 | microVM 空闲回收时长（60–28800），同时对齐网关的 session 复用 TTL |
+| `--max-lifetime <秒>` | 28800（8h） | microVM 强制回收前的硬上限（60–28800）；语义见 [`agent/architecture.md`](agent/architecture.md) |
+| `--force` | 关 | 跳过 Phase 0 的硬阻断预检（如 vCPU 配额不足），视为操作者已确认。已在提额、或确知检查结果过时时才用 |
+
 **前提**：`.local/projects.json` 里每个项目的 `feishuSecretId` 指向的飞书密钥、以及全局
 `source-truth/git-credentials`（私有仓只读凭证）**必须已存在于 Secrets Manager**。这些只有
 `install.sh` 的「添加项目」会交互创建，所以**新项目首次务必走 install.sh**；deploy-all 只消费它们。
@@ -471,6 +498,9 @@ export FEISHU_APP_ID=cli_xxx
 export FEISHU_APP_SECRET=xxx            # 不要写进仓库
 export FEISHU_BOT_OPEN_ID=ou_xxx
 # 可选：LOG_HASH_SALT、MAX_CONCURRENT_INVOKES（默认 8）、LOCALE（默认 zh）
+# 可选：HEALTH_PORT——健康端点端口（只绑 127.0.0.1）。不设时按 bridge 端口 + 10000 推导
+#   （8080 → 18080）；线上由 activate_gateway.sh 按项目写进 /etc/bot-gateway-<项目>.env，
+#   systemd 单元的启动探针读同一个值。端点语义（/health 存活、/ready 就绪）见第五节
 node_modules/.bin/ts-node --transpile-only src/index.ts
 ```
 

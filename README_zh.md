@@ -67,7 +67,7 @@
 
 部署在单一账号、单一区域（默认东京 `ap-northeast-1`）。核心是一台共用的 ARM EC2（常驻索引）、
 每项目一套 Bedrock AgentCore Runtime（会话隔离的 microVM）、Bedrock 模型推理、S3 / ECR。
-全部 21 项服务的规格 / 数量 / 用途见 [`docs/aws-services_zh.md`](docs/aws-services_zh.md)。
+全部 23 项服务 / 资源的规格 / 数量 / 用途见 [`docs/aws-services_zh.md`](docs/aws-services_zh.md)。
 
 ## 部署与测试
 
@@ -132,8 +132,7 @@ bash <(gh api repos/aws-samples/sample-code-qa-on-agentcore/contents/scripts/get
 | 一次提问如何在系统里流转 | [`docs/agent/architecture.md`](docs/agent/architecture.md) |
 | AI 协作约定 | [`AGENTS.md`](AGENTS.md) |
 | 需求 / 架构设计权威依据 | [`docs/design/`](docs/design/README.md) |
-
-完整文档地图（目录结构、术语表、不变量、变更手册、各调研记录）见 [`docs/README.md`](docs/README.md)。
+| 完整文档地图（目录结构、术语表、不变量、变更手册、各调研记录） | [`docs/README.md`](docs/README.md) |
 
 ## 许可证
 

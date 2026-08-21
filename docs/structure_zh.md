@@ -7,7 +7,7 @@
 ```
 agent-container/        会话 microVM 内运行的 Claude Code Agent（Python）
   README.md             职责 + 对外契约（输入 goal/session、index-service MCP 端点：定位 + 读文件）
-  prompts/              系统 prompt + 高频问题清单 + 问答规范（代码为准 / 标差异 / 转研发）
+  prompts/              system.md 一个文件：系统 prompt + 高频问题清单 + 问答规范（代码为准 / 标差异 / 转研发）
   Dockerfile            ARM64 基础镜像 sha256 锁定；pin Claude Agent SDK（claude-agent-sdk）；@anthropic-ai/claude-code 按运维决定跟随 @latest（不 pin）
   agent.py              @app.entrypoint 异步流式 handler，启动 Agent 循环
   agent_lib.py          SDK-free 只读问答 Agent 主逻辑（agent.py 的可测试内核：选项构建 / 取证循环）
@@ -16,6 +16,7 @@ agent-container/        会话 microVM 内运行的 Claude Code Agent（Python�
 bot-gateway/            飞书 Bot 长连接事件网关 + CardKit 流式渲染（TypeScript 长驻服务）
   README.md             长连接 / 事件去重 / 会话→runtimeSessionId 映射 / 卡片更新频控
   src/                  事件消费入口、SigV4 调 AgentCore、会话映射、CardKit 渲染、SSE 解析、脱敏日志
+  src/health.ts         健康端点（127.0.0.1 独立端口，默认 bridge 端口 + 10000，`HEALTH_PORT` 覆盖）：`/health` 存活、`/ready` 就绪（长连接已连上且未在优雅退出才 200）
   run.sh                服务启动器：source systemd 注入的 per-project env（/etc/bot-gateway-<项目>.env）+ 从 Secrets Manager 取飞书凭证（不落盘）→ node dist
   tests/                jest 单测（由 scripts/test.sh 调用）
 index-service/          常驻 CodeGraph 索引服务 + MCP-over-HTTP 接口
@@ -52,7 +53,7 @@ infra/                  基础设施即代码（MVP 先 agentcore toolkit / boto
   (p2) lib/             runtime / codegraph(index-service) / gateway 各 stack
 config/                 配置驱动：i18n.json（卡片 / 告警 / 错误文案）、alarm-thresholds.json（告警阈值，运维可调）、projects.example.json（项目路由 schema 模板；真实配置在 .local/projects.json，部署相关、gitignore）
 scripts/                运维生命周期
-  check-invariants.sh   快速结构 lint（AGENTS / CLAUDE / 双语配对 / 顶层目录 ↔ structure 文档双向对齐）
+  check-invariants.sh   快速结构 lint（AGENTS.md + architecture.md 存在与互引 / 双语配对 / 顶层目录 ↔ structure 文档双向对齐 / design 权威依据存在 / 全局 IAM 角色策略未钉死 ${REGION} / GitHub slug 默认值为 aws-samples / 文档无真实人名与竞品名）
   lib/                  common.sh（格式化 + 依赖检查）、env-utils.sh（.env / deploy-config 共享 helper）、render_metric_filters.py（指标定义→put-metric-filter 计划）、render_dashboard.py（看板模板渲染 + 禁 type:log 校验）、render_alarms.py（阈值→put-metric-alarm 计划）、render_manifest.py（多仓 REPO_MANIFEST_JSON 校验+逐仓记录，纯函数可测）
   apply-monitoring.sh   监控栈唯一入口（看板→指标 filter→告警→DAU Lambda 按序全量，幂等；--only 选单阶段；--dry-run；实现在 lib/apply-*.sh）
   test.sh               分层测试的唯一入口（离线默认 / --full）

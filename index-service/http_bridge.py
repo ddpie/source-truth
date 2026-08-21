@@ -22,6 +22,7 @@ import json
 import logging
 import os
 import posixpath
+import shutil
 import sys
 from typing import Any
 
@@ -35,6 +36,31 @@ from repo_router import RepoRouter, RepoOutOfScope
 # NOTE: the bridge uses the RESIDENT CodegraphSession exclusively — spawning a
 # fresh codegraph process per query is the corruption-risk pattern the resident
 # session replaced, so it must never re-enter the production path.
+
+# APP CODE STALENESS. A re-bootstrap refreshes /opt/idx/app in place and does NOT restart the
+# resident bridges, so this process can keep executing code older than what is on disk (the lazy
+# tool imports below then load NEW module source into a process running OLD code). We snapshot the
+# app bundle's signature stamp at import time and expose a comparison on /health, so the skew is
+# observable instead of being inferred from behaviour. Reporting only — never a health gate, and a
+# no-op on a host where nothing stamps the file.
+_APP_SIG_PATH = os.environ.get("APP_SRC_SIG_PATH", "/opt/idx/app/.src_sig")
+
+
+def _read_app_sig() -> str:
+    try:
+        with open(_APP_SIG_PATH, encoding="utf-8", errors="replace") as fh:
+            return fh.read().strip()
+    except OSError:
+        return ""
+
+
+_APP_SIG_AT_START = _read_app_sig()
+
+
+def _app_code_changed() -> bool:
+    """True iff the on-disk app signature differs from the one this process started with."""
+    now = _read_app_sig()
+    return bool(now) and bool(_APP_SIG_AT_START) and now != _APP_SIG_AT_START
 
 # Per-WORKSPACE writer-lock fds, module-global so the GC can't collect them and
 # release the flocks mid-run. Keyed by the normalized workspace path → held fd, so a
@@ -740,8 +766,19 @@ def build_bridge(
         if repo_down:
             ok = False
             detail = f"repo copy unreadable ({fails} consecutive probe failures): {detail}"
+        # OBSERVABILITY (does NOT gate health — a 200/503 flip on either of these would be worse
+        # than the blind spot it closes):
+        #  * ripgrep: bootstrap installs `rg` with a `|| true`, so a failed install silently
+        #    degrades search_files to the grep fallback with nothing anywhere reporting it.
+        #  * code_stale: a re-bootstrap refreshes /opt/idx/app UNDER the running bridge without
+        #    restarting it, so the process can be executing code older than what is on disk. This
+        #    compares the app bundle's signature stamp now against the value read at startup. It is
+        #    a NO-OP until the bootstrap side stamps the file — reporting False either way is
+        #    correct (nothing observed changing), so it is safe to ship ahead of that.
+        rg_ok = shutil.which("rg") is not None
         return JSONResponse(
-            {"healthy": ok, "detail": detail, "repo_probe_ms": disk_ms},
+            {"healthy": ok, "detail": detail, "repo_probe_ms": disk_ms,
+             "ripgrep": rg_ok, "code_stale": _app_code_changed()},
             status_code=200 if ok else 503,
         )
 
@@ -797,7 +834,14 @@ def main() -> int:
     # BY POSITION with a --local-workspace. Single-repo passes one of each (unchanged).
     p.add_argument("--workspace", action="append", default=[],
                    help="repo path codegraph-server indexes (repeat for multi-repo)")
-    p.add_argument("--host", default="0.0.0.0")
+    # SAFE-BY-DEFAULT BIND. There is NO authentication on this server: anything that can reach the
+    # port can read any indexed source (read_file / glob_files / search_files) and enumerate the
+    # graph, so the only control is the network. The DEFAULT is therefore loopback; the deployed
+    # unit (activate_project.sh) passes --host 0.0.0.0 explicitly because the AgentCore runtime
+    # connects over the VPC by private IP and the loopback /health probe must keep working — that
+    # exposure is a reviewed, recorded decision there, not something a caller should inherit by
+    # forgetting the flag. Adding real auth needs a matching change in the agent's MCP client.
+    p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8080)
     # DEPRECATED, accepted-but-ignored: paths are always repo-relative now (the agent
     # mounts no filesystem). The deploy script (activate_project.sh) still passes
@@ -839,6 +883,17 @@ def main() -> int:
     logger.info(json.dumps({"event": "bridge_start",
                             "workspaces": [ws for ws, _ in pairs],
                             "host": args.host, "port": args.port}))
+    # Make the unauthenticated-exposure decision VISIBLE in the journal on every start, so it shows
+    # up in an incident timeline instead of only in a unit file comment. Not an error: the deployed
+    # configuration binds all interfaces on purpose (see --host above) and relies on the security
+    # group. A host reachable from outside the VPC with this line in its log is a finding.
+    if args.host not in ("127.0.0.1", "localhost", "::1"):
+        logger.warning(json.dumps({
+            "event": "bridge_unauthenticated_bind", "host": args.host, "port": args.port,
+            "detail": "no authentication on this server: source read access is limited only by "
+                      "network reachability (security group). Intended for in-VPC access from "
+                      "the AgentCore runtime.",
+        }))
     # build_bridge starts each repo's resident worker (warming in background).
     app = build_bridge(
         workspaces=pairs, host=args.host, port=args.port,

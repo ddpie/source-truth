@@ -22,6 +22,12 @@ PROJECTS_CFG="$ROOT/.local/projects.json"
 [[ "$PID" =~ ^[a-z0-9][a-z0-9-]*$ ]] || { say err "invalid projectId '$PID'"; exit 1; }
 
 safe_source_env "$CONFIG_FILE"
+# Fail with an actionable message, not `ARTIFACT_BUCKET: unbound variable`. This script is reached
+# DIRECTLY by install.sh's add-project / redeploy flows, so a deploy-config written before that key
+# existed (or a partial Phase 1) hits the SSM heredoc below (`aws s3 cp s3://${ARTIFACT_BUCKET}/…`)
+# and aborts on set -u with no hint about which phase is missing. Same shape as the
+# INDEX_SERVICE_INSTANCE / PRIVATE_SUBNET guards further down.
+: "${ARTIFACT_BUCKET:?not set in .local/deploy-config — run scripts/deploy-all.sh (artifacts phase) first}"
 ACCOUNT="$(aws sts get-caller-identity --query Account --output text)"
 GIT_SECRET_ID="${GIT_SECRET_ID:-source-truth/git-credentials}"
 
@@ -174,7 +180,7 @@ if ! aws secretsmanager describe-secret --region "$REGION" --secret-id source-tr
 fi
 PROJECT_ID="$PID" bash "$SCRIPT_DIR/activate_gateway.sh" \
   "$REGION" "$IID" "$RT_ARN" "$FEISHU_SECRET" \
-  "${LOCALE:-zh}" "" "${FEISHU_API_BASE:-}" "${DEPLOY_IDLE_TIMEOUT:-900}" "${ARTIFACT_BUCKET:-}" \
+  "${LOCALE:-zh}" "" "${FEISHU_API_BASE:-}" "${DEPLOY_IDLE_TIMEOUT:-900}" "$ARTIFACT_BUCKET" \
   || { say err "gateway activation failed for $PID — backend is up; fix and re-run"; exit 1; }
 say ok "project $PID fully deployed (bridge:$PORT + runtime + gateway)"
 

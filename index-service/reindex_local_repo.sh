@@ -160,8 +160,13 @@ refresh_glossary() {
     # at once. --collect reaps the unit on completion so a later refresh reuses the same unit name.
     # ${GLOSSARY_MAX_FILES:+--setenv=…} simply vanishes when unset (no empty arg).
     systemctl reset-failed "glossary-build-${PID}-${SUBDIR}.service" 2>/dev/null || true
+    # MemoryMax: same reasoning as activate_project.sh — up to GLOSSARY_BUILD_CONCURRENCY (8)
+    # concurrent `claude` processes here are the largest consumer on the host, and an UNCAPPED OOM
+    # becomes a host-wide OOM that can kill another project's codegraph writer. Killed build =
+    # glossary_gen SKIP = the existing slice survives, so the failure mode is a stale glossary.
     systemd-run --collect --unit="glossary-build-${PID}-${SUBDIR}" \
         -p WorkingDirectory="$APP" \
+        -p MemoryMax=3G -p OOMPolicy=stop \
         -p "StandardOutput=append:$glog" -p "StandardError=append:$glog" \
         --setenv=GLOSSARY_ROOT="$groot" --setenv=AWS_REGION="${REGION:-}" \
         ${GLOSSARY_MAX_FILES:+--setenv=GLOSSARY_MAX_FILES="$GLOSSARY_MAX_FILES"} \
@@ -196,7 +201,13 @@ do_build() {
     echo "REINDEX_DONE subdir=${SUBDIR} project=${PID} mode=incremental"
   else
     # ----- FIRST push (no build marker): full build with the bridge stopped (free the writer flock) -----
+    # AVAILABILITY COST, stated explicitly: the bridge is per-PROJECT, so stopping it takes EVERY
+    # repo in this project offline for the duration of THIS repo's build (minutes on a large repo),
+    # not just the repo being pushed. That is inherent to one bridge process per project — the
+    # writer flock cannot be freed without stopping the process that holds it. Only the first push
+    # pays it; later pushes update in place with the bridge up.
     echo "reindex: first build for $SUBDIR — stopping $BRIDGE to build the graph (single-writer)"
+    echo "reindex: NOTE — this takes ALL of project ${PID}'s repos offline until the build finishes."
     systemctl stop "$BRIDGE" 2>/dev/null || true
     apply_staged
     stamp_snapshot
@@ -209,6 +220,8 @@ do_build() {
     # `restart` forces it to actually run again. reset-failed first so a prior failed state doesn't
     # block the transaction.
     systemctl reset-failed "index-build@${SUBDIR}.service" 2>/dev/null || true
+    # Timestamp taken BEFORE the restart: the fallback window for reading this run's log lines.
+    BUILD_SINCE="$(date -u +'%Y-%m-%d %H:%M:%S')"
     systemctl restart "index-build@${SUBDIR}.service" || true
     R="$(systemctl show "index-build@${SUBDIR}.service" --value -p Result 2>/dev/null || echo unknown)"
     if [ "$R" != "success" ]; then
@@ -221,7 +234,20 @@ do_build() {
     # ("Persisted <N> nodes" with N>0) before dropping the marker. If it built empty (e.g. code
     # somehow not present), leave NO marker so the next push retries a full build instead of getting
     # stuck on an empty graph.
-    NODES="$(journalctl -u "index-build@${SUBDIR}.service" --no-pager 2>/dev/null \
+    #
+    # SCOPED TO THIS INVOCATION. Reading the unit's whole retained history was the bug the marker
+    # exists to prevent: if THIS run persisted nothing but a previous run logged "Persisted 5000
+    # nodes", `tail -1` returned 5000 and the marker was written for an EMPTY graph — after which
+    # every later push takes the incremental path and the graph stays empty forever. Prefer the
+    # systemd InvocationID (exact, one run) and fall back to --since the pre-restart timestamp on
+    # an older systemd that does not expose it.
+    INV="$(systemctl show "index-build@${SUBDIR}.service" --value -p InvocationID 2>/dev/null || echo "")"
+    if [ -n "$INV" ]; then
+      BUILD_LOG_CMD=(journalctl "_SYSTEMD_INVOCATION_ID=$INV" --no-pager)
+    else
+      BUILD_LOG_CMD=(journalctl -u "index-build@${SUBDIR}.service" --since "$BUILD_SINCE" --no-pager)
+    fi
+    NODES="$("${BUILD_LOG_CMD[@]}" 2>/dev/null \
       | grep -oE 'Persisted [0-9]+ nodes' | tail -1 | grep -oE '[0-9]+' || echo 0)"
     if [ "${NODES:-0}" -gt 0 ]; then
       touch "$BUILD_MARKER" 2>/dev/null || true

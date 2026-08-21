@@ -593,16 +593,61 @@ fi
 # ============================================================
 if skip index-svc; then say warn "skip index-svc"; elif [[ "$DRY_RUN" == true ]]; then
   say step "Phase 3: index-service EC2"
-  say info "[dry-run] provision_index_service.sh (ARM EC2 + bootstrap, reuse if running) + /health wait"
   say info "[dry-run]   instance_type=$INSTANCE_TYPE  AMI=Ubuntu 24.04 ARM64 (resolved at provision time)"
   say info "[dry-run]   subnet=${PRIVATE_SUBNET:-<from Phase 2>}  region=$REGION"
   say info "[dry-run]   root_volume=${ROOT_VOLUME_GB}GiB  max_files=$MAX_FILES  model=$MODEL"
+  # The host is never replaced any more, so spell out what "reuse" now MUTATES. The old line
+  # ("reuse if running") predates in-place updates and understated the blast radius: on a
+  # signature mismatch this phase re-runs bootstrap.sh on a LIVE host.
+  if [[ -n "${INDEX_SERVICE_INSTANCE:-}" ]]; then
+    say info "[dry-run] REUSE base host ${INDEX_SERVICE_INSTANCE} — updated IN PLACE, never replaced:"
+    say info "[dry-run]   • if the staged S3 artifacts differ from the host's ArtifactSig tag →"
+    say info "[dry-run]     re-run bootstrap.sh on it over SSM: rewrites /etc/index-service.env,"
+    say info "[dry-run]     /opt/idx/app and /opt/bot-gateway on a RUNNING host (mutating)"
+    say info "[dry-run]   • if they match → no host-side change at all"
+    say info "[dry-run]   nothing is stopped or terminated by this phase"
+  else
+    say info "[dry-run] LAUNCH a new base host (no INDEX_SERVICE_INSTANCE recorded yet) + bootstrap"
+    say info "[dry-run]   via user-data, then wait for the BOOTSTRAP_DONE marker over SSM"
+  fi
+  # CONTRACT NOTE for provision_index_service.sh (owned elsewhere — not edited from here): to print
+  # the EXACT verdict ("will re-bootstrap in place on <iid>" vs "no change") this phase needs that
+  # script to expose its ArtifactSig comparison side-effect-free — e.g. honour ST_DRY_RUN=true by
+  # computing the signature, printing `PLAN=rebootstrap|noop <iid>` on stdout and exiting 0 before
+  # any mutating call. Until it does, dry-run enumerates the two possible actions rather than
+  # guessing. Recomputing the signature here is deliberately NOT done: it would drift the moment
+  # the signature gains a component (e.g. bootstrap.sh's own ETag).
 else
   say step "Phase 3: index-service EC2 (BASE host — no project bound)"
+  # Remember whether a base host already existed BEFORE this run: the provisioner reuses and updates
+  # it in place, and only writes a different INDEX_SERVICE_INSTANCE when it genuinely launched one.
+  # That comparison is the only signal deploy-all needs, and it needs no cooperation from
+  # provision_index_service.sh (whose stdout stays the IP alone).
+  INDEX_IID_BEFORE="${INDEX_SERVICE_INSTANCE:-}"
   INDEX_IP="$(ST_LOCAL_MODE="$LOCAL_MODE" "$SCRIPT_DIR/lib/provision_index_service.sh" \
     "$REGION" "$CONFIG_FILE" "$BUCKET" "$MAX_FILES" "$INSTANCE_TYPE" "$ROOT_VOLUME_GB" "$MODEL" "$GLOSSARY_MAX_FILES")"
   update_env "$CONFIG_FILE" INDEX_SERVICE_IP "$INDEX_IP"
   safe_source_env "$CONFIG_FILE"
+  REUSED_INDEX_HOST=false
+  if [[ -n "$INDEX_IID_BEFORE" && "$INDEX_IID_BEFORE" == "${INDEX_SERVICE_INSTANCE:-}" ]]; then
+    REUSED_INDEX_HOST=true
+  fi
+  # STABLE ENDPOINT: the agent reaches the index host through a Route53 private DNS name, never the
+  # raw IP, so the runtime's CODEGRAPH_MCP_URL survives a hand-replacement of the host (AgentCore's
+  # warm microVMs cache the env for 30+ min and would otherwise hold a stale IP).
+  #
+  # On the REUSED path the record already points at this IP and cannot change, so write it BEFORE the
+  # bootstrap gate. Waiting first was a blue-green leftover — the record had to move to a NEW
+  # instance only once it was healthy. Kept that way, a first-deploy gate failure aborted before the
+  # A record was ever written, leaving an instance with no index.<region>.source-truth.internal, and
+  # the re-run had to clear the same gate before DNS existed. For a genuinely FRESH launch the wait
+  # still comes first: that IP is new and must be healthy before it is published.
+  INDEX_DNS_DONE=false
+  if [[ "$REUSED_INDEX_HOST" == true && -n "${VPC_ID:-}" ]]; then
+    "$SCRIPT_DIR/lib/provision_index_dns.sh" "$REGION" "$CONFIG_FILE" "$VPC_ID" "$INDEX_IP" >/dev/null
+    safe_source_env "$CONFIG_FILE"
+    INDEX_DNS_DONE=true
+  fi
   # Wait for the BASE host bootstrap to finish before attaching any project. The base host
   # has NO bridge yet (projects attach later via deploy_project.sh), so we wait for SSM-online
   # + the BOOTSTRAP_DONE marker, NOT a bridge /health (per-project bridge health is gated inside
@@ -622,13 +667,9 @@ else
       exit 1
     }
   fi
-  # STABLE ENDPOINT: point the agent at a Route53 private DNS name, not the raw IP.
-  # The index host is updated IN PLACE, but if it ever has to be replaced by hand the
-  # DNS name is re-pointed instead of the runtime being reconfigured — so the runtime's
-  # CODEGRAPH_MCP_URL never changes, and AgentCore's warm microVMs (which cache the env
-  # for 30+ min) never end up pointed at a stale IP. The runtime phase below uses
-  # INDEX_DNS_NAME instead of INDEX_SERVICE_IP.
-  if [[ "$DRY_RUN" != true ]]; then
+  # STABLE ENDPOINT (fresh-launch path): publish the record only now that the new host is healthy.
+  # Already done above for a reused host, so this is skipped there rather than repeated.
+  if [[ "$INDEX_DNS_DONE" != true ]]; then
     "$SCRIPT_DIR/lib/provision_index_dns.sh" "$REGION" "$CONFIG_FILE" "$VPC_ID" "$INDEX_IP" >/dev/null
     safe_source_env "$CONFIG_FILE"
   fi

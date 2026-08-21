@@ -7,7 +7,7 @@
 ```
 agent-container/        Claude Code Agent running inside the session microVM (Python)
   README.md             Responsibility + external contract (goal/session input, index-service MCP endpoint: locate + read files)
-  prompts/              System prompt + FAQ list + answer rules (code-as-truth / flag divergence / escalate)
+  prompts/              A single file, system.md: system prompt + FAQ list + answer rules (code-as-truth / flag divergence / escalate)
   Dockerfile            ARM64 base image pinned by sha256; pins Claude Agent SDK (claude-agent-sdk); @anthropic-ai/claude-code tracks @latest by operator choice (NOT pinned)
   agent.py              @app.entrypoint async streaming handler that drives the agent loop
   agent_lib.py          SDK-free read-only Q&A agent core (agent.py's testable kernel: option build / evidence loop)
@@ -16,6 +16,7 @@ agent-container/        Claude Code Agent running inside the session microVM (Py
 bot-gateway/            Feishu Bot long-connection event gateway + CardKit streaming (TypeScript long-running service)
   README.md             Long-connection / event dedup / session→runtimeSessionId map / card update throttling
   src/                  Event consumer entry, SigV4 call to AgentCore, session map, CardKit render, SSE parse, redacted logging
+  src/health.ts         Health endpoints on a separate 127.0.0.1 port (bridge port + 10000 by default, `HEALTH_PORT` overrides): `/health` liveness, `/ready` readiness (200 only while the long connection is up and the process is not draining)
   run.sh                Service launcher: source the systemd-injected per-project env (/etc/bot-gateway-<project>.env) + fetch Feishu creds from Secrets Manager (never on disk) → node dist
   tests/                jest unit tests (invoked by scripts/test.sh)
 index-service/          Standalone CodeGraph index service + MCP-over-HTTP bridge
@@ -52,7 +53,7 @@ infra/                  Infrastructure as code (MVP starts with agentcore toolki
   (p2) lib/             runtime / codegraph(index-service) / gateway stacks
 config/                 Config-driven: i18n.json (card / alarm / error copy), alarm-thresholds.json (alarm thresholds, operator-tunable), projects.example.json (project-routing schema template; the real config lives at .local/projects.json — deployment-specific, gitignored)
 scripts/                Operational lifecycle
-  check-invariants.sh   Fast structural lint (AGENTS / CLAUDE / bilingual pairing / top-level dirs ↔ structure doc two-way diff)
+  check-invariants.sh   Fast structural lint (AGENTS.md + architecture.md present and cross-referenced / bilingual pairing / top-level dirs ↔ structure doc two-way diff / design docs present / global IAM role policies do not pin ${REGION} / GitHub slug defaults are aws-samples / docs carry no real personnel or competitor names)
   lib/                  common.sh (formatting + dep checks), env-utils.sh (.env / deploy-config shared helper), render_metric_filters.py (metric defs → put-metric-filter plan), render_dashboard.py (dashboard template render + no-type:log guard), render_alarms.py (thresholds → put-metric-alarm plan), render_manifest.py (multi-repo REPO_MANIFEST_JSON validate + per-repo records, pure & testable)
   apply-monitoring.sh   Single entry for the monitoring stack (dashboards→metric filters→alarms→DAU Lambda in order, idempotent; --only picks one stage; --dry-run; implementations in lib/apply-*.sh)
   test.sh               Single tiered test entrypoint (offline default / --full)

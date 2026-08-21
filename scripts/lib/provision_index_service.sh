@@ -10,19 +10,26 @@
 # its project's bridge over the private network. No EFS (each repo copy is local to this instance).
 #
 # IN-PLACE UPDATES ONLY — 只做原地更新，不再做蓝绿替换 (blue-green replacement REMOVED).
-# WHY: this deployment is a SINGLE-HOST sample, not a fleet — there is no traffic tier that
-# needs make-before-break, so the cost of the replacement path far exceeded its benefit:
-#   - it had a real MIS-KILL risk: deciding "which instance is safe to terminate" depended on
-#     a Route53 lookup + an INDEX_OLD_INSTANCE marker in the config file, and any wrong /
-#     unreadable answer meant terminating the box that was still serving;
-#   - a failed refresh (health gate red, deploy aborted, marker never cleared) left ORPHANED
-#     paid instances behind that nobody reconciled reliably.
-# NEW SEMANTICS: an existing instance is NEVER terminated and NEVER replaced. When the staged
-# base-code artifacts differ from what the instance booted from, we re-run bootstrap.sh ON THAT
-# INSTANCE over SSM (it is idempotent — the same thing local mode does on every run) and then
-# re-stamp its ArtifactSig tag. A fresh instance is launched only when there genuinely is none
-# (first deploy / someone terminated it) — that is normal provisioning, not blue-green.
-# 唯一仍会 run-instances 的情况：确实没有存活实例（首次部署或实例已被销毁）。
+# An existing instance is NEVER terminated and NEVER replaced: when the staged base-code
+# artifacts differ from what it booted from, we re-run bootstrap.sh ON THAT INSTANCE over SSM
+# (idempotent — the same thing local mode does on every run) and re-stamp its ArtifactSig tag.
+# The only remaining run-instances is a genuinely empty account (first deploy / someone
+# terminated the host). This is the single note about the removed path — it was a mis-kill risk
+# (the "which box is safe to terminate" decision hinged on a Route53 lookup plus an
+# INDEX_OLD_INSTANCE config marker) and it leaked paid instances whenever a refresh aborted.
+# INDEX_OLD_INSTANCE is now a DEAD KEY: nothing writes it, nothing reads it, a leftover is ignored.
+#
+# BREAK-BEFORE-MAKE on the in-place path (see rebootstrap_in_place): bootstrap.sh rewrites
+# /opt/bot-gateway and /opt/idx/app, and its `npm ci` deletes node_modules outright — under a live
+# process that is a MODULE_NOT_FOUND crash loop on the next lazy require(). So the re-bootstrap
+# STOPS the active bot-gateway@* / index-bridge-* units, runs, then starts exactly that captured
+# list. The host is deliberately DOWN for the length of the run (minutes); the alternative was new
+# code on disk that no process had loaded — and on --skip-projects nothing restarted at all.
+#
+# Env knobs: INDEX_REBOOTSTRAP_TIMEOUT_SECS (default 1800) bounds the in-place SSM run — raise it
+# for a slow host (cold apt + npm on a small ARM box can exceed 30 min). Must be a positive
+# integer; anything else falls back to the default with a warning instead of aborting on an
+# arithmetic error.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
@@ -48,27 +55,88 @@ imds_field() {
 }
 
 # A signature of the BASE-HOST artifacts an instance bootstraps from: the ETags of the
-# index-service code tarball + the bot-gateway tarball in S3. Repos are NO LONGER part of
-# this — they arrive via git (activate_project.sh git-clones + a refresh timer git-pulls),
-# so a repo change is picked up live and never touches the host. The signature therefore
-# tracks the BASE CODE only (bridge / gateway / its deps); when it changes we re-bootstrap
-# the existing host IN PLACE (see below) — 只重跑 bootstrap，不换机器.
-# ETag is S3's content hash, so this changes iff the staged base code changed.
+# index-service code tarball + the bot-gateway tarball in S3, PLUS a hash of bootstrap.sh
+# itself. Repos are NO LONGER part of this — they arrive via git (activate_project.sh
+# git-clones + a refresh timer git-pulls), so a repo change is picked up live and never touches
+# the host. The signature therefore tracks the BASE CODE only (bridge / gateway / their deps /
+# the script that installs them); when it changes we re-bootstrap the existing host IN PLACE
+# — 只重跑 bootstrap，不换机器. ETag is S3's content hash, so it changes iff the code changed.
+#
+# bootstrap.sh IS a component (M10). It carries the systemd unit templates, the CloudWatch
+# config, the Node version and the install steps, and since the host is never replaced any more
+# the in-place re-bootstrap is the ONLY channel by which an edit to it ever reaches a running
+# host: left out of the signature, such an edit was staged to S3 and then silently skipped as
+# "already on the current base artifacts". Hashed LOCALLY (not via its S3 ETag) so the value
+# does not depend on whether the upload happened before or after this call. NOTE: adding this
+# third component changes the signature FORMAT, so every existing host re-bootstraps once on
+# the next deploy — that is the intended catch-up, not a bug.
+#
+# ABSENT vs FAILED (C2). Both head-object calls used to end in `|| echo none`, so any throttle,
+# expired credential or network blip collapsed the signature to "none|none" — which reads as
+# "artifacts changed" and triggered a multi-minute MUTATING re-bootstrap of a perfectly healthy
+# host, then stamped ArtifactSig=none|none so every later deploy mismatched and re-bootstrapped
+# again. A swallowed READ error must never cause a repeated WRITE action, so: a genuine 404 maps
+# to "none", and anything else is fatal with the AWS message attached.
+head_object_etag() { # <key> — prints the quote-free ETag, or "none" iff the key genuinely 404s
+  local key="$1" out
+  # 2>&1 folds the AWS error into $out on failure; on success head-object writes nothing to
+  # stderr, so the captured value stays clean.
+  if out="$(QS head-object --bucket "$BUCKET" --key "$key" --query ETag --output text 2>&1)"; then
+    # S3 returns ETags WITH literal surrounding double-quotes (e.g. "abc123"). Strip them before
+    # this lands in the run-instances --tag-specifications SHORTHAND: a Value= starting with `"`
+    # makes the shorthand parser terminate at the closing quote, then choke on the `|` separator
+    # (ParamValidation), aborting the launch under set -e. Quote-free keeps comparisons consistent.
+    printf '%s' "${out//\"/}"
+    return 0
+  fi
+  case "$out" in
+    *404*|*"Not Found"*|*NotFound*|*NoSuchKey*) printf 'none'; return 0 ;;
+  esac
+  log err "head-object s3://$BUCKET/$key failed and it is NOT a 404 — refusing to guess the"
+  log err "  artifact signature (a wrong guess re-bootstraps a healthy host and poisons its tag):"
+  log err "  → $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-300)"
+  return 1
+}
 artifact_signature() {
-  local idx gw
-  idx="$(QS head-object --bucket "$BUCKET" --key index-service.tar.gz --query ETag --output text 2>/dev/null || echo none)"
-  # bot-gateway runs ON this instance, so its tarball is part of what a bootstrap run
-  # installs — include it so a gateway-only code change is detected as STALE and triggers
-  # the in-place re-bootstrap. Absent (backend-only) → "none", stable.
-  gw="$(QS head-object --bucket "$BUCKET" --key bot-gateway.tar.gz --query ETag --output text 2>/dev/null || echo none)"
-  # S3 returns ETags WITH literal surrounding double-quotes (e.g. "abc123"). Strip them
-  # before this lands in the run-instances --tag-specifications SHORTHAND: a Value= starting
-  # with `"` makes the shorthand parser terminate at the closing quote, then choke on the `|`
-  # separator (ParamValidation), aborting the launch under set -e. Quote-free both sides keeps
-  # the comparison consistent.
-  idx="${idx//\"/}"
-  gw="${gw//\"/}"
-  echo "${idx}|${gw}"
+  local idx gw bs
+  idx="$(head_object_etag index-service.tar.gz)" || return 1
+  # The artifacts phase ALWAYS stages this one, so "absent" means the deploy ran out of order or
+  # points at the wrong bucket — fatal, never a legitimate "none".
+  [[ "$idx" != none ]] || {
+    log err "index-service.tar.gz is absent from s3://$BUCKET — run the artifacts phase (deploy-all.sh) first"
+    return 1
+  }
+  # bot-gateway runs ON this instance, so its tarball is part of what a bootstrap run installs —
+  # include it so a gateway-only code change is detected as STALE and triggers the in-place
+  # re-bootstrap. Genuinely absent on a backend-only deploy → "none" (see effective_sig: a "none"
+  # is never stamped over a real ETag).
+  gw="$(head_object_etag bot-gateway.tar.gz)" || return 1
+  bs="$(sha256sum "$ROOT/index-service/bootstrap.sh" 2>/dev/null | cut -c1-16)"
+  [[ -n "$bs" ]] || { log err "cannot hash $ROOT/index-service/bootstrap.sh — incomplete checkout?"; return 1; }
+  echo "${idx}|${gw}|${bs}"
+}
+
+# Never DOWNGRADE a signature component to "none" (C2, second half). "none" means the key is
+# genuinely absent from the bucket THIS run — legitimate for bot-gateway.tar.gz on a backend-only
+# deploy. Stamping it over a real ETag would both trigger a pointless re-bootstrap and leave a tag
+# that mismatches on every future deploy. So for the comparison AND for the stamp we keep whatever
+# component the host already booted from when this run has nothing to say about it.
+_sig_component() { # <current> <booted>
+  if [[ "$1" == none && -n "${2:-}" && "$2" != none && "$2" != None ]]; then
+    log warn "artifact absent from the bucket this run — keeping the component the host booted from ($2)"
+    printf '%s' "$2"
+  else
+    printf '%s' "$1"
+  fi
+}
+effective_sig() { # <booted-sig> — the signature to COMPARE against and to STAMP
+  local cur=() boot=()
+  IFS='|' read -r -a cur <<< "$CURRENT_SIG"
+  IFS='|' read -r -a boot <<< "${1:-}"
+  printf '%s|%s|%s' \
+    "$(_sig_component "${cur[0]:-none}" "${boot[0]:-}")" \
+    "$(_sig_component "${cur[1]:-none}" "${boot[1]:-}")" \
+    "$(_sig_component "${cur[2]:-none}" "${boot[2]:-}")"
 }
 
 # Authorize an ingress rule idempotently: tolerate ONLY the benign "rule already
@@ -103,21 +171,9 @@ reconcile_index_sg_ingress() { # <sg>
     --group-id "$1" --protocol tcp --port 8080-8099 --source-group "$1"
 }
 
-# Reuse a running index-service instance if present — ALWAYS reuse, never replace.
-# A reused instance does NOT re-run bootstrap.sh by itself (that's EC2 user-data, which
-# fires only on first boot), so on its own it would NOT pick up index-service / gateway
-# code re-staged to S3 this run. So:
-#   - compute the current artifact signature (S3 ETags) and compare to the tag we
-#     stamped on the instance when it last bootstrapped;
-#   - if they match → nothing to do, fast-path reuse (idempotent: no re-bootstrap,
-#     签名一致就直接复用，不做任何多余动作);
-#   - if they differ → re-run bootstrap.sh IN PLACE on that same instance over SSM,
-#     then re-stamp the tag. The instance id / private IP / EBS volume / graph.db all
-#     survive, so the stable name index.source-truth.internal keeps resolving to a host
-#     that exists throughout — no terminate, no replacement launch, no DNS cutover.
-# The old refresh-gated behaviour is gone: there is no "warn and serve stale code" mode
-# (a deploy that re-staged code always applies it) and no "terminate + rebuild" mode.
-CURRENT_SIG="$(artifact_signature)"
+# Reuse strategy for a running index-service host: see the block after the local-mode branch,
+# where the artifact signature is computed (local mode never needs it — it runs bootstrap.sh
+# directly on this box on every invocation).
 
 # --- EC2 auto-recovery + termination protection (C2: runtime reliability) --------
 # System status-check failures (underlying hardware / hypervisor) are unrecoverable
@@ -192,69 +248,244 @@ arm_instance_resilience() {
   fi
 }
 
-# Re-run bootstrap.sh ON AN EXISTING instance, over SSM. This is what REPLACED the
-# blue-green launch: the base code (bridge / gateway / their deps) is brought up to date
-# on the machine that is already serving, keeping its instance id, private IP, EBS volume
-# and already-built graph.db. 原地重跑 bootstrap，机器不动。
+# Where the HOST records the units it stopped for us, so a recovery run (below) can start exactly
+# that list even if the remote shell was killed before its own trap fired. /run is tmpfs: a reboot
+# clears it, and a reboot also brings the units back on its own (they are WantedBy=multi-user).
+REBOOT_UNITS_FILE=/run/source-truth-rebootstrap-units
+
+# Send an AWS-RunShellScript document to one instance; prints the CommandId on success.
+# Captures the AWS error instead of discarding it (M11): with stderr dropped, an InvalidInstanceId
+# (SSM agent unregistered / no NAT egress) is indistinguishable from an AccessDeniedException on
+# ssm:SendCommand — which is the actual first-deploy-on-a-fresh-account failure.
+ssm_send_shell() { # <instance-id> <script>
+  local iid="$1" script="$2" param_file out
+  # --parameters as a JSON FILE, one array element per LINE (the shape SSM expects; a single
+  # element containing literal \n runs the lines glued together). Same helper the gateway /
+  # project activation steps use.
+  param_file="$(mktemp /tmp/idx-rebootstrap-ssm.XXXXXX)"  # X's at end (BSD/macOS-safe)
+  printf '%s' "$script" | python3 -c 'import sys,json; print(json.dumps({"commands": sys.stdin.read().split("\n")}))' > "$param_file"
+  if out="$(aws ssm send-command --region "$REGION" --instance-ids "$iid" \
+      --document-name AWS-RunShellScript --parameters "file://$param_file" \
+      --query Command.CommandId --output text 2>&1)"; then
+    rm -f "$param_file"
+    printf '%s' "$out"
+    return 0
+  fi
+  rm -f "$param_file"
+  log err "ssm send-command failed for $iid:"
+  log err "  → $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-300)"
+  log err "  (read the message above — it distinguishes an unregistered SSM agent / missing NAT"
+  log err "   egress / an instance profile without ssm:* from an AccessDenied on the DEPLOY identity)"
+  return 1
+}
+
+# Best-effort: ask the host to start whatever it recorded in $REBOOT_UNITS_FILE.
+# The remote payload already restarts its own captured units from an EXIT trap, but a cancel that
+# escalates to SIGKILL (or an SSM-agent restart) can kill the shell before the trap runs — which
+# would leave EVERY gateway and bridge stopped. So every failure path also asks from here. Never
+# fails the deploy any harder than it already has; `systemctl start` on a live unit is a no-op.
+restart_captured_units() { # <instance-id>
+  local iid="$1" cid st script deadline
+  script="$(cat <<REMOTE
+UNITS=$REBOOT_UNITS_FILE
+if [ ! -s "\$UNITS" ]; then echo "recover: no captured unit list at \$UNITS — nothing to start"; exit 0; fi
+while read -r u; do
+  [ -n "\$u" ] || continue
+  if systemctl start "\$u"; then echo "recover: started \$u"; else echo "recover: FAILED to start \$u" >&2; fi
+done < "\$UNITS"
+systemctl list-units --type=service --state=active,activating --plain --no-legend 'bot-gateway@*.service' 'index-bridge-*.service' 2>/dev/null || true
+exit 0
+REMOTE
+)"
+  log warn "attempting to restart the units the failed re-bootstrap had stopped on $iid ..."
+  cid="$(ssm_send_shell "$iid" "$script")" || {
+    log err "could not send the unit-restart recovery command to $iid — the host may have its"
+    log err "  gateways/bridges STOPPED. Recover by hand: aws ssm start-session --target $iid ;"
+    log err "  while read -r u; do systemctl start \"\$u\"; done < $REBOOT_UNITS_FILE"
+    return 0
+  }
+  deadline=$(( SECONDS + 180 ))
+  while (( SECONDS < deadline )); do
+    sleep 5
+    st="$(aws ssm get-command-invocation --region "$REGION" --command-id "$cid" --instance-id "$iid" \
+      --query Status --output text 2>/dev/null || echo "")"
+    case "$st" in
+      Success) log ok "units restarted on $iid after the failed re-bootstrap"; return 0 ;;
+      Failed|Cancelled|TimedOut)
+        log err "unit-restart recovery $st on $iid — the host may still have services down;"
+        log err "  inspect: aws ssm start-session --target $iid ; systemctl --failed"
+        return 0 ;;
+    esac
+  done
+  log warn "unit-restart recovery on $iid did not confirm within 180s — verify with: systemctl --failed"
+  return 0
+}
+
+# Re-run bootstrap.sh ON AN EXISTING instance, over SSM: the base code (bridge / gateway / their
+# deps) is brought up to date on the machine that is already serving, keeping its instance id,
+# private IP, EBS volume and already-built graph.db. 原地重跑 bootstrap，机器不动。
 #
-# Safe to call on a signature match too (bootstrap.sh is idempotent — local mode runs it
-# on every single invocation), but the caller SKIPS it when the signature already matches
-# so a no-op deploy stays fast.
+# BREAK-BEFORE-MAKE, all inside ONE SSM run (C1). Order is capture → stop → bootstrap → start:
+#   1. the host lists the ACTIVE bot-gateway@* / index-bridge-* units and records them;
+#   2. it stops exactly those (bootstrap's `npm ci` deletes node_modules under them — a live
+#      process then dies on its next lazy require() and Restart=always turns that into a crash
+#      loop; and the Feishu long-connection is a global singleton per app, so the old process
+#      must be positively dropped before a new one can hold it);
+#   3. bootstrap.sh runs;
+#   4. it starts exactly the captured list — never more (a project deliberately stopped stays
+#      stopped) and never fewer (this is also what fixes --skip-projects leaving new code on
+#      disk that no process had loaded).
+# Steps 2-4 live in the remote payload ON PURPOSE rather than as three SSM round-trips: if the
+# deploy machine loses the network between round-trips, a three-call version leaves the host with
+# everything stopped and nobody to start it. Here the host's own EXIT trap restarts the units and
+# rolls the env file back, and the deploy side additionally retries the restart from outside.
 #
-# HARD-FAILS on error instead of falling back to "reuse the stale box": the whole point of
-# this path is that a deploy which re-staged code actually applies it. A silent stale reuse
-# is exactly the failure mode the old REFRESH=false branch had.
+# HARD-FAILS instead of falling back to "reuse the stale box" — a deploy that re-staged code must
+# apply it. The caller stamps ArtifactSig only after this returns 0, so a failed run leaves the tag
+# stale and the next deploy retries.
 rebootstrap_in_place() { # <instance-id>
-  local iid="$1" cid st err out param_file remote_cmd deadline
+  local iid="$1" cid st err out rc remote_cmd deadline timeout_secs
+
+  # L16: an unvalidated override made `deadline=$(( ... ))` an arithmetic error that set -e turned
+  # into an opaque abort. Fall back to the default instead — a bad knob must not kill the deploy.
+  timeout_secs="${INDEX_REBOOTSTRAP_TIMEOUT_SECS:-1800}"
+  if ! printf '%s' "$timeout_secs" | grep -Eq '^[1-9][0-9]*$'; then
+    log warn "INDEX_REBOOTSTRAP_TIMEOUT_SECS='$timeout_secs' is not a positive integer — using 1800"
+    timeout_secs=1800
+  fi
 
   # Stage the CURRENT bootstrap.sh so the host pulls this run's copy (the fresh-launch path
   # does the same upload for its user-data). The instance already has the aws CLI + an
   # instance profile from its first bootstrap, so it can read S3 itself — no presign needed.
   aws s3 cp "$ROOT/index-service/bootstrap.sh" "s3://$BUCKET/bootstrap.sh" --region "$REGION" >&2
 
-  remote_cmd="set -e
-cat > /etc/index-service.env <<ENV
+  # Remote payload. Written for /bin/sh (the SSM agent's shell): no arrays, no [[ ]], no ${x//}.
+  # Deploy-side values interpolate here; every HOST-side expansion is escaped as \$.
+  remote_cmd="$(cat <<REMOTE
+set -e
+UNITS=$REBOOT_UNITS_FILE
+ENV_FILE=/etc/index-service.env
+ENV_BAK=/etc/index-service.env.rebootstrap-bak
+
+# H5: serialize. A deploy-side timeout used to abandon the SSM command while the remote bash kept
+# running, so the NEXT deploy started a SECOND concurrent bootstrap on the same tree (two
+# apt-get → dpkg lock, two tar xzf into /opt/bot-gateway, two npm ci in one node_modules).
+# Deliberately NOT the lock file bootstrap.sh itself may take: this wrapper CALLS bootstrap.sh, so
+# sharing one lock would deadlock against it. flock missing (non-Ubuntu base?) → proceed unlocked
+# rather than refuse to deploy.
+LOCK=/var/lock/source-truth-rebootstrap.lock
+if command -v flock >/dev/null 2>&1; then
+  exec 9>"\$LOCK"
+  flock -n 9 || { echo "FATAL: another in-place re-bootstrap already holds \$LOCK on this host — refusing to run a second, concurrent bootstrap" >&2; exit 75; }
+fi
+
+# C1 step 1 — capture the units this run is about to break.
+systemctl list-units --type=service --state=active,activating --plain --no-legend 'bot-gateway@*.service' 'index-bridge-*.service' 2>/dev/null | awk '{print \$1}' > "\$UNITS" || true
+echo "re-bootstrap: active units to stop and restart: \$(tr '\n' ' ' < "\$UNITS")"
+
+start_captured() {
+  rc=0
+  while read -r u; do
+    [ -n "\$u" ] || continue
+    if systemctl start "\$u"; then echo "re-bootstrap: restarted \$u"; else echo "re-bootstrap: FAILED to restart \$u" >&2; rc=1; fi
+  done < "\$UNITS"
+  return \$rc
+}
+
+on_failure() {
+  echo "re-bootstrap: FAILED — rolling back \$ENV_FILE and restarting the units we stopped" >&2
+  if [ -f "\$ENV_BAK" ]; then mv -f "\$ENV_BAK" "\$ENV_FILE" || true; fi
+  start_captured || true
+}
+# Never leave the host fully down: any non-zero exit (bootstrap failure, or the SIGTERM an
+# \`ssm cancel-command\` delivers) restarts what we stopped before propagating the failure.
+trap 'rc=\$?; if [ \$rc -ne 0 ]; then on_failure; fi; exit \$rc' EXIT
+trap 'echo "re-bootstrap: SIGTERM/SIGINT (deploy-side cancel?) — unwinding" >&2; exit 143' TERM INT
+
+# C1 step 2 — stop them.
+while read -r u; do
+  [ -n "\$u" ] || continue
+  echo "re-bootstrap: stopping \$u"
+  systemctl stop "\$u" || echo "re-bootstrap: WARN 'systemctl stop \$u' returned non-zero" >&2
+done < "\$UNITS"
+
+# M12 — the env file must carry the NEW values for this run to mean anything (bootstrap.sh READS
+# MAX_FILES / MODEL / GLOSSARY_MAX_FILES from it), so it is written BEFORE the run and rolled back
+# by on_failure. Deferring the write instead would have run bootstrap against the OLD values; a
+# backup+rollback keeps both properties — new values applied, no NEW-env-over-OLD-code residue.
+cp -a "\$ENV_FILE" "\$ENV_BAK" 2>/dev/null || true
+cat > "\$ENV_FILE" <<'ENV'
 BUCKET='$BUCKET'
 REGION='$REGION'
 MAX_FILES='$MAX_FILES'
 MODEL='$MODEL'
 GLOSSARY_MAX_FILES='$GLOSSARY_MAX_FILES'
 ENV
+
+# C1 step 3 — the update itself.
 aws s3 cp s3://${BUCKET}/bootstrap.sh /opt/bootstrap.sh --region ${REGION}
-bash /opt/bootstrap.sh"
+bash /opt/bootstrap.sh
 
-  # --parameters as a JSON FILE, one array element per LINE (the shape SSM expects; a single
-  # element containing literal \n runs the lines glued together). Same helper the gateway /
-  # project activation steps use.
-  param_file="$(mktemp /tmp/idx-rebootstrap-ssm.XXXXXX)"  # X's at end (BSD/macOS-safe)
-  printf '%s' "$remote_cmd" | python3 -c 'import sys,json; print(json.dumps({"commands": sys.stdin.read().split("\n")}))' > "$param_file"
-  cid="$(aws ssm send-command --region "$REGION" --instance-ids "$iid" \
-    --document-name AWS-RunShellScript --parameters "file://$param_file" \
-    --query Command.CommandId --output text 2>/dev/null || echo "")"
-  rm -f "$param_file"
-  [[ -n "$cid" ]] || { log err "in-place re-bootstrap: SSM send-command failed for $iid (SSM agent down? NAT egress? instance profile missing ssm:*)"; exit 1; }
+# C1 step 4 — start exactly the captured list. Past this point the env is committed and the
+# failure trap is disarmed: what remains is bringing the services back, and a unit that refuses to
+# start must be a LOUD deploy failure (the tag stays stale, so the next deploy retries).
+rm -f "\$ENV_BAK"
+trap - EXIT
+if start_captured; then
+  echo "re-bootstrap: all captured units are back up"
+else
+  echo "FATAL: bootstrap succeeded but some captured units failed to restart (see above)" >&2
+  exit 1
+fi
+REMOTE
+)"
 
-  # Bootstrap installs apt/pip deps and rebuilds the gateway — minutes, not seconds.
-  log info "re-running bootstrap.sh in place on $iid (base code update; no instance replacement) ..."
-  deadline=$(( SECONDS + ${INDEX_REBOOTSTRAP_TIMEOUT_SECS:-1800} ))
+  cid="$(ssm_send_shell "$iid" "$remote_cmd")" || exit 1
+
+  # Bootstrap installs apt/pip deps and rebuilds the gateway — minutes, not seconds. The gateways
+  # and bridges are DOWN for that window by design (break-before-make); say so, because an
+  # operator watching Feishu will notice.
+  log warn "re-running bootstrap.sh in place on $iid — its bot-gateway@* / index-bridge-* units are"
+  log warn "  STOPPED for the duration (break-before-make) and restarted at the end; bounded ${timeout_secs}s"
+  deadline=$(( SECONDS + timeout_secs ))
   while (( SECONDS < deadline )); do
     sleep 10
     st="$(aws ssm get-command-invocation --region "$REGION" --command-id "$cid" --instance-id "$iid" \
       --query Status --output text 2>/dev/null || echo "")"
     case "$st" in
-      Success) log ok "in-place re-bootstrap finished on $iid"; return 0 ;;
+      Success) log ok "in-place re-bootstrap finished on $iid (units restarted)"; return 0 ;;
       Failed|Cancelled|TimedOut)
         err="$(aws ssm get-command-invocation --region "$REGION" --command-id "$cid" --instance-id "$iid" \
           --query StandardErrorContent --output text 2>/dev/null || echo "")"
         out="$(aws ssm get-command-invocation --region "$REGION" --command-id "$cid" --instance-id "$iid" \
           --query StandardOutputContent --output text 2>/dev/null || echo "")"
+        rc="$(aws ssm get-command-invocation --region "$REGION" --command-id "$cid" --instance-id "$iid" \
+          --query ResponseCode --output text 2>/dev/null || echo "")"
         log err "in-place re-bootstrap $st on $iid — ${err:0:300}"
         printf '%s\n' "$out" | tail -20 >&2
         log err "  → inspect: aws ssm start-session --target $iid ; tail -100 /var/log/index-svc-bootstrap.log"
+        if [[ "$rc" == "75" ]]; then
+          # The payload refused the lock: ANOTHER re-bootstrap owns this host right now and will
+          # restart those units itself when it finishes. Starting them from here would race it
+          # (a gateway launched mid-`npm ci` just crash-loops), so leave them alone.
+          log err "  another in-place re-bootstrap is already running on $iid — this deploy did NOT touch it;"
+          log err "  wait for that run to finish, then re-run this deploy"
+        else
+          restart_captured_units "$iid"
+        fi
         exit 1 ;;
     esac
   done
-  log err "in-place re-bootstrap timed out on $iid after ${INDEX_REBOOTSTRAP_TIMEOUT_SECS:-1800}s"
+  # H5: CANCEL the abandoned command instead of walking away from it — otherwise the remote
+  # bootstrap keeps running and the next deploy adds a second concurrent one on the same tree.
+  log err "in-place re-bootstrap timed out on $iid after ${timeout_secs}s — cancelling the SSM command"
+  aws ssm cancel-command --region "$REGION" --command-id "$cid" --instance-ids "$iid" >/dev/null 2>&1 \
+    || log warn "  cancel-command failed (it may have just finished); the host lock still prevents a second run"
+  # Give the remote shell a moment to take the SIGTERM and unwind its own trap, then make sure
+  # from out here that the services are back up.
+  sleep 10
+  restart_captured_units "$iid"
+  log err "  raise INDEX_REBOOTSTRAP_TIMEOUT_SECS if this host is simply slow (cold apt/npm cache)"
   exit 1
 }
 
@@ -358,63 +589,107 @@ ENV
   echo "$SELF_IP"; exit 0
 fi
 
-# NOTE: there is no blue-green leftover to reconcile any more. The old code read an
-# INDEX_OLD_INSTANCE marker from the config here and decided whether it was safe to
-# terminate — a decision that hinged on a Route53 lookup and could kill the LIVE host when
-# the lookup failed, and that silently leaked paid instances whenever a refresh aborted
-# before the marker was cleared. Nothing writes that key now and nothing reads it; a marker
-# left over in an old config file is simply ignored (dead key, never terminates anything).
-# 蓝绿替换已移除，不再有"旧实例"需要回收。
+# Reuse a running index-service instance if present — ALWAYS reuse, never replace.
+# A reused instance does NOT re-run bootstrap.sh by itself (that's EC2 user-data, which fires only
+# on first boot), so on its own it would NOT pick up index-service / gateway code re-staged to S3
+# this run. So:
+#   - compute the current artifact signature and compare it to the tag we stamped on the instance
+#     when it last bootstrapped;
+#   - if they match → nothing to do, fast-path reuse (idempotent: no re-bootstrap,
+#     签名一致就直接复用，不做任何多余动作);
+#   - if they differ → re-run bootstrap.sh IN PLACE on that same instance over SSM (stopping and
+#     restarting its gateways/bridges around the run), then re-stamp the tag. The instance id /
+#     private IP / EBS volume / graph.db all survive, so index.source-truth.internal keeps
+#     resolving to a host that exists throughout.
+# Computed HERE rather than at the top of the script: local mode returns before this point and
+# never uses the value, so an S3 hiccup (or a role that can list the bucket but not head an
+# object) must not be able to fail a single-host deploy that does not depend on it.
+# Abort on an unreadable bucket rather than guessing: this value decides whether we MUTATE a live
+# host (C2).
+CURRENT_SIG="$(artifact_signature)" || {
+  log err "cannot determine the base-artifact signature — aborting before touching the live host"
+  exit 1
+}
+
+# SINGLE-INSTANCE GUARD (detection here, enforcement at the launch block below) — keep exactly one
+# index-service alive. The existing-instance filter below only matches running/pending, so a host
+# in any other state is invisible to it and a fresh launch would run alongside it: two paid hosts,
+# two graph.db copies, and INDEX_SERVICE_INSTANCE silently re-pointed at the new EMPTY one. This
+# script never terminates or stops anything, so such a host can only come from an operator action.
 #
-# SINGLE-INSTANCE GUARD: keep exactly one index-service alive at a time. An
-# instance still in a TRANSIENT shutdown state (stopping / shutting-down) isn't
-# seen by the existing-instance filter below (which only matches running/pending), so without
-# this a fresh launch could briefly run alongside a draining peer. Each instance
-# holds its OWN local repo copy + graph now (no shared EFS), so this is no longer
-# a corruption risk — just hygiene to avoid two paid instances. Wait for any such
-# peer to fully terminate first. (This script never terminates anything itself, so
-# a draining instance can only come from an operator / console action.)
-DRAINING="$(Q describe-instances --filters "Name=tag:Name,Values=source-truth-index-service" "Name=instance-state-name,Values=stopping,shutting-down,stopped" --query 'Reservations[0].Instances[0].InstanceId' --output text 2>/dev/null)"
-if [[ "$DRAINING" != "None" && -n "$DRAINING" ]]; then
-  log warn "an index-service instance ($DRAINING) is still draining (stopping/shutting-down); waiting for it to terminate before launching, to avoid running two paid instances"
-  Q wait instance-terminated --instance-ids "$DRAINING" 2>/dev/null || true
+# H4 — `stopped` and `stopping/shutting-down` are NOT the same case and must not share one wait:
+#   stopping / shutting-down → genuinely on its way out; wait (bounded) for it to disappear.
+#   stopped                  → it will NEVER terminate on its own, so `wait instance-terminated`
+#                              burned its full 600s (15s × 40) and the swallowed timeout then fell
+#                              through to a DUPLICATE launch. Termination protection is armed on
+#                              our hosts, so it cannot be cleaned up automatically either. The
+#                              resize advice further down (stop → modify-instance-attribute →
+#                              start) actively produces this state, so it is a normal operator
+#                              situation: refuse to LAUNCH and say exactly what to do. Starting it
+#                              ourselves would silently undo a deliberate stop (cost saving,
+#                              mid-resize, debugging), so we don't.
+# Both checks gate the LAUNCH only: when a running host exists we update THAT one in place and
+# never get here, so a leftover stopped box must not block an otherwise healthy deploy.
+mapfile -t STOPPED_HOSTS < <(Q describe-instances --filters "Name=tag:Name,Values=source-truth-index-service" "Name=instance-state-name,Values=stopped" --query 'Reservations[].Instances[].InstanceId' --output text 2>/dev/null | tr '\t' '\n' | grep -E '^i-' || true)
+if [[ ${#STOPPED_HOSTS[@]} -gt 0 ]]; then
+  log warn "index-service host(s) ${STOPPED_HOSTS[*]} are STOPPED — they never terminate on their own and you keep paying for their EBS; this deploy will not launch a peer beside them"
 fi
-# DETERMINISTIC selection: if more than one index instance is somehow running (a leftover
-# from an older blue-green deploy, or a hand-launched box), a blind
-# Reservations[0].Instances[0] could pick the WRONG (old-artifact) one. Prefer the
-# instance whose ArtifactSig matches CURRENT_SIG (already on the current build → no work to
-# do); only if none match, fall back to any running/pending one — that one gets re-bootstrapped
-# in place below.
+# DETERMINISTIC selection: if more than one index instance is somehow running (a hand-launched
+# box, or a leftover from a much older deploy), a blind Reservations[0].Instances[0] could pick the
+# WRONG (old-artifact) one. Prefer the instance whose ArtifactSig already matches CURRENT_SIG (no
+# work to do); only if none match, fall back to any running/pending one — that one gets
+# re-bootstrapped in place below.
 EXISTING="$(Q describe-instances --filters "Name=tag:Name,Values=source-truth-index-service" "Name=tag:ArtifactSig,Values=$CURRENT_SIG" "Name=instance-state-name,Values=running,pending" --query 'Reservations[0].Instances[0].InstanceId' --output text 2>/dev/null)"
 if [[ "$EXISTING" == "None" || -z "$EXISTING" ]]; then
   EXISTING="$(Q describe-instances --filters "Name=tag:Name,Values=source-truth-index-service" "Name=instance-state-name,Values=running,pending" --query 'Reservations[0].Instances[0].InstanceId' --output text 2>/dev/null)"
 fi
 if [[ "$EXISTING" != "None" && -n "$EXISTING" ]]; then
   BOOTED_SIG="$(Q describe-instances --instance-ids "$EXISTING" --query "Reservations[0].Instances[0].Tags[?Key=='ArtifactSig'].Value | [0]" --output text 2>/dev/null)"
-  if [[ "$BOOTED_SIG" != "$CURRENT_SIG" ]]; then
-    # IN-PLACE UPDATE (replaces the old blue-green branch entirely). The base code this host
-    # booted from is out of date, so re-run bootstrap.sh on THIS host over SSM and re-stamp
-    # the tag. No terminate, no replacement launch, no DNS cutover: the id/IP/EBS/graph.db
-    # are preserved, so the stable name never resolves to a dead box.
+  [[ "$BOOTED_SIG" != "None" ]] || BOOTED_SIG=""
+  # Compare (and later stamp) the EFFECTIVE signature: identical to CURRENT_SIG except that a
+  # component absent from the bucket this run keeps whatever the host booted from, so a
+  # backend-only deploy neither re-bootstraps for a missing gateway tarball nor writes a "none"
+  # over a real ETag that every future deploy would then mismatch (C2).
+  TARGET_SIG="$(effective_sig "$BOOTED_SIG")"
+  if [[ "$BOOTED_SIG" != "$TARGET_SIG" ]]; then
+    # The base code this host booted from is out of date: re-run bootstrap.sh on THIS host over
+    # SSM (stopping its gateways/bridges first and starting them again after — see
+    # rebootstrap_in_place) and re-stamp the tag. No terminate, no replacement launch, no DNS
+    # cutover: the id/IP/EBS/graph.db are preserved.
     # 签名不一致 → 原地重跑 bootstrap 把 bridge/gateway 依赖更新到位，再写回新签名。
-    log warn "index-service base artifacts changed since $EXISTING booted (sig: ${BOOTED_SIG:-none} → $CURRENT_SIG) — updating IN PLACE on $EXISTING (no instance replacement)"
+    log warn "index-service base artifacts changed since $EXISTING booted (sig: ${BOOTED_SIG:-none} → $TARGET_SIG) — updating IN PLACE on $EXISTING (no instance replacement)"
     rebootstrap_in_place "$EXISTING"
-    # Stamp the new signature only AFTER a successful run (rebootstrap_in_place exits on
-    # failure), so a failed update leaves the tag stale and the NEXT deploy retries instead
-    # of assuming the host is current. create-tags overwrites the existing key → idempotent.
-    Q create-tags --resources "$EXISTING" --tags "Key=ArtifactSig,Value=$CURRENT_SIG" >/dev/null
-    log info "recorded ArtifactSig=$CURRENT_SIG on $EXISTING"
+    # Stamp only AFTER a successful run (rebootstrap_in_place exits on failure), so a failed
+    # update leaves the tag stale and the NEXT deploy retries instead of assuming the host is
+    # current. create-tags overwrites the existing key → idempotent.
+    Q create-tags --resources "$EXISTING" --tags "Key=ArtifactSig,Value=$TARGET_SIG" >/dev/null
+    log info "recorded ArtifactSig=$TARGET_SIG on $EXISTING"
   else
-    log info "index-service $EXISTING already on the current base artifacts (sig $CURRENT_SIG) — skipping re-bootstrap"
+    log info "index-service $EXISTING already on the current base artifacts (sig $TARGET_SIG) — skipping re-bootstrap"
   fi
-  # Same block continues: EXISTING is never cleared any more (the old code set it back to
-  # "None" here to fall through into a replacement launch — that path is gone), so the
-  # signature handling and the state-persisting reuse below are one single branch.
   IP="$(Q describe-instances --instance-ids "$EXISTING" --query 'Reservations[0].Instances[0].PrivateIpAddress' --output text)"
   if [[ -z "$IP" || "$IP" == "None" ]]; then
     log err "existing instance $EXISTING has no private IP yet"; exit 1
   fi
-  SG="$(Q describe-instances --instance-ids "$EXISTING" --query 'Reservations[0].Instances[0].SecurityGroups[0].GroupId' --output text)"
+  # L17: pick the SG BY NAME, never SecurityGroups[0]. This value is persisted as
+  # INDEX_SERVICE_SG and handed to the AgentCore runtime (deploy_project.sh), and it is also the
+  # group whose 8080-8099 rule gets reconciled below. On a host with more than one SG attached
+  # (hand-attached, or local mode's additive attach) the array order is not guaranteed, so
+  # trusting [0] can put the runtime in a group with NO bridge ingress — invisible to every
+  # downstream gate, because the bridge /health probe is loopback-only. Fail loud instead: our own
+  # launch path always attaches this SG, so its absence is a real misconfiguration.
+  SG="$(Q describe-instances --instance-ids "$EXISTING" \
+    --query "Reservations[0].Instances[0].SecurityGroups[?GroupName=='source-truth-index-svc'].GroupId | [0]" \
+    --output text 2>/dev/null || echo "")"
+  if [[ -z "$SG" || "$SG" == "None" ]]; then
+    log err "existing instance $EXISTING has no 'source-truth-index-svc' security group attached."
+    log err "  That SG is what carries the bridge-port (8080-8099) ingress and what the AgentCore"
+    log err "  runtime is launched into, so guessing another of its groups would silently leave the"
+    log err "  runtime unable to reach the bridge. Attach it and re-run:"
+    log err "    aws ec2 describe-security-groups --region $REGION --filters Name=group-name,Values=source-truth-index-svc"
+    log err "    aws ec2 modify-instance-attribute --region $REGION --instance-id $EXISTING --groups <existing sg ids> <that sg id>"
+    exit 1
+  fi
   # If the operator asked for a DIFFERENT instance type than the existing instance
   # actually runs, we do NOT act on it: this script never replaces an instance, and
   # resizing needs a stop/modify/start (a deliberate, disruptive operator action).
@@ -440,11 +715,38 @@ if [[ "$EXISTING" != "None" && -n "$EXISTING" ]]; then
   echo "$IP"; exit 0
 fi
 
-# ── No live instance at all → FIRST-DEPLOY provisioning (not blue-green) ─────────────
-# Reaching here means describe-instances found nothing running/pending: a first deploy, or
-# someone terminated the host. Launching one here is the only run-instances in this script.
+# ── No live instance at all → FIRST-DEPLOY provisioning ──────────────────────────────
+# describe-instances found nothing running/pending: a first deploy, or someone terminated the
+# host. This is the only run-instances in the script.
 # 到这里说明确实没有实例（首次部署或被人销毁），这才 launch 新机器。
-# index-service security group: 8080 in from VPC.
+#
+# H4 enforcement — never launch a peer beside a host that is stopped or still on its way out.
+if [[ ${#STOPPED_HOSTS[@]} -gt 0 ]]; then
+  log err "index-service host(s) ${STOPPED_HOSTS[*]} are STOPPED and there is no running one. Refusing to"
+  log err "  launch a replacement beside a stopped host: you would pay for two instances, the built"
+  log err "  graph.db would stay on the stopped one, and this deploy would point at a fresh EMPTY box."
+  log err "  → resume it:    aws ec2 start-instances --region $REGION --instance-ids ${STOPPED_HOSTS[0]}"
+  log err "                  (then re-run this deploy — it updates that host in place)"
+  log err "  → or retire it: aws ec2 modify-instance-attribute --region $REGION --instance-id ${STOPPED_HOSTS[0]} --no-disable-api-termination"
+  log err "                  aws ec2 terminate-instances --region $REGION --instance-ids ${STOPPED_HOSTS[0]}"
+  exit 1
+fi
+DRAINING="$(Q describe-instances --filters "Name=tag:Name,Values=source-truth-index-service" "Name=instance-state-name,Values=stopping,shutting-down" --query 'Reservations[0].Instances[0].InstanceId' --output text 2>/dev/null)"
+if [[ "$DRAINING" != "None" && -n "$DRAINING" ]]; then
+  log warn "an index-service instance ($DRAINING) is still terminating (stopping/shutting-down); waiting for it to go away before launching, to avoid running two paid instances"
+  Q wait instance-terminated --instance-ids "$DRAINING" 2>/dev/null || true
+  # The waiter's timeout used to be swallowed, and control then fell through to a duplicate launch
+  # (for a `stopped` instance it NEVER succeeds). Confirm the state instead: anything other than
+  # `terminated` means we must not launch a peer.
+  DRAIN_STATE="$(Q describe-instances --instance-ids "$DRAINING" --query 'Reservations[0].Instances[0].State.Name' --output text 2>/dev/null || echo unknown)"
+  if [[ "$DRAIN_STATE" != "terminated" ]]; then
+    log err "index-service $DRAINING is still '$DRAIN_STATE' after the terminate wait — refusing to launch"
+    log err "  a second instance beside it. Resolve that host's state (it may have stopped rather than"
+    log err "  terminated), then re-run."
+    exit 1
+  fi
+fi
+# index-service security group: bridge ports in from SG members.
 SG="$(Q describe-security-groups --filters "Name=group-name,Values=source-truth-index-svc" "Name=vpc-id,Values=$VPC_ID" --query 'SecurityGroups[0].GroupId' --output text 2>/dev/null)"
 if [[ "$SG" == "None" || -z "$SG" ]]; then
   SG="$(Q create-security-group --group-name source-truth-index-svc --description "index-service codegraph bridge" --vpc-id "$VPC_ID" --query GroupId --output text)"

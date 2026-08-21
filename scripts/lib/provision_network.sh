@@ -2,20 +2,56 @@
 # provision_network.sh <region> <config_file>
 # Idempotent VPC for source-truth: one VPC, a public + private subnet (same AZ),
 # IGW, NAT gateway, and route tables. Writes IDs back to the config file.
-# Reuses anything tagged Name=source-truth-* so re-runs don't duplicate.
+# Reuses anything tagged Name=source-truth-* **inside this VPC** so re-runs don't duplicate.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/common.sh"; source "$SCRIPT_DIR/env-utils.sh"
 REGION="$1"; CONFIG="$2"
 CIDR="10.1.0.0/16"
 Q() { aws ec2 "$@" --region "$REGION"; }
-tag() { Q create-tags --resources "$1" --tags "Key=Name,Value=$2" >/dev/null; }
-by_name() { Q describe-"$1" --filters "Name=tag:Name,Values=$2" --query "${3}[0].${4:-${1%s}Id}" --output text 2>/dev/null; }
+
+# Name tag applied ATOMICALLY at creation. Every create-* below passes this instead of a separate
+# create-tags call: a crash / throttle / Ctrl-C between "created" and "tagged" leaves a resource
+# that the tag-only discovery on the next run cannot see and teardown.sh can never delete — the
+# subnet case is worse than a leak, because the untagged subnet still holds 10.1.0.0/24 and every
+# future deploy then dies on InvalidSubnet.Conflict until someone removes it by hand. The EIP block
+# below already solved this the same way and explains the quota consequences.
+tspec() { printf 'ResourceType=%s,Tags=[{Key=Name,Value=%s}]' "$1" "$2"; }
+
+# Tag-only lookup, optionally scoped by extra --filters arguments.
+#
+# tag:Name is NOT a unique key within an account. --local mode (provision_index_service.sh, the
+# "no source-truth-private subnet in <vpc>" branch) discovers that subnet inside the LOCAL host's
+# OWN VPC, so an account that has ever run --local — or any operator who tagged a second resource
+# by hand — carries two resources with the same Name in two different VPCs. Unscoped, this lookup
+# can return the OTHER VPC's subnet / route table / NACL and the run splices the two networks
+# together: create-nat-gateway and associate-route-table fail with cross-VPC errors, or the
+# hardened NACL gets associated to a subnet we do not own. So every VPC-scoped resource passes
+# "Name=vpc-id,Values=$VPC_ID", and assert_in_vpc re-checks the answer — an older CLI that drops
+# an unsupported filter would otherwise silently hand back an unscoped match.
+by_name() { # <resources> <name> <Collection> <IdField> [extra --filters args ...]
+  local res="$1" name="$2" coll="$3" field="$4"; shift 4
+  Q describe-"$res" --filters "Name=tag:Name,Values=$name" "$@" \
+    --query "${coll}[0].${field}" --output text 2>/dev/null
+}
+
+# Hard-fail if a discovered resource belongs to a different VPC. Splicing two VPCs is expensive to
+# unpick after the fact (half-associated route tables, a NACL on someone else's subnet), so refuse
+# up front rather than letting the AWS call fail three steps later with a cross-VPC error.
+assert_in_vpc() { # <resources> <ids-flag> <id> <Collection> [VpcId-field]
+  local res="$1" flag="$2" id="$3" coll="$4" field="${5:-VpcId}" owner
+  owner="$(Q describe-"$res" "$flag" "$id" --query "${coll}[0].${field}" --output text 2>/dev/null || echo "")"
+  [[ "$owner" == "$VPC_ID" ]] && return 0
+  say err "$res $id matches our tag:Name but lives in VPC ${owner:-unknown}, not $VPC_ID —"
+  say err "  refusing to splice two VPCs together. A prior --local deploy or a hand-tagged"
+  say err "  resource collides on tag:Name; retag or remove it, then re-run."
+  exit 1
+}
 
 VPC_ID="$(by_name vpcs source-truth-vpc Vpcs VpcId)"
 if [[ "$VPC_ID" == "None" || -z "$VPC_ID" ]]; then
-  VPC_ID="$(Q create-vpc --cidr-block "$CIDR" --query Vpc.VpcId --output text)"
-  tag "$VPC_ID" source-truth-vpc
+  VPC_ID="$(Q create-vpc --cidr-block "$CIDR" \
+    --tag-specifications "$(tspec vpc source-truth-vpc)" --query Vpc.VpcId --output text)"
 fi
 # Reconcile BOTH DNS attributes EVERY run (not just on create): the index-service
 # stable endpoint (index.source-truth.internal, a Route53 private hosted zone) only
@@ -41,11 +77,27 @@ if [[ -z "$AZ" || "$AZ" == "None" ]]; then
 fi
 
 ensure_subnet() { # name cidr public
-  local id; id="$(by_name subnets "$1" Subnets SubnetId)"
+  local id; id="$(by_name subnets "$1" Subnets SubnetId "Name=vpc-id,Values=$VPC_ID")"
   if [[ "$id" == "None" || -z "$id" ]]; then
-    id="$(Q create-subnet --vpc-id "$VPC_ID" --cidr-block "$2" --availability-zone "$AZ" --query Subnet.SubnetId --output text)"
-    tag "$id" "$1"
-    [[ "$3" == public ]] && Q modify-subnet-attribute --subnet-id "$id" --map-public-ip-on-launch >/dev/null
+    id="$(Q create-subnet --vpc-id "$VPC_ID" --cidr-block "$2" --availability-zone "$AZ" \
+      --tag-specifications "$(tspec subnet "$1")" --query Subnet.SubnetId --output text)"
+  else
+    assert_in_vpc subnets --subnet-ids "$id" Subnets
+  fi
+  # Reconcile map-public-ip-on-launch EVERY run, not only on create — same reasoning as the IGW
+  # attachment and the routes in mk_rt below. Gated on creation it was never repaired: a crash
+  # between create-subnet and modify-subnet-attribute left a public subnet that assigns no public
+  # IP (NAT gateway creation then fails), and a reused/externally-created subnet tagged
+  # source-truth-private that has the flag ON would hand the index host a public IP, quietly
+  # undoing the private-subnet design. Both directions are asserted, and both are no-ops when the
+  # attribute already matches.
+  local want=false maps
+  [[ "$3" == public ]] && want=true
+  maps="$(Q describe-subnets --subnet-ids "$id" --query 'Subnets[0].MapPublicIpOnLaunch' --output text 2>/dev/null || echo "")"
+  if [[ "$want" == true && "$maps" != "True" ]]; then
+    Q modify-subnet-attribute --subnet-id "$id" --map-public-ip-on-launch >/dev/null
+  elif [[ "$want" == false && "$maps" == "True" ]]; then
+    Q modify-subnet-attribute --subnet-id "$id" --no-map-public-ip-on-launch >/dev/null
   fi
   echo "$id"
 }
@@ -54,15 +106,26 @@ PRIV="$(ensure_subnet source-truth-private 10.1.1.0/24 private)"
 
 IGW="$(by_name internet-gateways source-truth-igw InternetGateways InternetGatewayId)"
 if [[ "$IGW" == "None" || -z "$IGW" ]]; then
-  IGW="$(Q create-internet-gateway --query InternetGateway.InternetGatewayId --output text)"
-  tag "$IGW" source-truth-igw
+  IGW="$(Q create-internet-gateway --tag-specifications "$(tspec internet-gateway source-truth-igw)" \
+    --query InternetGateway.InternetGatewayId --output text)"
+fi
+# An IGW is NOT looked up with a vpc-id filter (only attachment.vpc-id exists, and that would miss
+# the tagged-but-detached IGW this block deliberately repairs), so check ownership explicitly: an
+# IGW can be attached to at most one VPC, and if that is someone else's VPC we must stop. Previously
+# attach-internet-gateway was attempted anyway and its Resource.AlreadyAssociated error was
+# swallowed as "benign race", so a cross-VPC IGW was reported as attached to ours.
+IGW_VPC="$(Q describe-internet-gateways --internet-gateway-ids "$IGW" \
+  --query 'InternetGateways[0].Attachments[0].VpcId' --output text 2>/dev/null || echo "")"
+if [[ -n "$IGW_VPC" && "$IGW_VPC" != "None" && "$IGW_VPC" != "$VPC_ID" ]]; then
+  say err "IGW $IGW (tag:Name source-truth-igw) is attached to VPC $IGW_VPC, not $VPC_ID —"
+  say err "  retag or detach it, then re-run. Attaching it here would fail or hijack that VPC."
+  exit 1
 fi
 # Reconcile the VPC attachment EVERY run (NOT gated on IGW creation): a crash
 # between create and attach would otherwise leave a tagged-but-detached IGW that
 # a re-run skips, leaving the public subnet with no internet path. Tolerate only
 # the benign "already attached" errors; hard-fail anything else.
-ATTACHED="$(Q describe-internet-gateways --internet-gateway-ids "$IGW" --query "InternetGateways[0].Attachments[?VpcId=='$VPC_ID'] | [0].State" --output text 2>/dev/null)"
-if [[ "$ATTACHED" == "None" || -z "$ATTACHED" ]]; then
+if [[ "$IGW_VPC" == "None" || -z "$IGW_VPC" ]]; then
   igw_err="$(Q attach-internet-gateway --internet-gateway-id "$IGW" --vpc-id "$VPC_ID" 2>&1 >/dev/null)" || {
     case "$igw_err" in
       *Resource.AlreadyAssociated*|*already\ attached*) : ;;  # race: already attached — fine
@@ -71,8 +134,9 @@ if [[ "$ATTACHED" == "None" || -z "$ATTACHED" ]]; then
   }
 fi
 
-# NAT needs an EIP in the public subnet.
-NAT="$(Q describe-nat-gateways --filter "Name=tag:Name,Values=source-truth-nat" "Name=state,Values=available,pending" --query 'NatGateways[0].NatGatewayId' --output text 2>/dev/null)"
+# NAT needs an EIP in the public subnet. Scoped by vpc-id: a NAT gateway tagged source-truth-nat in
+# another VPC (a --local account) would otherwise be adopted and then fail to route this subnet.
+NAT="$(Q describe-nat-gateways --filter "Name=tag:Name,Values=source-truth-nat" "Name=vpc-id,Values=$VPC_ID" "Name=state,Values=available,pending" --query 'NatGateways[0].NatGatewayId' --output text 2>/dev/null)"
 if [[ "$NAT" == "None" || -z "$NAT" ]]; then
   # Reuse a tagged, UNASSOCIATED EIP before allocating a new one. Otherwise a
   # crash/Ctrl-C/throttle landing between allocate-address and create-nat-gateway
@@ -89,10 +153,13 @@ if [[ "$NAT" == "None" || -z "$NAT" ]]; then
   else
     say info "reusing orphaned EIP $EIP"
   fi
-  NAT="$(Q create-nat-gateway --subnet-id "$PUB" --allocation-id "$EIP" --query NatGateway.NatGatewayId --output text)"
-  tag "$NAT" source-truth-nat
+  NAT="$(Q create-nat-gateway --subnet-id "$PUB" --allocation-id "$EIP" \
+    --tag-specifications "$(tspec natgateway source-truth-nat)" \
+    --query NatGateway.NatGatewayId --output text)"
   say info "waiting for NAT $NAT ..."
   Q wait nat-gateway-available --nat-gateway-ids "$NAT"
+else
+  assert_in_vpc nat-gateways --nat-gateway-ids "$NAT" NatGateways
 fi
 
 # Route tables: public → IGW, private → NAT.
@@ -104,9 +171,12 @@ fi
 # (index-service then can't reach S3 to bootstrap). Mirrors the put-policy-
 # outside-the-get-role-gate pattern in provision_iam.sh.
 mk_rt() { # name subnet target-flag target-id
-  local rt; rt="$(by_name route-tables "$1" RouteTables RouteTableId)"
+  local rt; rt="$(by_name route-tables "$1" RouteTables RouteTableId "Name=vpc-id,Values=$VPC_ID")"
   if [[ "$rt" == "None" || -z "$rt" ]]; then
-    rt="$(Q create-route-table --vpc-id "$VPC_ID" --query RouteTable.RouteTableId --output text)"; tag "$rt" "$1"
+    rt="$(Q create-route-table --vpc-id "$VPC_ID" \
+      --tag-specifications "$(tspec route-table "$1")" --query RouteTable.RouteTableId --output text)"
+  else
+    assert_in_vpc route-tables --route-table-ids "$rt" RouteTables
   fi
   # Ensure the default route exists, regardless of whether the table is new.
   # create-route fails if the route already exists, so check first; if a route
@@ -137,10 +207,13 @@ VPC_CIDR="$(Q describe-vpcs --vpc-ids "$VPC_ID" --query 'Vpcs[0].CidrBlock' --ou
 # Inbound: TCP 8080-8099 and 443 from the VPC CIDR (index bridge + internal HTTPS), plus
 # ephemeral RETURN traffic (TCP and UDP) and ICMP fragmentation-needed. Outbound: allow all,
 # which NAT egress requires. Everything else hits the implicit deny at 32767.
-NACL_ID="$(by_name network-acls source-truth-private-nacl NetworkAcls NetworkAclId)"
+NACL_ID="$(by_name network-acls source-truth-private-nacl NetworkAcls NetworkAclId "Name=vpc-id,Values=$VPC_ID")"
 if [[ "$NACL_ID" == "None" || -z "$NACL_ID" ]]; then
-  NACL_ID="$(Q create-network-acl --vpc-id "$VPC_ID" --query NetworkAcl.NetworkAclId --output text)"
-  tag "$NACL_ID" source-truth-private-nacl
+  NACL_ID="$(Q create-network-acl --vpc-id "$VPC_ID" \
+    --tag-specifications "$(tspec network-acl source-truth-private-nacl)" \
+    --query NetworkAcl.NetworkAclId --output text)"
+else
+  assert_in_vpc network-acls --network-acl-ids "$NACL_ID" NetworkAcls
 fi
 
 # ADDITIVE convergence, never delete-then-recreate.
