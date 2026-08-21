@@ -120,6 +120,6 @@ CI（`.github/workflows/ci.yml`）跑离线套件；本仓库不带 git hook，�
 - CardKit 流式答案卡调研（`bot-gateway` 核心能力）：`docs/agent/cardkit-streaming-spike.md`
 - 不变量与权威依据映射：`docs/agent/invariants.md`
 - 变更手册：`docs/agent/playbooks.md`
-- 部署 / 连飞书 / 运维 / 排错：`docs/runbook.md`
+- 部署 / 连飞书 / 运维 / 排错：`docs/runbook_zh.md`（英文：`docs/runbook_en.md`）
 - 目录结构：`docs/structure_zh.md` · `docs/structure_en.md`
 - 需求 / 架构设计权威依据：`docs/design/requirements_zh.md` · `docs/design/architecture-overview_zh.md`

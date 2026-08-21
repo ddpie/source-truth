@@ -33,6 +33,49 @@ done
 shopt -u nullglob
 [[ $fail -eq 0 ]] && ok "docs/ 双语 _en/_zh 配对完整"
 
+# 3b. 每个 docs/ 下的 md 必须"要么成对，要么被显式豁免"。
+#     旧写法只 glob docs/*_en.md ↔ docs/*_zh.md，于是**中性文件名等于自动豁免**：runbook.md
+#     （整个部署 / 接入飞书 / 验证 / 运维 / 排障流程都在里面）就这样绕过了检查，structure_en.md
+#     里甚至把这个豁免写成了"设计如此"。结果是：唯一能发现"英文读者无法部署"的机械检查，恰好
+#     把最大的那份文档排除在外。
+#     改成白名单模型：新增一份中文独有文档，必须显式写进 DOC_CHINESE_ONLY —— 那是一个在 review
+#     里看得见的决定，而不是一次悄悄的默认。
+DOC_CHINESE_ONLY=(
+  # 内部交付物导入的设计依据，已在 docs/design/README.md 自我声明为中文
+  "docs/design/README.md"
+  "docs/design/requirements_zh.md"
+  "docs/design/architecture-overview_zh.md"
+  "docs/design/agent-container_zh.md"
+  "docs/design/multi-repo-isolation_zh.md"
+  # 研究性笔记（spike），结论已被 architecture / README 吸收
+  "docs/agent/cardkit-streaming-spike.md"
+  "docs/agent/indexing-performance-spike.md"
+  "docs/agent/perf-comparison.md"
+  # 面向贡献者与 AI 协作者的约定，主语言中文（AGENTS.md 自身已声明）
+  "docs/README.md"
+  "docs/agent/architecture.md"
+  "docs/agent/invariants.md"
+  "docs/glossary.md"
+  "docs/agent/glossary.md"
+  "docs/agent/playbooks.md"
+  "docs/agent/TEMPLATE-spike.md"
+)
+# 故意不在名单里：runbook —— 它是英文 README 六次指向的唯一部署/接入/验证/排障流程，中文独有
+# 等于英文读者无法部署。所以它必须是 runbook_en.md / runbook_zh.md 一对（现已成对）。
+doc_pair_ok=1
+while IFS= read -r f; do
+  [[ -z "$f" ]] && continue
+  base="${f##*/}"
+  # 成对文件由 3 已经检查过
+  [[ "$base" == *_en.md || "$base" == *_zh.md ]] && continue
+  exempt=0
+  for e in "${DOC_CHINESE_ONLY[@]}"; do [[ "$f" == "$e" ]] && { exempt=1; break; }; done
+  [[ $exempt -eq 1 ]] && continue
+  err "docs/ 下的 $f 既不是 _en/_zh 配对，也未列入 DOC_CHINESE_ONLY 豁免名单（新增中文独有文档须显式声明）"
+  doc_pair_ok=0
+done <<< "$(git ls-files 'docs/*.md' 2>/dev/null || true)"
+[[ "$doc_pair_ok" -eq 1 ]] && ok "docs/ 下每份文档要么成对、要么已显式豁免"
+
 # 4. 结构文档存在
 [[ -f docs/structure_zh.md && -f docs/structure_en.md ]] \
   && ok "结构文档双语齐全" || err "缺少 docs/structure_{zh,en}.md"
@@ -84,12 +127,17 @@ else
 fi
 
 # 8. 不得出现非 aws-samples 的 GitHub slug 作为默认值
-#    发布仓的克隆、二进制下载都从默认 slug 取；默认值若指向个人账号，外部用户一执行就失败，
-#    或静默依赖一个私人仓库。这条曾经修好又被回退（deploy-all.sh 的 CODEGRAPH_SERVER_REPO），
-#    所以改由机器守卫，而不是靠人记得。
-slug_hits="$(grep -nE '(github\.com/|githubusercontent\.com/|:-)[A-Za-z0-9_.-]+/(source-truth|sample-code-qa-on-agentcore)' \
-  scripts/*.sh scripts/lib/*.sh README.md README_zh.md docs/runbook.md 2>/dev/null \
-  | grep -vE '(aws-samples|Interkarma)/' || true)"
+#    这条曾经修好又被回退（deploy-all.sh 的 CODEGRAPH_SERVER_REPO），所以改由机器守卫。
+#    文件清单改为枚举 git 跟踪的 .sh/.md，不再写死：原先硬编码到 `docs/runbook.md`，而该文件被
+#    拆成 runbook_en/_zh 之后，`2>/dev/null` 让"文件不存在"完全无声，于是这条守卫**两份 runbook
+#    都不再扫**却依旧报绿 —— 与它自己要防的"修好又回退"是同一种失效。
+#    也去掉了 Interkarma 豁免：正则只匹配 source-truth|sample-code-qa-on-agentcore 两个仓名，
+#    Interkarma/daggerfall-unity 永远不可能命中，那个豁免是死代码，留着会让人以为它是本项目产物的
+#    合法来源。
+slug_files="$(git ls-files '*.sh' '*.md' 2>/dev/null | grep -v '^scripts/check-invariants\.sh$' || true)"
+slug_hits="$(printf '%s\n' "$slug_files" | tr '\n' '\0' \
+  | xargs -0 -r grep -nE '(github\.com/|githubusercontent\.com/|:-)[A-Za-z0-9_.-]+/(source-truth|sample-code-qa-on-agentcore)' 2>/dev/null \
+  | grep -vE 'aws-samples/' || true)"
 if [[ -n "$slug_hits" ]]; then
   err "出现非 aws-samples 的 GitHub slug 默认值（外部用户会拉不到）："
   printf '      %s\n' "$slug_hits" >&2
@@ -98,14 +146,47 @@ else
 fi
 
 # 9. 公开仓不得包含真实人名 / 客户环境 / 竞品名
-#    docs/design/ 由内部交付物导入，曾带负责人姓名、客户内网环境描述和竞品对比。这类内容进公开
-#    仓是隐私与保密问题，且一旦被翻译/引用就难以收回，所以在提交前拦下。
-pii_hits="$(grep -rlnE '曹豹|晨哥|老白|WorkBuddy|GenSpark' docs/ 2>/dev/null || true)"
-if [[ -n "$pii_hits" ]]; then
-  err "文档中残留真实人名 / 竞品名（公开仓不可含）："
+#    docs/design/ 由内部交付物导入，曾带负责人姓名、客户环境描述、交付责任人表和竞品对比。
+#
+#    这一条曾经只 grep 五个写死的人名、且只扫 docs/ —— 结果它在一棵仍然含有整节「客户环境（会上已
+#    澄清）」（仓库拓扑、团队规模、自建 Git、分支策略）和一张带「责任人 / 交付物」列的交付行动表的
+#    树上报告全绿。写死名字只能拦住已经知道的那几个词，拦不住"下一份"内部文档；所以改成扫全部被
+#    git 跟踪的文件，并且用**结构性信号**（客户环境、责任人、内网、会上……）而不是名字来判断。
+#    仍然拦不住纯叙述性的段落 —— 那需要人工过一遍 docs/design/，这一点写在发布检查清单里。
+PII_PATTERNS=(
+  '客户环境' '客户侧' '客户内网' '贵司' '会上已' '会上澄清' '责任人' '交付物'
+  'PoC 客户' '试点客户'   # 注：'内网地址' 曾在此，但它是通用安全术语（system.md 用它写
+                        # 「绝不输出内网地址」这条规则），属于低信号高误报，已移除。
+  'WorkBuddy' 'GenSpark'
+)
+pii_re="$(IFS='|'; printf '%s' "${PII_PATTERNS[*]}")"
+# 这个守卫本身必然包含上面的字面量，扫自己等于永远失败，所以排除它。
+# 只看被跟踪的文本文件；.local/ 等未跟踪内容不属于发布物。
+#
+# stderr 不再丢弃，退出码单独判定：第一版把 grep 的 stderr 送进 /dev/null，而模式里有一个
+# CJK 字符区间在本机 grep 下是非法 ERE —— grep 直接报错退出，输出为空，于是守卫报告"干净"。
+# 这跟它要拦的问题是同一类：一个因为自身损坏而恒绿的检查，比没有检查更糟。
+pii_err="$(mktemp)"
+# set -e / pipefail 会让失败的赋值直接终止脚本，于是下面那条"扫描本身失败"的诊断永远打不出来
+# （模式非法时脚本以 xargs 的 123 退出，运维只看到一个裸退出码）。这里显式关掉再取退出码。
+set +e
+pii_hits="$(git ls-files -z 2>/dev/null \
+  | grep -zv '^scripts/check-invariants\.sh$' \
+  | xargs -0 -r grep -lE "$pii_re" 2>"$pii_err")"
+pii_rc=$?
+set -e
+if [[ $pii_rc -gt 1 && -s "$pii_err" ]]; then
+  err "PII 扫描本身失败（模式非法或文件不可读），不能据此判定干净："
+  printf '      %s\n' "$(head -3 "$pii_err")" >&2
+  rm -f "$pii_err"
+elif [[ -n "$pii_hits" ]]; then
+  rm -f "$pii_err"
+  err "文件中出现客户环境 / 交付责任人 / 真实人名 / 竞品名信号（公开仓不可含）："
   printf '      %s\n' "$pii_hits" >&2
+  printf '      命中的模式集见 check-invariants.sh 第 9 项；若为误报请改写措辞，不要放宽模式。\n' >&2
 else
-  ok "文档无真实人名 / 竞品名残留"
+  rm -f "$pii_err"
+  ok "无客户环境 / 交付责任人 / 人名 / 竞品名信号"
 fi
 
 if [[ $fail -ne 0 ]]; then

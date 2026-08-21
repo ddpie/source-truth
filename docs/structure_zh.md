@@ -79,7 +79,8 @@ docs/
   README.md             文档总索引（按受众分类的入口地图）
   structure_zh.md       本文件（权威目录树，双语配对）
   structure_en.md       英文对照
-  runbook.md            部署 / 连飞书 / 运维 / 排错（中性名，不参与双语配对）
+  runbook_zh.md         部署 / 连飞书 / 运维 / 排错（中文，双语配对）
+  runbook_en.md         英文对照（原「中性名不参与配对」的豁免已取消，两份须同步）
   glossary.md           术语表怎么来的：构建流程 / 产物结构 / 可信依据 / 成本运维（面向人，中性名）
   aws-services_zh.md    用到的 AWS 服务清单：干什么用 / 计费点（双语配对 aws-services_en.md）
   design/               设计权威依据（仅中文，暂不翻译）

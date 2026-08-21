@@ -103,15 +103,37 @@ MANIFEST_B64="$(printf '%s' "$REPO_MANIFEST_JSON" | base64 | tr -d '\n')"
 # Same fix bootstrap.sh got; this path runs far more often — on every per-project deploy.
 REMOTE_CMD="set -e
 aws s3 cp s3://${ARTIFACT_BUCKET}/index-service.tar.gz /tmp/idx-refresh.tar.gz --region ${REGION}
-IDX_STAGE=\$(mktemp -d /opt/idx/app.stage.XXXX)
+# rsync is REQUIRED here, not optional: a non-atomic publish over a tree other projects are
+# executing from is exactly what this block exists to avoid. Hosts bootstrapped before rsync
+# became a bootstrap dependency may not have it, so install-or-fail rather than discovering it
+# after the download and extract. Mirrors the guard activate_gateway.sh already carries.
+command -v rsync >/dev/null 2>&1 || (yum install -y rsync || apt-get update -qq && apt-get install -y -qq rsync) >/dev/null 2>&1 || true
+command -v rsync >/dev/null 2>&1 || { echo 'ACTIVATE_FAILED: rsync missing on host and could not be installed — refusing a non-atomic publish over the live index-service tree'; exit 1; }
+# FIXED staging path with a leading rm -rf, not mktemp -d: EXIT traps do not fire on SIGKILL, and
+# this payload runs under SSM where the command can be cancelled or time out — deploy_project.sh's
+# own deadline gives up WITHOUT cancelling the remote run. A random mktemp name therefore stranded
+# a full copy of the tree on the root volume (shared with graph.db) on every abnormal exit, and
+# nothing in the repo ever collected /opt/idx/app.stage.*. bootstrap.sh already uses this pattern.
+IDX_STAGE=/opt/idx/stage/deploy-app
+rm -rf \"\$IDX_STAGE\"; mkdir -p \"\$IDX_STAGE\"
 trap 'rm -rf \"\$IDX_STAGE\"' EXIT
+IDX_TGZ_SIG=\$(sha256sum /tmp/idx-refresh.tar.gz 2>/dev/null | cut -d\" \" -f1 || true)
 tar xzf /tmp/idx-refresh.tar.gz -C \"\$IDX_STAGE\" && rm -f /tmp/idx-refresh.tar.gz
 # Refuse to publish an incomplete extract — a truncated download would otherwise wipe the
-# live tree via --delete-after.
-[ -f \"\$IDX_STAGE/http_bridge.py\" ] && [ -f \"\$IDX_STAGE/activate_project.sh\" ] || { echo 'ACTIVATE_FAILED: staged index-service tree is incomplete'; exit 1; }
+# live tree via --delete-after. Check EVERY file the payload goes on to need: the guard used to
+# check two while the next line chmod'd four, so a tarball missing one of the other two passed the
+# guard and died on a bare 'chmod: cannot access', hiding the real cause behind a confusing error.
+for f in http_bridge.py activate_project.sh git_fetch.sh glossary_refresh.sh reindex_local_repo.sh requirements.txt; do
+  [ -f \"\$IDX_STAGE/\$f\" ] || { echo \"ACTIVATE_FAILED: staged index-service tree is incomplete (missing \$f)\"; exit 1; }
+done
 chmod +x \"\$IDX_STAGE\"/activate_project.sh \"\$IDX_STAGE\"/git_fetch.sh \"\$IDX_STAGE\"/glossary_refresh.sh \"\$IDX_STAGE\"/reindex_local_repo.sh
 mkdir -p /opt/idx/app
-rsync -a --delay-updates --delete-after \"\$IDX_STAGE\"/ /opt/idx/app/
+rsync -a --delay-updates --delete-after --exclude=/.src_sig \"\$IDX_STAGE\"/ /opt/idx/app/
+# Re-stamp: this path publishes app code without going through bootstrap.sh, so without this
+# /opt/idx/.app_sig would still describe the PREVIOUS tree and the bridge skew field of the bridge would
+# report \"unchanged\" across a deploy that changed everything. The value is opaque — only that
+# it CHANGES when the code changes matters.
+[ -n \"\$IDX_TGZ_SIG\" ] && printf '%s\\n' \"\$IDX_TGZ_SIG\" > /opt/idx/.app_sig || true
 mkdir -p /etc/index-projects
 echo '${MANIFEST_B64}' | base64 -d > /tmp/manifest-${PID}.json
 PROJECT_ID='${PID}' GIT_SECRET_ID='${GIT_SECRET_ID}' MODEL='${RT_MODEL}' REPO_MANIFEST_JSON=\"\$(cat /tmp/manifest-${PID}.json)\" bash /opt/idx/app/activate_project.sh
@@ -123,7 +145,15 @@ CID="$(aws ssm send-command --region "$REGION" --instance-ids "$IID" \
   --document-name AWS-RunShellScript --parameters "file://$PARAM_FILE" \
   --query Command.CommandId --output text 2>/dev/null || echo "")"
 rm -f "$PARAM_FILE"
-[[ -n "$CID" ]] || { say err "activate_project: SSM send-command failed (SSM/NAT?)"; exit 1; }
+# Name the three things to check, not a question mark. "(SSM/NAT?)" told the operator there was a
+# question without telling them where to look.
+[[ -n "$CID" ]] || {
+  say err "activate_project: SSM send-command failed — the host did not accept the command."
+  say err "  1) is it registered with SSM?  aws ssm describe-instance-information --region $REGION --filters Key=InstanceIds,Values=$IID"
+  say err "  2) does its private subnet have a 0.0.0.0/0 route to the NAT gateway? (SSM needs egress)"
+  say err "  3) does the instance role carry AmazonSSMManagedInstanceCore?"
+  exit 1
+}
 say info "running activate_project.sh on $IID (clone repos + build graphs + start bridge:$PORT) ..."
 DEADLINE=$(( SECONDS + ${PROJECT_ACTIVATE_TIMEOUT_SECS:-900} ))   # graph builds can take minutes
 while (( SECONDS < DEADLINE )); do
@@ -142,7 +172,22 @@ while (( SECONDS < DEADLINE )); do
       exit 1 ;;
   esac
 done
-if (( SECONDS >= DEADLINE )); then say err "activate_project $PID timed out"; exit 1; fi
+if (( SECONDS >= DEADLINE )); then
+  # The Failed branch above dumps the remote output; the TIMEOUT branch used to dump nothing at
+  # all — and on a large repo a timeout is the LIKELIER outcome, since graph builds take minutes.
+  # Print the same evidence, then cancel the remote run so it stops working against a deploy that
+  # has already given up (it holds the project's units).
+  say err "activate_project $PID timed out after ${PROJECT_ACTIVATE_TIMEOUT_SECS:-900}s (graph builds on a large repo can exceed this; raise PROJECT_ACTIVATE_TIMEOUT_SECS)"
+  OUT="$(aws ssm get-command-invocation --region "$REGION" --command-id "$CID" --instance-id "$IID" \
+    --query 'StandardOutputContent' --output text 2>/dev/null || echo "")"
+  ERR="$(aws ssm get-command-invocation --region "$REGION" --command-id "$CID" --instance-id "$IID" \
+    --query 'StandardErrorContent' --output text 2>/dev/null || echo "")"
+  [[ -n "$ERR" ]] && { say err "  remote stderr:"; printf '%s\n' "$ERR" | tail -20 >&2; }
+  [[ -n "$OUT" ]] && { say err "  remote stdout (last 20):"; printf '%s\n' "$OUT" | tail -20 >&2; }
+  say err "  live progress: aws ssm start-session --target $IID --region $REGION, then sudo journalctl -u 'index-build@*' -n 100"
+  aws ssm cancel-command --region "$REGION" --command-id "$CID" --instance-ids "$IID" >/dev/null 2>&1 || true
+  exit 1
+fi
 
 # ============================================================
 # 2) Per-project AgentCore runtime — CODEGRAPH_MCP_URL points at THIS project's bridge port.

@@ -71,12 +71,29 @@ bash /tmp/prepare-local-host.sh   # 建议直接复制 launch-host 输出的命�
 ## 一、前置条件（一次性）
 
 1. **AWS 账号 + 目标区域**：区域须支持 AgentCore（如 `ap-northeast-1` 东京）。本机配好可部署的 AWS 凭证。
-2. **部署机（Linux 或 macOS）**：装好 `aws` CLI v2、`python3`、`git`，以及 **Docker 且守护进程在运行**
-   （Phase 4 要构建 ARM64 镜像；只装不启动会在依赖检查就被拦下，提示 `docker info` 验证）。私有仓部署还需
-   `gh` 并已 `gh auth login`（用于克隆仓库 + 拉取 `codegraph-server`）。验证与日常运维要进实例
-   （`aws ssm start-session`），需另装 [Session Manager plugin](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html)（不随 aws CLI 附带）。`codegraph-server` 二进制无需手动准备——
-   本地与 S3 都没有时，部署会从本仓 Release 自动下载（私有仓经 `gh`，公开仓经直链）。
-   可选：`zip`（仅监控的 DAU 预聚合 Lambda 打包用；缺了不影响问答与其余监控，只是「日活」widget 为空，`--local` 会自动装）。
+2. **部署机（Linux 或 macOS）**：以下是部署**真正会检查并硬失败**的清单（与
+   [`../README_zh.md`](../README_zh.md) / [`../README.md`](../README.md) 的 Prerequisites 一致）：
+
+   - **`aws` CLI v2**——不支持 v1。
+   - **`python3`**，且 **boto3 版本足够新、带 `bedrock-agentcore-control`**（配置 Runtime 用）。
+     升级：`python3 -m pip install -U boto3`；在 PEP-668 系统（较新的 macOS / Ubuntu）上须用
+     virtualenv 或加 `--break-system-packages`，否则升级会静默无效。
+   - **Docker 且守护进程在运行**，并且能构建 **linux/arm64**（agent 容器只有 ARM64；Phase 4 要构建
+     镜像，只装不启动会在依赖检查就被拦下，提示 `docker info` 验证）。x86 主机先装模拟器：
+     `docker run --privileged --rm tonistiigi/binfmt --install arm64`。
+   - **GNU tar**——macOS 自带的是 BSD tar，产不出可复现的归档；缺了它索引主机会把产物判定为「每次
+     部署都变了」，于是每次都就地重跑 bootstrap，打断这台机器上的所有机器人。`brew install gnu-tar`
+     装出的 `gtar` 会被自动识别。
+   - **[Session Manager plugin](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html)**——验证与所有 day-2 运维都要进实例（`aws ssm start-session`），它不随 aws CLI 附带。
+   - **`git`**；私有仓部署还需 **`gh`** 并已 `gh auth login`（用于克隆仓库 + 拉取 `codegraph-server`）。
+   - **一对 EC2 key pair 及本地的 `.pem`**——仅 `--local` 需要（你要 SSH 登录它创建的那台主机）。
+   - **`rsync`**——仅当代码走本地仓快照推送（不从 git clone）时需要。
+   - **`zip`**——可选，仅监控的 DAU 预聚合 Lambda 打包用；缺了不影响问答与其余监控，只是「日活」
+     widget 为空（`--local` 会自动装）。
+
+   本机**不需要** Node.js / Python 工程工具链：网关在索引主机上构建，agent 跑在容器里。
+   `codegraph-server` 二进制也无需手动准备——本地与 S3 都没有时，部署会从本仓 Release 自动下载
+   （私有仓经 `gh`，公开仓经直链）。
 3. **Bedrock 模型访问**：确保部署身份有 `bedrock:InvokeModel`（AWS 已不再需要逐模型在控制台「Model access」开通）。
    模型推理档由部署按 `--region` 自动解析，无需手填——部署调 `bedrock list-inference-profiles` 查该区域实际提供的档、
    自动挑最优（地域档 `us.`/`eu.`/`jp.`/`au.` 优先，没有就用 `global.`；如默认模型在东京解析为 `jp.…`、在新加坡保留 `global.…`）。
@@ -84,7 +101,10 @@ bash /tmp/prepare-local-host.sh   # 建议直接复制 launch-host 输出的命�
 4. **目标代码仓**：要被问答的游戏代码仓，两种来源（同项目可混用）：
    - **git 仓**（推荐，配置里写 `source: "git"`，默认值）：`https://github.com/org/repo.git`、`https://gitlab.com/org/repo.git`、`git@host:org/repo.git`，可选分支 / 标签 / 提交。index-service clone 到本地、定时 `git pull`，主分支改动分钟级内反映到问答。私有仓需一份只读访问凭证（写入 Secrets Manager，由索引主机取用）。
    - **本地仓**（配置里写 `source: "local"`，用于代码只在本地、推不到任何 git 远端的情况）：部署后用 `scripts/push-local-repo.sh` 经 rsync 直推到索引主机（见[第九节末「本地仓上传」](#本地仓上传)）。推送的是某一时刻的快照，不会自动跟随代码变化——代码变更后需重新运行一次上传命令。
-5. **飞书应用**（见第三节，可与部署并行准备）。
+5. **飞书应用**（见第三节，可与部署并行准备）。同时定下**租户**：中国版飞书（`open.feishu.cn`，
+   部署参数 `--feishu-domain feishu`，默认）还是国际版 Lark（`open.larksuite.com`，
+   `--feishu-domain lark`）。这个选择在**首次部署时**就要给对，且必须与创建应用所用的那个控制台一致
+   ——不一致时机器人能通过鉴权，却永远收不到事件（详见第三节）。
 
 ---
 
@@ -135,8 +155,8 @@ codegraph 索引占用内存较高，且随仓库增大而增长，按仓库规�
 | `400` | 控成本（可能漏掉中文密集文件） | 约 $10 量级 |
 
 首次全量为一次性开销，之后仅扫描代码变更的增量，成本很低。**接大仓且需控成本时先选一个正数上限**；
-纯英文 / 无中文项目无需在意——术语表会自动为空、零开销、不影响问答功能。调整该上限需重新初始化主机
-方可生效（见第六节「改术语表构建上限」），常规运维中无需调整。
+纯英文 / 无中文项目无需在意——术语表会自动为空、零开销、不影响问答功能。事后调整该上限见第六节
+「改术语表构建上限」（**不需要**重新初始化主机），常规运维中无需调整。
 
 > 术语表为**后台异步**构建：部署完成后问答功能立即可用；大仓首次全量构建可能耗时数十分钟，其间问答
 > 功能不受影响，仅中文冷僻词可能尚未对应。构建进度与结果记录在主机日志中（`journalctl` 查
@@ -150,6 +170,9 @@ codegraph 索引占用内存较高，且随仓库增大而增长，按仓库规�
 - 直接按第五节验证即可（各项目网关已在 index 主机上以 `bot-gateway@<项目>.service` 长驻）。
 
 > 无人值守 / CI：`./scripts/install.sh --yes` 接受所有预填值（首次仍需已存在的飞书密钥）。
+> 租户与语言也可直接用参数给定，跳过交互提问：
+> `./scripts/install.sh --feishu-domain lark --locale en`（不给时交互会问租户；`--locale` 不给时
+> `lark` 默认 `en`、`feishu` 默认 `zh`）。
 
 ### 手动部署：在单台 EC2 上就地安装（`--local`）
 
@@ -182,8 +205,23 @@ codegraph 索引占用内存较高，且随仓库增大而增长，按仓库规�
 
 ## 三、接入飞书
 
-在[飞书开放平台](https://open.feishu.cn)按顺序配置应用（后续步骤依赖前序：须先启用机器人才能开通
-发消息权限，权限 / 事件 / 机器人均配置完成后再发布生效）：
+**第 0 步 · 先定租户**（决定后面所有步骤打开哪个控制台）：
+
+| 租户 | 开放平台地址 | 部署参数 | 卡片语言默认值 |
+|---|---|---|---|
+| 飞书 · 中国版（默认） | <https://open.feishu.cn> | `--feishu-domain feishu` | `--locale zh` |
+| Lark · 国际版 | <https://open.larksuite.com> | `--feishu-domain lark` | `--locale en` |
+
+这个选择在**首次部署时**就要给对（`install.sh` 会问，也可用命令行参数直接指定），并且**必须与你创建
+应用所用的那个控制台一致**：中国版与国际版的应用互不相通，租户填错时长连接与 REST 会指向不同的租户，
+结果是机器人**能通过鉴权、却永远收不到任何事件**——群里 @ 它完全没反应，日志里也看不到收消息事件。
+`--locale` 决定卡片与提示文案的语言（`zh` / `en`）；不指定时：`--feishu-domain lark` 默认 `en`，
+`feishu` 默认 `zh`。
+
+下文用 `<开放平台>` 代表你那一侧的地址（中国版 `open.feishu.cn` / 国际版 `open.larksuite.com`）。
+
+在 `<开放平台>`（[飞书](https://open.feishu.cn) / [Lark](https://open.larksuite.com)）按顺序配置应用
+（后续步骤依赖前序：须先启用机器人才能开通发消息权限，权限 / 事件 / 机器人均配置完成后再发布生效）：
 
 1. **创建企业自建应用**：「开发者后台」→「创建应用」→「企业自建应用」。建好后在「凭证与基础信息」页
    记下 `App ID`（`cli_...`）和 `App Secret`。
@@ -239,17 +277,39 @@ aws ssm start-session --region <r> --target <INDEX_SERVICE_INSTANCE>
 
 ## 五、验证（端到端冒烟）
 
-1. **后端健康**（进 index-service 实例查，`8080` 是第一个项目的端口，其它项目用它在 `projects.json` 里的 `port`）：
+先跑机器能自己判定的第 1 步，再进实例看两个健康端点（2、3），最后才在群里人工确认（4）。
+
+1. **离线套件 + 真实端到端探针**（在部署机上，不用进实例）：
+
+   ```bash
+   ./scripts/test.sh --full        # 离线套件（lint + unit + typecheck）+ e2e 探针
+   ```
+
+   `--full` 会调用 `scripts/e2e-probe.py`。也可以单独跑它，退出码就是结论：
+
+   ```bash
+   python3 scripts/e2e-probe.py   # 0 = 全部探针通过；1 = 有探针失败；2 = 无法运行（缺依赖 / 未部署 / 无 projects.json）
+   ```
+
+   探针走的是**与网关完全相同的 invoke 路径**（boto3 `InvokeAgentRuntime` + 同一形状的 payload），
+   校验：流式返回非空且能解出答案、`permission_denials` 为空（只读边界未被突破）、答案带 `文件:行号`
+   出处。`2` 视为 skip 而非失败——离线或尚未部署的环境跑 `--full` 不会被它阻塞。
+
+2. **后端健康**（进 index-service 实例查，`8080` 是第一个项目的端口，其它项目用它在 `projects.json` 里的 `port`）：
 
    ```bash
    aws ssm start-session --region <r> --target <INDEX_SERVICE_INSTANCE>
    # 登录后：
-   curl -fs -w '%{http_code}\n' http://127.0.0.1:8080/health   # 期望 200 + healthy:true
+   curl -s -w '%{http_code}\n' http://127.0.0.1:8080/health   # 期望 200 + healthy:true
    ```
+
+   > 这里**不要加 `-f`**：`-f` 在非 2xx 时不打印响应体、直接以 22 退出，而你要看的恰恰是那个状态码。
+   > `/health` **只绑 `127.0.0.1`**（有意如此），从 VPC 外、甚至从同 VPC 的其它机器都访问不到，必须
+   > 先进实例。
 
    > 本地仓项目要先完成 Quick Start 第三步（推代码），否则 `/health` 非 200、机器人答「未找到」——这是推代码前的正常状态，不是故障。
 
-2. **网关健康**（同一台实例，端口是该项目 bridge 端口 + 10000，第一个项目即 `18080`；`activate_gateway.sh`
+3. **网关健康**（同一台实例，端口是该项目 bridge 端口 + 10000，第一个项目即 `18080`；`activate_gateway.sh`
    按项目把这个值写进 `/etc/bot-gateway-<项目>.env` 的 `HEALTH_PORT`，不确定时先 `grep HEALTH_PORT` 该文件）：
 
    ```bash
@@ -259,13 +319,17 @@ aws ssm start-session --region <r> --target <INDEX_SERVICE_INSTANCE>
 
    `/ready` 只在飞书长连接已连上、且进程不在优雅退出时才 200，否则 503——这是判断「长连接到底通不通」
    最快的一步，比翻日志直接。`/health` 在重连期间照样 200（有意如此：SDK 重连只要两秒，不该据此重启）。
-   两条路由只绑 `127.0.0.1`，从 VPC 外访问不到。
+   两条路由同样只绑 `127.0.0.1`，从 VPC 外访问不到。
 
-3. **在群里 @ 机器人**并提问（如「装备耐久怎么算？」）。预期：
+4. **在群里 @ 机器人**并提问（如「装备耐久怎么算？」）。预期：
    - 几秒内出现一张卡片，标题带实时计时（思考→分析→完成）；
    - 结论先行、用业务语言表述，底部「供研发复核」折叠区列 `文件:行号` 出处；
    - 可点「继续追问」或直接回复卡片，延续上文继续提问。
    - 首次冷启动（新 microVM）会慢一些（含 MCP 注册），是正常现象。
+
+> 仓库里唯一的机检闸门是 CI：[`.github/workflows/ci.yml`](../.github/workflows/ci.yml)（push 到 main /
+> 每个 PR / 手动触发）装齐依赖后跑 `scripts/test.sh`，并在任何一个子套件被 skip 时判失败。
+> **没有** pre-commit / pre-push 钩子（也没有 gitleaks 钩子）——本地是否跑套件靠自觉，闸门在 CI。
 
 ---
 
@@ -284,11 +348,12 @@ aws ssm start-session --region <r> --target <INDEX_SERVICE_INSTANCE>
 从不替换实例）：确需更换就自行 `stop` → `modify-instance-attribute --instance-type` → `start`，带
 `--instance-type` 重新部署只会在机型不一致时给出警告。
 
-**改术语表构建上限（`GLOSSARY_MAX_FILES`）**：常规做法是部署时带 `deploy-all.sh --glossary-max-files <n>`
-（`0` = 不限，见[附录 A](#附录-a手动-deploy-allsh)）。该值最终写在实例的 `/etc/index-service.env` 里，但只有这一轮
-**基础代码有更新**、触发原地重跑 bootstrap，该文件才会被重写、新上限随之生效；基础代码没变时部署走快速复用、
-不重跑 bootstrap，新值不会落到实例上——此时进实例手改 `/etc/index-service.env` 的 `GLOSSARY_MAX_FILES`，
-下一轮刷新构建即按新值跑。日常无需调整。
+**改术语表构建上限（`GLOSSARY_MAX_FILES`）**——这是本文关于该上限的唯一权威说法：该值最终写在实例的
+`/etc/index-service.env` 里，而写它的只有 bootstrap。部署时带 `deploy-all.sh --glossary-max-files <n>`
+（`0` = 不限，见[附录 A](#附录-a手动-deploy-allsh)）**只在这一轮的基础代码产物签名有变化、因而触发就地重跑
+bootstrap 时**才会落到实例上；产物签名没变时部署走快速复用、不重跑 bootstrap，这个参数就是个 no-op。
+所以：树没变时请进实例手改 `/etc/index-service.env` 的 `GLOSSARY_MAX_FILES`，下一轮刷新构建即按新值跑。
+**不需要**重新初始化主机、也不需要新建实例。日常无需调整。
 
 **只重部署 runtime**（修改 agent 镜像 / system prompt 后）：重新运行 `deploy-all.sh`（镜像与 runtime 阶段幂等）。
 注意仍存活的 microVM 会使用旧镜像约 15 分钟，直到被回收。
@@ -319,7 +384,7 @@ aws ssm start-session --region <r> --target <INDEX_SERVICE_INSTANCE>
 时间范围、查询、排序均自动处理）：
 
 ```bash
-./scripts/trace.sh st-731080073903468d83a0fbe1249b5dc3   # traceId 取自卡片底部或 answer_* 日志行
+./scripts/trace.sh st-00000000000000000000000000000000   # 示例值，把它换成卡片底部或 answer_* 日志行里的真实 traceId
 #   --since-hours N（默认 6）扩大回溯窗；--raw 不合并、两侧原样输出
 #   --runtime <id> 指定 AgentCore runtime id（默认从 .local/deploy-config 的 RUNTIME_ARN_* 推导；
 #     多项目时会取第一条并提示，查另一个项目就用这个参数指明）
@@ -395,9 +460,10 @@ refreshIntervalSec?}`，`source` 默认 `git`、本地仓写 `local`）。顶层
 
 | 症状 | 可能原因 | 处置 |
 |------|----------|------|
+| 部署显示成功，但每次问答都答不出内容（空答案 / 「未找到」） | **Runtime 到 bridge 的这一段不通**——部署的健康检查只探索引主机的 loopback，探不到这一层 | 按这三处依次查：① runtime 使用的安全组是否放行到索引主机的 **8080-8099**；② 私有子网到 **NAT** 的路由是否存在（Runtime 网卡由 AWS 托管、无公网 IP，必须经 NAT）；③ 私有域名能否解析——进实例跑 `dig +short index.<r>.source-truth.internal`，返回空说明私有托管区 / VPC DNS 属性有问题（见[附录 C](#附录-c首次部署后的真机核对清单)） |
 | 卡片一直「正在分析…」不结束 | 后端流被中断 / finalize 异常 | 查看网关日志 `finalize_error` / `card_closed failed:true`；偶发时重新提问，持续出现则检查 runtime / index 健康 |
 | 卡片里出现异常的 `<invoke>` 代码标记 | 冷启动那次问答，底层的代码检索工具尚未就绪，agent 就提前作答 | 网关会自动重试一次，预热后不再出现。查日志 `num_turns`/`cache_read` 确认是否冷启动 |
-| 机器人在群里**完全无响应** | 网关未启动 / 未 @ 到机器人 / 同一 app 运行了两个网关争抢事件 | 进实例先 `curl -s -w '%{http_code}\n' 127.0.0.1:<HEALTH_PORT>/ready`（端口见 `/etc/bot-gateway-<项目>.env`）：503 就是长连接没连上；再 `systemctl status 'bot-gateway@*'` 确认 active + 日志 `sdk_wsclient_connected`；确认 @ 的是 `FEISHU_BOT_OPEN_ID`；停止多余网关，只保留一个 |
+| 机器人在群里**完全无响应** | 网关未启动 / 未 @ 到机器人 / 同一 app 运行了两个网关争抢事件 / **租户填错**（应用建在国际版 Lark，却按中国版飞书部署，或反之） | 进实例先 `curl -s -w '%{http_code}\n' 127.0.0.1:<HEALTH_PORT>/ready`（端口见 `/etc/bot-gateway-<项目>.env`）：503 就是长连接没连上；再 `systemctl status 'bot-gateway@*'` 确认 active + 日志 `sdk_wsclient_connected`；确认 @ 的是 `FEISHU_BOT_OPEN_ID`；停止多余网关，只保留一个。若鉴权成功（拿到了 token）却始终没有收消息事件，检查租户：`grep -E 'FEISHU_API_BASE\|LOCALE' /etc/bot-gateway-<项目>.env`，与创建应用的控制台核对，不一致就带正确的 `--feishu-domain` 重新部署（见[第三节](#三接入飞书)） |
 | 网关 `condition failed` 未启动 | `/etc/bot-gateway-<项目>.env` 尚未写入（runtime 未就绪 / gateway 阶段被跳过） | 重新运行 `install.sh` 或 `deploy-all.sh`（不跳 gateway）；确认 `FEISHU_SECRET_ID` 已配 |
 | 卡片回「查询失败」/ 日志 `AccessDenied` | 部署身份缺 `bedrock:InvokeModel`，或该模型在此区域无可用推理档 | 给部署身份补 `bedrock:InvokeModel`；模型档由部署按区域自动解析，查不到时 preflight 会列出该区域可用的档（见前置条件 3） |
 | 部署在 index-service 阶段超时 | 全新账号 NAT 路由未收敛 / 实例仍在冷启动建立索引 | 再等待一轮（bootstrap 对网络操作有重试）；查看 `/var/log/` 与 `journalctl -u 'index-build@*'` |
@@ -414,8 +480,11 @@ refreshIntervalSec?}`，`source` 默认 `git`、本地仓写 `local`）。顶层
 
 - **只读**：MVP 全程不写代码 / 不提交 / 不运行引擎；答案只基于最新主分支的真实代码，并用 CodeGraph 核对验证。
 - **密钥**：飞书 `App Secret`、`App ID` 等绝不入仓库；走环境变量 / Secrets Manager / SSM。
+  机检落在 **CI**（[`.github/workflows/ci.yml`](../.github/workflows/ci.yml)）：它装齐依赖后跑
+  `scripts/test.sh`（含 `scripts/check-invariants.sh` 的结构与发布内容检查），任何子套件被 skip 即判失败。
+  仓库里**没有** pre-commit / pre-push 钩子，也没有 gitleaks 钩子——提交前是否本地跑一遍靠自觉，闸门在 CI。
 - **越界能力后置**：多分支、设计文档读取、写回、第二引擎等均为 post-MVP，详见
-  [`../README.md`](../README.md) 的「MVP 边界」与设计权威依据 [`design/`](design/)。
+  [`../README_zh.md`](../README_zh.md) 的「MVP 边界」与设计权威依据 [`design/`](design/)。
 
 ### 本地仓上传
 
@@ -454,7 +523,8 @@ sudo journalctl -u reindex-<subdir> -f          # 或 sudo tail -f /var/log/rein
 
 ```bash
 # 起底座 + 部署 .local/projects.json 里的每个项目。幂等、可重复、新账号可跑。
-./scripts/deploy-all.sh --region ap-northeast-1 [--instance-type t4g.large] [--root-volume-gb 30] [--model <默认id>]
+./scripts/deploy-all.sh --region ap-northeast-1 [--instance-type t4g.large] [--root-volume-gb 30] [--model <默认id>] \
+  [--feishu-domain <feishu|lark>] [--locale <zh|en>]
 
 # 只起共享底座、不挂项目（init-env）：
 ./scripts/deploy-all.sh --region <r> --skip-projects
@@ -474,8 +544,10 @@ sudo journalctl -u reindex-<subdir> -f          # 或 sudo tail -f /var/log/rein
 
 | 参数 | 默认 | 作用 |
 |------|------|------|
+| `--feishu-domain <feishu\|lark>` | `feishu` | 飞书租户：`feishu` = 中国版（`open.feishu.cn`），`lark` = 国际版（`open.larksuite.com`）。**必须与创建应用所用的控制台一致**，它同时决定事件长连接与 REST base URL；只对上其中一个，机器人会通过鉴权后永远收不到事件。首次部署就要给对（见[第三节](#三接入飞书)） |
+| `--locale <zh\|en>` | 跟随租户：`--feishu-domain lark` 时为 `en`，否则 `zh` | 卡片与提示文案语言。写进 `/etc/bot-gateway-<项目>.env` 的 `LOCALE` |
 | `--max-files <n>` | 10000 | 每个仓库 codegraph 建索引的文件数上限 |
-| `--glossary-max-files <n>` | `0`（不限） | 每个仓库术语表构建的文件数上限。**这是控成本的主要旋钮**：不限时大仓一次全量构建可达数百美元（14000 文件实测约 $372）。改这个值不必进实例改 env 文件，见第六节「改术语表构建上限」 |
+| `--glossary-max-files <n>` | `0`（不限） | 每个仓库术语表构建的文件数上限。**这是控成本的主要旋钮**：不限时大仓一次全量构建可达数百美元（14000 文件实测约 $372）。注意它只在本轮触发就地重跑 bootstrap 时才会落到实例上，否则需进实例手改 `/etc/index-service.env`，见第六节「改术语表构建上限」 |
 | `--idle-timeout <秒>` | 900 | microVM 空闲回收时长（60–28800），同时对齐网关的 session 复用 TTL |
 | `--max-lifetime <秒>` | 28800（8h） | microVM 强制回收前的硬上限（60–28800）；语义见 [`agent/architecture.md`](agent/architecture.md) |
 | `--force` | 关 | 跳过 Phase 0 的硬阻断预检（如 vCPU 配额不足），视为操作者已确认。已在提额、或确知检查结果过时时才用 |
@@ -497,7 +569,8 @@ export RUNTIME_ARN="$(grep '^RUNTIME_ARN_<项目>=' ../.local/deploy-config | cu
 export FEISHU_APP_ID=cli_xxx
 export FEISHU_APP_SECRET=xxx            # 不要写进仓库
 export FEISHU_BOT_OPEN_ID=ou_xxx
-# 可选：LOG_HASH_SALT、MAX_CONCURRENT_INVOKES（默认 8）、LOCALE（默认 zh）
+# 可选：LOG_HASH_SALT、MAX_CONCURRENT_INVOKES（默认 8）、LOCALE（zh|en；线上由
+#   activate_gateway.sh 按 --locale / 租户写入）
 # 可选：HEALTH_PORT——健康端点端口（只绑 127.0.0.1）。不设时按 bridge 端口 + 10000 推导
 #   （8080 → 18080）；线上由 activate_gateway.sh 按项目写进 /etc/bot-gateway-<项目>.env，
 #   systemd 单元的启动探针读同一个值。端点语义（/health 存活、/ready 就绪）见第五节
@@ -509,16 +582,16 @@ node_modules/.bin/ts-node --transpile-only src/index.ts
 
 ## 附录 C：首次部署后的真机核对清单
 
-第五节的冒烟测试（`/health` + 在群里提一个问题）确认了主流程可用。这份清单更细，用于**首次在一个新账号或新区域部署之后**逐项确认——重点是几个静态检查与离线测试都覆盖不到、必须在真实机器上验证的环节，其中有的即使部署显示成功、实际也未必可用（`--local` 手动部署尤其需要注意）。日常重复部署无需每次执行。命令中 `<r>` = 区域、`<I>` = 索引主机实例 id（取自 `.local/deploy-config` 的 `INDEX_SERVICE_INSTANCE`）。
+第五节的冒烟测试（`test.sh --full` / `e2e-probe.py` + `/health` + 在群里提一个问题）确认了主流程可用。这份清单更细，用于**首次在一个新账号或新区域部署之后**逐项确认——重点是几个静态检查与离线测试都覆盖不到、必须在真实机器上验证的环节，其中有的即使部署显示成功、实际也未必可用（`--local` 手动部署尤其需要注意）。日常重复部署无需每次执行。命令中 `<r>` = 区域、`<I>` = 索引主机实例 id（取自 `.local/deploy-config` 的 `INDEX_SERVICE_INSTANCE`）。
 
 **必须验证（交付前）**
 
 | 项目 | 确认方式 | 未通过时的表现与处理 |
 |---|---|---|
 | **能 SSH 登录新建的机器**（`--local`） | `ssh ubuntu@<公网IP>` 可连接 | 连不上/超时 → 安全组放行的 22 端口来源不是你真实的出口 IP（`launch-host` 用 `curl checkip` 获取，经 NAT 或代理时可能不准）。在控制台给该安全组补一条你当前 IP 的 22 |
-| **Runtime 能解析索引主机的私有域名** | 进实例（`aws ssm start-session ... --target <I>`），实例内跑 `dig +short index.<r>.source-truth.internal`，应返回一个私有 IP | 返回空 → 每次问答都答不出内容，**而部署本身会显示成功**（健康检查只探本机 loopback，探不到这一层）。检查该 VPC 的 `enableDnsSupport` 和 `enableDnsHostnames` 是否都已打开 |
-| **Runtime 访问 Bedrock、并连上 bridge** | 在群里提一个问题，卡片给出带 `文件:行号` 出处的答案 | 卡在「查询失败」或超时 → 私有子网到 NAT 的路由不通，或 runtime 使用的安全组未放行 8080-8099 |
+| **Runtime 访问 Bedrock、并连上 bridge** | 在群里提一个问题，卡片给出带 `文件:行号` 出处的答案 | 卡在「查询失败」或超时 → 私有子网到 NAT 的路由不通，或 runtime 使用的安全组未放行 8080-8099。答案为空（部署却显示成功）→ 见第八节「部署显示成功，但每次问答都答不出内容」，按 SG 8080-8099 / NAT 路由 / 私有域名解析三处依次排查 |
 | **部署身份权限充足**（`--local` 复用角色后） | `deploy-all --local` 执行到 runtime 的 `InvokeAgentRuntime` 不报 AccessDenied | 卡在 runtime 阶段报 AccessDenied 或 PassRole 被拒 → 角色缺 `bedrock-agentcore:*` 或对 `SourceTruthAgentRuntimeRole` 的 `iam:PassRole`（见前置条件 3 与 `--local` 权限说明） |
+| **私有域名可解析**（**仅**手工自建 VPC，或部署时 `modify-vpc-attribute` 被权限拒绝过时才需查） | 进实例（`aws ssm start-session ... --target <I>`），实例内跑 `dig +short index.<r>.source-truth.internal`，应返回一个私有 IP | 两种拓扑下部署都会显式对该 VPC 执行 `modify-vpc-attribute --enable-dns-support` 与 `--enable-dns-hostnames`（默认拓扑在建网阶段、`--local` 在复用本机 VPC 时），所以这一项通常不再需要人工确认。只有 VPC 是你手工建的、或部署日志里这两条 `modify-vpc-attribute` 报过权限错误时，才需要核对这两个属性是否都为 true |
 
 **接入第一个新代码仓时验证**
 
@@ -534,7 +607,7 @@ node_modules/.bin/ts-node --transpile-only src/index.ts
 - **冷启动首次提问**：新 microVM 第一次提问会略慢，极偶尔出现 `<invoke>` 之类的原始标记——网关会自动重试一次，预热后即正常（见第八节排错表）。
 - **复用与清理**：`launch-host` 复用一台已停止的机器时会先将其启动；本地仓从项目中移除后，下次部署会清除它的代码副本与 `.incoming`（调整仓库集合并重新部署后，用 `sudo ls /data/repo/` 确认无残留即可）。
 
-> **真机上最易出问题的两处，交付前务必亲自确认**：一是私有 DNS 解析失败——部署显示成功，问答却答不出内容，最难自行发现；二是安全组 22 端口放行的出口 IP 不对——无法登录刚创建的机器。
+> **真机上最易出问题的两处，交付前务必亲自确认**：一是「部署显示成功、问答却答不出内容」——原因几乎总在 Runtime 到 bridge 这一段（安全组未放行 8080-8099 / 私有子网到 NAT 的路由不通 / 私有域名解析失败），部署自身探不到，最难自行发现；二是安全组 22 端口放行的出口 IP 不对——无法登录刚创建的机器。
 
 ---
 

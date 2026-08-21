@@ -6,7 +6,7 @@
 `{prompt, traceId, repos}`（见 bot-gateway/src/sigv4.ts:buildInvokeRequest）——不发 agent 不读的
 字段（如 projectId），以免产生“看似真实、实则不真实”的埋点。
 
-读取（都不写死，便于客户环境复用）：
+读取（都不写死，便于在不同环境复用）：
   - runtime ARN / region：`.local/deploy-config`（AGENT_RUNTIME_ARN；region 优先级
     --region > ARN 第 4 段（权威）> AWS_REGION 环境变量（仅兜底，避免开发机默认区域误覆盖））。
   - repos：`.local/projects.json`（projects.<id>.repos）。多项目时用 --project 选；单项目自动选。

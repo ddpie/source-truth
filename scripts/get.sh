@@ -9,9 +9,22 @@
 # bootstrap stays small and there's a single source of truth for that logic.
 #
 # Re-runnable: if ./source-truth already exists it is reused (fetched + fast-forwarded to the target
-# ref), not re-cloned. Override the clone target with SOURCE_TRUTH_DIR, the repo with
-# SOURCE_TRUTH_REPO, the branch with SOURCE_TRUTH_REF. SOURCE_TRUTH_ALLOW_STALE=1 downgrades a failed
-# refresh from an error to a warning (install from the tree exactly as it is).
+# ref), not re-cloned. Overrides:
+#
+#   SOURCE_TRUTH_DIR    clone target directory (default: ./source-truth)
+#   SOURCE_TRUTH_SLUG   owner/repo for `gh repo clone` (default: aws-samples/sample-code-qa-on-agentcore)
+#   SOURCE_TRUTH_REPO   full clone URL for plain `git clone` (default: derived from SOURCE_TRUTH_SLUG)
+#   SOURCE_TRUTH_REF    branch / tag / sha (default: main)
+#   SOURCE_TRUTH_ALLOW_STALE=1  downgrade a failed refresh from an error to a warning
+#                       (install from the tree exactly as it is)
+#
+# ⚠️ SLUG vs REPO — for a fork, set SOURCE_TRUTH_SLUG, not SOURCE_TRUTH_REPO. There are two clone
+# paths (see do_clone below): with `gh` installed AND authenticated it runs `gh repo clone "$SLUG"`,
+# otherwise plain `git clone "$REPO"`. SOURCE_TRUTH_REPO only feeds the second one, so a fork user
+# who exports just SOURCE_TRUTH_REPO still clones UPSTREAM whenever gh is logged in. SOURCE_TRUTH_SLUG
+# covers both paths (REPO defaults to a URL derived from it). Reach for SOURCE_TRUTH_REPO only for a
+# non-GitHub remote — and set SOURCE_TRUTH_SLUG alongside it, or log out of gh, so the gh path cannot
+# win.
 set -euo pipefail
 
 SLUG="${SOURCE_TRUTH_SLUG:-aws-samples/sample-code-qa-on-agentcore}"      # owner/repo, for `gh repo clone`

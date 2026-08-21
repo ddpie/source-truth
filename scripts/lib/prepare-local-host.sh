@@ -57,7 +57,7 @@ command -v git >/dev/null && echo "• already present" || apti install -y git
 
 # --- 2a. zip (monitoring's DAU-lambda phase packages the function with `zip`) --------------------
 # apply-dau-lambda.sh require_cmd's zip and hard-fails without it; a fresh minimal image lacks it,
-# so deploy-all's Phase 7 DAU stage would fail (non-fatal, but leaves the 日活 widget empty).
+# so deploy-all's Phase 7 DAU stage would fail (non-fatal, but leaves the DAU widget empty).
 step "zip"
 command -v zip >/dev/null && echo "• already present" || apti install -y zip
 

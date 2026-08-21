@@ -23,6 +23,6 @@
 - 一次提问的生命周期、代码如何进入与刷新、会话隔离 → [`../agent/architecture.md`](../agent/architecture.md)（面向 AI 的工作原理）
 - 可执行的不变量与权威依据映射 → [`../agent/invariants.md`](../agent/invariants.md)
 - 常见改动的操作手册 → [`../agent/playbooks.md`](../agent/playbooks.md)
-- 从零部署 / 连飞书 / 运维 / 排错 → [`../runbook.md`](../runbook.md)
+- 从零部署 / 连飞书 / 运维 / 排错 → [`../runbook_zh.md`](../runbook_zh.md)
 
 全部文档入口见 [`../README.md`](../README.md)。

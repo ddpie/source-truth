@@ -48,6 +48,17 @@ fi
 # call can't silently write the wrong file.
 [[ -n "$PROJECT_ID" ]] || { say err "activate_gateway: PROJECT_ID required (which project's gateway to activate)"; exit 2; }
 [[ "$PROJECT_ID" =~ ^[a-z0-9][a-z0-9-]*$ ]] || { say err "activate_gateway: invalid PROJECT_ID '$PROJECT_ID'"; exit 2; }
+# Validate the tenant HERE because this is the one place every caller passes through. deploy-all.sh
+# validates its own --feishu-domain flag, but install.sh's add-project and redeploy flows invoke
+# deploy_project.sh DIRECTLY, where the flag never runs — so a typo'd DEPLOY_FEISHU_DOMAIN in
+# deploy-config was written verbatim into the gateway env file. The gateway now treats an
+# unrecognised value as fatal, which turns that typo into a restart loop; catching it here turns it
+# into a deploy-time error naming the two legal values, before anything is written to the host.
+FEISHU_DOMAIN="$(printf '%s' "${FEISHU_DOMAIN:-feishu}" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
+case "$FEISHU_DOMAIN" in
+  feishu|lark) ;;
+  *) say err "activate_gateway: FEISHU_DOMAIN must be 'feishu' (China) or 'lark' (international), got '$FEISHU_DOMAIN' — check DEPLOY_FEISHU_DOMAIN in .local/deploy-config"; exit 2 ;;
+esac
 GW_ENV_PATH="/etc/bot-gateway-${PROJECT_ID}.env"
 GW_UNIT="bot-gateway@${PROJECT_ID}.service"
 # Deployment-specific project config, on the DEPLOY machine (see PROJECT ROUTING below). Declared

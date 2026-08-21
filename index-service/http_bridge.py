@@ -43,7 +43,11 @@ from repo_router import RepoRouter, RepoOutOfScope
 # app bundle's signature stamp at import time and expose a comparison on /health, so the skew is
 # observable instead of being inferred from behaviour. Reporting only — never a health gate, and a
 # no-op on a host where nothing stamps the file.
-_APP_SIG_PATH = os.environ.get("APP_SRC_SIG_PATH", "/opt/idx/app/.src_sig")
+# NOTE: this must match where the publishers stamp. bootstrap.sh writes /opt/idx/.app_sig and
+# says why in a comment: OUTSIDE $APP, so the rsync --delete-after that publishes the app tree
+# can never eat it. The default here used to be /opt/idx/app/.src_sig — a path nothing writes —
+# so _app_code_changed() was permanently False and the /health skew field was dead on arrival.
+_APP_SIG_PATH = os.environ.get("APP_SRC_SIG_PATH", "/opt/idx/.app_sig")
 
 
 def _read_app_sig() -> str:

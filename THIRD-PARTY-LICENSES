@@ -1,8 +1,119 @@
-This product includes or depends on the following third-party software:
+# Third-Party Licenses
 
-================================================================================
-COMPONENT: agent-container
-================================================================================
+This product includes or depends on the third-party software listed below.
+
+`sample-code-qa-on-agentcore` itself is licensed under MIT-0 (see `LICENSE`).
+Nothing in this file relicenses a third-party component: each entry keeps its
+own terms, and the Apache-2.0 and BSD components below carry attribution and
+notice obligations that redistributing this project does not discharge on your
+behalf.
+
+---
+
+## 0. Scope and provenance
+
+What this project actually distributes, and which file is authoritative for
+each shipped set:
+
+| Component | What ships | Authoritative manifest | Shipped packages |
+| --- | --- | --- | --- |
+| `agent-container` | container image (`docker build --platform linux/arm64`) | `agent-container/requirements.lock` | 117 (fully listed in §4.1) |
+| `bot-gateway` | Node tarball installed with `npm ci --omit=dev` | `bot-gateway/package-lock.json` | 105 of 481 locked entries (fully listed in §4.2) |
+| `index-service` | Python tree installed on the EC2 host by `index-service/bootstrap.sh` | `index-service/requirements.txt` (4 direct pins; **transitives unpinned**) | not determinable from the repo — see §4.3 |
+
+The direct-dependency entries in §2 are hand-maintained (each carries a URL and
+a "why we depend on this" note). The full listings in §4.1 and §4.2 are
+**generated** — do not hand-edit them; regenerate with the commands below when
+a lock file changes.
+
+Every version in this file is traceable to a lock file. Every license string is
+reproduced verbatim from package metadata that was actually read, never inferred
+from a package's name, its siblings, or a neighbouring version. Strings that are
+not valid SPDX identifiers are left as the upstream metadata wrote them; see the
+Appendix.
+
+### How the generated sections were produced
+
+    # bot-gateway: every package NOT flagged "dev": true in the lockfile,
+    # i.e. exactly what `npm ci --omit=dev` installs. `license` is the value
+    # npm recorded from each package's own package.json.
+    cd bot-gateway && npx --yes license-checker --production --json
+
+    # agent-container: for each `name==version` in requirements.lock, read the
+    # License-Expression / License / License-classifier field out of THAT EXACT
+    # version's core metadata. Two evidence sources, both real metadata:
+    #   (a) the locally installed dist, used only when the installed version
+    #       equals the locked version:
+    python3 -m pip show <pkg>
+    #   (b) otherwise the wheel's PEP 658 core-metadata sidecar on PyPI, which
+    #       is the literal METADATA file of the distribution pip would install:
+    curl -s "https://pypi.org/pypi/<pkg>/<version>/json"   # find the wheel url
+    curl -s "<wheel-url>.metadata"                         # read its METADATA
+
+A licence was never carried over from a different version of the same package,
+and never guessed from a package name. Of the 117 rows in §4.1, 28 came from
+source (a) and 89 from source (b).
+
+The two bot-gateway sources were cross-checked against each other: 105 shipped
+entries from the lockfile, the same 105 from `license-checker` (its 106th entry
+is the root project), and zero license disagreements.
+
+---
+
+## 1. Proprietary / not open-source — action required before use
+
+**Two components below are NOT open-source. You must obtain them yourself and
+accept their terms. Neither is covered by this repository's MIT-0 licence, and
+neither can be redistributed under it.**
+
+---
+
+### codegraph-server — 0.18.5 — Proprietary (Amazon/AWS internal)
+
+Code indexing and graph query engine. This is the **core index engine that the
+entire sample depends on**: without it, `index-service` has nothing to drive and
+the agent has no evidence channel.
+
+- **No public source.** The component is declared Amazon-internal and
+  not open-source. There is no upstream repository to inspect, audit, or fork.
+- The `README` directs users to download the binary from this repository's
+  public GitHub Release; `index-service/README.md` documents the ARM aarch64 /
+  glibc >= 2.38 / v0.18.5 staging requirement.
+- **Unresolved and needs a human decision:** a proprietary,
+  Amazon-internal-declared binary distributed from a public release attached to
+  an MIT-0 sample is a licensing question this file cannot answer. The redistribution
+  terms, the licence a downloader receives, and whether the binary may be published
+  at all must be settled by the repository owner and their legal/OSS review
+  **before release**. Do not treat its presence in a release as a grant of rights.
+
+---
+
+### @anthropic-ai/claude-code — version NOT pinned (`latest`) — Proprietary (Anthropic Commercial Terms of Service)
+
+Claude Code agentic coding tool, installed into the agent container from npm
+outside any lock file.
+
+- Not open-source. Use is governed by Anthropic's Commercial Terms of Service,
+  which **you** must read and accept: <https://www.anthropic.com/legal/commercial-terms>
+- Package: <https://www.npmjs.com/package/@anthropic-ai/claude-code>
+- **`latest` is not a version.** Because it is unpinned, this manifest cannot
+  state what shipped, builds are not reproducible, and the terms in force at
+  install time are whatever npm resolved that day. Pin it (see the report
+  accompanying this change) before treating any build as releasable.
+
+---
+
+## 2. Direct dependencies
+
+Human-readable summary of the dependencies this project declares on purpose.
+This is **not** the shipped set — see §4 for that.
+
+---
+
+### COMPONENT: agent-container
+
+Declared in `agent-container/requirements.txt`; versions below match
+`agent-container/requirements.lock`.
 
 ---
 
@@ -46,14 +157,17 @@ AWS distribution of OpenTelemetry Python instrumentation.
 
 ---
 
-================================================================================
-COMPONENT: bot-gateway
-================================================================================
+### COMPONENT: bot-gateway
+
+Declared in `bot-gateway/package.json`. **Versions below are the exact versions
+resolved in `bot-gateway/package-lock.json`, not the `^x.y.z` ranges from
+`package.json`** — a licence manifest must state what shipped, and a range does
+not.
 
 ---
 
 @larksuiteoapi/node-sdk
-Version: ^1.67.0
+Version: 1.67.0  (range in package.json: ^1.67.0)
 License: MIT
 URL: https://github.com/larksuite/node-sdk
 Feishu/Lark Open Platform SDK for Node.js.
@@ -61,7 +175,7 @@ Feishu/Lark Open Platform SDK for Node.js.
 ---
 
 @aws-crypto/sha256-js
-Version: ^5.2.0
+Version: 5.2.0  (range in package.json: ^5.2.0)
 License: Apache-2.0
 URL: https://github.com/aws/aws-sdk-js-crypto-helpers
 AWS cryptographic SHA-256 implementation in JavaScript.
@@ -69,7 +183,7 @@ AWS cryptographic SHA-256 implementation in JavaScript.
 ---
 
 @aws-sdk/credential-providers
-Version: ^3.1070.0
+Version: 3.1070.0  (range in package.json: ^3.1070.0)
 License: Apache-2.0
 URL: https://github.com/aws/aws-sdk-js-v3
 AWS SDK credential providers.
@@ -77,7 +191,7 @@ AWS SDK credential providers.
 ---
 
 @aws-sdk/signature-v4
-Version: ^3.370.0
+Version: 3.370.0  (range in package.json: ^3.370.0)
 License: Apache-2.0
 URL: https://github.com/aws/aws-sdk-js-v3
 AWS Signature Version 4 request signing.
@@ -85,16 +199,17 @@ AWS Signature Version 4 request signing.
 ---
 
 @smithy/protocol-http
-Version: ^5.5.0
+Version: 5.5.0  (range in package.json: ^5.5.0)
 License: Apache-2.0
 URL: https://github.com/smithy-lang/smithy-typescript
 Smithy HTTP protocol bindings for AWS SDK.
 
 ---
 
-================================================================================
-COMPONENT: index-service
-================================================================================
+### COMPONENT: index-service
+
+Declared in `index-service/requirements.txt`. These four are exact-pinned; their
+transitive closure is **not** — see §4.3.
 
 ---
 
@@ -103,6 +218,8 @@ Version: 1.23.3
 License: MIT
 URL: https://github.com/modelcontextprotocol/python-sdk
 Model Context Protocol SDK; drives codegraph-server over stdio + FastMCP HTTP bridge.
+Deliberately pinned to 1.23.3, verified against codegraph-server 0.18.5. See §3 —
+a second, different version of `mcp` ships in agent-container.
 
 ---
 
@@ -111,6 +228,7 @@ Version: 0.44.0
 License: BSD-3-Clause
 URL: https://github.com/encode/uvicorn
 ASGI server backing the streamable-HTTP bridge.
+Note: agent-container ships uvicorn 0.49.0 (transitive) — see §4.1.
 
 ---
 
@@ -130,26 +248,341 @@ Read/write Excel (.xlsx) files; used for config table parsing.
 
 ---
 
-================================================================================
-COMPONENT: runtime-tools (not managed via package files)
-================================================================================
+## 3. `mcp` ships TWICE, at two different versions
+
+Both are distributed, so both are recorded. This is not a duplicate entry to be
+cleaned up:
+
+| Component | Version | License | Why this version |
+| --- | --- | --- | --- |
+| `index-service` | 1.23.3 | MIT | Deliberate exact pin in `index-service/requirements.txt`, protocol-verified against `codegraph-server` 0.18.5. Bumping it risks the stdio/FastMCP contract with the index engine. |
+| `agent-container` | 1.28.0 | MIT | Transitive. `claude-agent-sdk==0.2.103` requires `mcp>=1.23.0,<2.0.0` (read from its wheel metadata); `requirements.lock` froze whatever that range resolved to in the verified ARM64 build. |
+
+The divergence is intentional and safe because the two never share an
+interpreter: `index-service` runs on the EC2 index host, `agent-container` runs
+in the AgentCore microVM, and they talk over HTTP. Anyone raising the
+index-service pin must re-verify against `codegraph-server`; anyone changing the
+agent-container version must rebuild and re-freeze the lock.
+
+Same pattern, lower stakes: `uvicorn` ships at 0.44.0 (index-service, pinned)
+and 0.49.0 (agent-container, transitive).
 
 ---
 
-codegraph-server
-Version: 0.18.5
-License: Proprietary (Amazon/AWS internal)
-URL: N/A (internal binary)
-Code indexing and graph query engine. Amazon-internal tool; not open-source.
-Provisioned outside pip — see index-service/README.md for binary sourcing.
+## 4. Full shipped (transitive) listings
+
+### 4.1 agent-container — 117 packages
+
+Generated from `agent-container/requirements.lock`, which is itself
+`pip freeze` output from a verified ARM64 build and is the file the Dockerfile
+installs from. Licenses were read from each exact version's core metadata
+(28 from locally installed dists,
+89 from the wheel's PEP 658 `.metadata` sidecar);
+0 packages are unverified.
+
+| Package | Version | License (verbatim from metadata) |
+| --- | --- | --- |
+| `annotated-types` | 0.7.0 | MIT License |
+| `anyio` | 4.14.0 | MIT |
+| `asgiref` | 3.11.1 | BSD-3-Clause |
+| `attrs` | 26.1.0 | MIT |
+| `aws-opentelemetry-distro` | 0.17.1 | Apache-2.0 |
+| `bedrock-agentcore` | 1.14.1 | Apache-2.0 |
+| `boto3` | 1.43.31 | Apache-2.0 |
+| `botocore` | 1.43.31 | Apache-2.0 |
+| `cachetools` | 6.2.4 | MIT |
+| `certifi` | 2026.6.17 | MPL-2.0 |
+| `cffi` | 2.0.0 | MIT |
+| `charset-normalizer` | 3.4.7 | MIT |
+| `claude-agent-sdk` | 0.2.103 | MIT |
+| `click` | 8.4.1 | BSD-3-Clause |
+| `cryptography` | 49.0.0 | Apache-2.0 OR BSD-3-Clause |
+| `googleapis-common-protos` | 1.75.0 | Apache 2.0 |
+| `grpcio` | 1.81.1 | Apache-2.0 |
+| `h11` | 0.16.0 | MIT |
+| `httpcore` | 1.0.9 | BSD-3-Clause |
+| `httpx` | 0.28.1 | BSD-3-Clause |
+| `httpx-sse` | 0.4.3 | MIT |
+| `idna` | 3.18 | BSD-3-Clause |
+| `importlib_metadata` | 8.7.1 | Apache-2.0 |
+| `jmespath` | 1.1.0 | MIT |
+| `jsonschema` | 4.26.0 | MIT |
+| `jsonschema-specifications` | 2025.9.1 | MIT |
+| `mcp` | 1.28.0 | MIT |
+| `opentelemetry-api` | 1.40.0 | Apache-2.0 |
+| `opentelemetry-distro` | 0.61b0 | Apache-2.0 |
+| `opentelemetry-exporter-otlp-proto-common` | 1.40.0 | Apache-2.0 |
+| `opentelemetry-exporter-otlp-proto-grpc` | 1.40.0 | Apache-2.0 |
+| `opentelemetry-exporter-otlp-proto-http` | 1.40.0 | Apache-2.0 |
+| `opentelemetry-instrumentation` | 0.61b0 | Apache-2.0 |
+| `opentelemetry-instrumentation-aio-pika` | 0.61b0 | Apache-2.0 |
+| `opentelemetry-instrumentation-aiohttp-client` | 0.61b0 | Apache-2.0 |
+| `opentelemetry-instrumentation-aiokafka` | 0.61b0 | Apache-2.0 |
+| `opentelemetry-instrumentation-aiopg` | 0.61b0 | Apache-2.0 |
+| `opentelemetry-instrumentation-asgi` | 0.61b0 | Apache-2.0 |
+| `opentelemetry-instrumentation-asyncpg` | 0.61b0 | Apache-2.0 |
+| `opentelemetry-instrumentation-aws-lambda` | 0.61b0 | Apache-2.0 |
+| `opentelemetry-instrumentation-boto` | 0.61b0 | Apache-2.0 |
+| `opentelemetry-instrumentation-boto3sqs` | 0.61b0 | Apache-2.0 |
+| `opentelemetry-instrumentation-botocore` | 0.61b0 | Apache-2.0 |
+| `opentelemetry-instrumentation-cassandra` | 0.61b0 | Apache-2.0 |
+| `opentelemetry-instrumentation-celery` | 0.61b0 | Apache-2.0 |
+| `opentelemetry-instrumentation-confluent-kafka` | 0.61b0 | Apache-2.0 |
+| `opentelemetry-instrumentation-dbapi` | 0.61b0 | Apache-2.0 |
+| `opentelemetry-instrumentation-django` | 0.61b0 | Apache-2.0 |
+| `opentelemetry-instrumentation-elasticsearch` | 0.61b0 | Apache-2.0 |
+| `opentelemetry-instrumentation-falcon` | 0.61b0 | Apache-2.0 |
+| `opentelemetry-instrumentation-fastapi` | 0.61b0 | Apache-2.0 |
+| `opentelemetry-instrumentation-flask` | 0.61b0 | Apache-2.0 |
+| `opentelemetry-instrumentation-grpc` | 0.61b0 | Apache-2.0 |
+| `opentelemetry-instrumentation-httpx` | 0.61b0 | Apache-2.0 |
+| `opentelemetry-instrumentation-jinja2` | 0.61b0 | Apache-2.0 |
+| `opentelemetry-instrumentation-kafka-python` | 0.61b0 | Apache-2.0 |
+| `opentelemetry-instrumentation-logging` | 0.61b0 | Apache-2.0 |
+| `opentelemetry-instrumentation-mysql` | 0.61b0 | Apache-2.0 |
+| `opentelemetry-instrumentation-mysqlclient` | 0.61b0 | Apache-2.0 |
+| `opentelemetry-instrumentation-openai-agents-v2` | 0.1.0 | Apache-2.0 |
+| `opentelemetry-instrumentation-pika` | 0.61b0 | Apache-2.0 |
+| `opentelemetry-instrumentation-psycopg2` | 0.61b0 | Apache-2.0 |
+| `opentelemetry-instrumentation-pymemcache` | 0.61b0 | Apache-2.0 |
+| `opentelemetry-instrumentation-pymongo` | 0.61b0 | Apache-2.0 |
+| `opentelemetry-instrumentation-pymysql` | 0.61b0 | Apache-2.0 |
+| `opentelemetry-instrumentation-pyramid` | 0.61b0 | Apache-2.0 |
+| `opentelemetry-instrumentation-redis` | 0.61b0 | Apache-2.0 |
+| `opentelemetry-instrumentation-remoulade` | 0.61b0 | Apache-2.0 |
+| `opentelemetry-instrumentation-requests` | 0.61b0 | Apache-2.0 |
+| `opentelemetry-instrumentation-sqlalchemy` | 0.61b0 | Apache-2.0 |
+| `opentelemetry-instrumentation-sqlite3` | 0.61b0 | Apache-2.0 |
+| `opentelemetry-instrumentation-starlette` | 0.61b0 | Apache-2.0 |
+| `opentelemetry-instrumentation-system-metrics` | 0.61b0 | Apache-2.0 |
+| `opentelemetry-instrumentation-threading` | 0.61b0 | Apache-2.0 |
+| `opentelemetry-instrumentation-tornado` | 0.61b0 | Apache-2.0 |
+| `opentelemetry-instrumentation-tortoiseorm` | 0.61b0 | Apache-2.0 |
+| `opentelemetry-instrumentation-urllib` | 0.61b0 | Apache-2.0 |
+| `opentelemetry-instrumentation-urllib3` | 0.61b0 | Apache-2.0 |
+| `opentelemetry-instrumentation-wsgi` | 0.61b0 | Apache-2.0 |
+| `opentelemetry-processor-baggage` | 0.61b0 | Apache-2.0 |
+| `opentelemetry-propagator-aws-xray` | 1.0.2 | Apache-2.0 |
+| `opentelemetry-propagator-b3` | 1.40.0 | Apache-2.0 |
+| `opentelemetry-propagator-jaeger` | 1.40.0 | Apache-2.0 |
+| `opentelemetry-propagator-ot-trace` | 0.61b0 | Apache-2.0 |
+| `opentelemetry-proto` | 1.40.0 | Apache-2.0 |
+| `opentelemetry-sdk` | 1.40.0 | Apache-2.0 |
+| `opentelemetry-sdk-extension-aws` | 2.1.0 | Apache-2.0 |
+| `opentelemetry-semantic-conventions` | 0.61b0 | Apache-2.0 |
+| `opentelemetry-util-genai` | 0.4b0 | Apache-2.0 |
+| `opentelemetry-util-http` | 0.61b0 | Apache-2.0 |
+| `packaging` | 26.2 | Apache-2.0 OR BSD-2-Clause |
+| `protobuf` | 6.33.5 | 3-Clause BSD License |
+| `psutil` | 7.2.2 | BSD-3-Clause |
+| `pycparser` | 3.0 | BSD-3-Clause |
+| `pydantic` | 2.13.4 | MIT |
+| `pydantic-settings` | 2.14.1 | MIT |
+| `pydantic_core` | 2.46.4 | MIT |
+| `PyJWT` | 2.13.0 | MIT |
+| `python-dateutil` | 2.9.0.post0 | Dual License |
+| `python-dotenv` | 1.2.2 | BSD-3-Clause |
+| `python-multipart` | 0.0.32 | Apache-2.0 |
+| `PyYAML` | 6.0.3 | MIT |
+| `referencing` | 0.37.0 | MIT |
+| `requests` | 2.34.2 | Apache-2.0 |
+| `rpds-py` | 2026.5.1 | MIT |
+| `s3transfer` | 0.19.0 | Apache License 2.0 |
+| `six` | 1.17.0 | MIT |
+| `sniffio` | 1.3.1 | MIT OR Apache-2.0 |
+| `sse-starlette` | 3.4.4 | BSD-3-Clause |
+| `starlette` | 1.3.1 | BSD-3-Clause |
+| `typing-inspection` | 0.4.2 | MIT |
+| `typing_extensions` | 4.15.0 | PSF-2.0 |
+| `urllib3` | 2.7.0 | MIT |
+| `uvicorn` | 0.49.0 | BSD-3-Clause |
+| `websockets` | 16.0 | BSD-3-Clause |
+| `wrapt` | 1.17.3 | BSD |
+| `zipp` | 4.1.0 | MIT |
+
+### 4.2 bot-gateway — 105 packages
+
+Generated from `bot-gateway/package-lock.json` (lockfileVersion 3, 481 locked
+`node_modules/…` entries), taking every package NOT flagged `"dev": true` —
+exactly the set `npm ci --omit=dev` installs into the shipped tarball. That is
+107 lockfile entries, collapsing to the 105 distinct name+version pairs below
+(`@aws-sdk/types` 3.370.0 and `@smithy/types` 1.2.0 each appear at two nested
+paths). The other 374 entries are build/test-only — typescript, eslint, jest and
+their trees — and are not distributed. License values are the ones npm recorded
+from each package's own `package.json`; all 105 pairs carry one, so nothing here
+is unverified.
+
+100 distinct names, 105 name+version pairs — some names
+ship twice:
+
+- `@aws-crypto/crc32` ships at 3.0.0 and 5.2.0 (npm nests the older copy under its requiring package).
+- `@aws-crypto/util` ships at 3.0.0 and 5.2.0 (npm nests the older copy under its requiring package).
+- `@aws-sdk/types` ships at 3.370.0 and 3.973.13 (npm nests the older copy under its requiring package).
+- `@smithy/types` ships at 1.2.0 and 4.15.0 (npm nests the older copy under its requiring package).
+- `tslib` ships at 1.14.1 and 2.8.1 (npm nests the older copy under its requiring package).
+
+| Package | Version | License (verbatim from metadata) |
+| --- | --- | --- |
+| `@aws-crypto/crc32` | 3.0.0 | Apache-2.0 |
+| `@aws-crypto/crc32` | 5.2.0 | Apache-2.0 |
+| `@aws-crypto/sha256-browser` | 5.2.0 | Apache-2.0 |
+| `@aws-crypto/sha256-js` | 5.2.0 | Apache-2.0 |
+| `@aws-crypto/supports-web-crypto` | 5.2.0 | Apache-2.0 |
+| `@aws-crypto/util` | 3.0.0 | Apache-2.0 |
+| `@aws-crypto/util` | 5.2.0 | Apache-2.0 |
+| `@aws-sdk/client-cognito-identity` | 3.1070.0 | Apache-2.0 |
+| `@aws-sdk/core` | 3.974.21 | Apache-2.0 |
+| `@aws-sdk/credential-provider-cognito-identity` | 3.972.46 | Apache-2.0 |
+| `@aws-sdk/credential-provider-env` | 3.972.47 | Apache-2.0 |
+| `@aws-sdk/credential-provider-http` | 3.972.49 | Apache-2.0 |
+| `@aws-sdk/credential-provider-ini` | 3.972.54 | Apache-2.0 |
+| `@aws-sdk/credential-provider-login` | 3.972.53 | Apache-2.0 |
+| `@aws-sdk/credential-provider-node` | 3.972.56 | Apache-2.0 |
+| `@aws-sdk/credential-provider-process` | 3.972.47 | Apache-2.0 |
+| `@aws-sdk/credential-provider-sso` | 3.972.53 | Apache-2.0 |
+| `@aws-sdk/credential-provider-web-identity` | 3.972.53 | Apache-2.0 |
+| `@aws-sdk/credential-providers` | 3.1070.0 | Apache-2.0 |
+| `@aws-sdk/eventstream-codec` | 3.370.0 | Apache-2.0 |
+| `@aws-sdk/is-array-buffer` | 3.310.0 | Apache-2.0 |
+| `@aws-sdk/nested-clients` | 3.997.21 | Apache-2.0 |
+| `@aws-sdk/signature-v4` | 3.370.0 | Apache-2.0 |
+| `@aws-sdk/signature-v4-multi-region` | 3.996.35 | Apache-2.0 |
+| `@aws-sdk/token-providers` | 3.1069.0 | Apache-2.0 |
+| `@aws-sdk/types` | 3.370.0 | Apache-2.0 |
+| `@aws-sdk/types` | 3.973.13 | Apache-2.0 |
+| `@aws-sdk/util-buffer-from` | 3.310.0 | Apache-2.0 |
+| `@aws-sdk/util-hex-encoding` | 3.310.0 | Apache-2.0 |
+| `@aws-sdk/util-locate-window` | 3.965.8 | Apache-2.0 |
+| `@aws-sdk/util-middleware` | 3.370.0 | Apache-2.0 |
+| `@aws-sdk/util-uri-escape` | 3.310.0 | Apache-2.0 |
+| `@aws-sdk/util-utf8` | 3.310.0 | Apache-2.0 |
+| `@aws-sdk/util-utf8-browser` | 3.259.0 | Apache-2.0 |
+| `@aws-sdk/xml-builder` | 3.972.30 | Apache-2.0 |
+| `@aws/lambda-invoke-store` | 0.2.4 | Apache-2.0 |
+| `@larksuiteoapi/node-sdk` | 1.67.0 | MIT |
+| `@nodable/entities` | 2.2.0 | MIT |
+| `@protobufjs/aspromise` | 1.1.2 | BSD-3-Clause |
+| `@protobufjs/base64` | 1.1.2 | BSD-3-Clause |
+| `@protobufjs/codegen` | 2.0.5 | BSD-3-Clause |
+| `@protobufjs/eventemitter` | 1.1.1 | BSD-3-Clause |
+| `@protobufjs/fetch` | 1.1.1 | BSD-3-Clause |
+| `@protobufjs/float` | 1.0.2 | BSD-3-Clause |
+| `@protobufjs/path` | 1.1.2 | BSD-3-Clause |
+| `@protobufjs/pool` | 1.1.0 | BSD-3-Clause |
+| `@protobufjs/utf8` | 1.1.1 | BSD-3-Clause |
+| `@smithy/core` | 3.25.0 | Apache-2.0 |
+| `@smithy/credential-provider-imds` | 4.4.0 | Apache-2.0 |
+| `@smithy/fetch-http-handler` | 5.5.0 | Apache-2.0 |
+| `@smithy/is-array-buffer` | 2.2.0 | Apache-2.0 |
+| `@smithy/node-http-handler` | 4.8.0 | Apache-2.0 |
+| `@smithy/protocol-http` | 5.5.0 | Apache-2.0 |
+| `@smithy/signature-v4` | 5.5.0 | Apache-2.0 |
+| `@smithy/types` | 1.2.0 | Apache-2.0 |
+| `@smithy/types` | 4.15.0 | Apache-2.0 |
+| `@smithy/util-buffer-from` | 2.2.0 | Apache-2.0 |
+| `@smithy/util-utf8` | 2.3.0 | Apache-2.0 |
+| `@types/node` | 20.19.43 | MIT |
+| `anynum` | 1.0.0 | MIT |
+| `asynckit` | 0.4.0 | MIT |
+| `axios` | 1.13.6 | MIT |
+| `bowser` | 2.14.1 | MIT |
+| `call-bind-apply-helpers` | 1.0.2 | MIT |
+| `call-bound` | 1.0.4 | MIT |
+| `combined-stream` | 1.0.8 | MIT |
+| `delayed-stream` | 1.0.0 | MIT |
+| `dunder-proto` | 1.0.1 | MIT |
+| `es-define-property` | 1.0.1 | MIT |
+| `es-errors` | 1.3.0 | MIT |
+| `es-object-atoms` | 1.1.2 | MIT |
+| `es-set-tostringtag` | 2.1.0 | MIT |
+| `fast-xml-builder` | 1.2.0 | MIT |
+| `fast-xml-parser` | 5.7.3 | MIT |
+| `follow-redirects` | 1.16.0 | MIT |
+| `form-data` | 4.0.6 | MIT |
+| `function-bind` | 1.1.2 | MIT |
+| `get-intrinsic` | 1.3.0 | MIT |
+| `get-proto` | 1.0.1 | MIT |
+| `gopd` | 1.2.0 | MIT |
+| `has-symbols` | 1.1.0 | MIT |
+| `has-tostringtag` | 1.0.2 | MIT |
+| `hasown` | 2.0.4 | MIT |
+| `lodash.identity` | 3.0.0 | MIT |
+| `lodash.merge` | 4.6.2 | MIT |
+| `lodash.pickby` | 4.6.0 | MIT |
+| `long` | 5.3.2 | Apache-2.0 |
+| `math-intrinsics` | 1.1.0 | MIT |
+| `mime-db` | 1.52.0 | MIT |
+| `mime-types` | 2.1.35 | MIT |
+| `object-inspect` | 1.13.4 | MIT |
+| `path-expression-matcher` | 1.5.0 | MIT |
+| `protobufjs` | 7.6.4 | BSD-3-Clause |
+| `proxy-from-env` | 1.1.0 | MIT |
+| `qs` | 6.15.2 | BSD-3-Clause |
+| `side-channel` | 1.1.1 | MIT |
+| `side-channel-list` | 1.0.1 | MIT |
+| `side-channel-map` | 1.0.1 | MIT |
+| `side-channel-weakmap` | 1.0.2 | MIT |
+| `strnum` | 2.4.0 | MIT |
+| `tslib` | 1.14.1 | 0BSD |
+| `tslib` | 2.8.1 | 0BSD |
+| `undici-types` | 6.21.0 | MIT |
+| `ws` | 8.21.0 | MIT |
+| `xml-naming` | 0.1.0 | MIT |
+
+### 4.3 index-service — NOT PINNED, so the shipped set is not knowable from this repo
+
+`index-service/bootstrap.sh` installs with
+`pip3 install --break-system-packages --ignore-installed -r requirements.txt`
+on the index host. Only the four direct dependencies in §2 are exact-pinned;
+**everything they pull in floats to whatever the resolver picks on the day the
+host bootstraps.** That is a reproducibility hole as much as a licence one: two
+hosts bootstrapped a week apart can run different code.
+
+No transitive versions are stated here, because none can be stated honestly —
+inventing them would be worse than admitting the gap. `index-service/requirements.lock`
+has been added as a placeholder that must be filled from a verified build; until
+then there is no authoritative manifest for this component.
+
+For scope, the first-level requirements of the four pins, read from those exact
+versions' core metadata (names only — the versions that ship are unknown, and
+therefore so are their licences):
+
+| Pinned package | Requires (first level, non-extra) |
+| --- | --- |
+| `mcp==1.23.3` | `anyio>=4.5`, `httpx>=0.27.1`, `httpx-sse>=0.4`, `jsonschema>=4.20.0`, `pydantic>=2.11.0,<3.0.0`, `pydantic-settings>=2.5.2`, `pyjwt[crypto]>=2.10.1`, `python-multipart>=0.0.9`, `sse-starlette>=1.6.1`, `starlette>=0.27`, `typing-extensions>=4.9.0`, `typing-inspection>=0.4.1`, `uvicorn>=0.31.1` |
+| `uvicorn==0.44.0` | `click>=7.0`, `h11>=0.8` |
+| `openpyxl==3.1.5` | `et-xmlfile` |
+| `typing_extensions==4.15.0` | (none) |
+
+`et-xmlfile` is a concrete example of what is missing: it is installed on every
+index host and appears nowhere in this manifest, at no known version.
 
 ---
 
-@anthropic-ai/claude-code (Claude Code Agent SDK)
-Version: latest
-License: Proprietary (Anthropic Commercial Terms of Service)
-URL: https://www.npmjs.com/package/@anthropic-ai/claude-code
-Claude Code agentic coding tool. Not open-source; governed by Anthropic's
-Commercial Terms of Service.
+## Appendix: license strings reproduced verbatim
 
----
+The listings above print what upstream metadata says, character for character.
+Six strings in §4.1 are not valid SPDX identifiers. They are left alone rather
+than "corrected", so that a reviewer normalising this file can see the raw
+value. None of these is ambiguous enough to block a release, but none should be
+machine-parsed as SPDX either:
+
+| Package | Metadata string | Note |
+| --- | --- | --- |
+| `annotated-types` 0.7.0 | `MIT License` | From a `License ::` classifier, not an SPDX expression. |
+| `s3transfer` 0.19.0 | `Apache License 2.0` | Free-text spelling of Apache-2.0. |
+| `googleapis-common-protos` 1.75.0 | `Apache 2.0` | Free-text spelling of Apache-2.0. |
+| `protobuf` 6.33.5 | `3-Clause BSD License` | Free-text spelling of BSD-3-Clause. |
+| `wrapt` 1.17.3 | `BSD` | Unqualified; its only license classifier is `OSI Approved :: BSD License`. Which BSD variant is not stated in metadata. |
+| `python-dateutil` 2.9.0.post0 | `Dual License` | Names no licence at all. Its classifiers are `OSI Approved :: Apache Software License` and `OSI Approved :: BSD License`; the actual terms are in the dist's own LICENSE file. |
+
+Two entries in §4.1 are genuine SPDX **OR** expressions — a choice you must
+make, not a single licence: `cryptography` 49.0.0
+(`Apache-2.0 OR BSD-3-Clause`) and `packaging` 26.2
+(`Apache-2.0 OR BSD-2-Clause`). `sniffio` 1.3.1 declares
+`MIT OR Apache-2.0` in the same way.
+
+`certifi` 2026.6.17 is **MPL-2.0** — the only copyleft licence in any shipped
+set. MPL-2.0 is file-level copyleft and is satisfied by redistributing it
+unmodified, which is what happens here, but it is called out because it is the
+one entry whose obligations differ in kind from the permissive rest.

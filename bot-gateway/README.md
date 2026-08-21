@@ -66,10 +66,10 @@ node_modules/.bin/ts-node --transpile-only src/index.ts
 ```
 
 > 线上不是这样起的：index 主机上由 systemd 跑 `run.sh`，它从 Secrets Manager 取飞书凭证注入进程
-> 环境（不落盘），再 `exec node dist/index.js`（编译产物，非 ts-node）。详见 [`../docs/runbook.md`](../docs/runbook.md)。
+> 环境（不落盘），再 `exec node dist/index.js`（编译产物，非 ts-node）。详见 [`../docs/runbook_zh.md`](../docs/runbook_zh.md)。
 
 成功日志：`sdk_wsclient_started` → `sdk_wsclient_connected`（健康端点起来时另有 `health_server_started`）。
-完整的「连飞书 + 验证 + 排错」见 [`../docs/runbook.md`](../docs/runbook.md)。
+完整的「连飞书 + 验证 + 排错」见 [`../docs/runbook_zh.md`](../docs/runbook_zh.md)。
 
 > `package.json` 的 `build`/`lint`/`test` 是开发用脚本；启动用上面的 `ts-node` 命令运行入口。
 > **同一个飞书应用只能运行一个网关实例**（长连接集群模式，事件只投给一个 client；多实例会争抢事件，导致行为异常）。

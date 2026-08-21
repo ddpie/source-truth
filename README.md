@@ -45,7 +45,10 @@ A question flows through three resident components:
 ### Key design properties
 
 - **Trustworthy and verifiable** — real code is the only source of truth; every conclusion carries a `file:line` citation; when evidence is insufficient the agent defers rather than guessing.
-- **Fast on large codebases** — a resident CodeGraph index locates symbols in **1–5 ms** on a 16 GB / 75k-file project. Full Q&A round-trips are **2.7–5.1× faster** than without the index ([benchmark data](docs/agent/perf-comparison.md)).
+- **Fast on large codebases** — a resident CodeGraph index locates symbols in **1–5 ms** on a
+  16 GB / 75k-file repository (~1.75k indexed code files; the rest are art assets and `.meta`
+  files). Full Q&A round-trips are **2.7–5.1× faster** than without the index
+  ([benchmark data](docs/agent/perf-comparison.md)).
 - **Cross-language term mapping** — an offline glossary maps business terms (in any language) to the actual symbols in code, so questions phrased in natural language still hit the right code paths ([glossary details](docs/glossary.md)).
 - **Interactive streaming cards** — answers stream in real-time with progress indicators, collapsible source citations, and follow-up buttons for contextual conversation.
 
@@ -83,41 +86,76 @@ purpose for all 23 services and resources: [`docs/aws-services_en.md`](docs/aws-
 
 ## Prerequisites
 
-On the machine you deploy **from** — these are what the deploy actually checks and hard-fails on:
+On the machine you deploy **from**. The deploy does not enforce all of these, so each bullet is
+tagged with what actually happens when it is missing:
 
-- **AWS account** with permissions for EC2, Bedrock, ECR, S3, Secrets Manager, IAM
-- **Bedrock AgentCore** access (Runtime API enabled in your region)
-- **AWS CLI v2** — v1 is not supported
-- **Python 3** with a recent **boto3** that has `bedrock-agentcore-control`. Upgrade with
-  `python3 -m pip install -U boto3`; on a PEP-668 system (recent macOS/Ubuntu) use a virtualenv
-  or add `--break-system-packages`, or the upgrade silently does nothing.
-- **Docker** with a running daemon, able to build **linux/arm64** — the agent container is
-  ARM64-only. On an x86 host, enable emulation first:
+- **hard-fail** — `deploy-all.sh` Phase 0 aborts before creating anything billable
+- **warn** — an actionable warning is printed and the deploy continues
+- **not checked** — nothing verifies it; you find out when the step that needs it fails
+
+Prerequisites:
+
+- **AWS account** with permissions for EC2, Bedrock, ECR, S3, Secrets Manager, IAM — *not
+  checked* per service. The installer only proves the credentials resolve
+  (`sts get-caller-identity`); a missing permission surfaces as an API denial mid-deploy.
+- **Bedrock AgentCore** access (Runtime API enabled in your region) — *warn*. Probed with
+  `bedrock-agentcore-control list-agent-runtimes`; a failure does not stop the deploy.
+- **Bedrock model access** for the selected model — *warn*. Probed with a 1-token
+  `invoke-model`; on denial the deploy still reaches READY and the first real question fails.
+- **AWS CLI v2** — v1 is not supported, but *not checked on the deploy box*: only the presence
+  of an `aws` binary is hard-failed there. The `aws-cli/2.` version assertion runs later, on the
+  index host, inside `index-service/bootstrap.sh`.
+- **Python 3** — *hard-fail* — with a recent **boto3** that has `bedrock-agentcore-control`
+  (*hard-fail*, probed explicitly in Phase 0 because Phase 5 configures the Runtime through
+  boto3, not the CLI). Upgrade with `python3 -m pip install -U boto3`; on a PEP-668 system
+  (recent macOS/Ubuntu) use a virtualenv or add `--break-system-packages`, or the upgrade
+  silently does nothing.
+- **Docker** with a running daemon, able to build **linux/arm64** — *hard-fail* on all three
+  (binary, `docker info` liveness, and an arm64 platform in `docker buildx inspect`). The agent
+  container is ARM64-only. On an x86 host, enable emulation first:
   `docker run --privileged --rm tonistiigi/binfmt --install arm64`
-- **GNU tar** — stock macOS ships BSD tar, which cannot produce reproducible archives. Without
-  it the index host reads the artifacts as changed on every deploy and re-bootstraps in place,
-  interrupting every bot on it. `brew install gnu-tar` provides `gtar`, which is picked up
-  automatically.
-- **Session Manager plugin** — required for every verification and day-2 operation
-  ([install guide](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html));
-  it does not ship with the AWS CLI
-- **git**, and **`gh`** (authenticated via `gh auth login`) if your target repository is private
-- **An EC2 key pair** plus its local `.pem` — only for `--local`, whose host you SSH into
-- **`rsync`** — only if you push a local repository snapshot instead of cloning from git
-- **`zip`** — optional, only for the DAU pre-aggregation Lambda
+- **GNU tar** — *hard-fail* — stock macOS ships BSD tar, which cannot produce reproducible
+  archives. Without it the index host reads the artifacts as changed on every deploy and
+  re-bootstraps in place, interrupting every bot on it. `brew install gnu-tar` provides `gtar`,
+  which is picked up automatically.
+- **On-Demand Standard vCPU quota ≥ 4** (quota `L-1216C47A`) — *hard-fail* — a fresh account is
+  often capped below the 2 vCPU the `t4g.large` index host needs. `--force` bypasses the check;
+  EIP and VPC headroom are *warn* only. Skipped entirely under `--local`.
+- **Session Manager plugin** — ⚠️ ***not checked*, and nothing else checks it either.** It is
+  required for every verification and day-2 operation (the index host sits in a private subnet
+  with no SSH), it does not ship with the AWS CLI, and its absence only shows up as a failed
+  `aws ssm start-session` after the stack is already up. Install it up front:
+  [install guide](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html).
+- **git** — *hard-fail* (also by `get.sh` itself). **`gh`** authenticated via `gh auth login` —
+  *warn*, needed only to auto-download `codegraph-server` from a private repository's Release.
+- **An EC2 key pair** plus its local `.pem` — *not checked* — only for `--local`, whose host you
+  SSH into.
+- **`rsync`** — *not checked on the deploy box*, and needed there only if you push a local
+  repository snapshot with `scripts/push-local-repo.sh`. It is, however, a **hard requirement on
+  the index host** for every per-project deploy and gateway activation: artifacts are published
+  into live trees with `rsync -a --delay-updates --delete-after` (per-file rename, so running
+  processes keep their open inodes), and both `index-service/bootstrap.sh` and
+  `scripts/lib/activate_gateway.sh` abort with `BOOTSTRAP_FAILED` rather than publish
+  non-atomically without it. You do not have to install it there — the host bootstrap
+  `apt-get install`s it.
+- **`zip`** — *warn*, optional: only the DAU pre-aggregation Lambda needs it. Without it the
+  deploy and the bot work fine and the monitoring DAU widget stays empty.
 
-Node.js and Python toolchains are **not** needed locally: the gateway is built on the index host
-and the agent runs in a container.
+Node.js and Python **build** toolchains are **not** needed locally: the gateway is compiled on
+the index host and the agent runs in a container. The `python3` + `boto3` above are the
+exception — the deploy scripts themselves run on them.
 
 Also required:
 
 - **Feishu / Lark bot credentials** — App ID, App Secret, Bot Open ID. The installer creates the
   Secrets Manager entry for you; you supply the values interactively. See
-  [`docs/runbook.md`](docs/runbook.md) §3 for the console walkthrough.
+  [`docs/runbook_en.md`](docs/runbook_en.md) §3 for the console walkthrough.
   Both tenants are supported: pass `--feishu-domain feishu` for Feishu (China, the default) or
   `--feishu-domain lark` for international Lark. That one switch drives both the event
   long-connection and the REST base URL — setting only one of them yields an app that
-  authenticates and then never receives events.
+  authenticates and then never receives events. Card copy language follows `--locale zh|en`,
+  which defaults to `en` under `--feishu-domain lark` and `zh` otherwise; override it explicitly
+  to mix (for example a Chinese-language bot on an international Lark tenant).
 - **codegraph-server** — the index engine binary, downloaded automatically from this repository's
   GitHub Release during the artifacts phase. Override with `CODEGRAPH_SERVER_BIN=/path/to/binary`
   if you are staging it yourself.
@@ -154,7 +192,7 @@ rest by hand.
 
 ## Deployment
 
-For the full deployment walkthrough (prerequisites, configuration, connecting your chat platform, operations, and troubleshooting), see [`docs/runbook.md`](docs/runbook.md).
+For the full deployment walkthrough (prerequisites, configuration, connecting your chat platform, operations, and troubleshooting), see [`docs/runbook_en.md`](docs/runbook_en.md).
 
 ### Quick start
 
@@ -208,7 +246,7 @@ A single project can span multiple repositories, and one index-service host can 
 projects as separate processes on separate ports. The refresh mechanics, and measurements of why the
 index is worth building at all, are in
 [`docs/agent/architecture.md`](docs/agent/architecture.md); local-repo pushes and single-EC2
-(`--local`) deployment are covered in [`docs/runbook.md`](docs/runbook.md).
+(`--local`) deployment are covered in [`docs/runbook_en.md`](docs/runbook_en.md).
 
 ## Configuration
 
@@ -221,7 +259,7 @@ index is worth building at all, are in
 ./scripts/test.sh       # Runs lint + unit tests + type checking (offline, no AWS needed)
 ```
 
-For integration testing against a live deployment, see the testing section in [`docs/runbook.md`](docs/runbook.md).
+For integration testing against a live deployment, see the testing section in [`docs/runbook_en.md`](docs/runbook_en.md).
 
 ## Security
 
@@ -241,13 +279,18 @@ Per-item enforcement details, source of truth, automated checks, and violation c
 
 ## Documentation
 
-| Topic | Link |
-|-------|------|
-| Deploy / connect chat platform / ops / troubleshooting | [`docs/runbook.md`](docs/runbook.md) |
-| How a question flows through the system | [`docs/agent/architecture.md`](docs/agent/architecture.md) |
-| AI collaboration conventions | [`AGENTS.md`](AGENTS.md) |
-| Requirements and architecture design | [`docs/design/`](docs/design/README.md) |
-| Full docs map | [`docs/README.md`](docs/README.md) |
+| Topic | Link | Language |
+|-------|------|----------|
+| Deploy / connect chat platform / ops / troubleshooting | [`docs/runbook_en.md`](docs/runbook_en.md) | English |
+| How a question flows through the system | [`docs/agent/architecture.md`](docs/agent/architecture.md) | 中文 |
+| Security invariants and their enforcement | [`docs/agent/invariants.md`](docs/agent/invariants.md) | 中文 |
+| Benchmark data behind the speed claims | [`docs/agent/perf-comparison.md`](docs/agent/perf-comparison.md) | 中文 |
+| How the glossary is built | [`docs/glossary.md`](docs/glossary.md) | 中文 |
+| AWS services, specs, and counts | [`docs/aws-services_en.md`](docs/aws-services_en.md) | English |
+| Full directory tree | [`docs/structure_en.md`](docs/structure_en.md) | English |
+| AI collaboration conventions | [`AGENTS.md`](AGENTS.md) | 中文 |
+| Requirements and architecture design | [`docs/design/`](docs/design/README.md) | 中文 |
+| Full docs map | [`docs/README.md`](docs/README.md) | 中文 |
 
 ## License
 

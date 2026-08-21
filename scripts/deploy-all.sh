@@ -59,7 +59,7 @@ IDLE_TIMEOUT=""          # AgentCore session idle timeout (s); gateway session T
 MAX_LIFETIME=""          # AgentCore microVM hard max age (s) before forced recycle
 DEFAULT_INSTANCE_TYPE="t4g.large"
 DEFAULT_MAX_FILES="10000"
-DEFAULT_GLOSSARY_MAX_FILES="0"   # 0 = no cap (scan whole repo — full 中文→符号 coverage); set >0 to cap cost
+DEFAULT_GLOSSARY_MAX_FILES="0"   # 0 = no cap (scan whole repo — full Chinese→symbol coverage); set >0 to cap cost
 DEFAULT_MODEL="global.anthropic.claude-opus-4-8"
 DEFAULT_ROOT_VOLUME_GB="30"
 # Idle timeout default = AWS's own default (900s/15min). The gateway derives its
@@ -332,20 +332,27 @@ preflight_agentcore() {
 # cannot proceed without it. Skipped when the image phase is skipped (docker not needed).
 preflight_docker() {
   skip image && return 0
+  # Runs in --dry-run TOO (see the call site): every check below is local, free and touches no AWS
+  # resource, and a dry run is exactly where an x86 operator most wants to hear that their machine
+  # cannot build the ARM64 image. A dry run creates nothing, so there is nothing to abort — the same
+  # findings are reported at warn level and the run continues. $lvl carries that distinction.
+  local lvl=err
+  [[ "$DRY_RUN" == true ]] && lvl=warn
   # A MISSING docker binary used to return 0 here and be caught by Phase 4's require_cmd — but
   # Phase 2 creates the NAT gateway (billing starts at creation) and Phase 3 launches and
   # bootstraps the EC2 first, so the operator paid for ~10 minutes of infrastructure to be told
   # their machine cannot build the image. Same class as the arm64 check this function now owns.
   if ! command -v docker >/dev/null; then
-    say err "docker not found — Phase 4 builds the ARM64 agent image and cannot proceed without it."
-    say err "  → install Docker (with buildx and arm64 emulation), or pass --skip image if the image is already in ECR."
+    say "$lvl" "docker not found — Phase 4 builds the ARM64 agent image and cannot proceed without it."
+    say "$lvl" "  → install Docker (with buildx and arm64 emulation), or pass --skip image if the image is already in ECR."
     [[ "$DRY_RUN" == true ]] || exit 1
     return 0
   fi
   if ! run_timeout 20 docker info >/dev/null 2>&1; then
-    say err "docker is installed but its daemon isn't running — Phase 4 (image build) needs it."
-    say err "  → start Docker Desktop (or dockerd), wait until ready, then re-run. Verify: docker info"
+    say "$lvl" "docker is installed but its daemon isn't running — Phase 4 (image build) needs it."
+    say "$lvl" "  → start Docker Desktop (or dockerd), wait until ready, then re-run. Verify: docker info"
     [[ "$DRY_RUN" == true ]] || exit 1
+    return 0
   fi
   # ARM64 BUILD CAPABILITY — checked HERE, in preflight, not at Phase 4 where it used to live.
   # The agent container is ARM64-only, and most laptops are x86. Failing at Phase 4 meant the
@@ -353,10 +360,21 @@ preflight_docker() {
   # through Phase 3's EC2 launch + bootstrap — roughly ten minutes and real money before being
   # told their machine cannot build the image at all.
   if [[ "$(uname -m)" != "aarch64" && "$(uname -m)" != "arm64" ]]; then
-    if ! docker buildx inspect --bootstrap 2>/dev/null | grep -q "linux/arm64"; then
-      say err "host is $(uname -m) and cannot build linux/arm64. Set up emulation first:"
-      say err "  docker run --privileged --rm tonistiigi/binfmt --install arm64"
-      say err "  (or run the deploy from an arm64 host). The agent container is ARM64-only."
+    # NON-MUTATING probe. `buildx inspect --bootstrap` STARTS (and when absent CREATES) the buildkit
+    # builder, pulling moby/buildkit on a cold machine — a side effect every deploy-all run would pay
+    # for, including reconcile runs that never rebuild, and one a preflight must not have at all.
+    # Plain `inspect` reports the selected builder's platforms without starting anything; `buildx ls`
+    # is the fallback when the selected builder can't be inspected (it still lists the `default`
+    # docker-driver builder, whose platform list is what Phase 4's classic `docker build` actually
+    # uses). Both are wrapped in run_timeout so a wedged docker CLI can't hang Phase 0, and `|| true`
+    # keeps a non-zero probe from tripping set -e inside the assignment.
+    local bx=""
+    bx="$(run_timeout 20 docker buildx inspect 2>/dev/null || true)"
+    [[ "$bx" == *linux/arm64* ]] || bx="$(run_timeout 20 docker buildx ls 2>/dev/null || true)"
+    if [[ "$bx" != *linux/arm64* ]]; then
+      say "$lvl" "host is $(uname -m) and cannot build linux/arm64. Set up emulation first:"
+      say "$lvl" "  docker run --privileged --rm tonistiigi/binfmt --install arm64"
+      say "$lvl" "  (or run the deploy from an arm64 host). The agent container is ARM64-only."
       [[ "$DRY_RUN" == true ]] || exit 1
     fi
   fi
@@ -391,10 +409,10 @@ preflight_quota() {
   # non-zero return aborts the whole script (this exact trap silently killed a
   # deploy at Phase 0 when the account had <4 EIPs — the common fresh-account case).
   if [[ "$eips" =~ ^[0-9]+$ && "$eips" -ge 4 ]]; then
-    say warn "已有 $eips 个 EIP（默认配额 5）——若 NAT 的 allocate-address 失败，先去 Service Quotas 提额或释放闲置 EIP。"
+    say warn "已有 $eips 个 EIP（默认配额 5）——若 NAT 的 allocate-address 失败，先去 Service Quotas 提额或释放闲置 EIP / $eips EIPs already allocated (default quota is 5) — if the NAT's allocate-address fails, raise the quota in Service Quotas or release an idle EIP first."
   fi
   if [[ "$vpcs" =~ ^[0-9]+$ && "$vpcs" -ge 4 ]]; then
-    say warn "已有 $vpcs 个 VPC（默认配额 5）——若 create-vpc 失败，先提额或清理。"
+    say warn "已有 $vpcs 个 VPC（默认配额 5）——若 create-vpc 失败，先提额或清理 / $vpcs VPCs already exist (default quota is 5) — if create-vpc fails, raise the quota or clean up unused VPCs first."
   fi
   # vCPU (On-Demand Standard family, quota L-1216C47A): a BRAND-NEW account often caps
   # standard On-Demand vCPUs low (historically as low as 5, sometimes 0 until raised). The
@@ -410,12 +428,12 @@ preflight_quota() {
   if [[ "$vcpu_quota" =~ ^([0-9]+) ]]; then
     local vcpu_int="${BASH_REMATCH[1]}"
     if [[ "$vcpu_int" -lt 4 ]]; then
-      say err "On-Demand Standard vCPU 配额仅 ${vcpu_int}（quota L-1216C47A）——index 实例需 2 vCPU（t4g.large）。Phase 3 的 run-instances 必定报 VcpuLimitExceeded。"
-      say err "  → 去 Service Quotas 提额（至少 4 vCPU），或用 --force 强制跳过此检查。"
+      say err "On-Demand Standard vCPU 配额仅 ${vcpu_int}（quota L-1216C47A）——index 实例需 2 vCPU（t4g.large），Phase 3 的 run-instances 必定报 VcpuLimitExceeded / On-Demand Standard vCPU quota is only ${vcpu_int} (quota L-1216C47A) — the index instance needs 2 vCPU (t4g.large), so Phase 3's run-instances is certain to fail with VcpuLimitExceeded."
+      say err "  → 去 Service Quotas 提额（至少 4 vCPU），或用 --force 强制跳过此检查 / raise the quota in Service Quotas (to at least 4 vCPU), or re-run with --force to skip this check."
       if [[ "$FORCE" != true ]]; then
         fail=1
       else
-        say warn "  --force: 跳过 vCPU 配额硬阻断（操作者已确认）"
+        say warn "  --force: 跳过 vCPU 配额硬阻断（操作者已确认）/ --force given, skipping the vCPU-quota hard block (operator confirmed)."
       fi
     fi
   fi
@@ -425,8 +443,14 @@ preflight_quota() {
   fi
   return 0
 }
+# preflight_docker runs in --dry-run as well: docker present / daemon up / arm64 build capability are
+# LOCAL, free, non-AWS and non-mutating checks, and "your machine cannot build the ARM64 image" is
+# precisely what a dry run should tell you. Under --dry-run it reports at warn level and never exits.
+# The AWS-touching probes stay off in dry-run. Order for real runs is unchanged (boto3 → docker → …).
+[[ "$DRY_RUN" == true ]] || preflight_boto3
+preflight_docker
 if [[ "$DRY_RUN" != true ]]; then
-  preflight_boto3; preflight_docker; preflight_model_access; preflight_agentcore
+  preflight_model_access; preflight_agentcore
   # preflight_quota checks EIP/VPC/vCPU headroom — all for resources we're about to CREATE. --local
   # creates none of them (reuses this host's VPC/subnet, doesn't run-instances or allocate an EIP),
   # so the checks are irrelevant and their warnings just mislead. Skip in --local.
@@ -449,8 +473,9 @@ if [[ "$DRY_RUN" != true ]]; then
   update_env "$CONFIG_FILE" DEPLOY_FEISHU_DOMAIN "$FEISHU_DOMAIN"
   update_env "$CONFIG_FILE" DEPLOY_LOCALE "$LOCALE"
   update_env "$CONFIG_FILE" DEPLOY_ROOT_VOLUME_GB "$ROOT_VOLUME_GB"
-  # idle-timeout / max-lifetime 的消费方是 deploy_project.sh（读 DEPLOY_IDLE_TIMEOUT /
-  # DEPLOY_MAX_LIFETIME）。必须持久化+export，否则 --idle-timeout 只解析不生效（死旗子）。
+  # idle-timeout / max-lifetime are consumed by deploy_project.sh (which reads DEPLOY_IDLE_TIMEOUT /
+  # DEPLOY_MAX_LIFETIME). They MUST be persisted and exported, or --idle-timeout is parsed and then
+  # silently ignored (a dead flag).
   update_env "$CONFIG_FILE" DEPLOY_IDLE_TIMEOUT "$IDLE_TIMEOUT"
   update_env "$CONFIG_FILE" DEPLOY_MAX_LIFETIME "$MAX_LIFETIME"
 fi
@@ -852,7 +877,7 @@ p = cfg.get("projects")
 if not isinstance(p, dict):
     sys.exit("missing/invalid \"projects\" object")
 ' "$PROJECTS_CFG" 2>&1)"; then
-    say err "projects.json 解析失败: ${_perr} (${PROJECTS_CFG})"
+    say err "projects.json 解析失败 / failed to parse projects.json: ${_perr} (${PROJECTS_CFG})"
     exit 1
   fi
   # Loop every declared project. deploy_project.sh is idempotent; collect failures but keep going
@@ -925,5 +950,5 @@ if [[ "$DRY_RUN" != true && "$PROJECTS_DEPLOYED" != true ]]; then
   say warn "NEXT STEPS — shared base READY, but NO project/bot is active yet:"
   say warn "  • Run ./scripts/install.sh → 'add a project' to create its Feishu + git secrets and"
   say warn "    its projects.json entry, then it deploys that project's bridge + runtime + gateway."
-  say warn "  • Until then, 策划 @机器人 → answer will NOT work even though the base host is healthy."
+  say warn "  • Until then, @机器人提问 / @-mentioning the bot in Feishu → answer will NOT work even though the base host is healthy."
 fi

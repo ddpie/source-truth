@@ -40,7 +40,7 @@
 | 服务 | 规格 | 数量 | 用途 |
 |------|------|------|------|
 | **Secrets Manager** | 飞书凭证（每项目）+ git 只读令牌 + 日志脱敏盐；`--local` 另加一条部署用 GitHub 令牌 | **N + 2**（`feishu-<projectId>` ×N、`git-credentials`、`log-hash-salt`）；`--local` 为 **N + 3**（另加 `deploy-github-token`） | 飞书 App 凭证、私有仓只读拉取令牌、`hashUserId` 脱敏盐；`--local` 的 `deploy-github-token` 供新机 `gh auth login`（克隆私有仓、下载 Release、后续升级）。运行时取出不落盘 |
-| **IAM** | 3 角色 + 1 实例配置 + 1 服务关联角色 | 固定 | EC2 执行角色 `source-truth-index-role`、AgentCore Runtime 角色、DAU 预聚合 Lambda 角色 `source-truth-dau-lambda-role`、实例配置、AgentCore 的 VPC ENI 托管角色。前两者与 Lambda 角色都是账号级全局角色（多区域共用），其策略里资源型 ARN 的 region 段必须用 `*`，否则第二个区域部署会覆盖写、静默撤销第一个区域的权限（`check-invariants.sh` 有守卫） |
+| **IAM** | 3 角色 + 1 实例配置 + 1 服务关联角色 | 固定 | EC2 执行角色 `source-truth-index-role`、AgentCore Runtime 角色 `SourceTruthAgentRuntimeRole`、DAU 预聚合 Lambda 角色 `source-truth-dau-lambda-role`、实例配置、AgentCore 的 VPC ENI 托管角色。前三个角色都是账号级全局角色（多区域共用），其策略里资源型 ARN 的 region 段必须用 `*`，否则第二个区域部署会覆盖写、静默撤销第一个区域的权限。`check-invariants.sh` 的守卫是**部分覆盖**：只 grep `scripts/lib/provision_iam.sh` 与 `scripts/lib/apply-dau-lambda.sh`，且只查 `logs` / `bedrock` / `bedrock-agentcore` / `secretsmanager` / `s3` 这几个服务面的 ARN。`scripts/lib/create-iam.sh`——`--local` 路径上往同一个账号级 `source-truth-index-role` 写内联策略的脚本——**不在扫描范围内**，在那里新写一个钉死 region 的 ARN 能通过 CI |
 | **Systems Manager（SSM）** | Session Manager（无 SSH） | — | 管理私有子网 EC2：上线项目、刷新网关、清理单元 |
 
 ## 5. 监控与告警（看健康、出指标）

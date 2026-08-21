@@ -87,8 +87,11 @@
   连描述都不进模型）+ `disallowed_tools` 黑名单 + `permission_mode="dontAsk"` + `strict_mcp_config=True`
   + `setting_sources=[]`；**codegraph 的只读工具不归 `tools` 管**——它们走 `mcp_servers` 注入、`allowed_tools`
   自动批准，是另一条独立通道。
-  server 端 `http_bridge.py` 是**闭合白名单**——注册 7 个核心只读检索/文件工具（symbol_search / get_callers /
-  analyze_impact / search_files / read_file / glob_files / read_table），**项目已知时再加 2 个只读术语表工具**
+  server 端 `http_bridge.py` 是**闭合白名单**——注册 7 个核心只读检索/文件工具（`codegraph_symbol_search` /
+  `codegraph_get_callers` / `codegraph_analyze_impact` / `codegraph_search_files` / `codegraph_read_file` /
+  `codegraph_glob_files` / `codegraph_read_table`；**注册名一律带 `codegraph_` 前缀**，Agent 侧再加 SDK 的
+  MCP 命名空间成 `mcp__codegraph__codegraph_<name>`，见 `agent-container/agent_lib.py` 的 `CODEGRAPH_TOOLS`），
+  **项目已知时再加 2 个只读术语表工具**
   （`codegraph_glossary_index` / `codegraph_glossary_lookup`，7+2=9，故 ≤9），均 `READONLY_ANNOT`、无写副作用。
 - **构建期引擎例外（术语表生成，2026-06-22）**：「不运行引擎」约束的是**按用户提问实时回答的引擎**（必须在
   microVM 内）。**术语表生成**是离线构建期引擎——在 index 主机用本地 `claude` (cc) CLI 扫自有代码副本产出
@@ -130,9 +133,13 @@
   （logs / bedrock / bedrock-agentcore / secretsmanager / s3）ARN 的 region 段用 `*`，靠 account + 资源名前缀
   兜底。（lambda / events 的 ARN 按区构造是合法用法，不在此列。）
 - **机检**：`scripts/check-invariants.sh` —— grep 上述服务面的 `${REGION}` 钉死写法，命中即失败。
+  **覆盖范围有限**：只扫 `scripts/lib/provision_iam.sh` 与 `scripts/lib/apply-dau-lambda.sh` 两个文件
+  （这两个文件里包含 `SourceTruthAgentRuntimeRole` 的 `runtime-perms` 策略，故 Runtime 角色是被覆盖的）；
+  `scripts/lib/create-iam.sh`——`--local` 路径上往同一个 `source-truth-index-role` 写内联策略——**不在扫描
+  范围内**。在那里新加钉死 region 的 ARN 能通过 CI；改动该文件时要人工对照本条。
 - **违反后果**：多区域部署互相覆盖角色策略，先部署的区域被静默撤权（2026-06-29 新加坡部署据此打挂东京）。
 
 ---
 
 相关：变更操作手册见 [`playbooks.md`](playbooks.md)；架构工作原理见 [`architecture.md`](architecture.md)；
-部署/运维见 [`../runbook.md`](../runbook.md)。
+部署/运维见 [`../runbook_zh.md`](../runbook_zh.md)。

@@ -28,13 +28,17 @@
           · @app.entrypoint 异步流式 handler（bedrock_agentcore.runtime.BedrockAgentCoreApp）
           · Claude Code Agent SDK（claude_agent_sdk.query / ClaudeAgentOptions），
             CLAUDE_CODE_USE_BEDROCK=1 走 Bedrock 计费
-          · 取证只读通道（全部经 index-service 的 MCP-over-HTTP 接口；microVM 不挂任何文件系统）：
-              · 术语表（旁路辅助，非前置步骤）：中文业务词（战力/爆率…）可经 codegraph_glossary_index /
+          · 取证只读通道（共 7 个核心只读工具，全部经 index-service 的 MCP-over-HTTP 接口；microVM 不挂任何文件系统；
+            与 [`invariants.md`](invariants.md) §6 的「7 核心 + 2 术语表 = ≤9」一致）：
+              · 术语表（旁路辅助，非前置步骤，属那 2 个附加工具）：中文业务词（战力/爆率…）可经 codegraph_glossary_index /
                   codegraph_glossary_lookup 对应到英文代码符号，与 agent 自身想到的检索词**并用**——
                   不是「先查术语表再搜」的串行关卡（项目已知时才注册；辅助线索，结论仍须实际查看代码取证）
-              (1) CodeGraph 定位 → 先查「哪个工程 / 哪些文件」（symbol_search / get_callers / analyze_impact）
-              (2) 文件读取 → 按定位结果精准读取最新主分支源码与工程内配置表（Excel/JSON/CSV）：
-                  codegraph_read_file / codegraph_glob_files / codegraph_search_files（仓库相对路径）
+              (1) CodeGraph 定位（3 个）→ 先查「哪个工程 / 哪些文件」（codegraph_symbol_search /
+                  codegraph_get_callers / codegraph_analyze_impact）
+              (2) 文件读取（4 个）→ 按定位结果精准读取最新主分支源码与工程内配置表（Excel/JSON/CSV）：
+                  codegraph_read_file / codegraph_glob_files / codegraph_search_files（仓库相对路径），
+                  以及 codegraph_read_table 读结构化配置表（.xlsx/.xlsm/.xltx/.xltm 等二进制表格转文本，
+                  见 `index-service/file_table.py`）
           · 每会话写入使用 Session Storage /mnt/workspace（microVM 级隔离的临时文件）
           · 逐步流式产出（AssistantMessage / ResultMessage）
   → bot-gateway 把流式输出更新到 CardKit 卡片（src/cardkit-client.ts；SSE 解析 src/parse-stream.ts）

@@ -20,7 +20,7 @@
 **结论**：source-truth 稳定快 **2.7–5.1×**、轮次约一半到三分之一。根因：CodeGraph 直接定位符号 +
 去重的本地检索，避开了原生 cc 耗时的全仓搜索与反复试探。
 
-> 注：测试仓含 10 份完全相同的副本，放大了 cc 全仓搜索的劣势；真实客户单副本仓上差距会小一些，
+> 注：测试仓含 10 份完全相同的副本，放大了 cc 全仓搜索的劣势；单副本仓上差距会小一些，
 > 但 codegraph 直接定位带来的轮次优势是结构性的、与重复无关。
 
 ## 2. 提速来自 codegraph，不是封装层
@@ -30,22 +30,22 @@
 source-truth 53.7s——**基本持平**。对照 §1（cc 无 codegraph 时慢 2.7–5.1×）可知：提速全部来自
 codegraph 定位，封装层不增加耗时。
 
-## 3. 耗时构成（113 次历史问答，四项目）
+## 3. 耗时构成（一组基准问答，四个公开 OSS 仓库）
 
-- **耗时与代码量无关**：temporal（86 万行）56s、daggerfall（30 万行）53s、mangos（50 万行）51s、
-  source-truth（1.3 万行）49s——中位数几乎一致 → 瓶颈不在检索 / 代码规模。
+- **耗时与代码量无关**：在跨越两个数量级代码量的四个仓库上，中位耗时都落在约 50 秒，彼此相差不到
+  10% → 瓶颈不在检索，也不随代码规模增长。
 - **单次分解**：工具检索（中位 7 次往返）合计 **0.26s**（最大 1.1s）；**模型推理占 ~98%**。
   时间花在「工具轮次 × 每轮模型推理」上。
 - **冷启动占 22%**：暖机中位 52s，冷启动中位 64s（多花 ~12s，尾部最长 546s）。
 - 曾试过在 system.md 引导「独立 read 并发」，实测无提速已回滚——后续 read 多是依赖型探索链，
   模型正确地判断它们不独立。
 
-## 4. 单次问答费用（2026-06-25 统计，近 30 天 843 次）
+## 4. 单次问答费用（基准样本统计）
 
 从 `agent_result` 日志取 token 用量，按 Bedrock Opus 4.8 单价折算：**均值 $0.167/次、中位 $0.146/次**。
 构成：输出 token 占一半（均值 3,400 tok/次），prompt cache 读取占另一半（均值 16 万 tok/次，按
 cache-read $0.5/M 计）；非缓存输入极少。CodeGraph 检索走本地磁盘，不产生模型费用。
-当前规模：4 个游戏仓库，日均 28 次问答。
+费用与提问频次成正比，与仓库规模基本无关；按自己的日均提问量乘以上面的单次均值即可估算。
 
 ## 5. 模型选择
 
@@ -59,11 +59,19 @@ cache-read $0.5/M 计）；非缓存输入极少。CodeGraph 检索走本地磁�
 
 ## 复现方式
 
+§1–§3 的耗时数字不需要任何专用工具就能复现：在**你自己的飞书 / Lark 群里** @ 机器人提问（手机或
+桌面客户端都行），等卡片跑完，再从网关日志里读这一轮的 `invoke_timing`。方差大，所以按开头的方法
+学：同题多轮、丢弃第一轮预热、串行不并发，取中位数。
+
 ```bash
-# source-truth：飞书发问 → 读 invoke_timing 的 totalMs/toolCalls
-lark-cli im +messages-send --as user --chat-id <群> @机器人 "<问题>"
-# 等待 card_closed，再 +messages-mget 读取卡片
-grep invoke_timing /tmp/bot-gateway.log | tail -1   # totalMs / toolCalls / chars
+# source-truth：在群里 @机器人 问一题 → 等卡片标题的计时停住（card_closed）
+# → 到索引主机上读这一轮的 invoke_timing（totalMs = 本文所有耗时数字的定义）
+#   日志在索引主机的 /var/log/bot-gateway-<projectId>.log（每项目一个文件），
+#   同时由 CloudWatch agent 送到日志组 /source-truth/bot-gateway
+sudo grep invoke_timing /var/log/bot-gateway-<projectId>.log | tail -1   # totalMs / toolCalls / chars
+# 多轮取中位：
+sudo grep -o '"totalMs":[0-9]*' /var/log/bot-gateway-<projectId>.log \
+  | cut -d: -f2 | sort -n | awk '{a[NR]=$1} END{print a[int((NR+1)/2)]}'
 
 # 本地原生 cc 基线（无 codegraph、同 system.md、同模型）
 claude -p --model global.anthropic.claude-opus-4-8 \
@@ -76,3 +84,7 @@ claude -p --model global.anthropic.claude-opus-4-8 \
   --model global.anthropic.claude-opus-4-8
 # 注意：仍存活的 microVM 持旧 env 直到老化，切换后早期 invoke 可能还是旧模型，重复发送几条或等待一段时间。
 ```
+
+> 索引主机在私有子网、不开 SSH，用 `aws ssm start-session --target <instance-id>` 登录。不想登机器
+> 也行：`scripts/trace.sh <traceId>` 从 CloudWatch 侧把网关与 agent microVM 两个日志组按 traceId
+> 合并成一条全链路时间线。

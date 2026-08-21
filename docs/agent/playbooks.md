@@ -70,17 +70,20 @@
 
 ## 场景 6：全新账号 / 新区域一键部署
 
-- 见 [`../runbook.md`](../runbook.md)（前置 → 一条命令 → 连飞书 → 起网关 → 验证 → 运维 → 排错）。
+- 见 [`../runbook_zh.md`](../runbook_zh.md)（前置 → 一条命令 → 连飞书 → 起网关 → 验证 → 运维 → 排错）。
 - 幂等：每个资源 describe-or-create，按 tag 复用；中途失败后重新运行会继续未完成步骤。
 - 飞书密钥由 `install.sh` 交互式创建（Secrets Manager：`source-truth/feishu-<projectId>` + 全局 `source-truth/git-credentials`）；纯 `deploy-all.sh`（CI）要求密钥已存在。
 
 ## 场景 7：改顶层目录 / 加文档
 
 - 改顶层目录 ⇒ 同步 `docs/structure_zh.md` 和 `_en.md`。
-- 新增 `docs/*_zh.md` ⇒ 补充 `_en.md`（反之亦然）；非双语的运维文档用中性名（如 `runbook.md`）避开配对校验。
+- 新增 `docs/*_zh.md` ⇒ 补充 `_en.md`（反之亦然）。**中性文件名不再能绕过配对校验**：
+  `check-invariants.sh` 现在枚举 `docs/` 下每份 md，要么成对，要么显式写进脚本里的
+  `DOC_CHINESE_ONLY` 豁免名单 —— 后者是一个在 review 里看得见的决定。runbook 正是因为旧的
+  中性名豁免而长期只有中文，英文读者无法据此部署，所以它已拆成 `runbook_en.md` / `runbook_zh.md`。
 - 运行 `./scripts/check-invariants.sh`，确认结构/双语/权威依据校验通过。
 
 ---
 
 相关：不变量映射见 [`invariants.md`](invariants.md)；架构见 [`architecture.md`](architecture.md)；
-部署/运维/排错见 [`../runbook.md`](../runbook.md)。
+部署/运维/排错见 [`../runbook_zh.md`](../runbook_zh.md)。

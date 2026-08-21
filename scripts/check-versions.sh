@@ -95,6 +95,20 @@ if [[ -f "$IDX_BOOT" ]]; then
   else err "bootstrap.sh 未用 'pip install -r requirements.txt'（手列 pip 清单会漂移，见 perf.py/fastmcp 教训）"; fi
 fi
 
+# 6b. index-service/requirements.lock 目前是一个**声明了自己不完整**的占位文件（只有四个直接
+#     pin，传递闭包缺失，因为当时无法从一次可信构建中解析出来）。这种文件是个陷阱：名字叫 .lock，
+#     下一个人很可能顺手把 bootstrap 指过去，于是索引主机只装四个包就上线。
+#     所以：只要它还带着 INCOMPLETE 标记，就禁止任何安装路径引用它。
+#     等它被真正生成（去掉标记）之后，这一条会自动失效，届时应把 bootstrap 切过去。
+IDX_LOCK="index-service/requirements.lock"
+if [[ -f "$IDX_LOCK" ]] && grep -q 'INCOMPLETE' "$IDX_LOCK"; then
+  if [[ -f "$IDX_BOOT" ]] && grep -qE 'pip3? install[^|]*-r[^|]*requirements\.lock' "$IDX_BOOT"; then
+    err "$IDX_LOCK 仍标记为 INCOMPLETE，但 bootstrap.sh 已从它安装 —— 索引主机会缺少传递依赖。先用一次可信构建生成完整 lock 并移除 INCOMPLETE 标记。"
+  else
+    ok "index-service/requirements.lock 标记为 INCOMPLETE 且未被安装路径引用（符合预期）"
+  fi
+fi
+
 echo ""
 if [[ "$fail" -eq 0 ]]; then echo "check-versions: PASS"; else echo "check-versions: FAIL" >&2; fi
 exit "$fail"

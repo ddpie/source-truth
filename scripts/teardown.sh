@@ -261,7 +261,7 @@ if is_set "$ZONE_ID"; then
   if [[ "$remaining" == "0" ]]; then
     del "hosted zone $ZONE_ID (no records left)" aws route53 delete-hosted-zone --id "$ZONE_ID"
   else
-    say info "保留共享私有区 $ZONE_ID（仍有其它区域记录：$remaining 条 A）——只删本区域的记录"
+    say info "保留共享私有区 $ZONE_ID（仍有其它区域的记录：$remaining 条 A）——只删本区域的记录 / keeping shared private zone $ZONE_ID ($remaining A records from other regions remain) — only this region's record was deleted"
   fi
 fi
 
@@ -404,8 +404,8 @@ if [[ "$INCLUDE_SHARED" == true ]]; then
     is_set "$hit" && OTHER="$OTHER $r"
   done
   if is_set "$OTHER"; then
-    say warn "跳过共享 IAM 角色 + S3 桶：其它区域仍有 source-truth 主机在跑（$OTHER）——删了会让那些机器失权。"
-    say info "  等所有区域都拆完，再在最后一个区域跑 --include-shared。"
+    say warn "跳过共享 IAM 角色 + S3 桶：其它区域仍有 source-truth 主机在跑（$OTHER）——删了会让那些机器失权 / skipping the shared IAM roles + S3 bucket: source-truth hosts are still running in other regions ($OTHER) — deleting them would strip those hosts of their access."
+    say info "  等所有区域都拆完，再在最后一个区域跑 --include-shared / tear the other regions down first, then run --include-shared in the last one."
   else
   # DAU Lambda's IAM role (account-global, created by apply-monitoring.sh's dau stage).
   # Detach MANAGED policies before deleting a role: delete-role fails with DeleteConflict while
