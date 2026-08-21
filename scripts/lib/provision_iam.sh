@@ -50,8 +50,19 @@ aws iam put-role-policy --role-name "$INDEX_ROLE" --policy-name s3-artifacts --p
 aws iam delete-role-policy --role-name "$INDEX_ROLE" --policy-name feishu-secret >/dev/null 2>&1 || true
 aws iam put-role-policy --role-name "$INDEX_ROLE" --policy-name secrets-read --policy-document "{
   \"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",
-  \"Action\":[\"secretsmanager:GetSecretValue\"],
+  \"Action\":[\"secretsmanager:GetSecretValue\",\"secretsmanager:DescribeSecret\",
+             \"secretsmanager:CreateSecret\",\"secretsmanager:PutSecretValue\",
+             \"secretsmanager:TagResource\"],
   \"Resource\":[\"arn:aws:secretsmanager:*:${ACCOUNT}:secret:source-truth/*\"]}]}" >/dev/null
+# WHY the write verbs are here and not only in create-iam.sh's deploy-secrets: the documented
+# default is the two-machine topology, after which the operator SSHes to the index host and runs
+# install.sh to add a project. install.sh auto-enters --local on the host, so create-secret then
+# runs under THIS role — and with GetSecretValue alone it AccessDenied'd, the put-secret-value
+# fallback AccessDenied'd too, and `set -euo pipefail` aborted the installer mid-flow. Adding a
+# project on the host is the normal path, so the grant belongs on every index host, not only on
+# the ones that happened to run create-iam.sh.
+# DeleteSecret is deliberately NOT here: destroying a project's credentials is an operator action
+# (install.sh's remove-project / teardown.sh), not something a long-lived host should be able to do.
 # Inline policy: ship the co-located bot-gateway's journald logs to CloudWatch. Until now
 # only the AgentCore runtime role had logs perms; the gateway (a systemd unit ON the index
 # host since co-location) had none, so its structured metric:true lines stayed in local
@@ -92,7 +103,9 @@ aws iam put-role-policy --role-name "$INDEX_ROLE" --policy-name ec2-self-recover
   \"Version\":\"2012-10-17\",\"Statement\":[
     {\"Effect\":\"Allow\",\"Action\":[\"cloudwatch:PutMetricAlarm\",\"cloudwatch:DescribeAlarms\"],
      \"Resource\":[\"arn:aws:cloudwatch:*:${ACCOUNT}:alarm:source-truth-*\"]},
-    {\"Effect\":\"Allow\",\"Action\":[\"ec2:ModifyInstanceAttribute\",\"ec2:ModifyInstanceMetadataOptions\",\"ec2:DescribeInstanceAttribute\"],
+    {\"Effect\":\"Allow\",\"Action\":[\"ec2:ModifyInstanceAttribute\",\"ec2:ModifyInstanceMetadataOptions\"],
+     \"Resource\":\"*\"},
+    {\"Effect\":\"Allow\",\"Action\":[\"ec2:DescribeInstances\",\"ec2:DescribeVolumes\",\"ec2:DescribeInstanceAttribute\"],
      \"Resource\":\"*\"},
     {\"Effect\":\"Allow\",\"Action\":[\"iam:CreateServiceLinkedRole\"],\"Resource\":\"*\",
      \"Condition\":{\"StringEquals\":{\"iam:AWSServiceName\":\"events.amazonaws.com\"}}}]}" >/dev/null

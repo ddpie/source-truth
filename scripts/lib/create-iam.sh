@@ -94,8 +94,14 @@ aws iam put-role-policy --role-name "$ROLE" --policy-name deploy-network --polic
     "ec2:AttachInternetGateway","ec2:CreateNatGateway","ec2:AllocateAddress","ec2:CreateRouteTable",
     "ec2:CreateRoute","ec2:AssociateRouteTable","ec2:CreateSecurityGroup",
     "ec2:AuthorizeSecurityGroupIngress","ec2:CreateTags","ec2:ModifyVpcAttribute",
-    "ec2:ModifySubnetAttribute","ec2:ModifyInstanceAttribute","ec2:ModifyInstanceMetadataOptions","ec2:RunInstances","ec2:TerminateInstances"],
-    "Resource":"*"}]}' >/dev/null
+    "ec2:ModifySubnetAttribute","ec2:ModifyInstanceAttribute","ec2:ModifyInstanceMetadataOptions","ec2:RunInstances","ec2:TerminateInstances",
+    "ec2:StartInstances","ec2:CreateKeyPair","ec2:ReplaceRoute",
+    "ec2:CreateNetworkAcl","ec2:CreateNetworkAclEntry","ec2:ReplaceNetworkAclEntry",
+    "ec2:DeleteNetworkAclEntry","ec2:ReplaceNetworkAclAssociation","ec2:CreateFlowLogs"],
+    "Resource":"*"},
+    {"Effect":"Allow","Action":["logs:CreateLogDelivery","logs:DeleteLogDelivery"],"Resource":"*"},
+    {"Effect":"Allow","Action":["s3:GetBucketPolicy","s3:PutBucketPolicy"],
+     "Resource":"arn:aws:s3:::source-truth-repo-'"${ACCOUNT}"'-*"}]}' >/dev/null
 
 aws iam put-role-policy --role-name "$ROLE" --policy-name deploy-ecr --policy-document '{
   "Version":"2012-10-17",
@@ -151,7 +157,9 @@ aws iam put-role-policy --role-name "$ROLE" --policy-name deploy-iam --policy-do
       \"Resource\":[
         \"arn:aws:iam::${ACCOUNT}:role/source-truth-*\",
         \"arn:aws:iam::${ACCOUNT}:role/SourceTruthAgentRuntimeRole\"],
-      \"Condition\":{\"ArnEquals\":{\"iam:PolicyARN\":\"arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore\"}}},
+      \"Condition\":{\"ArnEquals\":{\"iam:PolicyARN\":[
+        \"arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore\",
+        \"arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole\"]}}},
     {\"Effect\":\"Allow\",\"Action\":\"iam:CreateServiceLinkedRole\",\"Resource\":\"*\",
       \"Condition\":{\"StringEquals\":{\"iam:AWSServiceName\":\"bedrock-agentcore.amazonaws.com\"}}},
     {\"Effect\":\"Allow\",\"Action\":\"iam:CreateServiceLinkedRole\",\"Resource\":\"*\",
@@ -162,7 +170,7 @@ aws iam put-role-policy --role-name "$ROLE" --policy-name deploy-misc --policy-d
   "Statement":[
     {"Effect":"Allow","Action":["s3:PutObject","s3:CreateBucket","s3:GetBucketLocation","s3:ListAllMyBuckets"],
       "Resource":"*"},
-    {"Effect":"Allow","Action":["ssm:SendCommand","ssm:GetCommandInvocation"],"Resource":"*"},
+    {"Effect":"Allow","Action":["ssm:SendCommand","ssm:GetCommandInvocation","ssm:CancelCommand","ssm:DescribeInstanceInformation"],"Resource":"*"},
     {"Effect":"Allow","Action":[
       "route53:ListHostedZonesByVPC","route53:ListHostedZones","route53:ChangeResourceRecordSets",
       "route53:CreateHostedZone","route53:GetChange","route53:GetHostedZone",
