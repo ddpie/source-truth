@@ -94,7 +94,7 @@ aws iam put-role-policy --role-name "$ROLE" --policy-name deploy-network --polic
     "ec2:AttachInternetGateway","ec2:CreateNatGateway","ec2:AllocateAddress","ec2:CreateRouteTable",
     "ec2:CreateRoute","ec2:AssociateRouteTable","ec2:CreateSecurityGroup",
     "ec2:AuthorizeSecurityGroupIngress","ec2:CreateTags","ec2:ModifyVpcAttribute",
-    "ec2:ModifySubnetAttribute","ec2:ModifyInstanceAttribute","ec2:RunInstances","ec2:TerminateInstances"],
+    "ec2:ModifySubnetAttribute","ec2:ModifyInstanceAttribute","ec2:ModifyInstanceMetadataOptions","ec2:RunInstances","ec2:TerminateInstances"],
     "Resource":"*"}]}' >/dev/null
 
 aws iam put-role-policy --role-name "$ROLE" --policy-name deploy-ecr --policy-document '{

@@ -234,12 +234,25 @@ arm_instance_resilience() {
   # unauthenticated IMDSv1 requests, and this script never replaces an instance: without a
   # reconcile here those hosts would stay on v1 forever. IMDSv1 is one unauthenticated GET away
   # from this instance's role credentials, and the same host runs an unauthenticated bridge.
-  if err="$(aws ec2 modify-instance-metadata-options --region "$REGION" \
-    --instance-id "$iid" --http-tokens required --http-put-response-hop-limit 1 --http-endpoint enabled 2>&1 >/dev/null)"; then
-    log info "IMDSv2 enforced for $iid"
+  #
+  # Do NOT pass --http-endpoint: an operator who disabled IMDS entirely is in the STRICTEST
+  # state, and a hardening reconcile must never widen it back open.
+  #
+  # And do NOT trust the call's exit status as proof: this needs
+  # ec2:ModifyInstanceMetadataOptions, which was missing from every policy in this repo, so the
+  # call AccessDenied'd on every run in --local mode and the non-fatal warning made "attempted"
+  # indistinguishable from "enforced". Read the value back.
+  aws ec2 modify-instance-metadata-options --region "$REGION" \
+    --instance-id "$iid" --http-tokens required --http-put-response-hop-limit 1 >/dev/null 2>&1 || true
+  local tokens
+  tokens="$(aws ec2 describe-instances --region "$REGION" --instance-ids "$iid" \
+    --query 'Reservations[0].Instances[0].MetadataOptions.HttpTokens' --output text 2>/dev/null || echo "")"
+  if [[ "$tokens" == "required" ]]; then
+    log info "IMDSv2 enforced for $iid (verified)"
   else
-    log warn "failed to enforce IMDSv2 (non-fatal, but the instance role is reachable via IMDSv1)"
-    log warn "  → $(printf '%s' "$err" | tr '\n' ' ' | cut -c1-300)"
+    log warn "IMDSv2 NOT enforced for $iid — HttpTokens reads '${tokens:-unknown}', so the instance"
+    log warn "  role is reachable over unauthenticated IMDSv1 from anything running on this host."
+    log warn "  Most likely cause: the deploy identity lacks ec2:ModifyInstanceMetadataOptions."
   fi
 
   # Root-volume encryption cannot be changed in place, so a host launched before the Encrypted

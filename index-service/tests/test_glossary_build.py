@@ -493,3 +493,59 @@ def test_build_propagates_batch_failure_as_overall(monkeypatch, tmp_path):
         assert False, "expected build() to raise on a batch that never succeeds"
     except _subp.CalledProcessError:
         pass
+
+
+# ---------------------------------------------------------------------------
+# Credential-shape output filter (layer 3 of the glossary threat model).
+#
+# This is the last gate before an entry reaches /data/glossary, which is served by the glossary
+# tools and rendered into user-visible answers — so a secret that gets past it is a published
+# secret. It had NO tests, and a security review found that most modern base64url tokens matched
+# nothing at all because a `-` or `_` disqualified the opaque heuristic outright.
+#
+# The negative corpus matters as much as the positive one: a false positive silently costs a real
+# glossary entry, and phrases like "token bucket rate limiter" are exactly what a naive keyword
+# rule over-matches.
+# ---------------------------------------------------------------------------
+import pytest  # noqa: E402
+from glossary_build import _looks_like_credential  # noqa: E402
+
+
+@pytest.mark.parametrize("value", [
+    "AKIAIOSFODNN7EXAMPLE",                                    # AWS access key id
+    "ghp_" + "a" * 24,                                         # GitHub token
+    "github_pat_" + "b" * 24,                                  # GitHub fine-grained PAT
+    "glpat-" + "c" * 20,                                       # GitLab PAT
+    "glptt-" + "d" * 20,                                       # GitLab project token
+    "glrt-" + "e" * 20,                                        # GitLab runner token
+    "gldt-" + "f" * 20,                                        # GitLab deploy token
+    "xoxb-1234567890-abcdefghij",                              # Slack bot token
+    "AIza" + "g" * 32,                                         # Google API key
+    "-----BEGIN RSA PRIVATE KEY-----",                         # PEM header
+    "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.x",      # JWT
+    "password: hunter2hunter2",                                # keyword form
+    "client_secret=aVeryLongOpaqueTokenValue12345",            # keyword form
+    "Authorization: Bearer sk-live-abcdef123456",              # scheme between keyword and value
+    "bearer=aVeryLongOpaqueTokenValue12345",
+    "sig=" + "a" * 40 + ";",                                   # hex digest with surrounding text
+    "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY1",               # AWS secret access key shape
+    # base64url, no padding, contains - and _ : the widest hole before the entropy floor.
+    "xK9mQ2pL-vN4wR7tY_aB3cD6eF8gH1jK5lM0nO2pQ4rS",
+])
+def test_credential_shapes_are_refused(value):
+    assert _looks_like_credential(value), f"credential shape not caught: {value[:40]}"
+
+
+@pytest.mark.parametrize("value", [
+    "getUserInventorySlotCapacityForPlayerV2Handler",           # long camelCase identifier
+    "source_truth_index_service_bridge_port_number_value",      # long snake_case identifier
+    "source-truth-index-service-bridge-port-number",            # long kebab-case name
+    "SourceTruthAgentRuntimeRole",
+    "Assets/Scripts/Game/Entities/PlayerEntity.cs",             # file path (a real `source` value)
+    "公会战积分结算规则",                                        # Chinese alias
+    "token bucket rate limiter",                                # keyword in ordinary prose
+    "basic block scheduling",                                   # `basic` scheme word in prose
+    "INDEX_SERVICE_SG",
+])
+def test_ordinary_identifiers_are_not_refused(value):
+    assert not _looks_like_credential(value), f"false positive drops a real entry: {value[:40]}"

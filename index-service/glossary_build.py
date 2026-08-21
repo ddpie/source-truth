@@ -111,10 +111,20 @@ CC_DISALLOWED_TOOLS = (
 # leading `/` would be resolved relative to the settings directory. `~/**` covers HOME.
 # Applied to Read AND Grep AND Glob: Grep on an absolute path prints matching LINES, so denying
 # only Read would leave the same file readable one tool over.
+#
+# //data/** is denied WHOLESALE, not just //data/glossary/**: every project's repo copy lives at
+# /data/repo/<subdir>, so leaving /data readable let this project's build read ANOTHER project's
+# tree — including anything committed there — and publish it into answers. cwd only scopes
+# RELATIVE paths, so an absolute read needed its own denial. The prompt enumerates the exact
+# files to scan, so no absolute read outside cwd is ever legitimate.
+#
+# //tmp/** is denied too. It was left readable on the assumption it "holds no secret", but on this
+# host /tmp receives SSM parameter files and glossary change lists from concurrent units, and
+# those units are deliberately not PrivateTmp.
 _CC_DENY_READ_GLOBS = (
     "//etc/**", "//opt/**", "//root/**", "//home/**", "//usr/**", "//var/**",
     "//run/**", "//proc/**", "//sys/**", "//boot/**", "//srv/**",
-    "//data/glossary/**", "~/**",
+    "//data/**", "//tmp/**", "//dev/**", "//mnt/**", "//media/**", "//snap/**", "~/**",
 )
 _CC_READ_TOOLS = ("Read", "Grep", "Glob")
 CC_DENY_READ_PATHS = tuple(
@@ -130,13 +140,30 @@ _CREDENTIAL_RES = (
     re.compile(r"gh[pousr]_[A-Za-z0-9]{20,}"),                        # GitHub token
     re.compile(r"github_pat_[A-Za-z0-9_]{20,}"),                      # GitHub fine-grained PAT
     re.compile(r"glpat-[A-Za-z0-9_\-]{16,}"),                         # GitLab PAT
+    # The rest of the GitLab token family: project/group, runner, deploy, OAuth, CI build. Each has
+    # a distinctive prefix, so these cost nothing in false positives — and only `glpat-` was here.
+    re.compile(r"gl(?:ptt|rt|dt|soat|cbt)-[A-Za-z0-9_\-]{16,}"),
     re.compile(r"xox[abprs]-[A-Za-z0-9-]{10,}"),                      # Slack token
     re.compile(r"AIza[0-9A-Za-z_\-]{30,}"),                           # Google API key
     re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),                # PEM private key
+    # Headerless PEM BODY. A pasted key body without its header contains newlines, which defeats
+    # both the anchored base64 rule and the opaque heuristic (neither tolerates \n), so the most
+    # obvious form of a leaked key was passing through.
+    re.compile(r"(?:^|\n)[A-Za-z0-9+/]{60,}={0,2}(?:\n[A-Za-z0-9+/]{60,}={0,2}){2,}"),
     re.compile(r"eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\."),     # JWT
-    re.compile(r"(?i)\b(?:aws_)?(?:secret|password|passwd|api[_-]?key|token)\b\s*[:=]\s*\S{8,}"),
-    # Hex digest / hex-encoded secret (40+ hex chars: SHA-1 and up).
-    re.compile(r"^[0-9a-fA-F]{40,}$"),
+    # Keyword rule. `bearer`, `authorization`, `credential`, `passphrase` and `client_secret` were
+    # missing, so `Authorization: <token>` and `bearer=<token>` published cleanly.
+    re.compile(
+        r"(?i)\b(?:aws_)?(?:secret|password|passwd|passphrase|credential|api[_-]?key"
+        r"|token|bearer|authorization)\b\s*[:=]\s*\S{8,}"
+    ),
+    # `Authorization: Bearer <token>` — the scheme sits BETWEEN the keyword and the value, so the
+    # keyword-then-separator rule above does not reach it. Match the scheme and its value directly.
+    re.compile(r"(?i)\b(?:bearer|basic|token)\s+[A-Za-z0-9+/=_\-\.]{8,}"),
+    # Hex digest / hex-encoded secret (40+ hex chars: SHA-1 and up). Word-bounded rather than
+    # whole-string anchored, so a secret with any surrounding character no longer escapes. This
+    # also matches a bare git SHA, which costs at most one dropped glossary entry.
+    re.compile(r"\b[0-9a-fA-F]{40,}\b"),
     # Base64/base64url blob carrying a padding or non-alphanumeric marker — session tokens,
     # encoded keys. The marker is what keeps a long camelCase identifier out of this rule.
     re.compile(r"^(?=[A-Za-z0-9+/=_\-]{40,}$)[A-Za-z0-9+/=_\-]*[+/=][A-Za-z0-9+/=_\-]*$"),
@@ -150,6 +177,19 @@ _CREDENTIAL_RES = (
 # publishes a secret into an answer.
 _OPAQUE_MIN_LEN = 40
 _OPAQUE_MIN_DIGITS = 4
+# Shannon entropy floor, bits per character. A base64url token is near-uniform over its alphabet
+# (~5.5-6.0); a real code identifier of the same length is word-shaped and repeats characters, so
+# it sits well below this. Measured against the identifiers in this repo, the longest land ~3.9.
+_OPAQUE_MIN_ENTROPY = 4.3
+
+
+def _shannon_bits_per_char(value: str) -> float:
+    from collections import Counter
+    import math
+    n = len(value)
+    if n == 0:
+        return 0.0
+    return -sum((c / n) * math.log2(c / n) for c in Counter(value).values())
 
 
 def _looks_opaque_secret(value: str) -> bool:
@@ -157,12 +197,20 @@ def _looks_opaque_secret(value: str) -> bool:
         return False
     if not all(c.isalnum() or c in "+/=_-" for c in value):
         return False
-    if "_" in value or "-" in value:
-        return False  # separator-bearing → identifier-shaped, not an opaque blob
     digits = sum(c.isdigit() for c in value)
     has_lower = any(c.islower() for c in value)
     has_upper = any(c.isupper() for c in value)
-    return digits >= _OPAQUE_MIN_DIGITS and has_lower and has_upper
+    if not (digits >= _OPAQUE_MIN_DIGITS and has_lower and has_upper):
+        return False
+    # A separator used to disqualify outright, which was the WIDEST hole in this filter: any 40+
+    # character secret containing `-` or `_` and no `+/=` padding matched nothing at all — and that
+    # describes most modern base64url tokens (Bitbucket workspace tokens, GitHub fine-grained
+    # bodies, many OAuth bearers). Instead of bailing, require high entropy: snake_case and
+    # kebab-case identifiers repeat characters and stay well under the floor, while a token does
+    # not. Mixed case plus the digit floor above already excludes ordinary lowercase identifiers.
+    if "_" in value or "-" in value:
+        return _shannon_bits_per_char(value) >= _OPAQUE_MIN_ENTROPY
+    return True
 
 
 def _looks_like_credential(value: str) -> bool:
@@ -281,7 +329,15 @@ def extract_entries(raw: str, *, reader: Callable[[str], str] | None = None) -> 
         # can put a secret in `value`. Refuse it here, before anything is written to the slice:
         # the slice is served by the glossary tools and rendered into user-visible answers, so a
         # secret that gets this far is a published secret. Counted and logged, never emitted.
-        if _looks_like_credential(e.value):
+        # Screen EVERY string field, not just `value`. `concept_id` and `value` are charset-
+        # constrained above, but `source` is free-form and is written to the slice and rendered
+        # into the citation line of an answer — so an injection could publish a secret through
+        # `source` while `value` stayed innocuous. Checking all fields also means adding a field
+        # to Entry later cannot silently bypass this gate.
+        if any(
+            isinstance(v, str) and _looks_like_credential(v)
+            for v in (e.concept_id, e.value, e.source)
+        ):
             cred_dropped += 1
             continue
         if e.kind == "alias" and reader is not None and not _alias_grounded(e, reader, _cache):
@@ -496,6 +552,28 @@ def build(files: list[str], *, project: str, cwd: str, model: str, region: str,
     import os
     run = runner if runner is not None else run_cc
     root = os.path.realpath(cwd)
+
+    # SYMLINK ESCAPE (layer 2 bypass). The input is an attacker-influenceable git tree and git
+    # commits symlinks, so `docs/notes.md -> /opt/idx/git-token-<projectId>` is readable via a
+    # path RELATIVE to cwd and matches none of the absolute CC_DENY_READ_PATHS globs: a permission
+    # rule matches the requested path, not the resolved target. One committed file would otherwise
+    # defeat the whole read confinement for the highest-value secret on the host.
+    #
+    # Drop any candidate whose realpath leaves the repo copy. Filtering the file list is enough
+    # because the prompt hands cc a concrete list and no absolute read outside cwd is legitimate.
+    safe_files = []
+    escaped = 0
+    for f in files:
+        target = f if os.path.isabs(f) else os.path.join(root, f)
+        real = os.path.realpath(target)
+        if real == root or real.startswith(root + os.sep):
+            safe_files.append(f)
+        else:
+            escaped += 1
+    if escaped:
+        logger.warning(json.dumps({"event": "glossary_symlink_escape_dropped",
+                                   "dropped": escaped, "root": root}))
+    files = safe_files
 
     # Run cc in batches: the file list rides in the ARGV of `claude -p`, so passing thousands of
     # paths at once overflows the OS arg limit. A full scan (files is the whole candidate set) thus

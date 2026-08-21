@@ -92,7 +92,7 @@ aws iam put-role-policy --role-name "$INDEX_ROLE" --policy-name ec2-self-recover
   \"Version\":\"2012-10-17\",\"Statement\":[
     {\"Effect\":\"Allow\",\"Action\":[\"cloudwatch:PutMetricAlarm\",\"cloudwatch:DescribeAlarms\"],
      \"Resource\":[\"arn:aws:cloudwatch:*:${ACCOUNT}:alarm:source-truth-*\"]},
-    {\"Effect\":\"Allow\",\"Action\":[\"ec2:ModifyInstanceAttribute\",\"ec2:DescribeInstanceAttribute\"],
+    {\"Effect\":\"Allow\",\"Action\":[\"ec2:ModifyInstanceAttribute\",\"ec2:ModifyInstanceMetadataOptions\",\"ec2:DescribeInstanceAttribute\"],
      \"Resource\":\"*\"},
     {\"Effect\":\"Allow\",\"Action\":[\"iam:CreateServiceLinkedRole\"],\"Resource\":\"*\",
      \"Condition\":{\"StringEquals\":{\"iam:AWSServiceName\":\"events.amazonaws.com\"}}}]}" >/dev/null
