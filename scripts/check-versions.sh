@@ -111,8 +111,26 @@ fi
 #     等它被真正生成（去掉标记）之后，这一条会自动失效，届时应把 bootstrap 切过去。
 IDX_LOCK="index-service/requirements.lock"
 if [[ -f "$IDX_LOCK" ]] && grep -q 'INCOMPLETE' "$IDX_LOCK"; then
-  if [[ -f "$IDX_BOOT" ]] && grep -qE 'pip3? install[^|]*-r[^|]*requirements\.lock' "$IDX_BOOT"; then
-    err "$IDX_LOCK 仍标记为 INCOMPLETE，但 bootstrap.sh 已从它安装 —— 索引主机会缺少传递依赖。先用一次可信构建生成完整 lock 并移除 INCOMPLETE 标记。"
+  # 判据刻意放粗：只要这些安装脚本**提到** index-service/requirements.lock 就失败，不去解析
+  # 它是不是真的出现在 `pip install -r` 里。
+  #
+  # 为什么不做精细匹配：原先是逐行 grep `pip install ... -r ...requirements.lock`，一个反斜杠
+  # 续行就能绕过 —— 而续行正是这些脚本里本来就在用的写法。我随后用 sed、再用 awk、再用纯 bash
+  # 的续行拼接去修它，每一版在**单独测试时都正确**，装回守卫里却依旧放过实测变异。也就是说，
+  # 这个精细判据本身就是一个反复产生"看起来修好了"的结构。
+  #
+  # 而粗判据在这里是严格更强的：当 lock 还带着 INCOMPLETE 标记时，这些脚本没有任何正当理由
+  # 提到它 —— 无论以什么写法、什么行数、什么参数形式。格式变化无法绕过"提到"。
+  # 等 lock 被真正生成（去掉 INCOMPLETE 标记）之后，整条检查自动失效，届时才需要精细判据。
+  _lockrefs=""
+  for _f in "$IDX_BOOT" scripts/lib/deploy_project.sh scripts/deploy-all.sh scripts/lib/provision_index_service.sh; do
+    [[ -f "$_f" ]] || continue
+    if grep -q 'requirements\.lock' "$_f"; then
+      _lockrefs="${_lockrefs}${_f} "
+    fi
+  done
+  if [[ -n "$_lockrefs" ]]; then
+    err "$IDX_LOCK 仍标记为 INCOMPLETE，但已被安装路径引用（$_lockrefs） —— 索引主机会缺少传递依赖。先用一次可信构建生成完整 lock 并移除 INCOMPLETE 标记。"
   else
     ok "index-service/requirements.lock 标记为 INCOMPLETE 且未被安装路径引用（符合预期）"
   fi

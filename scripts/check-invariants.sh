@@ -12,6 +12,31 @@ fail=0
 err() { printf '  ✗ %s\n' "$1" >&2; fail=1; }
 ok()  { printf '  ✓ %s\n' "$1"; }
 
+# 枚举被 git 跟踪的文件。这是第 3b / 8 / 9 三项共用的输入，也是它们共同的失效点：
+# 原先每处都写 `git ls-files … 2>/dev/null || true`，于是在**没有 .git 的树**里
+# （GitHub 源码 zip、release tarball、git archive 导出、不含 .git 的 Docker build
+# context）"fatal: not a git repository" 被吞掉、清单为空、`xargs -r` 什么都不跑，
+# 空输出被读成"干净"——三个守卫同时报绿，而它们正是为前三次事故写的。CI 用真 checkout，
+# 所以 CI 永远看不到这个失效；踩到的恰好是最需要这些守卫的外部使用者。
+# 所以：枚举不出来就是硬失败，绝不静默通过。
+tracked_files() {  # tracked_files [pathspec...]
+  git ls-files "$@" 2>/dev/null
+}
+
+# 可枚举性必须在**父 shell** 里断言一次，不能放在 tracked_files 内部：那个函数的每个调用点都在
+# 命令替换 `$(...)` 里，而命令替换是子 shell —— 在里面调 err 设置的 fail=1 根本传不回来。
+# （我第一版就是这么写的，于是"修好的"守卫在无 .git 的树上依旧全绿。）
+GIT_ENUMERABLE=1
+if ! _probe="$(git ls-files 2>/dev/null)" || [[ -z "$_probe" ]]; then
+  GIT_ENUMERABLE=0
+  err "无法枚举 git 跟踪文件（不是 git 仓库，或清单为空）——第 3b/7/8/9 项全部依赖它。"
+  printf '      这些检查在无 .git 的树上（GitHub 源码 zip / release tarball / git archive 导出 /
+' >&2
+  printf '      不含 .git 的 Docker build context）会因清单为空而静默报绿，所以此处直接判失败。
+' >&2
+fi
+unset _probe
+
 echo "check-invariants: $ROOT"
 
 # 1. AGENTS.md 存在
@@ -73,7 +98,7 @@ while IFS= read -r f; do
   [[ $exempt -eq 1 ]] && continue
   err "docs/ 下的 $f 既不是 _en/_zh 配对，也未列入 DOC_CHINESE_ONLY 豁免名单（新增中文独有文档须显式声明）"
   doc_pair_ok=0
-done <<< "$(git ls-files 'docs/*.md' 2>/dev/null || true)"
+done <<< "$(tracked_files 'docs/*.md')"
 [[ "$doc_pair_ok" -eq 1 ]] && ok "docs/ 下每份文档要么成对、要么已显式豁免"
 
 # 4. 结构文档存在
@@ -117,8 +142,15 @@ done
 #    静默撤销第一区域的权限（2026-06-29 新加坡部署据此打挂东京）。这些资源型 ARN 的 region 段
 #    必须用 '*'，靠 account + 资源名前缀兜底。只查易越权的服务面（lambda/events 的 ARN 是按区
 #    构造的合法用法，不在此列）。
-guard_hits="$(grep -nE 'arn:aws:(logs|bedrock|bedrock-agentcore|secretsmanager|s3[a-z-]*):[a-z0-9-]*\$\{REGION\}:' \
-  scripts/lib/provision_iam.sh scripts/lib/apply-dau-lambda.sh 2>/dev/null || true)"
+# 改名/删除任一文件都曾让这条守卫静默通过（硬编码路径 + 2>/dev/null || true —— 正是紧邻的
+# 第 8 项注释里写着"被烧过"的那个构造）。改成枚举所有写 IAM 内联策略的脚本，并断言这些文件
+# 确实存在：文件不见了要报错，而不是当作没有违规。
+iam_policy_files="$(tracked_files 'scripts/lib/*.sh' 'scripts/*.sh' | xargs -r grep -lE 'put-role-policy|iam:PutRolePolicy' 2>/dev/null || true)"
+if [[ -z "$iam_policy_files" ]]; then
+  err "找不到任何写 IAM 内联策略的脚本——第 7 项（多区域 Resource 守卫）无从检查，视为失败"
+fi
+guard_hits="$(printf '%s\n' "$iam_policy_files" | tr '\n' '\0' \
+  | xargs -0 -r grep -nE 'arn:aws:(logs|bedrock|bedrock-agentcore|secretsmanager|s3[a-z-]*):[a-z0-9-]*\$\{REGION\}:' 2>/dev/null || true)"
 if [[ -n "$guard_hits" ]]; then
   err "全局共享角色策略 Resource 钉死了 \${REGION}（多区部署会互相覆盖，改用 '*'）："
   printf '      %s\n' "$guard_hits" >&2
@@ -134,7 +166,7 @@ fi
 #    也去掉了 Interkarma 豁免：正则只匹配 source-truth|sample-code-qa-on-agentcore 两个仓名，
 #    Interkarma/daggerfall-unity 永远不可能命中，那个豁免是死代码，留着会让人以为它是本项目产物的
 #    合法来源。
-slug_files="$(git ls-files '*.sh' '*.md' 2>/dev/null | grep -v '^scripts/check-invariants\.sh$' || true)"
+slug_files="$(tracked_files '*.sh' '*.md' | grep -v '^scripts/check-invariants\.sh$' || true)"
 slug_hits="$(printf '%s\n' "$slug_files" | tr '\n' '\0' \
   | xargs -0 -r grep -IoE '(github\.com/|githubusercontent\.com/|:-)[A-Za-z0-9_.-]+/(source-truth|sample-code-qa-on-agentcore)' 2>/dev/null \
   | grep -vE 'aws-samples/' || true)"
@@ -177,7 +209,7 @@ pii_err="$(mktemp)"
 # set -e / pipefail 会让失败的赋值直接终止脚本，于是下面那条"扫描本身失败"的诊断永远打不出来
 # （模式非法时脚本以 xargs 的 123 退出，运维只看到一个裸退出码）。这里显式关掉再取退出码。
 set +e
-pii_hits="$(git ls-files -z 2>/dev/null \
+pii_hits="$(tracked_files | tr '\n' '\0' \
   | grep -zv '^scripts/check-invariants\.sh$' \
   | xargs -0 -r grep -IlE "$pii_re" 2>"$pii_err")"
 pii_rc=$?
@@ -188,7 +220,7 @@ while IFS= read -r _f; do
   if sed 's/客户端//g' "$_f" 2>/dev/null | grep -q "$PII_BARE_CUSTOMER" 2>/dev/null; then
     pii_bare="${pii_bare}${_f}"$'\n'
   fi
-done <<< "$(git ls-files 2>/dev/null || true)"
+done <<< "$(tracked_files)"
 set -e
 if [[ $pii_rc -gt 1 && -s "$pii_err" ]]; then
   err "PII 扫描本身失败（模式非法或文件不可读），不能据此判定干净："
