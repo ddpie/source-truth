@@ -47,24 +47,7 @@ if [[ -f docs/agent/architecture.md ]]; then ok "docs/agent/architecture.md 存�
 else err "缺少 docs/agent/architecture.md"; fi
 grep -q 'docs/agent/architecture.md' AGENTS.md || err "AGENTS.md 未引用 docs/agent/architecture.md"
 
-# 3. 双语 _en/_zh 配对：docs/ 下每个 *_en.md 必须有 *_zh.md，反之亦然
-shopt -s nullglob
-for f in docs/*_en.md; do
-  [[ -f "${f%_en.md}_zh.md" ]] || err "双语缺配对：$f 缺少 ${f##*/} 对应的 _zh.md"
-done
-for f in docs/*_zh.md; do
-  [[ -f "${f%_zh.md}_en.md" ]] || err "双语缺配对：$f 缺少 ${f##*/} 对应的 _en.md"
-done
-shopt -u nullglob
-[[ $fail -eq 0 ]] && ok "docs/ 双语 _en/_zh 配对完整"
-
-# 3b. 每个 docs/ 下的 md 必须"要么成对，要么被显式豁免"。
-#     旧写法只 glob docs/*_en.md ↔ docs/*_zh.md，于是**中性文件名等于自动豁免**：runbook.md
-#     （整个部署 / 接入飞书 / 验证 / 运维 / 排障流程都在里面）就这样绕过了检查，structure_en.md
-#     里甚至把这个豁免写成了"设计如此"。结果是：唯一能发现"英文读者无法部署"的机械检查，恰好
-#     把最大的那份文档排除在外。
-#     改成白名单模型：新增一份中文独有文档，必须显式写进 DOC_CHINESE_ONLY —— 那是一个在 review
-#     里看得见的决定，而不是一次悄悄的默认。
+# 中文独有文档白名单：第 3 项（配对）与第 3b 项（枚举）共用，所以在两者之前声明。
 DOC_CHINESE_ONLY=(
   # 设计依据文档，已在 docs/design/README.md 自我声明为中文
   "docs/design/README.md"
@@ -85,6 +68,33 @@ DOC_CHINESE_ONLY=(
   "docs/agent/playbooks.md"
   "docs/agent/TEMPLATE-spike.md"
 )
+
+# 3. 双语 _en/_zh 配对：docs/ 下每个 *_en.md 必须有 *_zh.md，反之亦然
+#    必须递归。原先用的是 shell glob `docs/*_en.md`，**不跨目录**；而第 3b 项对任何以
+#    `_en.md`/`_zh.md` 结尾的文件直接 continue，理由写的是"成对文件由第 3 项检查过"——这个信任
+#    对子目录并不成立。于是 docs/agent/deploy_en.md 没有中文版可以完全通过，而
+#    docs/agent/runbook_zh.md 没有英文版正是最初那次事故本身。
+#    又一次"文件名属性即豁免"：这次豁免的是"带双语后缀且位于子目录"。
+#    用 git pathspec 递归（git 的 `*` 跨 `/`），失败即硬失败（见上面的可枚举性断言）。
+while IFS= read -r f; do
+  [[ -z "$f" ]] && continue
+  # 已显式豁免为中文独有的文档不要求配对（名单在第 3b 项，声明在此之前使用）。
+  _ex=0; for e in "${DOC_CHINESE_ONLY[@]}"; do [[ "$f" == "$e" ]] && { _ex=1; break; }; done
+  [[ $_ex -eq 1 ]] && continue
+  case "$f" in
+    *_en.md) [[ -f "${f%_en.md}_zh.md" ]] || err "双语缺配对：$f 缺少对应的 _zh.md" ;;
+    *_zh.md) [[ -f "${f%_zh.md}_en.md" ]] || err "双语缺配对：$f 缺少对应的 _en.md" ;;
+  esac
+done <<< "$(git ls-files 'docs/**_en.md' 'docs/**_zh.md' 2>/dev/null || true)"
+[[ $fail -eq 0 ]] && ok "docs/ 双语 _en/_zh 配对完整（含子目录）"
+
+# 3b. 每个 docs/ 下的 md 必须"要么成对，要么被显式豁免"。
+#     旧写法只 glob docs/*_en.md ↔ docs/*_zh.md，于是**中性文件名等于自动豁免**：runbook.md
+#     （整个部署 / 接入飞书 / 验证 / 运维 / 排障流程都在里面）就这样绕过了检查，structure_en.md
+#     里甚至把这个豁免写成了"设计如此"。结果是：唯一能发现"英文读者无法部署"的机械检查，恰好
+#     把最大的那份文档排除在外。
+#     改成白名单模型：新增一份中文独有文档，必须显式写进 DOC_CHINESE_ONLY —— 那是一个在 review
+#     里看得见的决定，而不是一次悄悄的默认。
 # 故意不在名单里：runbook —— 它是英文 README 六次指向的唯一部署/接入/验证/排障流程，中文独有
 # 等于英文读者无法部署。所以它必须是 runbook_en.md / runbook_zh.md 一对（现已成对）。
 doc_pair_ok=1
@@ -192,6 +202,24 @@ PII_PATTERNS=(
   '需求评审' '需客户'
   'WorkBuddy' 'GenSpark'
 )
+# 逃生口。第 3b 项有 DOC_CHINESE_ONLY —— 一个在 review 里看得见、必须写理由的豁免机制；而第 9 项
+# 此前**只有"改写措辞"一条路**。问题在于：'责任人' / '交付物' 是中文技术文档里的普通词（升级路径
+# 表天然想要一列叫"责任人"，里程碑说明天然会写"交付物"），而裸「客户」在树里已出现于 17 个文件。
+# 一旦出现第一个无法改写的合法命中（比如一个表格列头），唯一剩下的动作就是去动 PII_PATTERNS ——
+# 也就是注释明令禁止的那件事。当年那个"只 grep 五个人名"的版本，很可能就是这么长出来的。
+#
+# 所以逃生口不是模式集的对立面，而正是**防止模式集被削弱**的东西：要豁免就写在这里，带路径、
+# 带模式、带理由，让它在 review 里可见。散文能改措辞就改措辞；结构化内容改不动时走这里。
+PII_EXEMPT=(
+  # "路径|模式|理由" —— 三段都必填
+)
+_pii_exempt() {  # _pii_exempt <file> ; 0 = 已豁免
+  local f="$1" e
+  for e in "${PII_EXEMPT[@]}"; do
+    [[ "$f" == "${e%%|*}" ]] && return 0
+  done
+  return 1
+}
 # 裸「客户」单独处理：它是最强的信号，但 '客户端'（client-side）是完全合法的技术词，
 # 全仓都在用。所以先删掉 '客户端' 再匹配剩下的「客户」—— 这样 '客户调研' / '贴近客户特征'
 # / '客户的' / '客户商业美术资源' / '客户接入时' 都会命中，而 '客户端引擎' 不会。
@@ -209,18 +237,28 @@ pii_err="$(mktemp)"
 # set -e / pipefail 会让失败的赋值直接终止脚本，于是下面那条"扫描本身失败"的诊断永远打不出来
 # （模式非法时脚本以 xargs 的 123 退出，运维只看到一个裸退出码）。这里显式关掉再取退出码。
 set +e
-pii_hits="$(tracked_files | tr '\n' '\0' \
-  | grep -zv '^scripts/check-invariants\.sh$' \
+# 只扫**磁盘上确实存在**的被跟踪文件。git ls-files 会列出已删除但仍被跟踪的路径，于是任何
+# "删掉一个文件"的提交都让 grep 报 "No such file or directory"、stderr 非空，被判成"扫描失败"
+# 并指向"模式非法"——方向是 fail-closed 不漏，但这正是当初让人加上 2>/dev/null 的那种噪声，
+# 而 2>/dev/null 就是上一次假绿的成因。把"文件不存在"和"模式非法"分开，噪声就没有了。
+pii_scan_list="$(tracked_files | while IFS= read -r _f; do
+  [[ -n "$_f" && -f "$_f" && "$_f" != "scripts/check-invariants.sh" ]] && printf '%s\n' "$_f"
+done)"
+pii_hits="$(printf '%s\n' "$pii_scan_list" | tr '\n' '\0' \
   | xargs -0 -r grep -IlE "$pii_re" 2>"$pii_err")"
 pii_rc=$?
 # 裸「客户」：逐文件把 '客户端' 抹掉后再找「客户」，避免 client-side 的误报。
 pii_bare=""
 while IFS= read -r _f; do
-  [[ -z "$_f" || "$_f" == "scripts/check-invariants.sh" ]] && continue
+  [[ -z "$_f" ]] && continue
   if sed 's/客户端//g' "$_f" 2>/dev/null | grep -q "$PII_BARE_CUSTOMER" 2>/dev/null; then
     pii_bare="${pii_bare}${_f}"$'\n'
   fi
-done <<< "$(tracked_files)"
+done <<< "$pii_scan_list"
+# 应用豁免表（带理由的显式决定；见 PII_EXEMPT 上方的说明）。
+_filter_exempt() { while IFS= read -r _f; do [[ -z "$_f" ]] && continue; _pii_exempt "$_f" || printf '%s\n' "$_f"; done; }
+pii_hits="$(printf '%s\n' "$pii_hits" | _filter_exempt)"
+pii_bare="$(printf '%s\n' "$pii_bare" | _filter_exempt)"
 set -e
 if [[ $pii_rc -gt 1 && -s "$pii_err" ]]; then
   err "PII 扫描本身失败（模式非法或文件不可读），不能据此判定干净："

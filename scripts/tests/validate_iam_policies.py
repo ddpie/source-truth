@@ -109,6 +109,26 @@ def main() -> int:
 
     for rel in FILES:
         src = (REPO / rel).read_text()
+        # COVERAGE ASSERTION. DOC_RE ends with `\s*>`, so any --policy-document whose command does
+        # not end in a redirect is silently skipped — `checked` does not even move. A review proved
+        # this by appending a full account-escalation chain (iam:PassRole on Resource "*") with no
+        # redirect: the validator printed "OK (19 documents)" and the document was never examined.
+        # discover_policy_files() only guards against a FILE going unlisted; nothing guarded against
+        # a DOCUMENT going unmatched inside a listed file, and the printed count was the only signal
+        # while nobody knew what the denominator should be.
+        # The anchor cannot simply be dropped: it is also what stops a double-quoted document being
+        # truncated at its first \" by the non-greedy `".*?"`. So instead, count the documents that
+        # are PRESENT independently and require the parser to have matched all of them.
+        present = len(re.findall(r"--policy-document|--assume-role-policy-document", src))
+        matched = len(DOC_RE.findall(src))
+        if matched != present:
+            print(
+                f"  FAIL {rel}: {present} policy document(s) present but the parser matched "
+                f"{matched} — an unmatched document is NOT validated. Every "
+                f"--policy-document command must end in a redirect (e.g. `>/dev/null`) so the "
+                f"parser can find its boundary, or DOC_RE must be taught the new shape."
+            )
+            failures += present - matched
         for name, is_trust, doc in DOC_RE.findall(src):
             label = name or "assume-role-policy"
             checked += 1
