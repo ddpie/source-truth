@@ -408,13 +408,18 @@ if [[ "$INCLUDE_SHARED" == true ]]; then
     say info "  等所有区域都拆完，再在最后一个区域跑 --include-shared。"
   else
   # DAU Lambda's IAM role (account-global, created by apply-monitoring.sh's dau stage).
-  # Detach MANAGED policies before deleting the role. apply-dau-lambda.sh attaches
-  # AWSLambdaBasicExecutionRole, and delete-role fails with DeleteConflict while any managed
-  # policy is still attached — so this role could never be removed, masked as "may already be
-  # gone". Enumerate rather than name it, so a future added policy is covered too.
-  for pa in $(aws iam list-attached-role-policies --role-name source-truth-dau-lambda-role --query 'AttachedPolicies[].PolicyArn' --output text 2>/dev/null || echo ""); do
-    aws iam detach-role-policy --role-name source-truth-dau-lambda-role --policy-arn "$pa" >/dev/null 2>&1 || true
-  done
+  # Detach MANAGED policies before deleting a role: delete-role fails with DeleteConflict while
+  # any remains. Applied to ALL THREE roles via one helper \u2014 the enumerate-don't-name fix was
+  # first written for the DAU role only, leaving source-truth-index-role deleting a single ARN by
+  # name and SourceTruthAgentRuntimeRole detaching nothing, so either could still leak.
+  detach_managed() { # <role-name>
+    local r="$1" pa
+    for pa in $(aws iam list-attached-role-policies --role-name "$r" --query 'AttachedPolicies[].PolicyArn' --output text 2>/dev/null || echo ""); do
+      is_set "$pa" && aws iam detach-role-policy --role-name "$r" --policy-arn "$pa" >/dev/null 2>&1 || true
+    done
+  }
+
+  detach_managed source-truth-dau-lambda-role
   for p in $(aws iam list-role-policies --role-name source-truth-dau-lambda-role --query 'PolicyNames[]' --output text 2>/dev/null || echo ""); do
     aws iam delete-role-policy --role-name source-truth-dau-lambda-role --policy-name "$p" >/dev/null 2>&1 || true
   done
@@ -422,7 +427,7 @@ if [[ "$INCLUDE_SHARED" == true ]]; then
   # IAM index role: detach managed, delete inline + profile, then the role.
   aws iam remove-role-from-instance-profile --instance-profile-name source-truth-index-profile --role-name source-truth-index-role >/dev/null 2>&1 || true
   del "instance profile source-truth-index-profile" aws iam delete-instance-profile --instance-profile-name source-truth-index-profile
-  aws iam detach-role-policy --role-name source-truth-index-role --policy-arn arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore >/dev/null 2>&1 || true
+  detach_managed source-truth-index-role
   # Delete ALL inline policies before the role (delete-role fails if any remain). Enumerate
   # rather than name them (the set grew: s3-artifacts, secrets-read, cloudwatch-logs, …).
   for p in $(aws iam list-role-policies --role-name source-truth-index-role --query 'PolicyNames[]' --output text 2>/dev/null || echo ""); do
@@ -430,6 +435,7 @@ if [[ "$INCLUDE_SHARED" == true ]]; then
   done
   del "IAM role source-truth-index-role" aws iam delete-role --role-name source-truth-index-role
   # Runtime role: delete any inline policies, then the role.
+  detach_managed SourceTruthAgentRuntimeRole
   for p in $(aws iam list-role-policies --role-name SourceTruthAgentRuntimeRole --query 'PolicyNames[]' --output text 2>/dev/null || echo ""); do
     aws iam delete-role-policy --role-name SourceTruthAgentRuntimeRole --policy-name "$p" >/dev/null 2>&1 || true
   done
@@ -442,7 +448,6 @@ if [[ "$INCLUDE_SHARED" == true ]]; then
   fi   # cross-region guard
 fi
 
-say ok "teardown complete for $REGION"
 say info "verify no billable orphans:  aws ec2 describe-nat-gateways --region $REGION --filter Name=tag:Name,Values=source-truth-nat"
 
 # RETAINED BY DESIGN — these are never deleted by a default run, and staying silent about them
@@ -457,8 +462,13 @@ fi
 
 # Exit non-zero when anything actually failed, so CI and the operator can tell a partial
 # teardown from a clean one. The old script exited 0 unconditionally.
+#
+# The success line lives HERE, not above: printed unconditionally it sat directly above the
+# failure report, so an operator saw a green "complete" over a red "INCOMPLETE", and any wrapper
+# grepping for "teardown complete" reported success on a run that leaked a billable VPC.
 if [[ "$TEARDOWN_INCOMPLETE" -gt 0 ]]; then
   say err "teardown INCOMPLETE — ${TEARDOWN_INCOMPLETE} operation(s) failed:${LEFT_BEHIND}"
   say err "re-run this teardown; resources above may still be billable"
   exit 1
 fi
+say ok "teardown complete for $REGION"

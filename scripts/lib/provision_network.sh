@@ -300,7 +300,13 @@ if [[ "$FLOW_LOG_ID" == "None" || -z "$FLOW_LOG_ID" ]]; then
   # region (…-uswest2), so a locally-built "…-${REGION}" name (…-us-west-2) pointed at a bucket
   # that does not exist and create-flow-logs failed. Fall back to the same tr -d '-' rule
   # deploy-all.sh uses, for a standalone invocation with no config yet.
-  FLOW_BUCKET="$(sed -n 's/^ARTIFACT_BUCKET=//p' "$CONFIG" 2>/dev/null | tail -1)"
+  # Read via the shared helper, NOT an ad-hoc sed: env-utils' safe_source_env strips a trailing
+  # \r, and a config saved with CRLF line endings otherwise yields "bucket<CR>", producing
+  # --log-destination arn:aws:s3:::bucket<CR>/vpc-flow-logs/ and a creation failure that is only
+  # WARNED about — so the VPC silently ends up with no flow log, which is the exact outcome the
+  # earlier fixes to this block were written to end.
+  safe_source_env "$CONFIG" 2>/dev/null || true
+  FLOW_BUCKET="${ARTIFACT_BUCKET:-}"
   if [[ -z "$FLOW_BUCKET" ]]; then
     ACCOUNT="$(aws sts get-caller-identity --query Account --output text)"
     FLOW_BUCKET="source-truth-repo-${ACCOUNT}-$(printf '%s' "$REGION" | tr -d '-')"

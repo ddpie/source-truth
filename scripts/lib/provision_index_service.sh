@@ -241,7 +241,11 @@ arm_instance_resilience() {
   if [[ -n "$root_vol" && "$root_vol" != "None" ]]; then
     enc="$(aws ec2 describe-volumes --region "$REGION" --volume-ids "$root_vol" \
       --query 'Volumes[0].Encrypted' --output text 2>/dev/null || echo "")"
-    if [[ "$enc" == "False" ]]; then
+    # Normalise the case: --output text renders a JSON boolean as "False" on some AWS CLI
+    # versions and "false" on others. Comparing against one spelling made this warning a no-op
+    # against the other — and this is the ONLY place the condition is ever reported, since root
+    # encryption cannot be enabled in place.
+    if [[ "${enc,,}" == "false" ]]; then
       log warn "root volume $root_vol of $iid is NOT encrypted — encryption cannot be enabled in place;"
       log warn "  remediate by snapshot → encrypted copy → replace, or enable EBS encryption by default account-wide"
     fi

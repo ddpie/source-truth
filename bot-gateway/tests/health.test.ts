@@ -219,11 +219,13 @@ describe("health server", () => {
     try {
       const second = startHealthServer(addr.port, { logger });
       servers.push(second);
-      // Await the deterministic signal rather than sleeping a fixed interval.
+      // Await the deterministic signal rather than sleeping a fixed interval. The timeout is a
+      // failure guard only, and it MUST be cleared: leaving it armed after 'error' fires (which
+      // happens in a few ms) leaves a live timer at file teardown, which is what makes jest
+      // report "a worker process has failed to exit gracefully".
       await new Promise<void>((resolve) => {
-        const done = () => resolve();
-        second.once("error", done);
-        setTimeout(done, 2000); // failure guard only
+        const guard = setTimeout(resolve, 2000);
+        second.once("error", () => { clearTimeout(guard); resolve(); });
       });
       expect(uncaught).not.toHaveBeenCalled();
       expect(second.listening).toBe(false);
