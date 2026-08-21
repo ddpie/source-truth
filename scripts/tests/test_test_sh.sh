@@ -58,6 +58,9 @@ cp "$ROOT/scripts/lib/common.sh" "$TMP/scripts/lib/common.sh"
 # 使 --lint 在假仓里恒为非零 —— 两条「聚合」断言就变成永真：把 run_lint 整体改成
 # `return 0` 它们照样通过，而这正是它们要守的性质。
 printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n' > "$TMP/scripts/tests/validate_iam_policies.py"
+# 同理：run_lint 现在还调许可清单漂移校验。少了它，假仓的 --lint 又会恒为非零，
+# 下面那条「全部守卫通过时退出零」的正向断言就会失败 —— 它正是为了发现这种情况才加的。
+printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n' > "$TMP/scripts/tests/validate_license_manifest.py"
 printf '#!/usr/bin/env bash\nexit 1\n' > "$TMP/scripts/check-invariants.sh"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$TMP/scripts/check-versions.sh"
 bash "$TMP/scripts/test.sh" --lint >/dev/null 2>&1; lintfail_rc=$?

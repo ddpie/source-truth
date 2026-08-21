@@ -73,6 +73,12 @@ run_lint() {
   # iam:AttachRolePolicy without an iam:PolicyARN condition) from coming back.
   say step "lint：IAM 策略文档校验 validate_iam_policies"
   python3 "$ROOT/scripts/tests/validate_iam_policies.py" || rc=1
+  # The licence manifest was verified correct by hand once, at real cost, and then nothing in the
+  # repo referenced it — so the next npm install or pip freeze would have silently made it wrong.
+  # Set membership and versions are decidable offline from the lock files; licence STRINGS need the
+  # network and stay a release-time task.
+  say step "lint：许可清单漂移校验 validate_license_manifest"
+  python3 "$ROOT/scripts/tests/validate_license_manifest.py" || rc=1
   return "$rc"
 }
 
