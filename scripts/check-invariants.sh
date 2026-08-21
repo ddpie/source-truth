@@ -78,6 +78,31 @@ else
   ok "全局共享角色策略 Resource 未钉死 \${REGION}（多区域安全）"
 fi
 
+# 8. 不得出现非 aws-samples 的 GitHub slug 作为默认值
+#    发布仓的克隆、二进制下载都从默认 slug 取；默认值若指向个人账号，外部用户一执行就失败，
+#    或静默依赖一个私人仓库。这条曾经修好又被回退（deploy-all.sh 的 CODEGRAPH_SERVER_REPO），
+#    所以改由机器守卫，而不是靠人记得。
+slug_hits="$(grep -nE '(github\.com/|githubusercontent\.com/|:-)[A-Za-z0-9_.-]+/(source-truth|sample-code-qa-on-agentcore)' \
+  scripts/*.sh scripts/lib/*.sh README.md README_zh.md docs/runbook.md 2>/dev/null \
+  | grep -vE '(aws-samples|Interkarma)/' || true)"
+if [[ -n "$slug_hits" ]]; then
+  err "出现非 aws-samples 的 GitHub slug 默认值（外部用户会拉不到）："
+  printf '      %s\n' "$slug_hits" >&2
+else
+  ok "GitHub slug 默认值均为 aws-samples"
+fi
+
+# 9. 公开仓不得包含真实人名 / 客户环境 / 竞品名
+#    docs/design/ 由内部交付物导入，曾带负责人姓名、客户内网环境描述和竞品对比。这类内容进公开
+#    仓是隐私与保密问题，且一旦被翻译/引用就难以收回，所以在提交前拦下。
+pii_hits="$(grep -rlnE '曹豹|晨哥|老白|WorkBuddy|GenSpark' docs/ 2>/dev/null || true)"
+if [[ -n "$pii_hits" ]]; then
+  err "文档中残留真实人名 / 竞品名（公开仓不可含）："
+  printf '      %s\n' "$pii_hits" >&2
+else
+  ok "文档无真实人名 / 竞品名残留"
+fi
+
 if [[ $fail -ne 0 ]]; then
   echo "check-invariants: FAILED" >&2
   exit 1

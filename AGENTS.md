@@ -17,7 +17,7 @@ source-truth 是「代码为唯一依据」的飞书游戏研发代码问答助�
 独立 CodeGraph 索引服务两个有状态组件——后者持有唯一一份代码仓本地副本，定位代码和读文件也全部走
 HTTP 接口（不挂任何共享文件系统）。架构工作原理见 `docs/agent/architecture.md`。
 
-语言：Python（`agent-container/`）、TypeScript / Node 20（`bot-gateway/`、未来 `infra/` CDK）、
+语言：Python（`agent-container/`）、TypeScript / Node 24（`bot-gateway/`、未来 `infra/` CDK）、
 Bash（`scripts/`）。会话容器 ARM64-only。
 
 ## Setup & commands

@@ -73,7 +73,7 @@ DEFAULT_MAX_LIFETIME="28800"
 # fresh-machine / one-line-installer path). Must serve the ARM aarch64 / glibc>=2.38
 # 0.18.5 build. Two routes: `gh release download` (works for a PRIVATE repo via the
 # operator's gh auth — preferred) then a plain-curl URL (works once public / a mirror).
-CODEGRAPH_SERVER_REPO="${CODEGRAPH_SERVER_REPO:-ddpie/source-truth}"
+CODEGRAPH_SERVER_REPO="${CODEGRAPH_SERVER_REPO:-aws-samples/sample-code-qa-on-agentcore}"
 CODEGRAPH_SERVER_TAG="${CODEGRAPH_SERVER_TAG:-codegraph-server-v0.18.5}"
 CODEGRAPH_SERVER_URL_DEFAULT="https://github.com/${CODEGRAPH_SERVER_REPO}/releases/download/${CODEGRAPH_SERVER_TAG}/codegraph-server"
 LOCAL_MODE=false          # --local: this EC2 IS the index host; bootstrap in place, reuse its VPC/subnet

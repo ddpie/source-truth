@@ -1,6 +1,6 @@
 # bot-gateway
 
-飞书 Bot 长连接事件网关 + CardKit 流式渲染（**TypeScript / Node 20 长驻服务**）。
+飞书 Bot 长连接事件网关 + CardKit 流式渲染（**TypeScript / Node 24 长驻服务**）。
 
 ## 职责
 

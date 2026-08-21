@@ -76,16 +76,16 @@
 仓库公开时，裸 `curl` 即可：
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/<org>/sample-code-qa-on-agentcore/main/scripts/get.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/aws-samples/sample-code-qa-on-agentcore/main/scripts/get.sh)
 ```
 
 仓库私有时，本机先 `gh auth login`（一次），再用 `gh` 取引导脚本（带认证，无需公开仓库）：
 
 ```bash
-bash <(gh api repos/<org>/sample-code-qa-on-agentcore/contents/scripts/get.sh --jq '.content' | base64 -d)
+bash <(gh api repos/aws-samples/sample-code-qa-on-agentcore/contents/scripts/get.sh --jq '.content' | base64 -d)
 ```
 
-它把仓库克隆到当前目录的 `sample-code-qa-on-agentcore/`（私有仓自动走 `gh` 认证克隆），再进入交互式安装。`codegraph-server` 索引引擎缺失时由部署脚本自动下载，无需手动准备二进制。
+它把仓库克隆到当前目录的 `source-truth/`（可用 `SOURCE_TRUTH_DIR` 覆盖）（私有仓自动走 `gh` 认证克隆），再进入交互式安装。`codegraph-server` 索引引擎缺失时由部署脚本自动下载，无需手动准备二进制。
 
 已克隆仓库则直接跑脚本即可，离线测试无需 Docker / AWS：
 

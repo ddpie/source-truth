@@ -169,7 +169,7 @@ codegraph 索引占用内存较高，且随仓库增大而增长，按仓库规�
 
 首次部署约 10–20 分钟（bootstrap 与镜像构建均在本机串行执行，比一键部署略慢）。
 
-**中断后重新运行**：每一步均幂等，从中断处重新运行即可，无需从头执行。脚本已在实例上时，SSH 登录后重新运行 `bash /tmp/prepare-local-host.sh`（或 `cd sample-code-qa-on-agentcore && ./scripts/install.sh --local`）即可从中断处继续。若实例已创建、之后才中断，重新运行 `launch-host.sh` 会**自动复用该实例**（已停止的先启动），照常提示 SSH 私钥、重新传脚本并输出登录命令，不会重复创建；确需全新实例时加 `--new-host`。
+**中断后重新运行**：每一步均幂等，从中断处重新运行即可，无需从头执行。脚本已在实例上时，SSH 登录后重新运行 `bash /tmp/prepare-local-host.sh`（或 `cd source-truth && ./scripts/install.sh --local`）即可从中断处继续。若实例已创建、之后才中断，重新运行 `launch-host.sh` 会**自动复用该实例**（已停止的先启动），照常提示 SSH 私钥、重新传脚本并输出登录命令，不会重复创建；确需全新实例时加 `--new-host`。
 
 **四点需要注意**
 
@@ -178,7 +178,7 @@ codegraph 索引占用内存较高，且随仓库增大而增长，按仓库规�
 - **权限较大、建议专机专用**：`--local` 调用 AWS 用的是这台机器的**实例角色**（不是你本地的 profile——登录 EC2 后即不再可用），它既需建资源的权限，也需运行期权限，**范围偏大，这台机器不建议与其它业务共用**。角色名 `source-truth-index-role` 与默认部署共用（IAM 角色为账号级、不分区域）：`create-iam.sh` 幂等复用、只补权限不重建；但需注意，**若同账号已有默认部署在使用该角色，补上部署期权限后那台机器也会一并获得**——如需让默认部署保持最小权限，请换一个账号运行 `--local`。
 - **NAT 不可省略**：实例位于公有子网（有公网 IP 供 SSH），但 AgentCore Runtime 位于私有子网、经 **NAT** 访问 Bedrock——Runtime 的网卡由 AWS 托管、无公网 IP，无法经 IGW 访问外网，因此必须配置 NAT（固定费用约每月 $32 起）。bridge 端口（8080-8099）仅对同一安全组内成员开放，外部无法访问。
 
-**升级**：登录**同一台实例**（部署状态 `.local/` 均保存于其上），运行 `cd sample-code-qa-on-agentcore && git pull && ./scripts/deploy-all.sh --region <r> --local`。部署就地更新这台机器：重跑 bootstrap 落地新的基础代码、重建镜像、更新 runtime、重启网关与索引服务，实例 ID / 私有 IP / 已建好的 graph.db 均保留，不新建实例。重跑 bootstrap 与重启服务期间会有一段服务中断（时长与首次部署相当），建议在低峰期操作。
+**升级**：登录**同一台实例**（部署状态 `.local/` 均保存于其上），运行 `cd source-truth && git pull && ./scripts/deploy-all.sh --region <r> --local`。部署就地更新这台机器：重跑 bootstrap 落地新的基础代码、重建镜像、更新 runtime、重启网关与索引服务，实例 ID / 私有 IP / 已建好的 graph.db 均保留，不新建实例。重跑 bootstrap 与重启服务期间会有一段服务中断（时长与首次部署相当），建议在低峰期操作。
 
 ## 三、接入飞书
 
@@ -223,7 +223,9 @@ codegraph 索引占用内存较高，且随仓库增大而增长，按仓库规�
 # 查看网关状态 / 日志（经 SSM 进实例）：
 aws ssm start-session --region <r> --target <INDEX_SERVICE_INSTANCE>
 #   sudo systemctl status 'bot-gateway@*'              # 所有项目网关
-#   sudo journalctl -u bot-gateway@<项目> -f           # 期望日志：sdk_wsclient_started → sdk_wsclient_connected
+#   sudo tail -f /var/log/bot-gateway-<项目>.log        # 期望日志：sdk_wsclient_started → sdk_wsclient_connected
+#   （单元用 StandardOutput=append: 直接写文件，journalctl -u 只有启停记录，看不到应用日志；
+#     CloudWatch agent 同时把这个文件投到 /source-truth/bot-gateway）
 ```
 
 > **只能有一个网关实例连接同一个飞书应用**：飞书长连接是集群模式，每个事件只投给一个 client，
@@ -286,7 +288,8 @@ AgentCore 空闲时 CPU 免费、内存照常计费。调大延长 microVM 存�
 
 ```bash
 aws ssm start-session --region <r> --target <INDEX_SERVICE_INSTANCE>
-# 实例内：sudo journalctl -u bot-gateway@<项目> -f
+# 实例内：sudo tail -f /var/log/bot-gateway-<项目>.log      # 应用日志在文件里，不在 journald
+#         sudo systemctl status bot-gateway@<项目>          # 只看单元状态用这个
 ```
 
 关键事件（网关侧）：`invoke_start`（开始调用 runtime）、`card_sent`（卡片已发出）、

@@ -64,12 +64,56 @@ Full directory tree: [`docs/structure_en.md`](docs/structure_en.md)
 
 ## Prerequisites
 
+On the machine you deploy **from**:
+
 - **AWS account** with permissions for EC2, Bedrock, ECR, S3, Secrets Manager, IAM
 - **Bedrock AgentCore** access (Runtime API enabled in your region)
-- **Feishu (Lark) bot credentials** — App ID, App Secret, Verification Token (stored in Secrets Manager)
-- **codegraph-server** — the index engine binary (auto-downloaded by the deploy script if missing)
-- **Node.js 20+** — for bot-gateway
-- **Python 3.12+** — for agent-container and index-service
+- **AWS CLI v2** — v1 is not supported
+- **Session Manager plugin** — required for every verification and day-2 operation
+  ([install guide](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html));
+  it does not ship with the AWS CLI
+- **Docker** with a running daemon — Phase 4 builds the ARM64 agent image locally
+- **git**, and **`gh`** (authenticated via `gh auth login`) if your target repository is private
+- **Node.js 24** — for bot-gateway
+- **Python 3.11** (agent-container, matching its container base image) / **3.12** (index-service)
+- **`zip`** — optional, only for the DAU pre-aggregation Lambda
+
+Also required:
+
+- **Feishu (Lark) bot credentials** — App ID, App Secret, Bot Open ID. The installer creates the
+  Secrets Manager entry for you; you supply the values interactively.
+- **codegraph-server** — the index engine binary. See
+  [`docs/runbook.md`](docs/runbook.md) for how to obtain and stage it.
+
+## Cost
+
+This stack runs continuously, so it costs money while it is up. The floor is set by two
+always-on resources:
+
+| Resource | Rough cost |
+|----------|-----------|
+| NAT Gateway (one, always on) | ~$32/month + data processing |
+| Index host EC2 (`t4g.large` default) | ~$50/month on-demand |
+| Bedrock model invocations | per token, scales with question volume |
+| Glossary build (optional, one-off per repo) | can be **hundreds of dollars** on a large repo — see below |
+
+The glossary build runs a model over your source tree and is **uncapped by default**. On a
+14k-file repository it measured ~$372. Set `--glossary-max-files` to bound it, or leave the
+glossary off entirely. Full per-service inventory: [`docs/aws-services_en.md`](docs/aws-services_en.md).
+
+## Cleanup
+
+Tear everything down when you are finished — nothing expires on its own:
+
+```bash
+./scripts/teardown.sh --region <r> --dry-run   # review the deletion plan first
+./scripts/teardown.sh --region <r>             # delete this region's resources
+./scripts/teardown.sh --region <r> --include-shared   # also the account-level IAM roles + S3 bucket
+```
+
+A default run keeps a few account-level resources on purpose (Secrets Manager entries, CloudWatch
+log groups, the artifact bucket); teardown prints exactly what it retained so you can remove the
+rest by hand.
 
 ## Deployment
 
