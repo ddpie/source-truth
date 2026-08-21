@@ -33,9 +33,16 @@ curl() {
 }
 [[ "$(imds_field instance-id)" == "i-abc" ]]; check "imds_field reads instance-id" $?
 [[ "$(imds_field local-ipv4)" == "10.1.2.3" ]]; check "imds_field reads local-ipv4" $?
-# local mode must derive VPC/subnet via describe-instances, NOT IMDS mac paths
-grep -q 'describe-instances' "$F"; check "uses describe-instances for vpc/subnet/sg" $?
-! grep -q 'macs/.*security-group-ids' "$F"; check "does NOT scrape IMDS mac sg path" $?
+# local mode must derive VPC/subnet via describe-instances, NOT IMDS mac paths.
+# 这两条以前是 `grep -q 'describe-instances' "$F"` 和一条否定 grep：前者在全文有 8 处其它
+# describe-instances 调用，把整个 local-mode 分支（约 100 行）删掉它依然通过；后者是否定断言，
+# 永远不可能失败。改成只在 local-mode 分支内部找，删掉分支就会失败。
+_local_block="$(sed -n '/if \[\[ "\$LOCAL_MODE" == "true" \]\]/,/^fi$/p' "$F")"
+[[ -n "$_local_block" ]]; check "找到 local-mode 分支" $?
+printf '%s' "$_local_block" | grep -q 'describe-instances'
+check "local-mode 分支内用 describe-instances 推导 vpc/subnet/sg" $?
+printf '%s' "$_local_block" | grep -qv 'macs/.*security-group-ids'
+check "local-mode 分支内不刮 IMDS mac sg 路径" $?
 # local mode must wrap bootstrap with a timeout; --foreground keeps it in our process group so
 # tty access (tee streaming) doesn't get the tree stopped by SIGTTIN/SIGTTOU
 grep -qE 'timeout (--foreground )?[0-9].* bash .*bootstrap.sh|run_timeout .* bootstrap.sh' "$F"; check "bootstrap wrapped in a timeout" $?
