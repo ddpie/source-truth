@@ -138,9 +138,18 @@ while [[ $# -gt 0 ]]; do
     # Tenant domain: feishu (China) or lark (international). Drives BOTH the gateway's event
     # long-connection and its REST base — they must not be set independently.
     --feishu-domain)
-      case "$2" in
-        feishu|lark) FEISHU_DOMAIN="$2" ;;
+      case "$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')" in
+        feishu|lark) FEISHU_DOMAIN="$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')" ;;
         *) say err "--feishu-domain must be 'feishu' (China) or 'lark' (international), got '$2'"; exit 2 ;;
+      esac
+      shift 2 ;;
+    # Card / message language. Separate from the tenant domain because they are genuinely
+    # independent (a China tenant may want English cards), but the DEFAULT is derived from the
+    # domain below, since an international tenant getting Chinese cards is never intentional.
+    --locale)
+      case "$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')" in
+        zh|en) LOCALE="$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')" ;;
+        *) say err "--locale must be 'zh' or 'en', got '$2'"; exit 2 ;;
       esac
       shift 2 ;;
     --idle-timeout) IDLE_TIMEOUT="$2"; shift 2 ;;
@@ -190,9 +199,29 @@ REGION="${REGION:-${DEPLOY_REGION:-}}"
 MODEL="${MODEL:-${DEPLOY_MODEL:-$DEFAULT_MODEL}}"
 # Tenant domain, same flag > persisted > default chain as the settings above. Persisted so a
 # per-project deploy (deploy_project.sh) and every later re-run inherit it without the flag.
-FEISHU_DOMAIN="${FEISHU_DOMAIN:-${DEPLOY_FEISHU_DOMAIN:-feishu}}"
+# Re-validated here because this chain also accepts an inherited ENVIRONMENT value, which never
+# passed through the flag's case statement — the strict gate was on the path least likely to be
+# wrong, while the unvalidated one was the path whose value gets persisted.
+FEISHU_DOMAIN="$(printf '%s' "${FEISHU_DOMAIN:-${DEPLOY_FEISHU_DOMAIN:-feishu}}" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
+case "$FEISHU_DOMAIN" in
+  feishu|lark) ;;
+  *) say err "FEISHU_DOMAIN must be 'feishu' or 'lark', got '$FEISHU_DOMAIN'"; exit 2 ;;
+esac
 export FEISHU_DOMAIN
-update_env "$CONFIG_FILE" DEPLOY_FEISHU_DOMAIN "$FEISHU_DOMAIN"
+# Locale default is DERIVED from the tenant: an international Lark deploy with Chinese cards is a
+# plumbing accident, not a choice. config/i18n.json ships a complete 'en' bundle and the gateway
+# honours it; until now nothing set LOCALE at all, so ${LOCALE:-zh} always resolved to zh and
+# activate_gateway.sh rewrote LOCALE='zh' on every activation, reverting any hand-edit.
+if [[ -z "${LOCALE:-}" ]]; then
+  if [[ -n "${DEPLOY_LOCALE:-}" ]]; then LOCALE="$DEPLOY_LOCALE"
+  elif [[ "$FEISHU_DOMAIN" == "lark" ]]; then LOCALE="en"
+  else LOCALE="zh"; fi
+fi
+case "$LOCALE" in
+  zh|en) ;;
+  *) say err "LOCALE must be 'zh' or 'en', got '$LOCALE'"; exit 2 ;;
+esac
+export LOCALE
 # Keep the operator's declared choice for persistence (DEPLOY_MODEL should record what
 # they asked for, not a per-region derivative), but the RUNTIME needs a profile that
 # actually exists in THIS region. The default is a global.* profile; many regions
@@ -303,7 +332,16 @@ preflight_agentcore() {
 # cannot proceed without it. Skipped when the image phase is skipped (docker not needed).
 preflight_docker() {
   skip image && return 0
-  command -v docker >/dev/null || return 0   # missing binary handled at Phase 4's require_cmd
+  # A MISSING docker binary used to return 0 here and be caught by Phase 4's require_cmd — but
+  # Phase 2 creates the NAT gateway (billing starts at creation) and Phase 3 launches and
+  # bootstraps the EC2 first, so the operator paid for ~10 minutes of infrastructure to be told
+  # their machine cannot build the image. Same class as the arm64 check this function now owns.
+  if ! command -v docker >/dev/null; then
+    say err "docker not found — Phase 4 builds the ARM64 agent image and cannot proceed without it."
+    say err "  → install Docker (with buildx and arm64 emulation), or pass --skip image if the image is already in ECR."
+    [[ "$DRY_RUN" == true ]] || exit 1
+    return 0
+  fi
   if ! run_timeout 20 docker info >/dev/null 2>&1; then
     say err "docker is installed but its daemon isn't running — Phase 4 (image build) needs it."
     say err "  → start Docker Desktop (or dockerd), wait until ready, then re-run. Verify: docker info"
@@ -408,6 +446,8 @@ if [[ "$DRY_RUN" != true ]]; then
   update_env "$CONFIG_FILE" DEPLOY_INSTANCE_TYPE "$INSTANCE_TYPE"
   update_env "$CONFIG_FILE" DEPLOY_MAX_FILES "$MAX_FILES"
   update_env "$CONFIG_FILE" DEPLOY_GLOSSARY_MAX_FILES "$GLOSSARY_MAX_FILES"
+  update_env "$CONFIG_FILE" DEPLOY_FEISHU_DOMAIN "$FEISHU_DOMAIN"
+  update_env "$CONFIG_FILE" DEPLOY_LOCALE "$LOCALE"
   update_env "$CONFIG_FILE" DEPLOY_ROOT_VOLUME_GB "$ROOT_VOLUME_GB"
   # idle-timeout / max-lifetime 的消费方是 deploy_project.sh（读 DEPLOY_IDLE_TIMEOUT /
   # DEPLOY_MAX_LIFETIME）。必须持久化+export，否则 --idle-timeout 只解析不生效（死旗子）。

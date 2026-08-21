@@ -51,6 +51,11 @@ if [[ -f docs/structure_zh.md ]]; then
   done <<< "$doc_dirs"
   while IFS= read -r d; do
     [[ -z "$d" || "$d" == .* ]] && continue
+    # Skip anything git already ignores. The dot-prefix skip above covers .local/ and friends, but
+    # NOT non-dotted generated dirs — venv/, coverage/, dist/, reports/, cdk.out/. A developer who
+    # follows the README and creates a virtualenv in the repo root would fail this lint, and an
+    # unexplained red in the lint layer is how people learn to stop running the suite.
+    git check-ignore -q "$d" 2>/dev/null && continue
     grep -qE "^${d}/" docs/structure_zh.md \
       || { err "顶层目录未收录进 structure_zh.md: $d（改顶层目录须同步结构文档）"; struct_ok=0; }
   done <<< "$disk_dirs"

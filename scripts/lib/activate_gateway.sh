@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # activate_gateway.sh <region> <instance_id> <runtime_arn> <feishu_secret_id> [locale] [log_hash_salt] [feishu_api_base] [idle_timeout] [bucket]
 # Requires PROJECT_ID in the environment (which project's gateway to (re)activate).
+# Also reads FEISHU_DOMAIN from the environment (feishu|lark, default feishu) — the tenant the
+# gateway connects to. Documented here because a caller that forgets it silently reverts an
+# international-Lark gateway to the China endpoint on the next activation.
 #
 # Writes /etc/bot-gateway-<projectId>.env on the index-service host (which also runs the
 # gateways, see index-service/bootstrap.sh) and enable/(re)starts bot-gateway@<projectId> — all
@@ -65,10 +68,24 @@ PROJECT_ID='${PROJECT_ID}'"
 LOG_HASH_SALT='${LOG_HASH_SALT}'"
 [[ -n "$FEISHU_API_BASE" ]] && ENV_BODY="${ENV_BODY}
 FEISHU_API_BASE='${FEISHU_API_BASE}'"
-# Tenant domain: drives BOTH the event long-connection and the REST base in the gateway. Emitted
-# only when non-default so an existing deploy's env file is unchanged.
-[[ -n "${FEISHU_DOMAIN:-}" && "${FEISHU_DOMAIN}" != "feishu" ]] && ENV_BODY="${ENV_BODY}
-FEISHU_DOMAIN='${FEISHU_DOMAIN}'"
+# FEISHU_API_BASE overrides only the REST base, while FEISHU_DOMAIN drives the event socket too.
+# Both index.ts and feishu-http.ts state that setting one without the other yields an app that
+# authenticates and then never receives events — and this script was what made that state
+# reachable, by emitting the two from independent conditionals. Refuse the contradiction here.
+if [[ -n "$FEISHU_API_BASE" ]]; then
+  case "${FEISHU_DOMAIN:-feishu}:$FEISHU_API_BASE" in
+    feishu:*larksuite*|lark:*feishu.cn*)
+      echo "activate_gateway: FEISHU_API_BASE ($FEISHU_API_BASE) contradicts FEISHU_DOMAIN (${FEISHU_DOMAIN:-feishu}) — the REST base and the event socket would target different tenants, so the bot would authenticate and then never receive an event. Set both consistently, or unset FEISHU_API_BASE and let the domain drive it." >&2
+      exit 2 ;;
+  esac
+fi
+# Tenant domain: drives BOTH the event long-connection and the REST base in the gateway. Always
+# emitted, including the default: "which tenant is this gateway on" is the FIRST question when a
+# bot is silent, and an absent line cannot answer it — omitting it on the default value meant the
+# env file was silent for exactly the population most likely to be misconfigured. The file is
+# rewritten wholesale per activation, so lark->feishu still correctly drops back to feishu.
+ENV_BODY="${ENV_BODY}
+FEISHU_DOMAIN='${FEISHU_DOMAIN:-feishu}'"
 # The runtime's idle timeout (seconds) — the gateway derives its session-reuse TTL
 # from this so "reusable on the gateway" never outlives "still warm on AgentCore".
 [[ -n "$IDLE_TIMEOUT" ]] && ENV_BODY="${ENV_BODY}

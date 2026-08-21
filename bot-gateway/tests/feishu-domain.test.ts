@@ -1,72 +1,103 @@
 /**
- * feishu-domain.test.ts — the tenant-domain switch.
+ * The tenant switch: one env var must drive BOTH the event long-connection and the REST base.
  *
- * The failure this guards is asymmetric and quiet: the REST base URL honoured a domain setting
- * while the event long-connection did not, so an international Lark app authenticated fine on
- * REST calls and then never received a single event. Nothing surfaced the mismatch — the gateway
- * looked healthy. So the invariant worth pinning is not "lark maps to larksuite" on its own, it
- * is that BOTH sides derive from the same input.
+ * These assert VALUES, not source text. The first version of this file matched the WSClient call
+ * site with regexes, which could not fail for an inverted ternary — `FEISHU_DOMAIN === "lark" ?
+ * Domain.Feishu : Domain.Lark` satisfied both `/domain:/` and `/FEISHU_DOMAIN/` while meaning the
+ * exact opposite. Since both transports now resolve through src/feishu-domain.ts, the agreement
+ * is structural and what remains to pin is the mapping itself.
  */
+import * as lark from "@larksuiteoapi/node-sdk";
+import { resolveTenant, wsDomainFor, restBaseFor } from "../src/feishu-domain";
 
-const REST_MODULE = "../src/feishu-http";
-
-function restBaseFor(env: Record<string, string | undefined>): string {
-  const saved = process.env;
-  // Swap in a fresh copy rather than deleting computed keys off the live object: a dynamic
-  // delete is both an eslint violation here and easy to get subtly wrong on restore.
-  const next: NodeJS.ProcessEnv = { ...saved };
-  for (const [k, v] of Object.entries(env)) {
-    if (v === undefined) next[k] = undefined;
-    else next[k] = v;
-  }
-  process.env = next;
-  let base: string;
-  try {
-    jest.resetModules();
-    // The module reads env at import time, which is why it has to be re-imported per case.
-    base = (require(REST_MODULE) as { FEISHU_API_BASE_FOR_TEST?: string }).FEISHU_API_BASE_FOR_TEST
-      ?? "";
-  } finally {
-    process.env = saved;
-  }
-  return base;
-}
-
-describe("tenant domain", () => {
-  it("defaults to Feishu (China) when unset", () => {
-    expect(restBaseFor({ FEISHU_DOMAIN: undefined, FEISHU_API_BASE: undefined }))
-      .toBe("https://open.feishu.cn");
+describe("tenant resolution", () => {
+  it("treats unset and empty as the China tenant (the documented default)", () => {
+    expect(resolveTenant(undefined)).toBe("feishu");
+    expect(resolveTenant("")).toBe("feishu");
+    expect(resolveTenant("   ")).toBe("feishu");
   });
 
-  it("selects the international Lark base for FEISHU_DOMAIN=lark", () => {
-    expect(restBaseFor({ FEISHU_DOMAIN: "lark", FEISHU_API_BASE: undefined }))
-      .toBe("https://open.larksuite.com");
+  it("accepts both tenants case-insensitively and with surrounding whitespace", () => {
+    expect(resolveTenant("lark")).toBe("lark");
+    expect(resolveTenant("LARK")).toBe("lark");
+    expect(resolveTenant(" Lark\n")).toBe("lark");
+    expect(resolveTenant("feishu")).toBe("feishu");
+    expect(resolveTenant("FeiShu")).toBe("feishu");
   });
 
-  it("is case- and whitespace-insensitive", () => {
-    expect(restBaseFor({ FEISHU_DOMAIN: " LARK ", FEISHU_API_BASE: undefined }))
-      .toBe("https://open.larksuite.com");
+  it("returns null for a value that was set but is unrecognised, so the caller can fail loudly", () => {
+    // Not "falls back to feishu": a typo means the operator's app is on the other tenant, and a
+    // silent fallback leaves a gateway that looks healthy and receives nothing.
+    expect(resolveTenant("larksuite")).toBeNull();
+    expect(resolveTenant("feishu.cn")).toBeNull();
+    expect(resolveTenant("international")).toBeNull();
+  });
+});
+
+describe("transport targets", () => {
+  it("maps each tenant to its own SDK domain", () => {
+    expect(wsDomainFor("lark")).toBe(lark.Domain.Lark);
+    expect(wsDomainFor("feishu")).toBe(lark.Domain.Feishu);
   });
 
-  it("falls back to Feishu on an unrecognised value rather than breaking the gateway", () => {
-    expect(restBaseFor({ FEISHU_DOMAIN: "bogus", FEISHU_API_BASE: undefined }))
-      .toBe("https://open.feishu.cn");
+  it("never maps the two tenants to the same socket domain", () => {
+    // This is the assertion an inverted ternary cannot survive, and the reason the old
+    // source-text version of this test was worthless.
+    expect(wsDomainFor("lark")).not.toBe(wsDomainFor("feishu"));
   });
 
-  it("lets an explicit FEISHU_API_BASE win, for a proxy or private deployment", () => {
-    expect(restBaseFor({ FEISHU_DOMAIN: "lark", FEISHU_API_BASE: "https://proxy.internal" }))
-      .toBe("https://proxy.internal");
+  it("maps each tenant to its own REST base", () => {
+    expect(restBaseFor("feishu")).toBe("https://open.feishu.cn");
+    expect(restBaseFor("lark")).toBe("https://open.larksuite.com");
   });
 
-  it("derives the event socket domain from the SAME variable as the REST base", () => {
-    // Static assertion: index.ts must pass a domain to WSClient, and it must come from
-    // FEISHU_DOMAIN. Wiring only the REST side is the exact regression that shipped.
-    const fs = require("node:fs") as typeof import("node:fs");
-    const src = fs.readFileSync(require.resolve("../src/index.ts"), "utf8");
-    const wsBlock = src.slice(src.indexOf("new lark.WSClient("));
-    const ctor = wsBlock.slice(0, wsBlock.indexOf("loggerLevel"));
-    expect(ctor).toMatch(/domain:/);
-    expect(ctor).toMatch(/FEISHU_DOMAIN/);
-    expect(src).toMatch(/FEISHU_DOMAIN\s*=\s*\(\(\)/); // validated once, at one declaration site
+  it("keeps the socket domain and the REST base on the SAME tenant", () => {
+    // The original bug: REST honoured the override while the socket silently stayed on Feishu.
+    for (const tenant of ["feishu", "lark"] as const) {
+      const isLark = tenant === "lark";
+      expect(wsDomainFor(tenant) === lark.Domain.Lark).toBe(isLark);
+      expect(restBaseFor(tenant).includes("larksuite")).toBe(isLark);
+    }
+  });
+});
+
+describe("REST base wiring in feishu-http", () => {
+  const load = (env: Record<string, string | undefined>) => {
+    const saved = process.env;
+    // Build the replacement env by omission rather than by deleting computed keys: an explicit
+    // `undefined` in `env` means "this variable must be absent", and copying is both clearer and
+    // free of the dynamic-delete lint.
+    const next: NodeJS.ProcessEnv = {};
+    for (const [k, v] of Object.entries(saved)) {
+      if (!(k in env)) next[k] = v;
+    }
+    for (const [k, v] of Object.entries(env)) {
+      if (v !== undefined) next[k] = v;
+    }
+    process.env = next;
+    let base: string;
+    try {
+      jest.resetModules();
+      base = require("../src/feishu-http").FEISHU_API_BASE_FOR_TEST as string;
+    } finally {
+      process.env = saved;
+    }
+    return base;
+  };
+
+  it("derives the base from the tenant", () => {
+    expect(load({ FEISHU_DOMAIN: "lark", FEISHU_API_BASE: undefined })).toBe("https://open.larksuite.com");
+    expect(load({ FEISHU_DOMAIN: "feishu", FEISHU_API_BASE: undefined })).toBe("https://open.feishu.cn");
+    expect(load({ FEISHU_DOMAIN: undefined, FEISHU_API_BASE: undefined })).toBe("https://open.feishu.cn");
+  });
+
+  it("still lets an explicit FEISHU_API_BASE win, for a proxy or private deployment", () => {
+    expect(load({ FEISHU_DOMAIN: "lark", FEISHU_API_BASE: "https://proxy.internal" })).toBe("https://proxy.internal");
+  });
+
+  it("falls back to the China base rather than crashing on an unrecognised value", () => {
+    // feishu-http is imported by modules that must not fail to load; index.ts owns the fatal
+    // check, so this layer degrades instead of throwing at import time.
+    expect(load({ FEISHU_DOMAIN: "bogus", FEISHU_API_BASE: undefined })).toBe("https://open.feishu.cn");
   });
 });

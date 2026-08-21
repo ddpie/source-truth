@@ -1,0 +1,77 @@
+# The only mechanical gate in this repository.
+#
+# AGENTS.md and scripts/test.sh used to claim a pre-push hook enforced the offline suite. No such
+# hook existed — no lefthook.yml, no .pre-commit-config.yaml, and .git/hooks/pre-push was the stock
+# git-lfs one. Every guard in scripts/tests/ ran only when a human remembered to type the command,
+# and test.sh would report an unqualified pass having silently skipped whole suites whose
+# dependencies were absent. A repository that takes external pull requests cannot rely on a local
+# hook anyway, since a contributor's machine is not ours to configure.
+#
+# Deliberately NOT a lefthook adoption: CI covers the same ground, needs no per-developer install,
+# and is the only thing that can gate a fork's pull request.
+name: ci
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  offline-suite:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: bot-gateway/package-lock.json
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Every dependency the suite would otherwise SKIP. Installing them is the point: a green run
+      # over skipped suites is exactly the misreport this workflow exists to prevent.
+      - name: Install gateway dependencies
+        working-directory: bot-gateway
+        run: npm ci
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r index-service/requirements.txt
+          pip install -r agent-container/requirements.txt
+          pip install pytest ruff boto3
+
+      # GNU tar and rsync are what the deploy itself hard-fails on; assert the runner matches the
+      # documented prerequisites so a doc/reality drift shows up here rather than mid-deploy.
+      - name: Verify deploy prerequisites are present
+        run: |
+          tar --version | head -1 | grep -q 'GNU tar' || { echo "GNU tar required"; exit 1; }
+          command -v rsync >/dev/null || { echo "rsync required"; exit 1; }
+
+      - name: Offline suite
+        run: bash scripts/test.sh
+
+      # A skipped suite must not pass in CI, whatever it does locally. This is the assertion that
+      # keeps the workflow honest: if a dependency step above silently stops working, the suite
+      # would go back to reporting green over nothing.
+      - name: Fail if any suite was skipped
+        run: |
+          out="$(bash scripts/test.sh 2>&1)" || { printf '%s\n' "$out"; exit 1; }
+          if printf '%s\n' "$out" | grep -q 'SKIPPED:'; then
+            printf '%s\n' "$out" | grep 'SKIPPED:'
+            echo "::error::a test suite was skipped in CI — its dependencies must be installed above"
+            exit 1
+          fi

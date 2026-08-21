@@ -9,8 +9,12 @@
 #   ./scripts/test.sh --full     离线套件 + e2e（对已部署 Runtime 真实问答；缺部署自动 skip）+ smoke（占位）
 #   ./scripts/test.sh --help     本说明
 #
-# 退出码 0 = 全绿。pre-push 跑离线默认（见 lefthook.yml，p1）。
+# 退出码 0 = 全绿，但"全绿"会连同被跳过的套件一起报告 —— 见 SKIPPED。
+# 没有 git hook：本仓库不带 lefthook.yml / pre-commit 配置，唯一的机械闸口是 CI
+# (.github/workflows/ci.yml)。本地请在推之前自行运行本脚本。
 set -uo pipefail
+# 被跳过的套件名；结尾的判定行会一并报告，避免"全绿"掩盖没跑的断言。
+SKIPPED=()
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT" || exit 1
@@ -31,7 +35,7 @@ usage() {
   --full       离线套件 + smoke/e2e（需 Docker/AWS）
   -h, --help   本说明
 
-退出码 0 = 全绿。pre-push 跑离线默认（见 lefthook.yml，p1）。
+退出码 0 = 全绿（被跳过的套件会在结尾列出）。机械闸口是 CI，不是 git hook。
 EOF
 }
 
@@ -90,7 +94,7 @@ run_unit() {
       ran=$((ran + ${#py_dirs[@]}))
       pytest -q "${py_dirs[@]}" || rc=1
     else
-      say warn "skip pytest（未安装）"
+      say warn "skip pytest（未安装）"; SKIPPED+=("pytest")
     fi
   fi
   # 3) TypeScript 单元测试（jest）；有 jest.config + node_modules 才跑。
@@ -100,7 +104,7 @@ run_unit() {
       ran=$((ran + 1))
       ( cd "$ROOT/$d" && npx jest -c jest.config.cjs --no-coverage --passWithNoTests ) || rc=1
     elif [[ -f "$ROOT/$d/jest.config.cjs" ]]; then
-      say warn "skip jest（${d} 依赖未安装）"
+      say warn "skip jest（${d} 依赖未安装）"; SKIPPED+=("jest")
     fi
   done
   if [[ "$ran" -eq 0 ]]; then
@@ -122,7 +126,7 @@ run_typecheck() {
       fi
     done
   else
-    say warn "skip ruff（未安装）"
+    say warn "skip ruff（未安装）"; SKIPPED+=("ruff")
   fi
   # TypeScript（bot-gateway）：有 tsconfig 才跑 tsc --noEmit。
   if [[ -f "$ROOT/bot-gateway/tsconfig.json" ]]; then
@@ -130,7 +134,7 @@ run_typecheck() {
       say info "tsc --noEmit bot-gateway"
       ( cd "$ROOT/bot-gateway" && ./node_modules/.bin/tsc --noEmit ) || rc=1
     else
-      say warn "skip tsc（bot-gateway 依赖未安装）"
+      say warn "skip tsc（bot-gateway 依赖未安装）"; SKIPPED+=("tsc")
     fi
   fi
   # ESLint（bot-gateway）：AGENTS.md 约定「ESLint 即格式化器」，纳入离线套件。
@@ -139,7 +143,7 @@ run_typecheck() {
       say info "eslint bot-gateway"
       ( cd "$ROOT/bot-gateway" && ./node_modules/.bin/eslint src/ tests/ ) || rc=1
     else
-      say warn "skip eslint（bot-gateway 依赖未安装）"
+      say warn "skip eslint（bot-gateway 依赖未安装）"; SKIPPED+=("eslint")
     fi
   fi
   return "$rc"
@@ -159,14 +163,14 @@ run_offline() {
 run_e2e() {
   say step "e2e：对已部署 Runtime 跑真实端到端问答"
   if ! have_cmd python3; then
-    say warn "skip e2e（未安装 python3）"
+    say warn "skip e2e（未安装 python3）"; SKIPPED+=("e2e")
     return 0
   fi
   python3 "$ROOT/scripts/e2e-probe.py"
   local erc=$?
   case "$erc" in
     0) say ok "e2e：全部探针通过" ; return 0 ;;
-    2) say warn "skip e2e（缺依赖 / 未部署 / 无 projects.json）" ; return 0 ;;
+    2) say warn "skip e2e（缺依赖 / 未部署 / 无 projects.json）"; SKIPPED+=("e2e") ; return 0 ;;
     *) say err "e2e：有探针失败" ; return 1 ;;
   esac
 }
@@ -204,7 +208,15 @@ main() {
   local rc=$?
 
   if [[ "$rc" -eq 0 ]]; then
-    say ok "test.sh（${mode}）：全绿"
+    if [[ ${#SKIPPED[@]} -gt 0 ]]; then
+      # A green light over a silently-skipped suite is a misreport, not a pass: a fresh clone with
+      # no `npm ci` runs zero TypeScript tests and used to print an unqualified 全绿 — ~2% of the
+      # assertion count, reported as 100%. Name the gaps on the verdict line itself.
+      say ok "test.sh（${mode}）：全绿 — 但已跳过 ${#SKIPPED[@]} 个套件 / SKIPPED: ${SKIPPED[*]}"
+      say warn "跳过的套件未做任何断言；装齐依赖后重跑才算真正通过 / install deps and re-run for a real pass"
+    else
+      say ok "test.sh（${mode}）：全绿"
+    fi
   else
     say err "test.sh（${mode}）：有失败"
   fi

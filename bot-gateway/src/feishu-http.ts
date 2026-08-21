@@ -20,17 +20,14 @@
  * are not in the per-frame animation loop, so their spawn cost doesn't matter.
  */
 
-// REST base URL. Derived from the SAME FEISHU_DOMAIN switch that selects the event
+import { resolveTenant, restBaseFor } from "./feishu-domain";
+
+// REST base URL. Derived from the SAME resolver that selects the event
 // long-connection's domain in src/index.ts — setting only one of the two produced an app that
 // authenticated on REST and never received events. An explicit FEISHU_API_BASE still wins, for
 // a proxy or a private deployment.
-const DOMAIN_BASES: Record<string, string> = {
-  feishu: "https://open.feishu.cn",
-  lark: "https://open.larksuite.com",
-};
 const BASE = process.env.FEISHU_API_BASE
-  ?? DOMAIN_BASES[(process.env.FEISHU_DOMAIN ?? "feishu").trim().toLowerCase()]
-  ?? DOMAIN_BASES.feishu;
+  ?? restBaseFor(resolveTenant(process.env.FEISHU_DOMAIN) ?? "feishu");
 
 /** Test seam: the resolved base, so the domain derivation can be asserted without a network call. */
 export const FEISHU_API_BASE_FOR_TEST = BASE;

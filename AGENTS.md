@@ -28,7 +28,7 @@ Bash（`scripts/`）。会话容器 ARM64-only。
 ./scripts/check-invariants.sh   # 结构自检：AGENTS / structure / 双语配对 / 顶层目录
 
 # 各组件依赖见其 README（agent-container: uv；bot-gateway: npm）。
-./scripts/test.sh           # 已实现。离线默认：lint + unit + typecheck（pre-push 跑这个）
+./scripts/test.sh           # 已实现。离线默认：lint + unit + typecheck（CI 跑这个）
 ./scripts/test.sh --full    # 已实现。加 e2e（对已部署 Runtime 跑真实问答，缺部署自动 skip）+ smoke（仍占位）
 # 一键部署（已实现、全新账号/区域可跑、幂等）：artifacts→IAM→network→index-service→镜像→Runtime→gateway
 # 仓库不再走命令行，改由 .local/projects.json 配置（推荐 install.sh 交互式添加项目）
@@ -67,7 +67,8 @@ Agent）、`bot-gateway/`（TS 网关 + CardKit）、`index-service/`（CodeGrap
 
 `./scripts/test.sh`（**已实现**）是单一入口。离线默认安全（lint + unit + typecheck）；`--full` 才跑
 需要 AWS 的 e2e（`scripts/e2e-probe.py`：对已部署 Runtime 跑真实问答，缺部署自动 skip）与 smoke（仍占位）。
-pre-push 跑离线套件。结构自检 `./scripts/check-invariants.sh` 由 lint 层调用。
+CI（`.github/workflows/ci.yml`）跑离线套件；本仓库不带 git hook，本地请自行在推前运行。
+结构自检 `./scripts/check-invariants.sh` 由 lint 层调用。
 
 ## Critical constraints（详见 docs/agent/invariants.md）
 
@@ -88,12 +89,12 @@ pre-push 跑离线套件。结构自检 `./scripts/check-invariants.sh` 由 lint
   产物只读服务 + grounding 校验三重约束。完整边界与机制见 `docs/agent/invariants.md` §6 与
   `docs/agent/glossary.md`。
 
-`scripts/check-invariants.sh`（已实现；将在 p1 接入 pre-commit）强制其中可自动检查的子集。
+`scripts/check-invariants.sh`（已实现；由 `test.sh --lint` 与 CI 调用）强制其中可自动检查的子集。
 
 ## Boundaries
 
 **Never:**
-- 提交密钥 / token（gitleaks pre-commit；飞书凭证走 Secrets Manager——`install.sh` 交互式创建
+- 提交密钥 / token（飞书凭证走 Secrets Manager——`install.sh` 交互式创建
   `source-truth/feishu-<projectId>` 密钥，bot-gateway 的 `run.sh` 启动时取出注入进程环境，不落盘、不入仓库）。
 - 手改生成物。
 - 让 MVP 越过只读边界（写回代码、跑引擎、提交）。
@@ -109,7 +110,8 @@ pre-push 跑离线套件。结构自检 `./scripts/check-invariants.sh` 由 lint
 - Conventional Commits 前缀（`feat:`、`fix:`、`docs:`、`chore(deps):`）。
 - 分支命名 `<type>/<short-kebab-summary>`，与 commit 前缀一致。
 - **不要**加 `Co-Authored-By` 或任何 AI 署名 trailer。
-- pre-push 跑 `./scripts/test.sh`，通过再推。
+- 推之前跑 `./scripts/test.sh`，通过再推（没有 git hook 替你做这件事；CI 会复核）。
+- 注意 `test.sh` 结尾的 `SKIPPED:` 行：依赖缺失的套件会被跳过，此时的"全绿"并不代表跑过。
 
 ## Key resources
 

@@ -31,24 +31,51 @@ CONFIG_FILE="$ROOT/.local/deploy-config"
 ASSUME_YES=false
 LOCAL_MODE=false
 LOCAL_FLAG=()   # forwarded to deploy-all.sh: (--local) in single-host mode, else empty
+DOMAIN_FLAG=()  # forwarded to deploy-all.sh: (--feishu-domain lark) for an international tenant
+LOCALE_FLAG=()  # forwarded to deploy-all.sh: (--locale en) for English cards
+GMF_FLAG=()     # forwarded to deploy-all.sh: (--glossary-max-files N) cost cap
+REGION_PREFILL="" # pre-fills the region prompt instead of being silently dropped
 
 # _imds_region / _is_index_host : is THIS machine the source-truth index host? (IMDSv2). Used to
 # auto-enter single-host mode — see the LOCAL_MODE auto-detect below.
+# The timeouts are load-bearing, not defensive dressing: this runs before the banner, so on a
+# laptop behind a VPN, in a container, or on any network that BLACKHOLES link-local instead of
+# refusing it, an untimed curl means the first thing a first-time user sees is a silent terminal
+# with no output at all and no idea whether the installer is working.
 _imds_get() {   # _imds_get <metadata-path>
   local tok
-  tok="$(curl -fsS -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 60" 2>/dev/null || true)"
-  curl -fsS ${tok:+-H "X-aws-ec2-metadata-token: $tok"} "http://169.254.169.254/latest/meta-data/$1" 2>/dev/null || true
+  tok="$(curl -fsS --connect-timeout 1 --max-time 2 -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 60" 2>/dev/null || true)"
+  curl -fsS --connect-timeout 1 --max-time 2 ${tok:+-H "X-aws-ec2-metadata-token: $tok"} "http://169.254.169.254/latest/meta-data/$1" 2>/dev/null || true
 }
 _imds_region() { _imds_get "placement/region"; }
 _is_index_host() { [[ "$(_imds_get "iam/security-credentials/")" == *source-truth-index* ]]; }
 
-for a in "$@"; do
+# Arg parsing takes VALUES, so it cannot be a `for a in "$@"` loop. It used to be one, with no
+# default case — which meant every flag this script does not itself implement was silently
+# discarded. The costly one was --feishu-domain: README tells an international-Lark operator to
+# pass it to the documented entry point (this script, via get.sh), the token was dropped on the
+# floor, deploy-all defaulted to feishu AND PERSISTED it, and the operator got precisely the
+# never-receives-events failure the README warned them about while having done as instructed.
+# --region and --glossary-max-files were swallowed the same way, the latter meaning an uncapped
+# (potentially hundreds of dollars) glossary build from a command that looked like it capped it.
+while [[ $# -gt 0 ]]; do
+  a="$1"
   case "$a" in
     -y|--yes) ASSUME_YES=true ;;
     --local) LOCAL_MODE=true; LOCAL_FLAG=(--local) ;;
+    --feishu-domain) shift; DOMAIN_FLAG=(--feishu-domain "${1:-}") ;;
+    --feishu-domain=*) DOMAIN_FLAG=(--feishu-domain "${a#*=}") ;;
+    --locale) shift; LOCALE_FLAG=(--locale "${1:-}") ;;
+    --locale=*) LOCALE_FLAG=(--locale "${a#*=}") ;;
+    --region) shift; REGION_PREFILL="${1:-}" ;;
+    --region=*) REGION_PREFILL="${a#*=}" ;;
+    --glossary-max-files) shift; GMF_FLAG=(--glossary-max-files "${1:-}") ;;
+    --glossary-max-files=*) GMF_FLAG=(--glossary-max-files "${a#*=}") ;;
     -h|--help)
       cat <<EOF
-Usage: ./scripts/install.sh [--yes] [--local]
+Usage: ./scripts/install.sh [--yes] [--local] [--feishu-domain <feishu|lark>]
+                            [--locale <zh|en>] [--region <aws-region>]
+                            [--glossary-max-files <n>]
 
 Interactive installer. Shows an arrow-key menu: init environment / add a project /
 redeploy a project / remove a project. Code repos (git or local source) live in
@@ -60,9 +87,24 @@ Secrets Manager. Re-runs pre-fill region/spec from .local/deploy-config.
             create a separate index host. Forwarded to deploy-all.sh. Auto-enabled
             when run ON the index host, so re-runs (add-project / redeploy) don't
             need it. Normally set for you by prepare-local-host.sh / launch-host.sh.
+  --feishu-domain <feishu|lark>
+            Tenant domain. 'feishu' = 飞书 / China (open.feishu.cn), 'lark' =
+            international Lark (open.larksuite.com). MUST match the console the
+            app was created in — a mismatch authenticates and then never
+            receives a single event. Forwarded to deploy-all.sh.
+  --locale <zh|en>
+            Card / message language. Defaults to 'en' when --feishu-domain is
+            'lark', otherwise 'zh'. Forwarded to deploy-all.sh.
+  --region <aws-region>
+            Pre-fills the region prompt (still confirmable when interactive).
+  --glossary-max-files <n>
+            Cap the one-off glossary build. 0 = uncapped; on a very large repo
+            an uncapped build can cost hundreds of dollars. Forwarded.
 EOF
       exit 0 ;;
+    *) printf 'unknown flag: %s (see --help)\n' "$a" >&2; exit 2 ;;
   esac
+  shift
 done
 
 # Auto-enter single-host mode when running ON the index host itself, even without --local. Operators
@@ -332,6 +374,14 @@ PROJECTS_CFG="$ROOT/.local/projects.json"
 # THIS EC2, whose region is fixed. Read it from IMDS; asking would just invite the wrong pick (e.g.
 # a stale Tokyo default while the box is in us-east-1). Otherwise (operator laptop) show the menu.
 ask_region() {
+  # An explicit --region wins over everything, including the IMDS auto-detect: the operator named
+  # a region on the command line, and silently deploying somewhere else is worse than being wrong
+  # loudly. (Before, --region was swallowed entirely by the arg loop.)
+  if [[ -n "$REGION_PREFILL" ]]; then
+    printf -v "$1" '%s' "$REGION_PREFILL"
+    say info "区域 / region: $REGION_PREFILL（来自 --region）"
+    return
+  fi
   if [[ "$LOCAL_MODE" == true ]]; then
     local imds_region; imds_region="$(_imds_region)"
     if [[ -n "$imds_region" ]]; then
@@ -382,12 +432,16 @@ flow_init_env() {
     done
     HW_FLAGS=(--instance-type "$INSTANCE_TYPE" --root-volume-gb "$ROOT_VOLUME_GB")
   fi
-  # Glossary cap is a build-cost knob (not machine-specific). In --local, don't make the operator
-  # stop and choose on first run — take the default (0 = no cap, full coverage) and just show it.
-  # To change it later: re-run install without --local, or set GLOSSARY_MAX_FILES / edit the env.
-  if [[ "$LOCAL_MODE" == true ]]; then
-    GLOSSARY_MAX_FILES="${DEPLOY_GLOSSARY_MAX_FILES:-0}"
-    say info "术语表构建文件上限 / glossary build cap: ${GLOSSARY_MAX_FILES}（0=不限·全量覆盖；设正数可控成本）"
+  # Glossary cap is a build-COST knob, so it is asked in both topologies. It used to be skipped
+  # under --local on the reasoning that applies to machine specs (instance type, disk) — but that
+  # reasoning does not transfer: nothing about a cost ceiling is machine-specific, and the advice
+  # printed in its place ("re-run install without --local, or set GLOSSARY_MAX_FILES") was dead in
+  # both halves — _is_index_host force-enables --local on the index host, and deploy-all.sh opens
+  # by assigning GLOSSARY_MAX_FILES="" which clobbers any exported value. An uncapped build on a
+  # large repo is a several-hundred-dollar one-off, so a silent default is the wrong call.
+  if [[ ${#GMF_FLAG[@]} -gt 0 ]]; then
+    GLOSSARY_MAX_FILES="${GMF_FLAG[1]}"
+    say info "术语表构建文件上限 / glossary build cap: ${GLOSSARY_MAX_FILES}（来自 --glossary-max-files）"
   else
   pick_field GLOSSARY_MAX_FILES "术语表构建文件上限 (中文→代码符号；0=不限) / glossary build cap" \
     "${DEPLOY_GLOSSARY_MAX_FILES:-0}" "文件数 (0=不限)" "${GLOSSARY_OPTIONS[@]}"
@@ -401,7 +455,8 @@ flow_init_env() {
   confirm "开始初始化环境？/ Initialize the base environment now?" || { say info "已取消"; exit 0; }
   say step "部署底座 / Deploying base host (several minutes)"
   exec "$SCRIPT_DIR/deploy-all.sh" --region "$REGION" "${HW_FLAGS[@]}" \
-    --glossary-max-files "$GLOSSARY_MAX_FILES" --skip-projects "${LOCAL_FLAG[@]}"
+    --glossary-max-files "$GLOSSARY_MAX_FILES" --skip-projects "${LOCAL_FLAG[@]}" \
+    "${DOMAIN_FLAG[@]}" "${LOCALE_FLAG[@]}"
 }
 
 # ============================================================
@@ -432,10 +487,22 @@ flow_add_project() {
     ask RSUB "  第 $((N + 1)) 个仓库 · on-host 子目录名 / repo #$((N + 1)) subdir (^[a-z0-9-]+$, blank=done)" ""
     [[ -z "$RSUB" ]] && break
     [[ "$RSUB" =~ ^[a-z0-9][a-z0-9-]*$ ]] || { say warn "subdir 非法，跳过 / invalid subdir, skipped"; continue; }
-    pick SRC_CHOICE 0 \
-      "git    远程 git 仓（自动定时刷新）/ remote git repo (auto-refresh)" \
-      "local  本地仓（rsync 直推 + 手动刷新）/ local repo (rsync push + manual refresh)"
-    RSRC="${SRC_CHOICE%%[[:space:]]*}"
+    # The local-repo option is offered ONLY in single-host mode. In the default two-machine
+    # topology the index host is launched into a PRIVATE subnet with no key pair and no public IP,
+    # and push-local-repo.sh needs a real SSH host (it deliberately refuses --ssh-opts, so there is
+    # no SSM ProxyCommand escape either). Offering it there produced the worst possible outcome:
+    # activate_project succeeds without code present, the deploy prints "fully deployed", the
+    # installer then prints a push command that CANNOT work, and the bot answers "not found"
+    # forever while every health signal looks fine.
+    if [[ "$LOCAL_MODE" == true ]]; then
+      pick SRC_CHOICE 0 \
+        "git    远程 git 仓（自动定时刷新）/ remote git repo (auto-refresh)" \
+        "local  本地仓（rsync 直推 + 手动刷新）/ local repo (rsync push + manual refresh)"
+      RSRC="${SRC_CHOICE%%[[:space:]]*}"
+    else
+      RSRC="git"
+      say info "  仓库来源：git（默认拓扑的索引主机在私有子网、无密钥对、无公网 IP，无法 rsync 推送本地仓；如需本地仓请用 --local 单机拓扑）"
+    fi
     if [[ "$RSRC" == "git" ]]; then
       ask RGIT "    git 地址 / repo git URL" ""
       [[ -n "$RGIT" ]] || { say warn "git 仓必须有地址，跳过 / git repo needs a URL, skipped"; continue; }
@@ -510,17 +577,103 @@ if clash:
   # Validate at the prompt (re-ask the bad field only) so a typo'd App ID / secret
   # is caught here, not 10 minutes later when the bot silently fails to start.
   local FEISHU_APP_ID FEISHU_APP_SECRET FEISHU_BOT_OPEN_ID SECRET_ID
-  ask_valid FEISHU_APP_ID "飞书 App ID（cli_…）" '^cli_[A-Za-z0-9]+$' \
-    "App ID 应形如 cli_xxxxxxxx / App ID must look like cli_..."
+  # The tenant the app belongs to decides which console — and which API host — is correct.
+  # Asked before the credentials because it selects the endpoint they are validated against.
+  local FEISHU_DOMAIN_SEL="${DOMAIN_FLAG[1]:-${DEPLOY_FEISHU_DOMAIN:-feishu}}"
+  if [[ ${#DOMAIN_FLAG[@]} -eq 0 ]]; then
+    pick_field FEISHU_DOMAIN_SEL "飞书租户 / tenant (↑/↓ 选择，回车确认)" \
+      "${DEPLOY_FEISHU_DOMAIN:-feishu}" "租户 / tenant" \
+      "feishu:飞书 · 中国版 (open.feishu.cn)" "lark:Lark · 国际版 (open.larksuite.com)"
+    DOMAIN_FLAG=(--feishu-domain "$FEISHU_DOMAIN_SEL")
+  fi
+  local FEISHU_API_HOST="https://open.feishu.cn"
+  [[ "$FEISHU_DOMAIN_SEL" == "lark" ]] && FEISHU_API_HOST="https://open.larksuite.com"
+
   while true; do
-    ask_secret FEISHU_APP_SECRET "飞书 App Secret（输入以 * 回显）/ (echoed as *)"
-    [[ -n "$FEISHU_APP_SECRET" ]] && break
-    say warn "App Secret 必填 / App Secret is required"
+    ask_valid FEISHU_APP_ID "飞书 App ID（cli_…）" '^cli_[A-Za-z0-9]+$' \
+      "App ID 应形如 cli_xxxxxxxx / App ID must look like cli_..."
+    while true; do
+      ask_secret FEISHU_APP_SECRET "飞书 App Secret（输入以 * 回显）/ (echoed as *)"
+      [[ -n "$FEISHU_APP_SECRET" ]] && break
+      say warn "App Secret 必填 / App Secret is required"
+    done
+    # REAL validation, not just a shape check. The regex above only proves the App ID looks like
+    # an App ID; the comment claiming a typo is "caught here, not 10 minutes later" was false
+    # until this probe existed. tenant_access_token/internal needs NO scopes and NO published
+    # version, so it is valid this early, costs one request, and distinguishes bad credentials
+    # from a tenant mismatch — the two failures that otherwise surface as a gateway restart loop
+    # in a log file on an EC2 instance the operator reaches through SSM.
+    local PROBE_RC=0 PROBE_OUT
+    PROBE_OUT="$(_H="$FEISHU_API_HOST" _AID="$FEISHU_APP_ID" _AS="$FEISHU_APP_SECRET" python3 - <<'PY' 2>&1
+import json, os, sys, urllib.request, urllib.error
+req = urllib.request.Request(
+    os.environ["_H"] + "/open-apis/auth/v3/tenant_access_token/internal",
+    data=json.dumps({"app_id": os.environ["_AID"], "app_secret": os.environ["_AS"]}).encode(),
+    headers={"Content-Type": "application/json; charset=utf-8"})
+try:
+    body = json.loads(urllib.request.urlopen(req, timeout=15).read().decode())
+except urllib.error.HTTPError as e:
+    try: body = json.loads(e.read().decode())
+    except Exception: print("HTTP %s" % e.code); sys.exit(3)
+except Exception as e:
+    print("NETWORK %s" % type(e).__name__); sys.exit(4)
+code = body.get("code")
+if code == 0 and body.get("tenant_access_token"):
+    print("OK"); sys.exit(0)
+print("code=%s msg=%s" % (code, str(body.get("msg"))[:120])); sys.exit(1)
+PY
+)" || PROBE_RC=$?
+    if [[ $PROBE_RC -eq 0 ]]; then
+      say ok "飞书凭证已验证 / credentials verified against $FEISHU_API_HOST"
+      break
+    elif [[ $PROBE_RC -eq 4 ]]; then
+      # Cannot reach Feishu at all — do not punish the operator for our network.
+      say warn "无法连通 $FEISHU_API_HOST（$PROBE_OUT）——跳过凭证校验 / cannot reach Feishu, skipping validation"
+      break
+    else
+      say err "凭证校验失败 / credentials rejected by $FEISHU_API_HOST: $PROBE_OUT"
+      say info "请检查：App ID / Secret 是否抄错；以及该应用是否属于「${FEISHU_DOMAIN_SEL}」租户（中国版与国际版的应用互不相通）。"
+      [[ "$ASSUME_YES" == true ]] && { say err "--yes 模式下无法重试 / cannot re-prompt under --yes"; exit 1; }
+      unset FEISHU_APP_SECRET
+    fi
   done
   # open_id is optional, but if given it must look like ou_… (a wrong value breaks the
   # group @-gate). Empty is allowed (FEISHU_BOT_OPEN_ID unset → 'any mention triggers').
-  ask_valid FEISHU_BOT_OPEN_ID "机器人 open_id（ou_…，可留空）/ bot open_id (optional)" \
-    '^ou_[A-Za-z0-9]+$' "open_id 应形如 ou_xxxxxxxx，或留空 / must look like ou_... or be blank" allow_empty
+  # The bot's own open_id gates group @-mentions. The runbook used to tell operators to "note it
+  # from the bot page", but that page shows the APP identity, not an ou_-prefixed open_id — so the
+  # realistic outcomes were a guess or a blank. Derive it from the API instead, using the token we
+  # just proved works. Blank is still permitted, but the prompt now names what blank COSTS: the
+  # gate degrades to "any mention triggers", so @-ing a colleague makes the bot answer unbidden.
+  FEISHU_BOT_OPEN_ID=""
+  local DERIVED_OPEN_ID
+  DERIVED_OPEN_ID="$(_H="$FEISHU_API_HOST" _AID="$FEISHU_APP_ID" _AS="$FEISHU_APP_SECRET" python3 - <<'PY' 2>/dev/null || true
+import json, os, urllib.request
+h = os.environ["_H"]
+def post(path, payload):
+    req = urllib.request.Request(h + path, data=json.dumps(payload).encode(),
+                                 headers={"Content-Type": "application/json; charset=utf-8"})
+    return json.loads(urllib.request.urlopen(req, timeout=15).read().decode())
+try:
+    tok = post("/open-apis/auth/v3/tenant_access_token/internal",
+               {"app_id": os.environ["_AID"], "app_secret": os.environ["_AS"]}).get("tenant_access_token")
+    req = urllib.request.Request(h + "/open-apis/bot/v3/info",
+                                 headers={"Authorization": "Bearer " + tok})
+    info = json.loads(urllib.request.urlopen(req, timeout=15).read().decode())
+    oid = (info.get("bot") or {}).get("open_id") or ""
+    if oid.startswith("ou_"):
+        print(oid)
+except Exception:
+    pass
+PY
+)"
+  if [[ -n "$DERIVED_OPEN_ID" ]]; then
+    FEISHU_BOT_OPEN_ID="$DERIVED_OPEN_ID"
+    say ok "机器人 open_id 自动获取 / bot open_id derived: $FEISHU_BOT_OPEN_ID"
+  else
+    say warn "无法自动获取机器人 open_id（通常是「机器人」能力未开启，或版本未发布）"
+    ask_valid FEISHU_BOT_OPEN_ID "机器人 open_id（ou_…；留空则群里 @ 任何人都会触发机器人）/ blank = ANY @-mention triggers the bot" \
+      '^ou_[A-Za-z0-9]+$' "open_id 应形如 ou_xxxxxxxx，或留空 / must look like ou_... or be blank" allow_empty
+  fi
   SECRET_ID="source-truth/feishu-${PID}"
   local SJSON
   SJSON="$(_AID="$FEISHU_APP_ID" _AS="$FEISHU_APP_SECRET" _BO="${FEISHU_BOT_OPEN_ID:-}" python3 -c '
@@ -602,6 +755,7 @@ json.dump(cfg,open(sys.argv[1],"w"),ensure_ascii=False,indent=2)' "$PROJECTS_CFG
   # Ensure the shared base exists (idempotent no-op if already up), then deploy this project.
   say step "确保底座就绪 / ensuring shared base (idempotent)"
   "$SCRIPT_DIR/deploy-all.sh" --region "$REGION" --skip-projects "${LOCAL_FLAG[@]}" \
+    "${DOMAIN_FLAG[@]}" "${LOCALE_FLAG[@]}" \
     || { say err "底座部署失败 / base deploy failed — fix and re-run"; exit 1; }
   say step "部署项目 / deploying project $PID"
   exec bash "$SCRIPT_DIR/lib/deploy_project.sh" "$REGION" "$PID"

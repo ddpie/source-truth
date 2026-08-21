@@ -4,7 +4,7 @@
 
 | 脚本 | 阶段 | 状态 | 职责 |
 |------|------|------|------|
-| `check-invariants.sh` | p0 | 已实现 | 快速无网络结构 lint，九项：AGENTS.md 存在 / `docs/agent/architecture.md` 存在且被 AGENTS.md 引用 / `docs/` 下 `_zh`·`_en` 双语配对 / 结构文档双语齐全 / 顶层目录 ↔ `structure_zh.md` 双向对齐 / `docs/design/` 四份权威依据存在 / 账号级全局 IAM 角色的策略 Resource 未钉死 `${REGION}`（多区部署互相覆盖的守卫）/ 脚本与 README 里的 GitHub slug 默认值均为 `aws-samples` / `docs/` 无真实人名与竞品名。pre-commit 与 `test.sh --lint` 调用。 |
+| `check-invariants.sh` | p0 | 已实现 | 快速无网络结构 lint，九项：AGENTS.md 存在 / `docs/agent/architecture.md` 存在且被 AGENTS.md 引用 / `docs/` 下 `_zh`·`_en` 双语配对 / 结构文档双语齐全 / 顶层目录 ↔ `structure_zh.md` 双向对齐 / `docs/design/` 四份权威依据存在 / 账号级全局 IAM 角色的策略 Resource 未钉死 `${REGION}`（多区部署互相覆盖的守卫）/ 脚本与 README 里的 GitHub slug 默认值均为 `aws-samples` / `docs/` 无真实人名与竞品名。由 `test.sh --lint` 与 CI 调用。 |
 | `test.sh` | p1 | 已实现 | 分层测试的唯一入口：离线默认（lint + unit + typecheck）/ `--full`（加 e2e；smoke 仍占位）。详见下方「用法」。 |
 | `e2e-probe.py` | p1 | 已实现 | `test.sh --full` 的 e2e 组件：对已部署 Runtime 跑真实问答（boto3 InvokeAgentRuntime + 流式），**发送与 gateway 完全一致的 payload** `{prompt, traceId, repos}`。校验只读边界（`permission_denials` 空）、无 `errors`、答案含 `文件:行号` 出处。ARN/region/repos 从 `.local/{deploy-config,projects.json}` 读（不写死）；缺依赖/未部署退出码 2（test.sh 视为 skip，不阻塞）。纯逻辑（region 优先级 / payload 形状）有单测 `tests/test_e2e_probe.sh`。 |
 | `lib/common.sh` | p1 | 已实现 | 共享 shell：格式化输出（`say`）+ 依赖检查（`have_cmd` / `require_cmd`）。可被单测 source。 |

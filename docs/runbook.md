@@ -413,7 +413,7 @@ refreshIntervalSec?}`，`source` 默认 `git`、本地仓写 `local`）。顶层
 ## 九、边界与安全（务必知道）
 
 - **只读**：MVP 全程不写代码 / 不提交 / 不运行引擎；答案只基于最新主分支的真实代码，并用 CodeGraph 核对验证。
-- **密钥**：飞书 `App Secret`、`App ID` 等绝不入仓库（gitleaks pre-commit 守）；走环境变量 / Secrets Manager / SSM。
+- **密钥**：飞书 `App Secret`、`App ID` 等绝不入仓库；走环境变量 / Secrets Manager / SSM。
 - **越界能力后置**：多分支、设计文档读取、写回、第二引擎等均为 post-MVP，详见
   [`../README.md`](../README.md) 的「MVP 边界」与设计权威依据 [`design/`](design/)。
 

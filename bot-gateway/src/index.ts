@@ -50,23 +50,27 @@ import { emitMetric, classifyFailure, countEvidenceCitations, type FailReason } 
 import { isDuplicate, forget } from "./dedup";
 import { STREAM_TIMEOUT_MS, DEFAULT_MAX_CONCURRENT_INVOKES } from "./tunables";
 import { loadProjectsConfig, resolveRoute, ProjectsConfigMissing, type ProjectsConfig, type ResolvedRoute } from "./project-routing";
+import { resolveTenant, wsDomainFor, type FeishuTenant } from "./feishu-domain";
 import { startHealthServer, deriveHealthPort, markConnected, markReconnecting, markReconnected, markConnecting, markDisconnected, markDraining, markEventReceived } from "./health";
 
 const RUNTIME_ARN = process.env.RUNTIME_ARN ?? "";
-// Tenant domain: "feishu" (China, open.feishu.cn) or "lark" (international, open.larksuite.com).
-// One switch drives BOTH the event long-connection (WSClient below) and the REST base URL
-// (src/feishu-http.ts), because setting only one of them yields an app that authenticates but
-// never receives events. Anything unrecognised falls back to feishu rather than failing the
-// gateway, and is logged so the operator sees the typo.
-const FEISHU_DOMAIN = (() => {
-  const raw = (process.env.FEISHU_DOMAIN ?? "feishu").trim().toLowerCase();
-  if (raw === "feishu" || raw === "lark") return raw;
-  console.log(JSON.stringify({
+// Tenant: "feishu" (China, open.feishu.cn) or "lark" (international, open.larksuite.com).
+// Resolved ONCE, in src/feishu-domain.ts, which also derives the REST base — so the event
+// long-connection and the REST calls cannot target different tenants (that split produced an app
+// which authenticated and then never received an event). Unset means feishu; an unrecognised
+// value is FATAL rather than a silent fallback, for the same reason REGION and RUNTIME_ARN are
+// fatal below: the operator expressed an intent we cannot guess, and guessing wrong means the
+// gateway is 100% dark while looking healthy.
+const FEISHU_DOMAIN_RESOLVED = resolveTenant(process.env.FEISHU_DOMAIN);
+if (FEISHU_DOMAIN_RESOLVED === null) {
+  console.error(JSON.stringify({
     ts: new Date().toISOString(), event: "feishu_domain_invalid",
-    value: raw.slice(0, 32), fallback: "feishu",
+    value: (process.env.FEISHU_DOMAIN ?? "").slice(0, 32),
+    fatal: true, allowed: ["feishu", "lark"],
   }));
-  return "feishu";
-})();
+  process.exit(1);
+}
+const FEISHU_DOMAIN: FeishuTenant = FEISHU_DOMAIN_RESOLVED;
 // Region: AWS_REGION (deploy sets it) → AWS_DEFAULT_REGION → derived from the RUNTIME_ARN
 // (arn:aws:bedrock-agentcore:<region>:...). NEVER hardcode a region default — this ships to
 // customer accounts in any region, and a wrong silent default (e.g. Tokyo) would point the
@@ -1390,11 +1394,20 @@ async function main(): Promise<void> {
           },
         })
           .then((res) => {
-            // A reply to a card we no longer know (gateway restart / >500 eviction)
-            // is dropped at the mention gate; log it so the silent stop is
-            // diagnosable rather than indistinguishable from a plain non-mention.
-            if (res && !res.handled && res.reason === "reply_to_unknown_card") {
-              log({ event: "reply_to_unknown_card", chat: hashUserId(event.chat_id) });
+            // Every gate drop is logged, not just the card-reply case. A wrong-but-well-formed
+            // FEISHU_BOT_OPEN_ID (a colleague's id, one from another tenant) makes the mention
+            // gate match nothing, so 100% of group traffic was discarded with NO log line, no
+            // metric and no reaction — indistinguishable from "nobody has asked anything yet",
+            // while /ready returned 200 and the heartbeat alarm stayed green. mentionCount
+            // separates "Feishu is not delivering" from "delivery works, the gate is
+            // misconfigured", which is the single most useful discriminator when a bot is silent.
+            if (res && !res.handled && res.reason) {
+              log({
+                event: "event_dropped", reason: res.reason,
+                chat: hashUserId(event.chat_id),
+                mentionCount: event.mentions.length,
+                botOpenIdConfigured: !!BOT_OPEN_ID,
+              });
             }
             return replyWithCard(res);
           })
@@ -1745,9 +1758,11 @@ async function main(): Promise<void> {
     // international Lark app configured correctly in its own console would authenticate on
     // REST calls (which honour FEISHU_API_BASE) and then never connect the event socket —
     // a silent, hard-to-diagnose split. FEISHU_DOMAIN=lark selects open.larksuite.com.
-    domain: FEISHU_DOMAIN === "lark" ? lark.Domain.Lark : lark.Domain.Feishu,
+    domain: wsDomainFor(FEISHU_DOMAIN),
     loggerLevel: lark.LoggerLevel.warn,
-    onReady: () => { markConnected(); log({ event: "sdk_wsclient_connected" }); }, // the REAL "receiving events" signal
+    // Name the tenant on the connect line: "which tenant is this gateway on" is the first
+    // diagnostic question when a bot is silent, and nothing used to answer it.
+    onReady: () => { markConnected(); log({ event: "sdk_wsclient_connected", domain: FEISHU_DOMAIN }); }, // the REAL "receiving events" signal
     onReconnecting: () => { markReconnecting(); log({ event: "sdk_wsclient_reconnecting" }); },
     onReconnected: () => { markReconnected(); log({ event: "sdk_wsclient_reconnected" }); },
     onError: (err: unknown) => {

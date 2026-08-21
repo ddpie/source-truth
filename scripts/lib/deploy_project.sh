@@ -192,11 +192,11 @@ if ! aws secretsmanager describe-secret --region "$REGION" --secret-id source-tr
   unset GW_SALT
 fi
 PROJECT_ID="$PID" \
-FEISHU_DOMAIN="${FEISHU_DOMAIN:-$(sed -n 's/^DEPLOY_FEISHU_DOMAIN=//p' "$CONFIG_FILE" 2>/dev/null | tail -1)}" \
+FEISHU_DOMAIN="${FEISHU_DOMAIN:-${DEPLOY_FEISHU_DOMAIN:-feishu}}" \
   bash "$SCRIPT_DIR/activate_gateway.sh" \
   "$REGION" "$IID" "$RT_ARN" "$FEISHU_SECRET" \
-  "${LOCALE:-zh}" "" "${FEISHU_API_BASE:-}" "${DEPLOY_IDLE_TIMEOUT:-900}" "$ARTIFACT_BUCKET" \
-  || { say err "gateway activation failed for $PID — backend is up; fix and re-run"; exit 1; }
+  "${LOCALE:-${DEPLOY_LOCALE:-zh}}" "" "${FEISHU_API_BASE:-}" "${DEPLOY_IDLE_TIMEOUT:-900}" "$ARTIFACT_BUCKET" \
+  || { say err "gateway activation failed for $PID — backend is up. Logs: sudo journalctl -u bot-gateway@$PID -n 50, and /var/log/bot-gateway-$PID.log on $IID (aws ssm start-session --target $IID --region $REGION)"; exit 1; }
 say ok "project $PID fully deployed (bridge:$PORT + runtime + gateway)"
 
 # Local repos come up with their graph DEFERRED (activate doesn't require code to be present). The
