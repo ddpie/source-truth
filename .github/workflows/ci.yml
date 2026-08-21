@@ -61,15 +61,17 @@ jobs:
           tar --version | head -1 | grep -q 'GNU tar' || { echo "GNU tar required"; exit 1; }
           command -v rsync >/dev/null || { echo "rsync required"; exit 1; }
 
-      - name: Offline suite
-        run: bash scripts/test.sh
 
       # A skipped suite must not pass in CI, whatever it does locally. This is the assertion that
       # keeps the workflow honest: if a dependency step above silently stops working, the suite
       # would go back to reporting green over nothing.
       - name: Fail if any suite was skipped
         run: |
-          out="$(bash scripts/test.sh 2>&1)" || { printf '%s\n' "$out"; exit 1; }
+          # Run ONCE and tee. This used to be a second full run of a suite the previous step had
+          # already executed, doubling a 20-minute job for no additional coverage.
+          set -o pipefail
+          bash scripts/test.sh 2>&1 | tee /tmp/suite.log
+          out="$(cat /tmp/suite.log)"
           if printf '%s\n' "$out" | grep -q 'SKIPPED:'; then
             printf '%s\n' "$out" | grep 'SKIPPED:'
             echo "::error::a test suite was skipped in CI — its dependencies must be installed above"

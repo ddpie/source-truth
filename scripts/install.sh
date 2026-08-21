@@ -58,19 +58,58 @@ _is_index_host() { [[ "$(_imds_get "iam/security-credentials/")" == *source-trut
 # never-receives-events failure the README warned them about while having done as instructed.
 # --region and --glossary-max-files were swallowed the same way, the latter meaning an uncapped
 # (potentially hundreds of dollars) glossary build from a command that looked like it capped it.
+# Flag-value validators. All four value-taking flags were added without any of this, and the gaps
+# were not cosmetic:
+#   * a flag as the LAST argument shifted twice and underflowed; under `set -euo pipefail` bash
+#     exited 1 with NO OUTPUT AT ALL — on the documented `curl | bash -s --` entry point.
+#   * `--region --local` took the next FLAG as its value, so the region became "--local" AND the
+#     requested single-host topology was silently dropped.
+#   * `--glossary-max-files abc` / `=` reached deploy-all unvalidated and resolved to 0 = UNCAPPED,
+#     reintroducing the exact "a command that looked like it capped it" failure the flag was added
+#     to prevent.
+#   * the tenant was compared with a bare `== "lark"` here while every downstream layer case-folds,
+#     so `--feishu-domain Lark` probed valid international credentials against open.feishu.cn and
+#     told the operator their app was not in the Lark tenant — which is what they had got right.
+_need_val() {  # _need_val <flag> <remaining-argc>
+  [[ "$2" -ge 2 ]] || { printf 'flag %s needs a value\n' "$1" >&2; exit 2; }
+}
+_reject_flaglike() { case "$1" in -?*) printf 'flag %s: %s looks like another flag, not a value\n' "$2" "$1" >&2; exit 2 ;; esac; }
+_norm_tenant() {
+  _reject_flaglike "$1" --feishu-domain
+  local v; v="$(printf '%s' "$1" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
+  case "$v" in feishu|lark) printf '%s' "$v" ;;
+    *) printf -- "--feishu-domain must be 'feishu' or 'lark', got '%s'\n" "$1" >&2; exit 2 ;; esac
+}
+_norm_locale() {
+  _reject_flaglike "$1" --locale
+  local v; v="$(printf '%s' "$1" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
+  case "$v" in zh|en) printf '%s' "$v" ;;
+    *) printf -- "--locale must be 'zh' or 'en', got '%s'\n" "$1" >&2; exit 2 ;; esac
+}
+_norm_region() {
+  _reject_flaglike "$1" --region
+  [[ "$1" =~ ^[a-z]{2}(-[a-z]+)+-[0-9]+$ ]] || { printf -- "--region '%s' is not an AWS region code\n" "$1" >&2; exit 2; }
+  printf '%s' "$1"
+}
+_norm_count() {
+  _reject_flaglike "$1" --glossary-max-files
+  [[ "$1" =~ ^[0-9]+$ ]] || { printf -- "--glossary-max-files must be a non-negative integer (0 = uncapped), got '%s'\n" "$1" >&2; exit 2; }
+  printf '%s' "$1"
+}
+
 while [[ $# -gt 0 ]]; do
   a="$1"
   case "$a" in
     -y|--yes) ASSUME_YES=true ;;
     --local) LOCAL_MODE=true; LOCAL_FLAG=(--local) ;;
-    --feishu-domain) shift; DOMAIN_FLAG=(--feishu-domain "${1:-}") ;;
-    --feishu-domain=*) DOMAIN_FLAG=(--feishu-domain "${a#*=}") ;;
-    --locale) shift; LOCALE_FLAG=(--locale "${1:-}") ;;
-    --locale=*) LOCALE_FLAG=(--locale "${a#*=}") ;;
-    --region) shift; REGION_PREFILL="${1:-}" ;;
-    --region=*) REGION_PREFILL="${a#*=}" ;;
-    --glossary-max-files) shift; GMF_FLAG=(--glossary-max-files "${1:-}") ;;
-    --glossary-max-files=*) GMF_FLAG=(--glossary-max-files "${a#*=}") ;;
+    --feishu-domain)       _need_val "$a" $#; DOMAIN_FLAG=(--feishu-domain "$(_norm_tenant "$2")"); shift ;;
+    --feishu-domain=*)     DOMAIN_FLAG=(--feishu-domain "$(_norm_tenant "${a#*=}")") ;;
+    --locale)              _need_val "$a" $#; LOCALE_FLAG=(--locale "$(_norm_locale "$2")"); shift ;;
+    --locale=*)            LOCALE_FLAG=(--locale "$(_norm_locale "${a#*=}")") ;;
+    --region)              _need_val "$a" $#; REGION_PREFILL="$(_norm_region "$2")"; shift ;;
+    --region=*)            REGION_PREFILL="$(_norm_region "${a#*=}")" ;;
+    --glossary-max-files)  _need_val "$a" $#; GMF_FLAG=(--glossary-max-files "$(_norm_count "$2")"); shift ;;
+    --glossary-max-files=*) GMF_FLAG=(--glossary-max-files "$(_norm_count "${a#*=}")") ;;
     -h|--help)
       cat <<EOF
 Usage: ./scripts/install.sh [--yes] [--local] [--feishu-domain <feishu|lark>]
@@ -585,7 +624,11 @@ if clash:
   # Feishu app credentials → source-truth/feishu-<pid> (auto secret id).
   # Validate at the prompt (re-ask the bad field only) so a typo'd App ID / secret
   # is caught here, not 10 minutes later when the bot silently fails to start.
-  local FEISHU_APP_ID FEISHU_APP_SECRET FEISHU_BOT_OPEN_ID SECRET_ID
+  local FEISHU_APP_ID FEISHU_BOT_OPEN_ID SECRET_ID
+  # `local +x` strips any inherited export attribute: bash keeps it when the name was already
+  # exported in the caller's environment, which would hand the typed value to every child of
+  # this function, including deploy-all.sh and the exec'd deploy_project.sh.
+  local +x FEISHU_APP_SECRET
   # The tenant the app belongs to decides which console — and which API host — is correct.
   # Asked before the credentials because it selects the endpoint they are validated against.
   local FEISHU_DOMAIN_SEL="${DOMAIN_FLAG[1]:-${DEPLOY_FEISHU_DOMAIN:-feishu}}"
@@ -651,7 +694,7 @@ PY
       say err "凭证校验失败 / credentials rejected by $FEISHU_API_HOST: $PROBE_OUT"
       say info "请检查：App ID / Secret 是否抄错；以及该应用是否属于「${FEISHU_DOMAIN_SEL}」租户（中国版与国际版的应用互不相通）。"
       [[ "$ASSUME_YES" == true ]] && { say err "--yes 模式下无法重试 / cannot re-prompt under --yes"; exit 1; }
-      unset FEISHU_APP_SECRET
+      FEISHU_APP_SECRET=""
     fi
   done
   # open_id is optional, but if given it must look like ou_… (a wrong value breaks the
@@ -698,7 +741,7 @@ import os,json; print(json.dumps({"app_id":os.environ["_AID"],"app_secret":os.en
   aws secretsmanager create-secret --name "$SECRET_ID" --secret-string "$SJSON" --region "$REGION" \
       --description "source-truth Feishu app creds for project $PID" >/dev/null 2>&1 \
     || aws secretsmanager put-secret-value --secret-id "$SECRET_ID" --secret-string "$SJSON" --region "$REGION" >/dev/null
-  unset FEISHU_APP_SECRET SJSON
+  FEISHU_APP_SECRET=""; unset SJSON
   say ok "飞书凭证已写入 / stored: $SECRET_ID"
 
   # git read-only credential (R-cred-1, global, reused by later projects).
@@ -793,7 +836,12 @@ flow_redeploy() {
     < <(printf '%s\n' "$_plist" | grep -v '^$' || true)
   [[ ${#PIDS[@]} -gt 0 ]] || { say err "清单无项目 / no projects in projects.json — use 'add a project' first"; exit 1; }
   local SEL; pick SEL 0 "${PIDS[@]}"
-  exec bash "$SCRIPT_DIR/lib/deploy_project.sh" "$REGION" "$SEL"
+  # Forward the tenant/locale here too. deploy_project.sh already reads FEISHU_DOMAIN and
+  # LOCALE from the environment; without this, `install.sh --feishu-domain lark` plus
+  # "redeploy" was accepted and silently changed nothing — the same discarded-flag defect the
+  # arg loop was rewritten to eliminate, still alive in one of the four flows.
+  exec env ${DOMAIN_FLAG[1]:+FEISHU_DOMAIN="${DOMAIN_FLAG[1]}"} ${LOCALE_FLAG[1]:+LOCALE="${LOCALE_FLAG[1]}"} \
+    bash "$SCRIPT_DIR/lib/deploy_project.sh" "$REGION" "$SEL"
 }
 
 # ============================================================

@@ -114,7 +114,15 @@ command -v rsync >/dev/null 2>&1 || { echo 'ACTIVATE_FAILED: rsync missing on ho
 # own deadline gives up WITHOUT cancelling the remote run. A random mktemp name therefore stranded
 # a full copy of the tree on the root volume (shared with graph.db) on every abnormal exit, and
 # nothing in the repo ever collected /opt/idx/app.stage.*. bootstrap.sh already uses this pattern.
-IDX_STAGE=/opt/idx/stage/deploy-app
+# Unique LEAF under a fixed parent. A fixed leaf fixed the disk leak but introduced a worse race:
+# two concurrent deploys (two projects, or an operator redeploy racing a scripted one) shared one
+# path, so run B's rm -rf wiped run A's staged tree mid-flight and B's EXIT trap deleted it again
+# while A was still rsyncing — letting A publish a PARTIAL tree into the live /opt/idx/app with
+# --delete-after, which is exactly what the completeness guard cannot catch because it runs before
+# the rsync, not during it. Unique leaf keeps mktemp's isolation; the sweep keeps the leak closed
+# even when a trap never fires (SIGKILL, SSM cancel).
+find /opt/idx/stage -maxdepth 1 -name 'deploy-app.*' -mmin +120 -exec rm -rf {} + 2>/dev/null || true
+IDX_STAGE=/opt/idx/stage/deploy-app.\$\$
 rm -rf \"\$IDX_STAGE\"; mkdir -p \"\$IDX_STAGE\"
 trap 'rm -rf \"\$IDX_STAGE\"' EXIT
 IDX_TGZ_SIG=\$(sha256sum /tmp/idx-refresh.tar.gz 2>/dev/null | cut -d\" \" -f1 || true)
@@ -128,12 +136,13 @@ for f in http_bridge.py activate_project.sh git_fetch.sh glossary_refresh.sh rei
 done
 chmod +x \"\$IDX_STAGE\"/activate_project.sh \"\$IDX_STAGE\"/git_fetch.sh \"\$IDX_STAGE\"/glossary_refresh.sh \"\$IDX_STAGE\"/reindex_local_repo.sh
 mkdir -p /opt/idx/app
-rsync -a --delay-updates --delete-after --exclude=/.src_sig \"\$IDX_STAGE\"/ /opt/idx/app/
+rsync -a --delay-updates --delete-after \"\$IDX_STAGE\"/ /opt/idx/app/
 # Re-stamp: this path publishes app code without going through bootstrap.sh, so without this
 # /opt/idx/.app_sig would still describe the PREVIOUS tree and the bridge skew field of the bridge would
 # report \"unchanged\" across a deploy that changed everything. The value is opaque — only that
 # it CHANGES when the code changes matters.
-[ -n \"\$IDX_TGZ_SIG\" ] && printf '%s\\n' \"\$IDX_TGZ_SIG\" > /opt/idx/.app_sig || true
+[ -n \"\$IDX_TGZ_SIG\" ] || { echo 'ACTIVATE_FAILED: could not compute the artifact hash, refusing to leave a stale /opt/idx/.app_sig'; exit 1; }
+printf '%s\\n' \"\$IDX_TGZ_SIG\" > /opt/idx/.app_sig
 mkdir -p /etc/index-projects
 echo '${MANIFEST_B64}' | base64 -d > /tmp/manifest-${PID}.json
 PROJECT_ID='${PID}' GIT_SECRET_ID='${GIT_SECRET_ID}' MODEL='${RT_MODEL}' REPO_MANIFEST_JSON=\"\$(cat /tmp/manifest-${PID}.json)\" bash /opt/idx/app/activate_project.sh

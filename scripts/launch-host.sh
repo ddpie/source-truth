@@ -39,6 +39,16 @@ REPO_REF="$(git -C "$HERE" rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)
 # the ref; fall back to upstream only when there is no origin at all (a tarball download).
 REPO_URL="${REPO_URL:-$(git -C "$HERE" remote get-url origin 2>/dev/null || true)}"
 [ -n "$REPO_URL" ] || REPO_URL=https://github.com/aws-samples/sample-code-qa-on-agentcore.git
+# Normalise an SSH remote to https. Deriving the URL from the operator's own checkout fixed the
+# fork case, but it BROKE the SSH-clone case that used to work: an ssh remote
+# (git@github.com:owner/repo.git) was handed to an instance with no GitHub SSH key, and the
+# credential path this script sets up (deploy-github-token -> gh auth login --with-token)
+# authenticates https ONLY. So an SSH-cloning operator, fork or not, got
+# "Permission denied (publickey)" where before they silently got the working upstream https URL.
+case "$REPO_URL" in
+  git@*:*)      REPO_URL="https://github.com/${REPO_URL#*:}" ;;
+  ssh://git@*)  REPO_URL="https://github.com/${REPO_URL#*github.com/}" ;;
+esac
 
 # Prior-choice state for pre-fill is per-account (set once ACCOUNT is known, below): keys like the
 # SSH key name / CIDR / region only make sense within one account, so a single shared file would

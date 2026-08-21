@@ -136,7 +136,7 @@ fi
 #    合法来源。
 slug_files="$(git ls-files '*.sh' '*.md' 2>/dev/null | grep -v '^scripts/check-invariants\.sh$' || true)"
 slug_hits="$(printf '%s\n' "$slug_files" | tr '\n' '\0' \
-  | xargs -0 -r grep -nE '(github\.com/|githubusercontent\.com/|:-)[A-Za-z0-9_.-]+/(source-truth|sample-code-qa-on-agentcore)' 2>/dev/null \
+  | xargs -0 -r grep -IoE '(github\.com/|githubusercontent\.com/|:-)[A-Za-z0-9_.-]+/(source-truth|sample-code-qa-on-agentcore)' 2>/dev/null \
   | grep -vE 'aws-samples/' || true)"
 if [[ -n "$slug_hits" ]]; then
   err "出现非 aws-samples 的 GitHub slug 默认值（外部用户会拉不到）："
@@ -179,7 +179,7 @@ pii_err="$(mktemp)"
 set +e
 pii_hits="$(git ls-files -z 2>/dev/null \
   | grep -zv '^scripts/check-invariants\.sh$' \
-  | xargs -0 -r grep -lE "$pii_re" 2>"$pii_err")"
+  | xargs -0 -r grep -IlE "$pii_re" 2>"$pii_err")"
 pii_rc=$?
 # 裸「客户」：逐文件把 '客户端' 抹掉后再找「客户」，避免 client-side 的误报。
 pii_bare=""
