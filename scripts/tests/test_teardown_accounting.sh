@@ -16,6 +16,9 @@ check() { _run=$((_run+1)); if [[ "$2" -eq 0 ]]; then printf '  ok   %s\n' "$1";
 harness() {
   cat <<'STUB'
 say() { printf '%s %s\n' "$1" "${*:2}"; }
+# wait_gone has a hardcoded `sleep 5`, so driving its timeout path cost 5s of real wall clock for
+# no assertion value. Stubbing sleep makes the whole suite instant and changes nothing being tested.
+sleep() { :; }
 TEARDOWN_INCOMPLETE=0
 LEFT_BEHIND=""
 STUB

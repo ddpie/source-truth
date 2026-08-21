@@ -98,7 +98,18 @@ run_unit() {
     say step "unit：Python 单元测试（pytest）"
     if have_cmd pytest; then
       ran=$((ran + ${#py_dirs[@]}))
-      pytest -q "${py_dirs[@]}" || rc=1
+      # Capture the output so FRAMEWORK-INTERNAL skips become visible. The accumulator only ever
+      # tracked runner-level skips (the pytest binary being absent), so
+      # `pytest.skip(..., allow_module_level=True)` was invisible — and two suites use it when
+      # codegraph-server is not on PATH, which is ALWAYS true in CI (the binary is aarch64 and the
+      # runner is x86_64). That silently removed the only tests that drive the bridge over a real
+      # MCP session, including the singleton-writer-lock concurrency behaviour, under a fully green
+      # unqualified verdict — exactly the misreport this accumulator exists to prevent.
+      local _py_out _py_skipped
+      _py_out="$(pytest -q "${py_dirs[@]}" 2>&1)" || rc=1
+      printf '%s\n' "$_py_out"
+      _py_skipped="$(printf '%s' "$_py_out" | grep -oE '[0-9]+ skipped' | tail -1 | grep -oE '^[0-9]+' || true)"
+      [[ -n "$_py_skipped" && "$_py_skipped" -gt 0 ]] && SKIPPED+=("pytest:${_py_skipped}-tests-skipped")
     else
       say warn "skip pytest（未安装）"; SKIPPED+=("pytest")
     fi
@@ -108,7 +119,11 @@ run_unit() {
     if [[ -f "$ROOT/$d/jest.config.cjs" && -x "$ROOT/$d/node_modules/.bin/jest" ]]; then
       say step "unit：TypeScript 单元测试（jest ${d}）"
       ran=$((ran + 1))
-      ( cd "$ROOT/$d" && npx jest -c jest.config.cjs --no-coverage --passWithNoTests ) || rc=1
+      local _js_out _js_skipped
+      _js_out="$( cd "$ROOT/$d" && npx jest -c jest.config.cjs --no-coverage --passWithNoTests 2>&1 )" || rc=1
+      printf '%s\n' "$_js_out"
+      _js_skipped="$(printf '%s' "$_js_out" | grep -oE '[0-9]+ skipped' | tail -1 | grep -oE '^[0-9]+' || true)"
+      [[ -n "$_js_skipped" && "$_js_skipped" -gt 0 ]] && SKIPPED+=("jest:${_js_skipped}-tests-skipped")
     elif [[ -f "$ROOT/$d/jest.config.cjs" ]]; then
       say warn "skip jest（${d} 依赖未安装）"; SKIPPED+=("jest")
     fi

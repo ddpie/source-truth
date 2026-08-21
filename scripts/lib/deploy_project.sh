@@ -107,7 +107,7 @@ aws s3 cp s3://${ARTIFACT_BUCKET}/index-service.tar.gz /tmp/idx-refresh.tar.gz -
 # executing from is exactly what this block exists to avoid. Hosts bootstrapped before rsync
 # became a bootstrap dependency may not have it, so install-or-fail rather than discovering it
 # after the download and extract. Mirrors the guard activate_gateway.sh already carries.
-command -v rsync >/dev/null 2>&1 || (yum install -y rsync || apt-get update -qq && apt-get install -y -qq rsync) >/dev/null 2>&1 || true
+command -v rsync >/dev/null 2>&1 || { yum install -y rsync || { apt-get update -qq && apt-get install -y -qq rsync; }; } >/dev/null 2>&1 || true
 command -v rsync >/dev/null 2>&1 || { echo 'ACTIVATE_FAILED: rsync missing on host and could not be installed — refusing a non-atomic publish over the live index-service tree'; exit 1; }
 # FIXED staging path with a leading rm -rf, not mktemp -d: EXIT traps do not fire on SIGKILL, and
 # this payload runs under SSM where the command can be cancelled or time out — deploy_project.sh's

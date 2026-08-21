@@ -391,8 +391,8 @@ rebootstrap_in_place() { # <instance-id>
   remote_cmd="$(cat <<REMOTE
 set -e
 UNITS=$REBOOT_UNITS_FILE
-ENV_FILE=/etc/index-service.env
-ENV_BAK=/etc/index-service.env.rebootstrap-bak
+ENV_FILE=\${INDEX_ENV_FILE:-/etc/index-service.env}
+ENV_BAK=\${ENV_FILE}.rebootstrap-bak
 
 # H5: serialize. A deploy-side timeout used to abandon the SSM command while the remote bash kept
 # running, so the NEXT deploy started a SECOND concurrent bootstrap on the same tree (two
@@ -400,7 +400,7 @@ ENV_BAK=/etc/index-service.env.rebootstrap-bak
 # Deliberately NOT the lock file bootstrap.sh itself may take: this wrapper CALLS bootstrap.sh, so
 # sharing one lock would deadlock against it. flock missing (non-Ubuntu base?) → proceed unlocked
 # rather than refuse to deploy.
-LOCK=/var/lock/source-truth-rebootstrap.lock
+LOCK=\${REBOOT_LOCK_FILE:-/var/lock/source-truth-rebootstrap.lock}
 if command -v flock >/dev/null 2>&1; then
   exec 9>"\$LOCK"
   flock -n 9 || { echo "FATAL: another in-place re-bootstrap already holds \$LOCK on this host — refusing to run a second, concurrent bootstrap" >&2; exit 75; }
@@ -411,12 +411,12 @@ systemctl list-units --type=service --state=active,activating --plain --no-legen
 echo "re-bootstrap: active units to stop and restart: \$(tr '\n' ' ' < "\$UNITS")"
 
 start_captured() {
-  rc=0
+  sc_rc=0
   while read -r u; do
     [ -n "\$u" ] || continue
-    if systemctl start "\$u"; then echo "re-bootstrap: restarted \$u"; else echo "re-bootstrap: FAILED to restart \$u" >&2; rc=1; fi
+    if systemctl start "\$u"; then echo "re-bootstrap: restarted \$u"; else echo "re-bootstrap: FAILED to restart \$u" >&2; sc_rc=1; fi
   done < "\$UNITS"
-  return \$rc
+  return \$sc_rc
 }
 
 on_failure() {
@@ -426,7 +426,7 @@ on_failure() {
 }
 # Never leave the host fully down: any non-zero exit (bootstrap failure, or the SIGTERM an
 # \`ssm cancel-command\` delivers) restarts what we stopped before propagating the failure.
-trap 'rc=\$?; if [ \$rc -ne 0 ]; then on_failure; fi; exit \$rc' EXIT
+trap 'trc=\$?; if [ \$trc -ne 0 ]; then on_failure; fi; exit \$trc' EXIT
 trap 'echo "re-bootstrap: SIGTERM/SIGINT (deploy-side cancel?) — unwinding" >&2; exit 143' TERM INT
 
 # C1 step 2 — stop them.
