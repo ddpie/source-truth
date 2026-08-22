@@ -574,10 +574,14 @@ def build_bridge(
             return _guarded(run, bad_input="bad search pattern", failed="search failed",
                             log_event="search_error", scope_warn_tool="search_files")
 
-        async def codegraph_read_file(path: str, offset: int = 0, limit: int | None = None) -> str:
+        async def codegraph_read_file(path: str, offset: int = 0, limit: int | None = None,
+                                      line: int | None = None) -> str:
             """Read a source/config file's contents by its path (the path codegraph/search
             returns, e.g. `Assets/Scripts/Foo.cs` or `<repo>/Assets/Scripts/Foo.cs` —
-            pass it back verbatim). Optional `offset` (0-based line) + `limit` page large
+            pass it back verbatim). To re-read a line codegraph_search_files reported, pass
+            `line=<its line value>`: `line` is 1-BASED and needs no adjustment, which is
+            how you confirm a citation points at the text you are about to quote.
+            Optional `offset` (0-based line) + `limit` page large
             files; `offset` can point ANYWHERE in the file (not just the first ~256 KiB).
             The result includes `total_lines` and, when `truncated` is true, `next_offset` —
             call again with `offset=next_offset` to read the next contiguous window (repeat
@@ -586,7 +590,8 @@ def build_bridge(
             shell `cat` or builtin Read."""
             def run() -> str:
                 t = _repo_for_path(path, None)
-                return file_read.read_to_json(path, local_root=t.local, offset=offset, limit=limit, repo=t.name)
+                return file_read.read_to_json(path, local_root=t.local, offset=offset,
+                                              limit=limit, repo=t.name, line=line)
             return _guarded(run, bad_input="cannot read file", failed="read failed",
                             log_event="read_error")
 

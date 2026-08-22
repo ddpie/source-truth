@@ -25,6 +25,7 @@ from typing import Any
 
 import path_align
 from perf import perf_entry
+import served_paths
 
 logger = logging.getLogger("file-search")
 
@@ -68,8 +69,11 @@ def build_command(pattern: str, root: str, *, glob: str | None, max_matches: int
             "rg", "--line-number", "--no-heading", "--color", "never",
             "--no-ignore",                 # do NOT skip .gitignore'd files (they exist on disk)
             "--hidden",                    # include dotfiles/dirs (config, .env-like tables)
-            "--glob", "!.git/",            # …but never the VCS metadata dir
-            "--glob", "!node_modules/",    # nor vendored deps (huge, not the project's code)
+            # --hidden --no-ignore above deliberately search dotfiles and gitignored files,
+            # which is right for config tables and wrong for credentials. The shared filter
+            # supplies both exclusions (.git/, node_modules/) plus the credential set; every
+            # hit is re-checked below, because the non-ripgrep fallback does not see these.
+            *served_paths.rg_exclude_globs(),
             "--max-count", str(MAX_PER_FILE),  # per-file hit ceiling (dense data tables need >5)
             "--max-filesize", "100M",      # allow searching large config/data tables
             "-e", pattern,
@@ -163,6 +167,10 @@ def run_search(
         if len(parts) < 3:
             continue
         path, line_s, text = parts
+        # Authoritative check. The ripgrep globs above are an optimisation; the pure-Python
+        # fallback path never sees them, so correctness lives here.
+        if served_paths.is_withheld(path):
+            continue
         mount_path = _to_mount(path, local_root=local_root)
         if mount_path is None:
             continue
