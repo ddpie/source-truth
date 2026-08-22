@@ -29,7 +29,7 @@ tracked_files() {  # tracked_files [pathspec...]
 GIT_ENUMERABLE=1
 if ! _probe="$(git ls-files 2>/dev/null)" || [[ -z "$_probe" ]]; then
   GIT_ENUMERABLE=0
-  err "无法枚举 git 跟踪文件（不是 git 仓库，或清单为空）——第 3b/7/8/9 项全部依赖它。"
+  err "无法枚举 git 跟踪文件（不是 git 仓库，或清单为空）——第 3b/7/8/9 项全部依赖它。若你是通过 GitHub「Download ZIP」或 release tarball 获得代码，请改用 git clone。 / Cannot enumerate git-tracked files (not a git repository, or an empty manifest) — checks 3b/7/8/9 all depend on it. If you obtained this tree via GitHub 'Download ZIP' or a release tarball, re-obtain it with git clone: these checks need the git manifest."
   printf '      这些检查在无 .git 的树上（GitHub 源码 zip / release tarball / git archive 导出 /
 ' >&2
   printf '      不含 .git 的 Docker build context）会因清单为空而静默报绿，所以此处直接判失败。

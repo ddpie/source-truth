@@ -40,9 +40,11 @@ A question flows through three resident components:
 
 ![End-to-end sequence of one Q&A: Chat client, bot-gateway, AgentCore microVM, index-service, CardKit across five swimlanes](docs/assets/sequence-qa.en.svg)
 
-> Step-by-step details: [`docs/agent/architecture.md`](docs/agent/architecture.md)
+> Step-by-step details: [`docs/agent/architecture.md`](docs/agent/architecture.md) (Chinese only)
 
 ### Key design properties
+
+> **On the name `source-truth`**: that is this project's internal name. You will see it in every resource it creates — IAM roles, secrets, systemd units, EC2 tags, log groups and the private DNS zone are all `source-truth-*` or `source-truth/*`. It is not a separate component.
 
 - **Trustworthy and verifiable** — real code is the only source of truth; every conclusion carries a `file:line` citation; when evidence is insufficient the agent defers rather than guessing.
 - **Fast on large codebases** — a resident CodeGraph index locates symbols in **1–5 ms** on a
@@ -62,7 +64,7 @@ answers; it changes nothing. Explicitly out of scope:
 - Reading design documents, working across branches or worktrees, or sharing memory between sessions
 - A second reasoning engine, or a complete audit trail
 
-Planned capabilities are tracked in [`docs/agent/architecture.md`](docs/agent/architecture.md) and the design docs.
+Planned capabilities are tracked in [`docs/agent/architecture.md`](docs/agent/architecture.md) and the design docs (both Chinese only).
 
 ## Components
 
@@ -119,7 +121,9 @@ Prerequisites:
   re-bootstraps in place, interrupting every bot on it. `brew install gnu-tar` provides `gtar`,
   which is picked up automatically.
 - **On-Demand Standard vCPU quota ≥ 4** (quota `L-1216C47A`) — *hard-fail* — a fresh account is
-  often capped below the 2 vCPU the `t4g.large` index host needs. `--force` bypasses the check;
+  often capped below this. The `t4g.large` index host itself needs 2 vCPU; the check wants 4
+  because build and transient instances draw on the same quota, so a quota of exactly 2 still
+  fails `run-instances`. `--force` bypasses the check;
   EIP and VPC headroom are *warn* only. Skipped entirely under `--local`.
 - **Session Manager plugin** — ⚠️ ***not checked*, and nothing else checks it either.** It is
   required for every verification and day-2 operation (the index host sits in a private subnet

@@ -491,7 +491,7 @@ preflight_quota() {
   if [[ "$vcpu_quota" =~ ^([0-9]+) ]]; then
     local vcpu_int="${BASH_REMATCH[1]}"
     if [[ "$vcpu_int" -lt 4 ]]; then
-      say err "On-Demand Standard vCPU 配额仅 ${vcpu_int}（quota L-1216C47A）——index 实例需 2 vCPU（t4g.large），Phase 3 的 run-instances 必定报 VcpuLimitExceeded / On-Demand Standard vCPU quota is only ${vcpu_int} (quota L-1216C47A) — the index instance needs 2 vCPU (t4g.large), so Phase 3's run-instances is certain to fail with VcpuLimitExceeded."
+      say err "On-Demand Standard vCPU 配额仅 ${vcpu_int}（quota L-1216C47A）——index 实例本身需 2 vCPU（t4g.large），但本检查要求 ≥4：同一账号内并存的构建/临时实例会占用同一配额，配额恰好为 2 时run-instances 仍会报 VcpuLimitExceeded / On-Demand Standard vCPU quota is only ${vcpu_int} (quota L-1216C47A). The index instance needs 2 vCPU (t4g.large); this check requires >=4 because build and transient instances draw on the same quota, so a quota of exactly 2 still fails run-instances with VcpuLimitExceeded."
       say err "  → 去 Service Quotas 提额（至少 4 vCPU），或用 --force 强制跳过此检查 / raise the quota in Service Quotas (to at least 4 vCPU), or re-run with --force to skip this check."
       if [[ "$FORCE" != true ]]; then
         fail=1
@@ -512,6 +512,31 @@ preflight_quota() {
 # The AWS-touching probes stay off in dry-run. Order for real runs is unchanged (boto3 → docker → …).
 [[ "$DRY_RUN" == true ]] || preflight_boto3
 preflight_docker
+# GNU tar, checked HERE in Phase 0 rather than where det_tar first runs. README lists GNU tar under
+# "hard-fail", and defines hard-fail as "Phase 0 aborts BEFORE creating anything billable" — but the
+# only check lived inside det_tar, first reached in the artifacts phase, after the S3 bucket had
+# already been created. A stock-macOS reader (BSD tar) did get a real hard-fail, just not where the
+# README promised and not before the first billable resource. Same class as the arm64 buildx check,
+# which was moved into Phase 0 for exactly this reason. Local, free, non-mutating, so it runs under
+# --dry-run too.
+preflight_gnu_tar() {
+  if tar --version 2>/dev/null | grep -qi 'gnu tar' || command -v gtar >/dev/null 2>&1; then
+    return 0
+  fi
+  local msg="未找到 GNU tar（BSD tar 不支持 --sort/--mtime/--owner，产出的 tarball 每次字节不同，"
+  msg+="会让每次部署都判定 ArtifactSig 过期并触发原地重引导——即整机网关停数分钟）。macOS 用 "
+  msg+="brew install gnu-tar。 / GNU tar not found. BSD tar lacks --sort/--mtime/--owner, so the "
+  msg+="tarball differs byte-wise on every run, every deploy judges ArtifactSig stale and triggers "
+  msg+="an in-place re-bootstrap that stops every gateway on the host for minutes. On macOS: "
+  msg+="brew install gnu-tar."
+  if [[ "$DRY_RUN" == true ]]; then
+    say warn "$msg"
+  else
+    say err "$msg"
+    exit 1
+  fi
+}
+preflight_gnu_tar
 # These are READ-ONLY probes (Bedrock model listing, AgentCore reachability), so they run in
 # --dry-run as well. Withholding them made `--dry-run` answer "what would be built" while staying
 # silent on "can this machine and account actually do it" — which is the question the operator was

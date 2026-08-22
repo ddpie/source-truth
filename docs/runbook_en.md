@@ -9,7 +9,7 @@ There are two entry points: `install.sh` (interactive, recommended) and `deploy-
 
 ## Quick start
 
-The shortest path to a deployment; the details are in the sections that follow. Assumes the `aws` CLI is installed and credentialed on this machine, and that the Feishu/Lark app has been created per [section 3](#3-connecting-feishu--lark) so you hold the `App ID` / `App Secret` / bot `open_id`.
+The shortest path to a deployment; the details are in the sections that follow. Assumes the `aws` CLI is installed and credentialed on this machine, and that the Feishu/Lark app has been created per [section 3](#3-connecting-feishu--lark) so you hold the `App ID` and `App Secret`. (The bot's `open_id` is derived automatically by the installer — the console does not display one.)
 
 Pick one of the two — **one-command deploy** (the default: installed remotely from an operator machine) or **manual deploy** (`--local`: log into the target EC2 and run it step by step). At runtime both end up with exactly one EC2 instance running the services; the difference is only which machine drives the install. See [section 2](#2-one-command-install-interactive-recommended) for the trade-offs. Once you have chosen, follow only that one path.
 
@@ -37,7 +37,10 @@ git clone https://github.com/aws-samples/sample-code-qa-on-agentcore.git && cd s
 **Step 2 · Deploy the services** (run after logging in with the `ssh` command printed by step 1): answer `install.sh`'s prompts for repositories / model / Feishu credentials. When it finishes, all three backend components (bridge, runtime, gateway) are up.
 
 ```bash
-bash /tmp/prepare-local-host.sh   # Easiest to copy the command launch-host printed
+# Run the command launch-host.sh PRINTED — it carries your own repo URL and branch.
+# A bare `bash /tmp/prepare-local-host.sh` defaults to upstream aws-samples/main, so on a
+# fork or a feature branch it silently deploys code that is not yours.
+REPO_URL=<your repo URL> REPO_REF=<your branch> bash /tmp/prepare-local-host.sh
 ```
 
 **Step 3 · Push the code** (run locally; only needed for local repositories): a local repository must be pushed before the bot can answer anything; after that, every code change is refreshed by pushing again.
@@ -110,7 +113,7 @@ For the details of each step (SSH private key, private-repository credentials, t
 
 ## 2. One-command install (interactive, recommended)
 
-Prepare the Feishu / Lark app first (section 3) and have the `App ID` / `App Secret` / bot `open_id` at hand.
+Prepare the Feishu / Lark app first (section 3) and have the `App ID` and `App Secret` at hand. The bot's `open_id` is derived automatically; you are prompted only if that derivation fails.
 
 The install command is in [Quick start](#quick-start); if you have not cloned the repository yet, a single command bootstraps it (clones into `./source-truth/`, then enters the interactive install):
 
@@ -181,7 +184,7 @@ Once the instance exists, the script **prompts for the path to the SSH private k
 
 A first deploy takes roughly 10–20 minutes (bootstrap and the image build both run serially on this machine, slightly slower than the one-command deploy).
 
-**Re-running after an interruption**: every step is idempotent, so re-run from where it stopped — no need to start over. If the script is already on the instance, SSH in and run `bash /tmp/prepare-local-host.sh` again (or `cd source-truth && ./scripts/install.sh --local`) to continue. If the instance was created before the interruption, re-running `launch-host.sh` **reuses that instance automatically** (starting it first if it was stopped), prompts for the SSH key as usual, re-uploads the script and prints the login command — it does not create a duplicate. Add `--new-host` when you really do want a fresh instance.
+**Re-running after an interruption**: every step is idempotent, so re-run from where it stopped — no need to start over. If the script is already on the instance, SSH in and run the `REPO_URL=… REPO_REF=… bash /tmp/prepare-local-host.sh` command that `launch-host.sh` printed (a bare invocation would fall back to upstream `main`) (or `cd source-truth && ./scripts/install.sh --local`) to continue. If the instance was created before the interruption, re-running `launch-host.sh` **reuses that instance automatically** (starting it first if it was stopped), prompts for the SSH key as usual, re-uploads the script and prints the login command — it does not create a duplicate. Add `--new-host` when you really do want a fresh instance.
 
 **Four things to note**
 
@@ -217,11 +220,16 @@ message-sending permission takes effect, and permissions / events / bot must all
 publish a version to make them live):
 
 1. **Create a custom app for your organisation**: "Developer console" → "Create app" → "Custom app". Once created, note the `App ID` (`cli_...`) and `App Secret` on the "Credentials & basic info" page.
-2. **Enable the bot**: turn on the bot capability on the "Bot" page and note its `open_id` (`ou_...`) — this is `FEISHU_BOT_OPEN_ID` (used to decide whether the account @-mentioned in a group is this bot). **Enable the bot first, or the message-sending permission below cannot take effect.**
+2. **Enable the bot**: turn on the bot capability on the "Bot" page. You do NOT need to copy an `open_id` from this page — it shows the app identity, not an `ou_`-prefixed open_id, so there is nothing there to copy. `install.sh` derives `FEISHU_BOT_OPEN_ID` automatically from `/open-apis/bot/v3/info` using the credentials it has just validated, and prompts only if that call fails. The value decides whether the account @-mentioned in a group is this bot; left blank, ANY @-mention triggers the bot. **Enable the bot first, or the message-sending permission below cannot take effect.**
 3. **Permissions (scopes)**: grant the following under "Permissions" (a missing one makes the corresponding feature fail silently):
    - `im:message`, `im:message.group_at_msg`: read messages that @-mention the bot in a group;
    - `im:message:send_as_bot`: send / reply / add the "processing" reaction as the bot (calls `im/v1/messages` and its `reactions` sub-endpoint — reactions are covered by the messaging permission and need no separate resource scope);
-   - **CardKit cards**: search for "card" under "Permissions" and grant whatever the `cardkit/v1/cards` endpoint lists as its dependencies; without it, cards cannot be created.
+   - **CardKit cards**: grant `cardkit:card:write` ("Create and update cards" / 创建及更新卡片).
+     The gateway calls `POST /open-apis/cardkit/v1/cards` plus the `settings` and `elements`
+     PATCH endpoints. Without this scope the deploy still reaches READY and events still
+     arrive, but every card creation returns 403 — the bot looks silently dead. If the console
+     shows a different name for it, search "card" under "Permissions" and grant the create/update
+     card scope.
 4. **Event subscription**: choose **long connection** mode (not webhook — this system holds a resident subscription and exposes no public callback), and subscribe to two events:
    - `im.message.receive_v1`: a group message was received;
    - `card.action.trigger`: a card button was clicked (stop / follow-up / clarify).
@@ -229,8 +237,8 @@ publish a version to make them live):
 
 After publishing, two more things remain (unrelated to the Feishu console, in either order):
 
-- **Add the bot to the target group** and note the group's `chat_id` (`oc_...`).
-- **Hand the credentials to the installer**: the `App Secret` is sensitive and **never goes into the repository**. The "add project" flow of `install.sh` in section 2 asks for `App ID` / `App Secret` / bot `open_id` and writes them into **Secrets Manager** for you (one secret per project, named `source-truth/feishu-<projectId>`); at gateway start `run.sh` fetches them and injects them into the process environment, never to disk. Just paste when prompted — no need to create the secret by hand.
+- **Add the bot to the target group.** (Nothing asks you for the group's `chat_id` — it arrives on the inbound event.)
+- **Hand the credentials to the installer**: the `App Secret` is sensitive and **never goes into the repository**. The "add project" flow of `install.sh` in section 2 asks for the `App ID` and `App Secret` (deriving the bot `open_id` itself) and writes all three into **Secrets Manager** for you (one secret per project, named `source-truth/feishu-<projectId>`); at gateway start `run.sh` fetches them and injects them into the process environment, never to disk. Just paste when prompted — no need to create the secret by hand.
 
   > Managing it manually (without install.sh): create a Secrets Manager secret whose value is the JSON
   > `{"app_id":"...","app_secret":"...","bot_open_id":"..."}`, with a name starting with `source-truth/`

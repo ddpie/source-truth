@@ -125,7 +125,8 @@ Secrets Manager. Re-runs pre-fill region/spec from .local/deploy-config.
   --local   Single-host mode: deploy onto THIS EC2 (reuse its VPC/role), don't
             create a separate index host. Forwarded to deploy-all.sh. Auto-enabled
             when run ON the index host, so re-runs (add-project / redeploy) don't
-            need it. Normally set for you by prepare-local-host.sh / launch-host.sh.
+            need it. Normally set for you by scripts/lib/prepare-local-host.sh /
+            scripts/launch-host.sh.
   --feishu-domain <feishu|lark>
             Tenant domain. 'feishu' = 飞书 / China (open.feishu.cn), 'lark' =
             international Lark (open.larksuite.com). MUST match the console the
