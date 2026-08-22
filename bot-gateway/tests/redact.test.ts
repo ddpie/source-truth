@@ -439,3 +439,31 @@ describe("Feishu object identifiers", () => {
     expect(redactSensitive("om_short")).toContain("om_short");
   });
 });
+
+describe("bare high-entropy tokens (no adjacent keyword)", () => {
+  // The keyword rules only fire when a credential is LABELLED (`secret=`, `token:`). A value
+  // pasted or quoted on its own was not caught here, while index-service/glossary_build.py had
+  // been widened to catch exactly these shapes — an asymmetry with a real consequence: the same
+  // string blocked from entering a glossary could still flow through an ANSWER into a chat card.
+  it("redacts a 32-char mixed-case token — the Feishu app_secret shape", () => {
+    const s = "kZ8mQ3vXpL0aRt7YbN2wEcHs6UdFjG1i";
+    expect(redactSensitive(s)).not.toContain(s);
+  });
+
+  it("redacts a 32-char hex digest (the old floor of 40 let MD5-shaped secrets through)", () => {
+    const s = "d41d8cd98f00b204e9800998ecf8427e";
+    expect(redactSensitive(s)).not.toContain(s);
+  });
+
+  // These are what protect answer prose. A false positive costs one redacted noun in an answer;
+  // over-redacting identifiers would make the product look broken on every reply.
+  it.each([
+    ["CONSTANT_CASE identifier", "背包格子上限由 INVENTORY_SLOT_ITEM_1 决定"],
+    ["long CamelCase with no digits", "GetBagSizeFromContainerFieldNumSlots"],
+    ["file:line citation", "Player.h:577 里的 enum InventorySlots"],
+    ["prose plus identifier", "伤害公式在 CalculateMeleeDamage 里实现"],
+    ["constant and a number", "MAX_BAG_SIZE 是 36"],
+  ])("leaves legitimate answer prose intact: %s", (_why, text) => {
+    expect(redactSensitive(text)).toBe(text);
+  });
+});

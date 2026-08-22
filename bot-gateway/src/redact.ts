@@ -11,6 +11,28 @@ import { stripToolCallLeak } from "./strip-toolcall-leak";
 const REDACTED = "[已隐藏]";
 
 const PATTERNS: Array<[RegExp, string | ((...args: string[]) => string)]> = [
+  // Bare high-entropy tokens with NO keyword next to them. The keyword-form rules below
+  // ("secret=", "token:") only fire when the credential is labelled; a value pasted or quoted on
+  // its own is not. index-service/glossary_build.py was widened to catch exactly these shapes and
+  // this net was not, which left an asymmetry with a real consequence: the same string that is
+  // blocked from entering a glossary could still flow through an ANSWER into a chat card. The
+  // 32-char mixed-case form matters most — a Feishu app_secret is exactly that shape, and the
+  // per-project gateway env holding one sits on the same host the agent reads from.
+  //
+  // Discriminators chosen to protect ANSWER PROSE, which is full of legitimate identifiers:
+  // require BOTH mixed case AND >= 2 digits, and no separators. That excludes CamelCaseNames
+  // (no digits), CONSTANT_CASE (underscore, excluded by the class), and ordinary words, while
+  // still catching opaque tokens. A false positive costs one redacted noun in an answer; a false
+  // negative publishes a live credential to a group chat.
+  [
+    /\b(?=[A-Za-z0-9]{32,64}\b)(?=(?:[^0-9]*[0-9]){2,})(?=[^a-z]*[a-z])(?=[^A-Z]*[A-Z])[A-Za-z0-9]{32,64}\b/g,
+    REDACTED,
+  ],
+  // Hex digest of 32+ (MD5 and up). 40+ was the old floor here and in the glossary filter, which
+  // let every 32-char digest through — MD5, Twilio auth tokens, several providers' secret keys.
+  // Cost: a bare git SHA quoted in an answer is redacted, which the glossary filter already
+  // accepts for the same reason.
+  [/\b[0-9a-fA-F]{32,}\b/g, REDACTED],
   // Feishu/Lark object identifiers. These arrive via the URL PATH of a failed API call
   // (`POST /open-apis/im/v1/messages/om_xxx/reactions HTTP 400: ...`), so every error string
   // wrapped in redactSensitive was publishing raw message / chat / user ids to CloudWatch —
