@@ -11,28 +11,6 @@ import { stripToolCallLeak } from "./strip-toolcall-leak";
 const REDACTED = "[已隐藏]";
 
 const PATTERNS: Array<[RegExp, string | ((...args: string[]) => string)]> = [
-  // Bare high-entropy tokens with NO keyword next to them. The keyword-form rules below
-  // ("secret=", "token:") only fire when the credential is labelled; a value pasted or quoted on
-  // its own is not. index-service/glossary_build.py was widened to catch exactly these shapes and
-  // this net was not, which left an asymmetry with a real consequence: the same string that is
-  // blocked from entering a glossary could still flow through an ANSWER into a chat card. The
-  // 32-char mixed-case form matters most — a Feishu app_secret is exactly that shape, and the
-  // per-project gateway env holding one sits on the same host the agent reads from.
-  //
-  // Discriminators chosen to protect ANSWER PROSE, which is full of legitimate identifiers:
-  // require BOTH mixed case AND >= 2 digits, and no separators. That excludes CamelCaseNames
-  // (no digits), CONSTANT_CASE (underscore, excluded by the class), and ordinary words, while
-  // still catching opaque tokens. A false positive costs one redacted noun in an answer; a false
-  // negative publishes a live credential to a group chat.
-  [
-    /\b(?=[A-Za-z0-9]{32,64}\b)(?=(?:[^0-9]*[0-9]){2,})(?=[^a-z]*[a-z])(?=[^A-Z]*[A-Z])[A-Za-z0-9]{32,64}\b/g,
-    REDACTED,
-  ],
-  // Hex digest of 32+ (MD5 and up). 40+ was the old floor here and in the glossary filter, which
-  // let every 32-char digest through — MD5, Twilio auth tokens, several providers' secret keys.
-  // Cost: a bare git SHA quoted in an answer is redacted, which the glossary filter already
-  // accepts for the same reason.
-  [/\b[0-9a-fA-F]{32,}\b/g, REDACTED],
   // Feishu/Lark object identifiers. These arrive via the URL PATH of a failed API call
   // (`POST /open-apis/im/v1/messages/om_xxx/reactions HTTP 400: ...`), so every error string
   // wrapped in redactSensitive was publishing raw message / chat / user ids to CloudWatch —
@@ -176,8 +154,77 @@ const PATTERNS: Array<[RegExp, string | ((...args: string[]) => string)]> = [
   [/\bs3:\/\/[a-z0-9][a-z0-9.-]{2,62}(?:\/[A-Za-z0-9!_.*'/-]*)?/g, REDACTED],
 ];
 
+
+// Bare high-entropy tokens with NO keyword beside them. The keyword rules in PATTERNS only fire
+// when a credential is LABELLED (`secret=`, `token:`); a value pasted or quoted on its own is not,
+// and index-service/glossary_build.py was widened to catch these shapes while this net was not.
+// The 32-char mixed-case form matters most: a Feishu app_secret is exactly that shape.
+//
+// Deliberately NOT a single regex. The first version stacked lookaheads
+// (`(?=(?:[^0-9]*[0-9]){2,})` and friends) and had two defects from one cause -- a lookahead scans
+// forward over the REST OF THE STRING, not the matched token:
+//   * unbounded `[^0-9]*` backtracked per candidate start, giving O(n^2): 2240 ms on 211 KB. And
+//     clampForCard runs AFTER redactSensitive, so the card's 9000-char cap does not bound this
+//     input, while the live typewriter re-runs the full accumulated text every THROTTLE_MS. Answer
+//     text is model-authored from indexed repo content, so that was a remotely reachable stall of
+//     the single-threaded event loop -- every session's CardKit writes and WS heartbeats with it.
+//   * the mixed-case/digit conditions never applied to the token. Two digits and a capital
+//     ANYWHERE LATER satisfied them, so the rule collapsed into `\b[A-Za-z0-9]{32,64}\b` and
+//     redacted game symbol names like GetBagSizeFromContainerFieldNumSlots -- the exact thing this
+//     product exists to talk about. It also made the result depend on whether digits sat before or
+//     after the token, so one identifier was hidden in the conclusion and kept in the evidence.
+// A greedy character class followed by `\b` has no backtrackable alternation, so the scan is
+// linear; the discrimination then runs on the token itself, which is what the rule always meant.
+const BARE_TOKEN_RE = /\b[A-Za-z0-9]{32,}\b/g;
+
+function redactBareHighEntropy(text: string): string {
+  return text.replace(BARE_TOKEN_RE, (m) => {
+    // Keep the original 32..64 window: beyond that is not a credential shape we claim to detect.
+    if (m.length > 64) return m;
+    let digits = 0;
+    let lower = 0;
+    let upper = 0;
+    for (let i = 0; i < m.length; i++) {
+      const c = m.charCodeAt(i);
+      if (c >= 48 && c <= 57) digits++;
+      else if (c >= 97 && c <= 122) lower++;
+      else upper++;
+    }
+    // Requiring digits AND both cases is what keeps CamelCaseIdentifiers (no digits) and
+    // CONSTANT_CASE (underscore is outside the class) readable. A false positive costs one
+    // redacted noun; a false negative publishes a live credential to a group chat.
+    return digits >= 2 && lower > 0 && upper > 0 ? REDACTED : m;
+  });
+}
+
+// Hex digest of 32+ (MD5 and up). The old floor of 40 let every 32-char digest through.
+const HEX_DIGEST_RE = /\b[0-9a-fA-F]{32,}\b/g;
+
+function redactHexDigest(text: string): string {
+  return text.replace(HEX_DIGEST_RE, (m, offset: number, whole: string) => {
+    // NEVER redact this gateway's own traceId (`st-` + 32 hex, see the traceId mint site). It is
+    // the correlation key an operator greps by -- scripts/trace.sh takes exactly that value as its
+    // only argument -- and redactSensitive wraps ~25 log sites, so redacting it would write
+    // `st-[REDACTED]` into CloudWatch and destroy the one handle for diagnosing the very error
+    // being logged. Same reasoning already recorded for the CardKit card ids below.
+    if (whole.slice(Math.max(0, offset - 3), offset) === "st-") return m;
+    // A digest that is ALL digits is a number, and all letters is a word; requiring both keeps
+    // 32-digit game constants and 0xFFFF..FF masks readable.
+    let hasDigit = false;
+    let hasAlpha = false;
+    for (let i = 0; i < m.length; i++) {
+      const c = m.charCodeAt(i);
+      if (c >= 48 && c <= 57) hasDigit = true;
+      else hasAlpha = true;
+      if (hasDigit && hasAlpha) return REDACTED;
+    }
+    return m;
+  });
+}
+
 export function redactSensitive(text: string): string {
-  let out = text;
+  // Linear-time bare-token and hex rules first, then the keyword/prefix PATTERNS.
+  let out = redactBareHighEntropy(redactHexDigest(text));
   for (const [re, repl] of PATTERNS) {
     out = typeof repl === "function"
       ? out.replace(re, repl as (...args: string[]) => string)
