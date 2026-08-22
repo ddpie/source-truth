@@ -183,7 +183,7 @@ Tear everything down when you are finished — nothing expires on its own:
 ```bash
 ./scripts/teardown.sh --region <r> --dry-run   # review the deletion plan first
 ./scripts/teardown.sh --region <r>             # delete this region's resources
-./scripts/teardown.sh --region <r> --include-shared   # also the account-level IAM roles + S3 bucket
+./scripts/teardown.sh --region <r> --include-shared   # also the account-wide IAM roles + this region's S3 bucket
 ```
 
 A default run keeps a few account-level resources on purpose (Secrets Manager entries, CloudWatch

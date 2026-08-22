@@ -284,14 +284,18 @@ def build_options_dict(
         "strict_mcp_config": True,
         # ISOLATION: load NO filesystem settings. With setting_sources unset the SDK
         # defaults to loading user + project settings AND project CLAUDE.md — and our
-        # cwd is /mnt/repo, the attacker-influenceable repo mount. A CLAUDE.md or
+        # cwd would be the repo mount if one existed. A CLAUDE.md or
         # .claude/settings.json committed into the indexed game repo would otherwise
         # be loaded as TRUSTED PROJECT INSTRUCTIONS (the instruction channel, before
         # any tool call), bypassing the 信任边界/防注入 guard in system.md (which only
         # governs content read VIA tools). The agent's ONLY instructions must be the
-        # bundled system.md passed as system_prompt. [] = full isolation. (Do NOT set
-        # `skills`: a non-None skills value re-defaults setting_sources to
-        # user+project via the SDK's _apply_skills_defaults; an explicit [] is kept.)
+        # bundled system.md passed as system_prompt. [] = full isolation. The SDK
+        # re-defaults setting_sources to user+project when it is None (checked against
+        # _apply_skills_defaults in v0.2.103) — so what protects us is passing an
+        # explicit [], NOT the absence of any other option. An earlier version of this
+        # comment blamed `skills` specifically; that was wrong. Setting `skills` is
+        # harmless here, because the re-default is gated on `setting_sources is None`
+        # and ours is a list. Do not "fix" this by removing the explicit [].
         "setting_sources": [],
         "max_turns": max_turns,
         "mcp_servers": mcp_servers,
