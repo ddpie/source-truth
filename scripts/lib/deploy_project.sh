@@ -245,11 +245,43 @@ if ! aws secretsmanager describe-secret --region "$REGION" --secret-id source-tr
     || say warn "could not create source-truth/log-hash-salt; gateway runs with weak public fallback (saltWeak)"
   unset GW_SALT
 fi
+# TENANT + LOCALE resolution, at the one point BOTH flows pass through.
+#
+# deploy-all.sh persists DEPLOY_FEISHU_DOMAIN / DEPLOY_LOCALE, but install.sh's "redeploy" flow
+# does not call deploy-all — it invokes this script directly with FEISHU_DOMAIN/LOCALE as one-shot
+# environment values. And activate_gateway.sh rewrites the gateway env file WHOLE. So
+# `install.sh --feishu-domain lark` + redeploy took effect exactly once: the next flag-less
+# redeploy read the stale DEPLOY_FEISHU_DOMAIN, rewrote the env file back to feishu, and the bot
+# silently returned to the China tenant and stopped receiving events entirely. Same class as the
+# discarded-flag defect the arg loop was rewritten to eliminate — moved into the persistence step.
+#
+# Resolving AND persisting here makes both flows equivalent and removes the dependency on whether
+# deploy-all was ever involved.
+_TENANT="${FEISHU_DOMAIN:-${DEPLOY_FEISHU_DOMAIN:-feishu}}"
+# Locale default follows the tenant. The old fallback hardcoded zh, so a redeploy that switched to
+# lark without an explicit --locale configured an international tenant with Chinese cards — the
+# pipeline accident deploy-all.sh derives this default specifically to prevent. Only the DEFAULT is
+# derived; an explicit LOCALE / DEPLOY_LOCALE still wins.
+if [[ -n "${LOCALE:-}" ]]; then
+  _LOCALE="$LOCALE"
+elif [[ -n "${DEPLOY_LOCALE:-}" ]]; then
+  _LOCALE="$DEPLOY_LOCALE"
+elif [[ "$_TENANT" == "lark" ]]; then
+  _LOCALE="en"
+else
+  _LOCALE="zh"
+fi
+# Persist so the NEXT flag-less redeploy keeps the tenant instead of silently reverting.
+if [[ "${_TENANT}" != "${DEPLOY_FEISHU_DOMAIN:-}" || "${_LOCALE}" != "${DEPLOY_LOCALE:-}" ]]; then
+  update_env "$CONFIG_FILE" DEPLOY_FEISHU_DOMAIN "$_TENANT"
+  update_env "$CONFIG_FILE" DEPLOY_LOCALE "$_LOCALE"
+  say info "persisted tenant=$_TENANT locale=$_LOCALE to deploy-config"
+fi
 PROJECT_ID="$PID" \
-FEISHU_DOMAIN="${FEISHU_DOMAIN:-${DEPLOY_FEISHU_DOMAIN:-feishu}}" \
+FEISHU_DOMAIN="$_TENANT" \
   bash "$SCRIPT_DIR/activate_gateway.sh" \
   "$REGION" "$IID" "$RT_ARN" "$FEISHU_SECRET" \
-  "${LOCALE:-${DEPLOY_LOCALE:-zh}}" "" "${FEISHU_API_BASE:-}" "${DEPLOY_IDLE_TIMEOUT:-900}" "$ARTIFACT_BUCKET" \
+  "$_LOCALE" "" "${FEISHU_API_BASE:-}" "${DEPLOY_IDLE_TIMEOUT:-900}" "$ARTIFACT_BUCKET" \
   || { say err "gateway activation failed for $PID — backend is up. Logs: sudo journalctl -u bot-gateway@$PID -n 50, and /var/log/bot-gateway-$PID.log on $IID (aws ssm start-session --target $IID --region $REGION)"; exit 1; }
 say ok "project $PID fully deployed (bridge:$PORT + runtime + gateway)"
 

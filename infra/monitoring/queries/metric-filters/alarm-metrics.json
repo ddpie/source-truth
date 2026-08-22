@@ -84,11 +84,11 @@
     {
       "name": "EventDroppedGate",
       "event": "event_dropped",
-      "filterPattern": "{ $.metric IS TRUE && $.event = \"event_dropped\" && $.reason != \"unparseable_event\" && $.reason != \"duplicate_message\" }",
+      "filterPattern": "{ $.metric IS TRUE && $.event = \"event_dropped\" && $.reason != \"unparseable_event\" && $.reason != \"duplicate\" }",
       "metricValue": "1",
       "defaultValue": 0,
       "unit": "Count",
-      "purpose": "消息到了却被门禁丢掉。最典型的成因是 FEISHU_BOT_OPEN_ID 填了一个格式正确但不对的值 —— 群里 100% 流量被丢，而 /ready 200、心跳绿，与'今天没人提问'完全无法区分。刻意排除 duplicate_message：重启后飞书重投是正常现象，不排除会让每次部署都告警。"
+      "purpose": "消息到了却被门禁丢掉。最典型的成因是 FEISHU_BOT_OPEN_ID 填了一个格式正确但不对的值 —— 群里 100% 流量被丢，而 /ready 200、心跳绿，与'今天没人提问'完全无法区分。刻意排除 duplicate：重启后飞书重投是正常现象，不排除会让每次部署都告警。（这里曾写成 duplicate_message，那是另一条纯日志用的词，metric 路径发的是 duplicate，所以排除从未生效；同期 metrics.ts 的 reason 白名单又把所有丢弃原因改写成 unknown，两者叠加使本告警在每次部署后误报。）"
     }
   ]
 }
