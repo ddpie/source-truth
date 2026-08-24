@@ -56,3 +56,15 @@ Thumbs.db
 
 # Internal / dev-only
 .superpowers/
+
+# The CodeGraph engine binary. This sample does NOT redistribute it (Apache-2.0, carries a NOTICE
+# obligation), and deploy-all.sh's own failure message tells the operator to drop it in the repo
+# root and point CODEGRAPH_SERVER_BIN at $PWD — so the likeliest way it ever gets committed is by
+# following our own instructions. check-invariants 8b fails on a TRACKED match; this keeps it from
+# showing up as untracked noise in the first place.
+codegraph-server
+codegraph-server-*
+!codegraph-server-*.md
+# `cargo build --release -p codegraph-server` runs inside a separately cloned CodeGraph tree, so
+# this is belt-and-braces for anyone who builds it in place.
+/target/

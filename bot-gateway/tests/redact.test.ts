@@ -424,11 +424,13 @@ describe("Feishu object identifiers", () => {
   // message / chat / user ids — breaking log.ts's own contract while looking redacted.
   it("redacts message, chat, user and bot ids", () => {
     const s = redactSensitive(
-      "feishu POST /open-apis/im/v1/messages/om_x100b674b2af884a8deb907ad58a6aa7/reactions HTTP 400",
+      // Synthetic ids. These assertions test the SHAPE rule, so real values add nothing and
+    // publishing them contradicts the very rule under test.
+    "feishu POST /open-apis/im/v1/messages/om_00000000000000000000000000000002/reactions HTTP 400",
     );
-    expect(s).not.toContain("om_x100b674b2af884a8deb907ad58a6aa7");
-    expect(redactSensitive("asker ou_bd45b9d1fe7e95cdfc3b0e3bfe704c78")).not.toContain("ou_bd45");
-    expect(redactSensitive("chat oc_1b38d6cb6c22cdd9d2bff6b02040ead5")).not.toContain("oc_1b38");
+    expect(s).not.toContain("om_00000000000000000000000000000002");
+    expect(redactSensitive("asker ou_00000000000000000000000000000002")).not.toContain("ou_0000");
+    expect(redactSensitive("chat oc_00000000000000000000000000000002")).not.toContain("oc_0000");
   });
 
   it("keeps the CardKit card id, which is the operator's correlation key and identifies no user", () => {

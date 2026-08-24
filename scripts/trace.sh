@@ -8,7 +8,7 @@
 # it), so they join into one timeline. This wraps the two Logs-Insights queries + the merge so
 # an operator types ONE thing:
 #
-#   ./scripts/trace.sh st-731080073903468d83a0fbe1249b5dc3
+#   ./scripts/trace.sh st-00000000000000000000000000000000
 #
 # Everything else (region, both log group names, the time window, the query, sorting) is
 # resolved automatically. Region + runtime are read from .local/deploy-config; override with
@@ -30,7 +30,7 @@ usage() {
 Usage: ./scripts/trace.sh <traceId> [--region <r>] [--since-hours N] [--runtime <id>] [--raw]
 
 Pulls the full gateway+agent timeline for one traceId, merged by timestamp.
-  <traceId>        e.g. st-731080073903468d83a0fbe1249b5dc3 (from a card footer / answer_* log)
+  <traceId>        e.g. st-00000000000000000000000000000000 (from a card footer / answer_* log)
   --region         AWS region (default: DEPLOY_REGION from .local/deploy-config)
   --since-hours    how far back to scan (default: 6)
   --runtime        AgentCore runtime id (default: derived from AGENT_RUNTIME_ARN in config)

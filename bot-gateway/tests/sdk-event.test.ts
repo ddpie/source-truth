@@ -6,20 +6,24 @@
 
 import { sdkEventToImEvent } from "../src/sdk-event";
 
-// Real event shape captured live from @larksuiteoapi/node-sdk WSClient.
+// Event SHAPE as emitted by @larksuiteoapi/node-sdk WSClient. The shape is what these tests
+// pin; every identifier below is SYNTHETIC on purpose. A previous version pasted a live
+// capture, which published one person's open_id, a real conversation id and the actual text
+// of their question — the same om_/ou_/oc_ shape src/redact.ts strips from anything that
+// reaches a Feishu group. Keep these fake; realism buys these assertions nothing.
 const LIVE_EVENT = {
   schema: "2.0",
-  event_id: "d1529900790228daff5d295f10865304",
+  event_id: "00000000000000000000000000000001",
   event_type: "im.message.receive_v1",
   message: {
-    chat_id: "oc_c9bce1d07bf0a51c82507473c336eda8",
+    chat_id: "oc_00000000000000000000000000000001",
     chat_type: "p2p",
-    content: '{"text":"session-map 有几种状态"}',
-    message_id: "om_x100b6c1c66b6f4a8c287a839b12804e",
+    content: '{"text":"how many states does the session map have"}',
+    message_id: "om_00000000000000000000000000000001",
     message_type: "text",
   },
   sender: {
-    sender_id: { open_id: "ou_208edaa2b50e6e7343cf110f1d051a47" },
+    sender_id: { open_id: "ou_00000000000000000000000000000001" },
     sender_type: "user",
   },
 };
@@ -28,17 +32,17 @@ describe("sdkEventToImEvent", () => {
   it("flattens the nested SDK event into ImEvent", () => {
     const ev = sdkEventToImEvent(LIVE_EVENT);
     expect(ev).not.toBeNull();
-    expect(ev!.event_id).toBe("d1529900790228daff5d295f10865304");
-    expect(ev!.chat_id).toBe("oc_c9bce1d07bf0a51c82507473c336eda8");
+    expect(ev!.event_id).toBe("00000000000000000000000000000001");
+    expect(ev!.chat_id).toBe("oc_00000000000000000000000000000001");
     expect(ev!.chat_type).toBe("p2p");
-    expect(ev!.message_id).toBe("om_x100b6c1c66b6f4a8c287a839b12804e");
+    expect(ev!.message_id).toBe("om_00000000000000000000000000000001");
     expect(ev!.message_type).toBe("text");
-    expect(ev!.sender_id).toBe("ou_208edaa2b50e6e7343cf110f1d051a47");
+    expect(ev!.sender_id).toBe("ou_00000000000000000000000000000001");
   });
 
   it("extracts the text from the content JSON", () => {
     const ev = sdkEventToImEvent(LIVE_EVENT);
-    expect(ev!.content).toBe("session-map 有几种状态");
+    expect(ev!.content).toBe("how many states does the session map have");
   });
 
   it("returns null for a non-text message type (e.g. image)", () => {

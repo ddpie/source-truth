@@ -204,6 +204,18 @@ else
   ok "引擎二进制来自上游，本仓不再分发"
 fi
 
+#     ……以及它绝不能作为文件进到仓库里。上面那条只看下载源的配置值，看不出树里是不是躺着一个
+#     二进制。而 deploy-all.sh 的失败提示恰好教操作员把它放在仓库根目录并让 CODEGRAPH_SERVER_BIN
+#     指向 $PWD，所以"照我们自己的指示做"就是它被提交的最可能路径。实测过：根目录放一个假二进制，
+#     git add -A 会收，而当时两个守卫都报绿。
+cg_tracked="$(tracked_files 'codegraph-server*' | grep -vE '\.md$' || true)"
+if [[ -n "$cg_tracked" ]]; then
+  err "仓库里跟踪了引擎二进制——本仓不分发它（Apache-2.0，含 NOTICE 义务）："
+  printf '      %s\n' "$cg_tracked" >&2
+else
+  ok "仓库未跟踪引擎二进制"
+fi
+
 # 8c. 引擎二进制的校验行为必须由可执行测试守着，而不是由本文件断言
 #     这条原来是 `grep -q 'sha256sum "$CG_TMP"'`。它对真正发生过的缺陷完全无效：那段校验调用了
 #     只定义在 teardown.sh 里的 is_set，`if <不存在的命令>` 返回 127、在 if 条件位置不触发
