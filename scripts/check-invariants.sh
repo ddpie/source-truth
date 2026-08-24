@@ -187,6 +187,32 @@ else
   ok "GitHub slug 默认值均为 aws-samples"
 fi
 
+# 8b. 引擎二进制不得由本仓分发
+#     codegraph-server 是上游 Apache-2.0 项目的产物（github.com/codegraph-ai/CodeGraph）。把默认
+#     下载源指回本仓意味着两件坏事：本仓成了 Apache-2.0 二进制的再分发方（连带 NOTICE 义务），
+#     且每个外部用户的部署都依赖我们给自己的 release 挂资产——那正是此前"外部用户根本装不上"的
+#     成因。第 8 项守的是 slug 不能是非 aws-samples 的本仓名，反向回退它看不出来，所以单列一条。
+cg_repo_line="$(grep -E '^CODEGRAPH_SERVER_REPO=' scripts/deploy-all.sh 2>/dev/null || true)"
+if [[ -z "$cg_repo_line" ]]; then
+  err "未找到 CODEGRAPH_SERVER_REPO 定义（deploy-all.sh 结构变了，本条守卫已失效）"
+elif printf '%s' "$cg_repo_line" | grep -qE 'source-truth|sample-code-qa-on-agentcore'; then
+  err "引擎下载源指回了本仓——本仓不分发 codegraph-server（Apache-2.0，含 NOTICE 义务）："
+  printf '      %s\n' "$cg_repo_line" >&2
+elif ! printf '%s' "$cg_repo_line" | grep -q 'codegraph-ai/CodeGraph'; then
+  warn "引擎下载源既不是本仓也不是已知上游，请确认是有意的：$cg_repo_line"
+else
+  ok "引擎二进制来自上游，本仓不再分发"
+fi
+
+# 8c. 下载的引擎二进制必须校验摘要
+#     它会在索引主机上以 root 运行。此前这一步完全不存在：128 MB 的可执行文件经网络取回后
+#     没有任何东西检查到达的是什么。
+if grep -q 'sha256sum "\$CG_TMP"' scripts/deploy-all.sh 2>/dev/null; then
+  ok "引擎二进制下载后校验 sha256"
+else
+  err "引擎二进制下载路径缺少 sha256 校验（它以 root 运行，不可省）"
+fi
+
 # 9. 公开仓不得包含可识别到具体组织的内容
 #    规则：不得含具体部署环境的描述、交付责任人/交付物表、真实人名或竞品对标。
 #

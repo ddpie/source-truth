@@ -76,13 +76,23 @@ DEFAULT_ROOT_VOLUME_GB="30"
 # follow-up warm-hit rate for idle-memory spend — tune per workload.
 DEFAULT_IDLE_TIMEOUT="900"
 DEFAULT_MAX_LIFETIME="28800"
-# Where to fetch codegraph-server when it's neither local nor already in S3 (the
-# fresh-machine / one-line-installer path). Must serve the ARM aarch64 / glibc>=2.38
-# 0.18.5 build. Two routes: `gh release download` (works for a PRIVATE repo via the
-# operator's gh auth — preferred) then a plain-curl URL (works once public / a mirror).
-CODEGRAPH_SERVER_REPO="${CODEGRAPH_SERVER_REPO:-aws-samples/sample-code-qa-on-agentcore}"
-CODEGRAPH_SERVER_TAG="${CODEGRAPH_SERVER_TAG:-codegraph-server-v0.18.5}"
-CODEGRAPH_SERVER_URL_DEFAULT="https://github.com/${CODEGRAPH_SERVER_REPO}/releases/download/${CODEGRAPH_SERVER_TAG}/codegraph-server"
+# Where to fetch codegraph-server when it's neither local nor already in S3 (the fresh-machine /
+# one-line-installer path). This sample does NOT redistribute the engine: the default source is the
+# engine's OWN upstream release. CodeGraph is a public Apache-2.0 Rust workspace
+# (github.com/codegraph-ai/CodeGraph) that publishes a linux-arm64 build plus a .sha256 for each
+# release, so pointing here is both lawful and one fewer thing for us to keep in sync.
+#
+# Version note: this used to pin 0.18.5, which has NO upstream tag — nobody outside could obtain or
+# build it, so a first deploy could only ever work off a binary we attached to our own release.
+# 0.20.1 is protocol-verified against the pinned mcp==1.23.3 client (MCP 2024-11-05; the three
+# tools index-service exposes — symbol_search / get_callers / analyze_impact — are present under
+# the same names). Override any of these to use a build of your own; see index-service/README.md
+# for building from source, which is the route to take for a different arch or an audited build.
+CODEGRAPH_SERVER_REPO="${CODEGRAPH_SERVER_REPO:-codegraph-ai/CodeGraph}"
+CODEGRAPH_SERVER_TAG="${CODEGRAPH_SERVER_TAG:-v0.20.1}"
+# Upstream ships per-platform asset names; the index host and the session microVM are both ARM.
+CODEGRAPH_SERVER_ASSET="${CODEGRAPH_SERVER_ASSET:-codegraph-server-linux-arm64}"
+CODEGRAPH_SERVER_URL_DEFAULT="https://github.com/${CODEGRAPH_SERVER_REPO}/releases/download/${CODEGRAPH_SERVER_TAG}/${CODEGRAPH_SERVER_ASSET}"
 LOCAL_MODE=false          # --local: this EC2 IS the index host; bootstrap in place, reuse its VPC/subnet
 # bash 3.2 (stock macOS) has no `declare -A` — model the skip set as a space-delimited
 # string ("iam network …") and test membership with a case glob (see skip() below).
@@ -120,9 +130,11 @@ Options:
   -h, --help
 
 PREREQUISITES (not auto-provisioned — the deploy hard-fails / WARNs if missing):
-  • codegraph-server binary (ARM aarch64, glibc>=2.38, pinned 0.18.5) on PATH or via
+  • codegraph-server binary (ARM aarch64, glibc>=2.38, pinned 0.20.1) on PATH or via
     CODEGRAPH_SERVER_BIN. If absent locally and not yet in S3, it is downloaded from
-    CODEGRAPH_SERVER_URL (default: this repo's Release asset) — so a fresh machine works.
+    CODEGRAPH_SERVER_URL (default: the engine's OWN upstream release asset, checksum-verified;
+    this repo never redistributes it) — so a fresh machine works. Build it yourself instead:
+    see index-service/README.md "Obtaining codegraph-server".
   • A host that can build linux/arm64 images (arm64 host, or x86 + binfmt).
   • Bedrock model access for the model, and AgentCore available in --region (probed, WARN).
   • A read-only git credential in Secrets Manager (source-truth/git-credentials) for cloning
@@ -639,8 +651,8 @@ else
     say info "codegraph-server not local, but already staged at s3://$BUCKET/bin/codegraph-server (reuse)"
   else
     # Download once to a temp file, then stage to S3 (same path the local-binary tier uses).
-    # The asset must be the ARM aarch64 / glibc>=2.38 0.18.5 build — the host can't run a
-    # mismatched arch. Two ways, tried in order so a PRIVATE repo works without going public:
+    # The asset must be the ARM aarch64 / glibc>=2.38 build — the host can't run a mismatched
+    # arch. Two ways, tried in order (gh also covers a rate-limited/anonymous curl):
     #   1) `gh release download` — uses the operator's authenticated gh token, so it reaches a
     #      private repo's Release asset. Preferred whenever gh is installed + logged in.
     #   2) plain `curl` from $CODEGRAPH_SERVER_URL — works once the repo (or mirror) is public.
@@ -655,7 +667,7 @@ else
     if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
       say info "codegraph-server not local or in S3 — downloading via gh from $CODEGRAPH_SERVER_REPO ($CODEGRAPH_SERVER_TAG)"
       if run gh release download "$CODEGRAPH_SERVER_TAG" --repo "$CODEGRAPH_SERVER_REPO" \
-           --pattern codegraph-server --output "$CG_TMP" --clobber && [[ -s "$CG_TMP" ]]; then
+           --pattern "$CODEGRAPH_SERVER_ASSET" --output "$CG_TMP" --clobber && [[ -s "$CG_TMP" ]]; then
         cg_got=true
       fi
     fi
@@ -667,14 +679,50 @@ else
       fi
     fi
     if [[ "$cg_got" == true ]]; then
+      # VERIFY THE BYTES. This step did not exist: a 128 MB executable was fetched over the network
+      # and then run as root on the index host with nothing checking what arrived. Upstream
+      # publishes "<asset>.sha256" beside each asset, so there is no excuse for trusting the
+      # transfer. CODEGRAPH_SERVER_SHA256 lets an operator pin the digest of their OWN build.
+      cg_want="${CODEGRAPH_SERVER_SHA256:-}"
+      if [[ -z "$cg_want" ]]; then
+        cg_sum_url="${CODEGRAPH_SERVER_URL:-$CODEGRAPH_SERVER_URL_DEFAULT}.sha256"
+        cg_want="$(curl -fsSL "$cg_sum_url" 2>/dev/null | awk 'NR==1{print $1}' || echo "")"
+      fi
+      if is_set "$cg_want"; then
+        cg_have="$(sha256sum "$CG_TMP" | awk '{print $1}')"
+        if [[ "$cg_have" != "$cg_want" ]]; then
+          rm -f "$CG_TMP"; trap - EXIT
+          say err "codegraph-server checksum MISMATCH — refusing to stage it."
+          say err "  expected $cg_want"
+          say err "  got      $cg_have"
+          say err "  The binary runs as root on the index host, so a bad or tampered download must"
+          say err "  not proceed. Re-run to retry, or set CODEGRAPH_SERVER_SHA256 for your own build."
+          exit 1
+        fi
+        say ok "codegraph-server checksum verified (sha256 ${cg_have:0:16}…)"
+      else
+        # Not fatal: an operator pointing CODEGRAPH_SERVER_URL at their own build may have no
+        # sibling .sha256. Say it out loud rather than verifying silently-not-at-all.
+        say warn "no checksum available for codegraph-server — staging UNVERIFIED bytes."
+        say warn "  set CODEGRAPH_SERVER_SHA256=<digest> to pin your build."
+      fi
       chmod +x "$CG_TMP"
       run aws s3 cp "$CG_TMP" "s3://$BUCKET/bin/codegraph-server" --region "$REGION"
       rm -f "$CG_TMP"; trap - EXIT
     else
       rm -f "$CG_TMP"; trap - EXIT
-      say err "codegraph-server not found locally / in S3, and download failed (gh + curl both)."
-      say err "  → If the repo is private, run 'gh auth login' so 'gh release download' can reach the asset;"
-      say err "    or set CODEGRAPH_SERVER_BIN=/path/to/codegraph-server (ARM aarch64, glibc>=2.38) and re-run."
+      say err "codegraph-server not found locally / in S3, and the download failed (gh + curl)."
+      say err "  This sample does not redistribute the engine. Two ways forward:"
+      say err "  1) Download the published build for this arch:"
+      say err "       gh release download $CODEGRAPH_SERVER_TAG --repo $CODEGRAPH_SERVER_REPO \\"
+      say err "         --pattern $CODEGRAPH_SERVER_ASSET"
+      say err "     then: chmod +x $CODEGRAPH_SERVER_ASSET && export CODEGRAPH_SERVER_BIN=\$PWD/$CODEGRAPH_SERVER_ASSET"
+      say err "  2) Build it from source (Apache-2.0, needs Rust stable):"
+      say err "       git clone https://github.com/$CODEGRAPH_SERVER_REPO && cd CodeGraph"
+      say err "       cargo build --release -p codegraph-server"
+      say err "       export CODEGRAPH_SERVER_BIN=\$PWD/target/release/codegraph-server"
+      say err "     Build on ARM aarch64 (or cross-compile to it) — the index host cannot run x86_64."
+      say err "  See index-service/README.md \"Obtaining codegraph-server\" for the full notes."
       [[ "$DRY_RUN" == true ]] || exit 1
     fi
   fi

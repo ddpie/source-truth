@@ -131,7 +131,8 @@ Prerequisites:
   `aws ssm start-session` after the stack is already up. Install it up front:
   [install guide](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html).
 - **git** — *hard-fail* (also by `get.sh` itself). **`gh`** authenticated via `gh auth login` —
-  *warn*, needed only to auto-download `codegraph-server` from a private repository's Release.
+  *warn*, convenient for fetching `codegraph-server` from its upstream release without
+  hitting anonymous rate limits; a plain `curl` works too.
 - **An EC2 key pair** plus its local `.pem` — *not checked* — only for `--local`, whose host you
   SSH into.
 - **`rsync`** — *not checked on the deploy box*, and needed there only if you push a local
@@ -160,9 +161,13 @@ Also required:
   authenticates and then never receives events. Card copy language follows `--locale zh|en`,
   which defaults to `en` under `--feishu-domain lark` and `zh` otherwise; override it explicitly
   to mix (for example a Chinese-language bot on an international Lark tenant).
-- **codegraph-server** — the index engine binary, downloaded automatically from this repository's
-  GitHub Release during the artifacts phase. Override with `CODEGRAPH_SERVER_BIN=/path/to/binary`
-  if you are staging it yourself.
+- **codegraph-server** — the index engine binary. This sample does **not** redistribute it:
+  it is fetched from its own upstream (public, Apache-2.0,
+  <https://github.com/codegraph-ai/CodeGraph>) and verified against the checksum upstream
+  publishes, or you build it yourself with `cargo build --release -p codegraph-server`.
+  See [`index-service/README.md`](index-service/README.md) for both routes. The fetch happens in
+  the artifacts phase; override it with `CODEGRAPH_SERVER_BIN=/path/to/binary` if you are staging
+  the binary yourself, or `CODEGRAPH_SERVER_SHA256=<digest>` to pin your own build.
 
 ## Cost
 

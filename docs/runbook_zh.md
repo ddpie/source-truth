@@ -92,7 +92,8 @@ bash /tmp/prepare-local-host.sh   # 建议直接复制 launch-host 输出的命�
      widget 为空（`--local` 会自动装）。
 
    本机**不需要** Node.js / Python 工程工具链：网关在索引主机上构建，agent 跑在容器里。
-   `codegraph-server` 二进制也无需手动准备——本地与 S3 都没有时，部署会从本仓 Release 自动下载
+   `codegraph-server` 二进制也无需手动准备——本地与 S3 都没有时，部署会从**上游自己的** Release 自动下载
+   并校验其发布的 sha256（本仓不分发该二进制；也可自行编译，见 `index-service/README.md`）
    （私有仓经 `gh`，公开仓经直链）。
 3. **Bedrock 模型访问**：确保部署身份有 `bedrock:InvokeModel`（AWS 已不再需要逐模型在控制台「Model access」开通）。
    模型推理档由部署按 `--region` 自动解析，无需手填——部署调 `bedrock list-inference-profiles` 查该区域实际提供的档、

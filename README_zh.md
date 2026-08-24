@@ -104,7 +104,7 @@
   执行 `aws ssm start-session` 时才报错。请提前装好：
   [安装指引](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html)。
 - **git**——**硬失败**（`get.sh` 自己也会硬失败）。**`gh`**（`gh auth login` 登录过）——**告警**，
-  仅用于从私有仓的 Release 自动下载 `codegraph-server`。
+  便于从上游 Release 拉取 `codegraph-server` 而不触发匿名限流；用 `curl` 亦可。
 - **EC2 密钥对**及本地 `.pem`——**不检查**——只有 `--local` 需要（你要 SSH 登录那台主机）。
 - **`rsync`**——**部署机上不检查**，且那里只有用 `scripts/push-local-repo.sh` 推本地仓快照时才需要。
   但它在**索引主机上是硬性要求**：每次按项目部署与网关激活都靠

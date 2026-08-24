@@ -82,23 +82,38 @@ neither can be redistributed under it.**
 
 ---
 
-### codegraph-server — 0.18.5 — Proprietary (Amazon/AWS internal)
+### codegraph-server — 0.20.1 — Apache-2.0
 
 Code indexing and graph query engine. This is the **core index engine that the
 entire sample depends on**: without it, `index-service` has nothing to drive and
 the agent has no evidence channel.
 
-- **No public source.** The component is declared Amazon-internal and
-  not open-source. There is no upstream repository to inspect, audit, or fork.
-- The `README` directs users to download the binary from this repository's
-  public GitHub Release; `index-service/README.md` documents the ARM aarch64 /
-  glibc >= 2.38 / v0.18.5 staging requirement.
-- **Unresolved and needs a human decision:** a proprietary,
-  Amazon-internal-declared binary distributed from a public release attached to
-  an MIT-0 sample is a licensing question this file cannot answer. The redistribution
-  terms, the licence a downloader receives, and whether the binary may be published
-  at all must be settled by the repository owner and their legal/OSS review
-  **before release**. Do not treat its presence in a release as a grant of rights.
+- **Public source, Apache-2.0**: <https://github.com/codegraph-ai/CodeGraph> — a
+  Rust workspace (`cargo build --release -p codegraph-server`) shipping a `LICENSE`
+  and a `NOTICE`. Apache-2.0 requires that the `NOTICE` content be carried in
+  redistributions, which is one more reason this sample does not redistribute the
+  binary: it points at upstream's own release assets instead.
+- This repository **does not redistribute the engine.** `scripts/deploy-all.sh`
+  resolves it in this order: `CODEGRAPH_SERVER_BIN` → `PATH` → `~/.local/bin` →
+  already staged in S3 → download from upstream's release, verified against the
+  `.sha256` upstream publishes beside each asset. `index-service/README.md`
+  documents both the download and the build-from-source route, plus the ARM
+  aarch64 / glibc >= 2.38 constraint.
+- **A prior version of this entry was wrong and is corrected here.** It stated
+  "No public source… declared Amazon-internal and not open-source… no upstream
+  repository to inspect, audit, or fork", and flagged redistribution as an
+  unresolved legal question blocking release. The engine's own binary embeds its
+  upstream URL, and that repository is public and Apache-2.0. The record is kept
+  rather than quietly deleted because a licence manifest that misstates the
+  licence of the most critical dependency is itself a compliance defect, and the
+  false claim was treated as this project's primary publication blocker.
+- Version note: 0.18.5 was previously pinned but has **no upstream tag**, so no
+  external user could obtain or build it. 0.20.1 is the pinned version and was
+  protocol-verified against the `mcp==1.23.3` client (MCP `2024-11-05`; the three
+  tools `index-service` exposes are present under unchanged names).
+- Runtime note: the engine writes `TEL: {...}` telemetry lines to its own stderr.
+  No outbound telemetry endpoint is present in the binary. It does fetch an
+  embedding model at first use, so the index host needs egress (it has it via NAT).
 
 ---
 
