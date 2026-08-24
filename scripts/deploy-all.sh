@@ -94,6 +94,20 @@ CODEGRAPH_SERVER_TAG="${CODEGRAPH_SERVER_TAG:-v0.20.1}"
 CODEGRAPH_SERVER_ASSET="${CODEGRAPH_SERVER_ASSET:-codegraph-server-linux-arm64}"
 CODEGRAPH_SERVER_URL_DEFAULT="https://github.com/${CODEGRAPH_SERVER_REPO}/releases/download/${CODEGRAPH_SERVER_TAG}/${CODEGRAPH_SERVER_ASSET}"
 LOCAL_MODE=false          # --local: this EC2 IS the index host; bootstrap in place, reuse its VPC/subnet
+# --print-engine-source: echo the engine source values BASH ACTUALLY RESOLVED, then exit.
+# check-invariants 8b consumes this instead of grepping for an assignment line. Grepping source
+# could not see three real reversions: repointing CODEGRAPH_SERVER_URL_DEFAULT rather than _REPO,
+# a second INDENTED re-assignment further down (bash takes the last one, a `^`-anchored grep sees
+# the first), and `aws-samples/source-truth`, which the older slug check exempts by construction.
+# Reading the resolved value makes the guard and the runtime agree by definition.
+if [[ "${1:-}" == "--print-engine-source" ]]; then
+  printf 'CODEGRAPH_SERVER_REPO=%s\n' "$CODEGRAPH_SERVER_REPO"
+  printf 'CODEGRAPH_SERVER_TAG=%s\n' "$CODEGRAPH_SERVER_TAG"
+  printf 'CODEGRAPH_SERVER_ASSET=%s\n' "$CODEGRAPH_SERVER_ASSET"
+  printf 'CODEGRAPH_SERVER_EFFECTIVE_URL=%s\n' "${CODEGRAPH_SERVER_URL:-$CODEGRAPH_SERVER_URL_DEFAULT}"
+  exit 0
+fi
+
 # bash 3.2 (stock macOS) has no `declare -A` — model the skip set as a space-delimited
 # string ("iam network …") and test membership with a case glob (see skip() below).
 SKIP_PHASES=""

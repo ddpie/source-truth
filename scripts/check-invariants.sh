@@ -10,6 +10,12 @@ cd "$ROOT"
 
 fail=0
 err() { printf '  ✗ %s\n' "$1" >&2; fail=1; }
+# 8b once called `warn` here when no such function existed: the branch died with
+# "warn: command not found" and TRUNCATED the whole run — 8c and the PII scan never executed —
+# while the script still exited 0, because this file deliberately does not use `set -e`. Advisory
+# by design: it must NOT set `fail`, or a "please confirm this is deliberate" note becomes a
+# build failure.
+warn() { printf '  ! %s\n' "$1" >&2; }
 ok()  { printf '  ✓ %s\n' "$1"; }
 
 # 枚举被 git 跟踪的文件。这是第 3b / 8 / 9 三项共用的输入，也是它们共同的失效点：
@@ -192,16 +198,28 @@ fi
 #     下载源指回本仓意味着两件坏事：本仓成了 Apache-2.0 二进制的再分发方（连带 NOTICE 义务），
 #     且每个外部用户的部署都依赖我们给自己的 release 挂资产——那正是此前"外部用户根本装不上"的
 #     成因。第 8 项守的是 slug 不能是非 aws-samples 的本仓名，反向回退它看不出来，所以单列一条。
-cg_repo_line="$(grep -E '^CODEGRAPH_SERVER_REPO=' scripts/deploy-all.sh 2>/dev/null || true)"
-if [[ -z "$cg_repo_line" ]]; then
-  err "未找到 CODEGRAPH_SERVER_REPO 定义（deploy-all.sh 结构变了，本条守卫已失效）"
-elif printf '%s' "$cg_repo_line" | grep -qE 'source-truth|sample-code-qa-on-agentcore'; then
+#     判定依据是 deploy-all.sh --print-engine-source 的输出，即 bash 在所有赋值执行完之后
+#     真正解析到的值——而不是某一行源码。前一版按 `^CODEGRAPH_SERVER_REPO=` grep，有三条真实的
+#     回退路径能大摇大摆走过去：只改 CODEGRAPH_SERVER_URL_DEFAULT 而不动 _REPO（curl 层读的是
+#     ${CODEGRAPH_SERVER_URL:-$CODEGRAPH_SERVER_URL_DEFAULT}，改它一处就把整条路重定向了）；
+#     在文件后面加一条**带缩进**的重新赋值（bash 取最后一次，`^` 锚点只看到第一次）；以及
+#     `aws-samples/source-truth`——第 8 项的管道以 `grep -vE 'aws-samples/'` 结尾，所以它按构造
+#     就是被放行的。让守卫读 bash 读到的东西，这五类（改名/缩进/续行/二次赋值/变量拼接）一次全关。
+cg_src="$(bash scripts/deploy-all.sh --print-engine-source 2>/dev/null || true)"
+cg_repo="$(printf '%s\n' "$cg_src" | sed -n 's/^CODEGRAPH_SERVER_REPO=//p')"
+cg_url="$(printf '%s\n' "$cg_src" | sed -n 's/^CODEGRAPH_SERVER_EFFECTIVE_URL=//p')"
+if [[ -z "$cg_repo" || -z "$cg_url" ]]; then
+  err "deploy-all.sh --print-engine-source 无输出（该模式被删或提前退出了，本条守卫已失效）"
+elif printf '%s %s' "$cg_repo" "$cg_url" | grep -qE 'source-truth|sample-code-qa-on-agentcore'; then
   err "引擎下载源指回了本仓——本仓不分发 codegraph-server（Apache-2.0，含 NOTICE 义务）："
-  printf '      %s\n' "$cg_repo_line" >&2
-elif ! printf '%s' "$cg_repo_line" | grep -q 'codegraph-ai/CodeGraph'; then
-  warn "引擎下载源既不是本仓也不是已知上游，请确认是有意的：$cg_repo_line"
+  printf '      repo=%s\n      url=%s\n' "$cg_repo" "$cg_url" >&2
+elif ! printf '%s' "$cg_repo" | grep -q 'codegraph-ai/CodeGraph'; then
+  warn "引擎来源不是已知上游，请确认是有意的：repo=$cg_repo"
+elif ! printf '%s' "$cg_url" | grep -q 'codegraph-ai/CodeGraph'; then
+  err "引擎 repo 指向上游，但实际下载 URL 不是——两者必须一致："
+  printf '      repo=%s\n      url=%s\n' "$cg_repo" "$cg_url" >&2
 else
-  ok "引擎二进制来自上游，本仓不再分发"
+  ok "引擎二进制来自上游，本仓不再分发（按运行时解析值判定）"
 fi
 
 #     ……以及它绝不能作为文件进到仓库里。上面那条只看下载源的配置值，看不出树里是不是躺着一个
