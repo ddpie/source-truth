@@ -204,13 +204,19 @@ else
   ok "引擎二进制来自上游，本仓不再分发"
 fi
 
-# 8c. 下载的引擎二进制必须校验摘要
-#     它会在索引主机上以 root 运行。此前这一步完全不存在：128 MB 的可执行文件经网络取回后
-#     没有任何东西检查到达的是什么。
-if grep -q 'sha256sum "\$CG_TMP"' scripts/deploy-all.sh 2>/dev/null; then
-  ok "引擎二进制下载后校验 sha256"
+# 8c. 引擎二进制的校验行为必须由可执行测试守着，而不是由本文件断言
+#     这条原来是 `grep -q 'sha256sum "$CG_TMP"'`。它对真正发生过的缺陷完全无效：那段校验调用了
+#     只定义在 teardown.sh 里的 is_set，`if <不存在的命令>` 返回 127、在 if 条件位置不触发
+#     set -e，于是恒走 else 分支把未校验字节暂存进 S3——而 grep 看到那一行"存在"，报绿。
+#     实测对比：把该缺陷注入回去，scripts/tests/test_codegraph_checksum.sh 挂 7 条断言，
+#     而原来的 8c 依旧打印"✓ 校验 sha256"。所以这里只断言**行为测试接上了**，行为本身交给它。
+if [[ ! -f scripts/tests/test_codegraph_checksum.sh ]]; then
+  err "缺少 scripts/tests/test_codegraph_checksum.sh（引擎二进制校验的行为测试）"
+elif ! grep -q 'codegraph-acquire:begin' scripts/deploy-all.sh 2>/dev/null \
+     || ! grep -q 'codegraph-acquire:end' scripts/deploy-all.sh 2>/dev/null; then
+  err "deploy-all.sh 缺少 codegraph-acquire 哨兵注释——行为测试将抽不到被测块（会静默空转）"
 else
-  err "引擎二进制下载路径缺少 sha256 校验（它以 root 运行，不可省）"
+  ok "引擎二进制校验由可执行测试覆盖（哨兵与测试文件均在）"
 fi
 
 # 9. 公开仓不得包含可识别到具体组织的内容

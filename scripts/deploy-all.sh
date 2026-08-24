@@ -634,7 +634,7 @@ else
   fi
 
   # codegraph-server binary (ARM aarch64, needs glibc>=2.38 — see index-service/
-  # README.md "codegraph-server 二进制来源" for the canonical download). Resolve
+  # README.md "取得 codegraph-server / Obtaining codegraph-server" for the canonical download). Resolve
   # order: explicit $CODEGRAPH_SERVER_BIN → on PATH → ~/.local/bin. If none is
   # found locally AND the S3 object isn't already staged from a prior run, HARD-
   # FAIL here with an actionable message — do NOT warn-green and let the missing
@@ -644,11 +644,50 @@ else
   # in S3 (prior run) → download from $CODEGRAPH_SERVER_URL (the published Release asset,
   # so a fresh machine with no local binary still works — this is what the one-line
   # installer relies on). Only the URL tier is new; the local/S3 tiers are unchanged.
+  # --- codegraph-acquire:begin --- (scripts/tests/test_codegraph_checksum.sh extracts
+  # everything between these sentinels and runs it against stubs. Keep them around the WHOLE
+  # resolve+verify+stage block: the checksum step here was once unreachable dead code that a
+  # text-matching guard reported as present, so this block is behaviour-tested, not grepped.)
   CG_BIN="${CODEGRAPH_SERVER_BIN:-$(command -v codegraph-server || echo "$HOME/.local/bin/codegraph-server")}"
+  # An EXPLICIT path that is not usable is a configuration error. Falling through to S3 or a
+  # download means the operator asked for their own audited binary and silently got other bytes —
+  # and both documented routes end in a manual `chmod +x`, so a forgotten chmod is the common case.
+  if [[ -n "${CODEGRAPH_SERVER_BIN:-}" && ! -x "$CODEGRAPH_SERVER_BIN" ]]; then
+    say err "CODEGRAPH_SERVER_BIN is set but not an executable file: $CODEGRAPH_SERVER_BIN"
+    if [[ -e "$CODEGRAPH_SERVER_BIN" ]]; then
+      say err "  it exists — missing the executable bit? run: chmod +x \"$CODEGRAPH_SERVER_BIN\""
+    else
+      say err "  no such file. Fix the path, or unset it to use the download path."
+    fi
+    exit 1
+  fi
   if [[ -x "$CG_BIN" ]]; then
     run aws s3 cp "$CG_BIN" "s3://$BUCKET/bin/codegraph-server" --region "$REGION"
   elif aws s3api head-object --bucket "$BUCKET" --key bin/codegraph-server --region "$REGION" >/dev/null 2>&1; then
-    say info "codegraph-server not local, but already staged at s3://$BUCKET/bin/codegraph-server (reuse)"
+    # The reuse tier used to trust whatever a prior run staged, indefinitely, with no record of
+    # whether it had ever been verified — so bytes staged before verification existed, or by a run
+    # that failed open, were re-adopted by every later deploy. head-object also succeeds on a
+    # zero-byte object. The verified digest is stamped as object metadata when staging, so read it
+    # back here: its ABSENCE means "staged by something that did not verify", which the operator
+    # should know even though the object cannot be re-hashed without downloading it.
+    cg_meta="$(aws s3api head-object --bucket "$BUCKET" --key bin/codegraph-server \
+      --region "$REGION" --query 'Metadata.sha256' --output text 2>/dev/null || echo "")"
+    if [[ -n "$cg_meta" && "$cg_meta" != "None" ]]; then
+      say info "codegraph-server reused from s3://$BUCKET/bin/codegraph-server (verified ${cg_meta:0:16}…)"
+      if [[ -n "${CODEGRAPH_SERVER_SHA256:-}" ]]; then
+        cg_pin="$(printf '%s' "$CODEGRAPH_SERVER_SHA256" | tr -d '[:space:]' | tr 'A-F' 'a-f')"
+        if [[ "$cg_pin" != "$cg_meta" ]]; then
+          say err "the staged codegraph-server was verified as $cg_meta but CODEGRAPH_SERVER_SHA256"
+          say err "  pins $cg_pin — the staged object is not the build you asked for."
+          say err "  Remove s3://$BUCKET/bin/codegraph-server and re-run to re-stage."
+          exit 1
+        fi
+      fi
+    else
+      say warn "codegraph-server reused from S3 but carries NO recorded digest — staged before"
+      say warn "  verification existed, or by a run that did not verify. To re-stage verified"
+      say warn "  bytes, remove s3://$BUCKET/bin/codegraph-server and re-run."
+    fi
   else
     # Download once to a temp file, then stage to S3 (same path the local-binary tier uses).
     # The asset must be the ARM aarch64 / glibc>=2.38 build — the host can't run a mismatched
@@ -664,11 +703,17 @@ else
     # outlive this block.
     trap 'rm -f "$CG_TMP"' EXIT
     cg_got=false
-    if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+    cg_via_gh=false
+    # An explicit CODEGRAPH_SERVER_URL must be honoured. The gh tier used to run first and never
+    # looked at it, so an operator pointing at their own audited build got upstream's asset staged
+    # instead — while the digest was still fetched from THEIR url, which then either 404s (staging
+    # unverified bytes) or mismatches (a failure blaming the wrong thing).
+    if [[ -z "${CODEGRAPH_SERVER_URL:-}" ]] \
+       && command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
       say info "codegraph-server not local or in S3 — downloading via gh from $CODEGRAPH_SERVER_REPO ($CODEGRAPH_SERVER_TAG)"
       if run gh release download "$CODEGRAPH_SERVER_TAG" --repo "$CODEGRAPH_SERVER_REPO" \
            --pattern "$CODEGRAPH_SERVER_ASSET" --output "$CG_TMP" --clobber && [[ -s "$CG_TMP" ]]; then
-        cg_got=true
+        cg_got=true; cg_via_gh=true
       fi
     fi
     if [[ "$cg_got" != true ]]; then
@@ -683,49 +728,116 @@ else
       # and then run as root on the index host with nothing checking what arrived. Upstream
       # publishes "<asset>.sha256" beside each asset, so there is no excuse for trusting the
       # transfer. CODEGRAPH_SERVER_SHA256 lets an operator pin the digest of their OWN build.
-      cg_want="${CODEGRAPH_SERVER_SHA256:-}"
-      if [[ -z "$cg_want" ]]; then
-        cg_sum_url="${CODEGRAPH_SERVER_URL:-$CODEGRAPH_SERVER_URL_DEFAULT}.sha256"
-        cg_want="$(curl -fsSL "$cg_sum_url" 2>/dev/null | awk 'NR==1{print $1}' || echo "")"
+      # NOTE: no `is_set` here. It is defined in teardown.sh only, so the first version of this
+      # block called a command that does not exist; 127 in an `if` condition does not trip set -e,
+      # the else branch ran every time, and sha256sum was never executed on any path.
+      cg_want=""; cg_src=""
+      if [[ -n "${CODEGRAPH_SERVER_SHA256:-}" ]]; then
+        # An explicitly pinned digest is the most trustworthy input there is, so a malformed one is
+        # a configuration error — never a reason to downgrade to "no digest". `None` in particular
+        # is what a templating layer renders for a null, and treating it as absent turned the
+        # operator's own pin into silence.
+        cg_want="$(printf '%s' "$CODEGRAPH_SERVER_SHA256" | tr -d '[:space:]' | tr 'A-F' 'a-f')"
+        if [[ ! "$cg_want" =~ ^[0-9a-f]{64}$ ]]; then
+          rm -f "$CG_TMP"; trap - EXIT
+          say err "CODEGRAPH_SERVER_SHA256 is not a 64-hex sha256 digest: '$CODEGRAPH_SERVER_SHA256'"
+          exit 1
+        fi
+        cg_src="CODEGRAPH_SERVER_SHA256"
+      else
+        cg_raw=""
+        if [[ "$cg_via_gh" == true ]]; then
+          # Take the digest from the SAME source as the bytes. Fetching it with anonymous curl
+          # could never work on the private/rate-limited repos this tier exists for.
+          cg_sum_tmp="$(mktemp /tmp/codegraph-server.sha256.XXXX)"
+          if gh release download "$CODEGRAPH_SERVER_TAG" --repo "$CODEGRAPH_SERVER_REPO" \
+               --pattern "${CODEGRAPH_SERVER_ASSET}.sha256" --output "$cg_sum_tmp" --clobber \
+               >/dev/null 2>&1; then
+            cg_raw="$(cat "$cg_sum_tmp")"
+          fi
+          rm -f "$cg_sum_tmp"
+          cg_src="gh ${CODEGRAPH_SERVER_ASSET}.sha256"
+        else
+          cg_asset_url="${CODEGRAPH_SERVER_URL:-$CODEGRAPH_SERVER_URL_DEFAULT}"
+          case "$cg_asset_url" in
+            *\?*)
+              # Appending .sha256 to a signed URL lands after the signature: wrong path AND a
+              # broken signature. A presigned URL cannot have a sibling digest.
+              say warn "CODEGRAPH_SERVER_URL carries a query string (presigned?) — a sibling"
+              say warn "  .sha256 cannot be derived. Pin CODEGRAPH_SERVER_SHA256 instead." ;;
+            *)
+              cg_sum_url="${cg_asset_url}.sha256"; cg_src="$cg_sum_url"
+              cg_raw="$(curl -fsSL --max-time 60 "$cg_sum_url" 2>/dev/null || true)" ;;
+          esac
+        fi
+        # Normalise: drop CR (a CRLF digest produced a MISMATCH whose two printed lines were
+        # character-identical), and EXTRACT the 64-hex token instead of taking field 1 — that way
+        # `SHA256 (asset) = <digest>`, a reversed field order, and an HTML error page served with
+        # 200 are distinguishable from a genuine mismatch.
+        cg_want="$(printf '%s' "$cg_raw" | tr -d '\r' | grep -oiE '[0-9a-fA-F]{64}' \
+                   | head -n 1 | tr 'A-F' 'a-f' || true)"
+        if [[ -n "$cg_raw" && -z "$cg_want" ]]; then
+          rm -f "$CG_TMP"; trap - EXIT
+          say err "fetched $cg_src but could not parse a sha256 digest out of it."
+          say err "  An HTML error page or an unexpected format — refusing to stage."
+          exit 1
+        fi
       fi
-      if is_set "$cg_want"; then
+      if [[ -n "$cg_want" ]]; then
         cg_have="$(sha256sum "$CG_TMP" | awk '{print $1}')"
         if [[ "$cg_have" != "$cg_want" ]]; then
           rm -f "$CG_TMP"; trap - EXIT
           say err "codegraph-server checksum MISMATCH — refusing to stage it."
-          say err "  expected $cg_want"
+          say err "  expected $cg_want   (source: $cg_src)"
           say err "  got      $cg_have"
           say err "  The binary runs as root on the index host, so a bad or tampered download must"
           say err "  not proceed. Re-run to retry, or set CODEGRAPH_SERVER_SHA256 for your own build."
           exit 1
         fi
-        say ok "codegraph-server checksum verified (sha256 ${cg_have:0:16}…)"
+        say ok "codegraph-server checksum verified (sha256 ${cg_have:0:16}…, via $cg_src)"
+      elif [[ "${CODEGRAPH_SERVER_ALLOW_UNVERIFIED:-0}" == "1" ]]; then
+        say warn "CODEGRAPH_SERVER_ALLOW_UNVERIFIED=1 — staging UNVERIFIED bytes at your own risk."
       else
-        # Not fatal: an operator pointing CODEGRAPH_SERVER_URL at their own build may have no
-        # sibling .sha256. Say it out loud rather than verifying silently-not-at-all.
-        say warn "no checksum available for codegraph-server — staging UNVERIFIED bytes."
-        say warn "  set CODEGRAPH_SERVER_SHA256=<digest> to pin your build."
+        # FAIL CLOSED. Upstream publishes a .sha256 beside every asset, so "could not obtain the
+        # digest" means a network fault or someone interfering; a downgrade-to-unverified path is
+        # exactly what an attacker who can drop one request would use.
+        rm -f "$CG_TMP"; trap - EXIT
+        say err "could not obtain a sha256 for codegraph-server (${cg_src:-no source}) —"
+        say err "  refusing to stage unverified bytes. It runs as root on the index host."
+        say err "  Set CODEGRAPH_SERVER_SHA256=<digest>, or if your mirror genuinely publishes no"
+        say err "  digest, re-run with CODEGRAPH_SERVER_ALLOW_UNVERIFIED=1 to accept the risk."
+        exit 1
       fi
       chmod +x "$CG_TMP"
-      run aws s3 cp "$CG_TMP" "s3://$BUCKET/bin/codegraph-server" --region "$REGION"
+      # Stamp what was verified, so the reuse tier can tell verified bytes from unverified ones.
+      if [[ -n "${cg_want:-}" ]]; then
+        run aws s3 cp "$CG_TMP" "s3://$BUCKET/bin/codegraph-server" --region "$REGION" \
+          --metadata "sha256=$cg_want"
+      else
+        run aws s3 cp "$CG_TMP" "s3://$BUCKET/bin/codegraph-server" --region "$REGION"
+      fi
       rm -f "$CG_TMP"; trap - EXIT
     else
       rm -f "$CG_TMP"; trap - EXIT
       say err "codegraph-server not found locally / in S3, and the download failed (gh + curl)."
       say err "  This sample does not redistribute the engine. Two ways forward:"
       say err "  1) Download the published build for this arch:"
-      say err "       gh release download $CODEGRAPH_SERVER_TAG --repo $CODEGRAPH_SERVER_REPO \\"
-      say err "         --pattern $CODEGRAPH_SERVER_ASSET"
+      # Deliberately one line: split across two `say err` calls each gets the ✗ prefix, so a
+      # copy-paste yields a backslash immediately followed by ✗ and bash rejects it.
+      say err "       gh release download $CODEGRAPH_SERVER_TAG --repo $CODEGRAPH_SERVER_REPO --pattern $CODEGRAPH_SERVER_ASSET"
       say err "     then: chmod +x $CODEGRAPH_SERVER_ASSET && export CODEGRAPH_SERVER_BIN=\$PWD/$CODEGRAPH_SERVER_ASSET"
       say err "  2) Build it from source (Apache-2.0, needs Rust stable):"
-      say err "       git clone https://github.com/$CODEGRAPH_SERVER_REPO && cd CodeGraph"
+      say err "       git clone https://github.com/$CODEGRAPH_SERVER_REPO && cd \"\$(basename $CODEGRAPH_SERVER_REPO)\""
       say err "       cargo build --release -p codegraph-server"
       say err "       export CODEGRAPH_SERVER_BIN=\$PWD/target/release/codegraph-server"
       say err "     Build on ARM aarch64 (or cross-compile to it) — the index host cannot run x86_64."
       say err "  See index-service/README.md \"Obtaining codegraph-server\" for the full notes."
-      [[ "$DRY_RUN" == true ]] || exit 1
+      # Unconditional: --dry-run never reaches this block (the dry-run elif returns earlier), so the
+      # old `[[ "$DRY_RUN" == true ]] ||` was dead and implied a dry-run path that does not exist.
+      exit 1
     fi
   fi
+  # --- codegraph-acquire:end ---
 
   # index-service code (bridge + persistent session + path align + perf, etc).
   # Package ALL top-level *.py + requirements.txt — NOT a hand-maintained file

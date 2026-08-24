@@ -75,6 +75,16 @@ export CODEGRAPH_SERVER_BIN="$PWD/codegraph-server-linux-arm64"
 `deploy-all.sh` does this automatically when the binary is neither local nor already staged, and
 verifies the published checksum; a mismatch aborts. The binary runs as root on the index host.
 
+**摘要取不到也会中止**（fail closed）。上游每个 release 都随资产发布 `.sha256`，所以"取不到"只意味着
+网络故障或有人在干预——两者都不该放行，否则只要能丢掉一个请求就能把校验关掉。若你的镜像确实不发布
+摘要，用 `CODEGRAPH_SERVER_SHA256=<digest>` 显式钉，或明确 `CODEGRAPH_SERVER_ALLOW_UNVERIFIED=1`
+自行承担风险。校验通过的摘要会记入 S3 对象的 metadata，复用已暂存的二进制时会读回来核对。
+An unobtainable digest also aborts: upstream publishes one beside every asset, so "cannot fetch it"
+means a network fault or interference, and a downgrade-to-unverified path is exactly what an
+attacker able to drop one request would use. Pin `CODEGRAPH_SERVER_SHA256` for a mirror that
+publishes no digest, or set `CODEGRAPH_SERVER_ALLOW_UNVERIFIED=1` to accept the risk explicitly.
+The verified digest is recorded as S3 object metadata and checked when a staged binary is reused.
+
 **方式二：自己编译 / Route 2 — build from source**
 
 需要 Rust stable。想审计代码、换架构、或钉自己的构建时走这条。

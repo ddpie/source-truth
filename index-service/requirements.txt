@@ -2,8 +2,8 @@
 #
 # Pinned to versions verified locally against codegraph-server 0.18.5.
 # The codegraph-server binary itself is provisioned outside pip — see
-# index-service/README.md §"codegraph-server 二进制来源（部署前置）" for the
-# ARM aarch64 / glibc>=2.38 / v0.18.5 download + staging requirements.
+# index-service/README.md §"取得 codegraph-server / Obtaining codegraph-server" for the
+# ARM aarch64 / glibc>=2.38 / v0.20.1 download-or-build + staging requirements.
 #
 # NOTE: the HTTP bridge uses `mcp.server.fastmcp.FastMCP` — the FastMCP class
 # BUNDLED inside the `mcp` package — NOT the unrelated standalone `fastmcp`
