@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import json
 import pathlib
+import re
 import sys
 
 import boto3
@@ -37,6 +38,36 @@ def existing_by_name(client) -> dict[str, str]:
             return out
 
 
+# LLM-as-judge 的 instructions 必须含至少一个占位符，服务端会把它替换成真实的 trace 信息。
+# 每个评估级别只接受固定的一组，缺失时 CreateEvaluator 直接拒绝：
+#   ValidationException: Instructions must contain at least one of the allowed placeholders ...
+# 在本地先查，是因为这个错误只在真正调 API 时才出现，而那时可能已经创建了另一半资源。
+_PLACEHOLDERS: dict[str, set[str]] = {
+    "SESSION": {"context", "available_tools", "actual_tool_trajectory",
+                "expected_tool_trajectory", "assertions"},
+    "TRACE": {"context", "assistant_turn", "expected_response"},
+    "TOOL_CALL": {"context", "available_tools", "tool_turn",
+                  "invoked_skill", "skill_content", "available_skills", "user_message"},
+}
+
+
+def check_placeholders(spec: dict, instructions: str) -> str | None:
+    """返回错误说明，合规时返回 None。"""
+    level = spec.get("level", "")
+    allowed = _PLACEHOLDERS.get(level)
+    if allowed is None:
+        return f"未知的 level: {level!r}"
+    used = set(re.findall(r"\{([a-z_]+)\}", instructions))
+    if not used & allowed:
+        return (f"{level} 级的 instructions 必须含至少一个占位符 "
+                f"{sorted(allowed)}，当前用到的是 {sorted(used) or '（无）'}")
+    unknown = used - allowed
+    if unknown:
+        # 未知占位符不会被替换，会原样送给评委模型，看起来像提示词写坏了。
+        return f"instructions 里有 {level} 级不支持的占位符 {sorted(unknown)}，它们不会被替换"
+    return None
+
+
 def build_config(spec: dict, lambda_arn: str) -> dict:
     kind = spec["kind"]
     if kind == "codeBased":
@@ -48,6 +79,9 @@ def build_config(spec: dict, lambda_arn: str) -> dict:
         instructions = spec["instructions"]
         if isinstance(instructions, list):
             instructions = "\n".join(instructions)
+        problem = check_placeholders(spec, instructions)
+        if problem:
+            raise ValueError(problem)
         scale = spec["ratingScale"]
         # 按 API 形状归一：numerical 需要 value+label+definition，categorical 只要 label+definition。
         if "numerical" in scale:

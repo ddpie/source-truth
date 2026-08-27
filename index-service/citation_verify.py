@@ -100,11 +100,15 @@ class Verdict(str, Enum):
 # 但它必须是独立判决而不是并入 SYMBOL_CONFIRMED：本仓库已确认的引擎契约缺陷里就有一条是
 # `call_site` 返回调用者的**声明行**而非调用发生的行，而那类缺陷只有在这两者被区分开时才量得出来。
 #
-# READ_ERROR 也**不**计入失败，这一条是被测试抓出来的真实缺陷：它原本在这个集合里，于是一次 bridge
-# 不可达会让每条出处都变成 READ_ERROR、整份报告判成 Fail——把一次基础设施中断永久记成「答案的引用
-# 不成立」。判据的原则是：这个集合只放**对答案下判断**的判决。FILE_NOT_FOUND 是在说答案（引用的文件
-# 不存在），PATH_REFUSED 是在说答案（引用了不该被提供的路径），而 READ_ERROR 说的是校验器自己没读到，
-# 与答案无关。调用方应改用 `read_errors` 判断校验是否真正完成。
+# READ_ERROR **不**计入失败，这一条是被真机跑出来的假失败推出来的：一次 bridge 不可达会让每条出处
+# 都变成 READ_ERROR、整份报告判 Fail——把基础设施中断永久记成「答案的引用不成立」。同一个判决也承载
+# 「校验器没能把出处映射回仓库文件」：答案里的出处常写成裸文件名（`LevitateMotor.cs:83`）或缺仓库前缀的
+# 路径，真机首次运行时这让 4 个 trace 全判 Fail，而那些出处经人工核对**全部真实存在**。
+#
+# PATH_REFUSED 则**保留**在失败集合里：映射失败已经改走 READ_ERROR，所以它现在只剩一种含义——路径被
+# served_paths 按策略拒绝（如 `.env`）。引用一个连 agent 自己都读不到的文件，是在说答案而不是说校验器。
+#
+# 原则：这个集合只放**对答案下判断**的判决。调用方用 `read_errors` 判断校验是否真正完成。
 FAILING = frozenset({
     Verdict.SYMBOL_MISMATCH,
     Verdict.LINE_OUT_OF_RANGE,
@@ -300,14 +304,28 @@ def verify(
         if not isinstance(lines, list):
             lines = (got.get("content") or "").splitlines()
 
+        # 读取方可以报告文件的**真实**行数，即使它只返回了一个窗口。范围判断必须用它：拿到手的行数
+        # 会把一条指向窗口之外的正确出处误判成越界，而那是响亮的假失败。
+        total = got.get("total_lines")
+        total = total if isinstance(total, int) and total >= len(lines) else len(lines)
+        truncated = bool(got.get("truncated"))
+
         if c.line is None:
             report.results.append(CitationResult(
                 c, Verdict.UNCHECKABLE, "出处未带行号，只能确认文件存在"))
             continue
-        if c.line > len(lines):
+        if c.line > total:
             report.results.append(CitationResult(
                 c, Verdict.LINE_OUT_OF_RANGE,
-                f"引用第 {c.line} 行，但文件只有 {len(lines)} 行"))
+                f"引用第 {c.line} 行，但文件只有 {total} 行"))
+            continue
+        if c.line > len(lines):
+            # 行号在文件里存在，只是不在这次读到的窗口内。这是「查不了」而不是「查出问题」——
+            # 判成失败会把正确出处误伤，而这类误伤会让整批评估数据失去意义。
+            report.results.append(CitationResult(
+                c, Verdict.UNCHECKABLE,
+                f"第 {c.line} 行超出本次读取窗口（拿到 {len(lines)} 行 / 共 {total} 行"
+                f"{'，已截断' if truncated else ''}），无法核对内容"))
             continue
 
         primary, context = nearby_symbols(text, c.start)

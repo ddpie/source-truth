@@ -219,6 +219,31 @@ def test_empty_answer_yields_empty_report_not_success_claim() -> None:
 
 
 # --------------------------------------------------------------------------- 稳健性
+def test_total_lines_beats_window_for_range_check() -> None:
+    """读取方只返回一个窗口时，范围判断必须用它报告的**真实**行数。
+
+    真机上被抓到的缺陷的第二半：拿到手的行数当作文件长度，会把一条指向窗口之外的**正确**出处
+    误判成越界——响亮的假失败。
+    """
+    def _read(path: str) -> dict[str, object]:
+        return {"lines": ["a", "b", "c"], "total_lines": 5000, "truncated": True}
+
+    r = verify("`Foo` 见 a/b.cs:4000", _read)
+    assert r.results[0].verdict is Verdict.UNCHECKABLE, r.results[0].detail
+    assert "超出本次读取窗口" in r.results[0].detail
+    assert r.failing == [], "行号在文件里存在，只是没读到——不得判失败"
+
+
+def test_line_beyond_real_total_is_still_out_of_range() -> None:
+    """上一条不能把真正的越界也放过。"""
+    def _read(path: str) -> dict[str, object]:
+        return {"lines": ["a", "b", "c"], "total_lines": 5000, "truncated": True}
+
+    r = verify("`Foo` 见 a/b.cs:99999", _read)
+    assert r.results[0].verdict is Verdict.LINE_OUT_OF_RANGE
+    assert "共 5000" in r.results[0].detail or "只有 5000" in r.results[0].detail
+
+
 def test_read_error_does_not_abort_report() -> None:
     def _read(path: str) -> dict[str, str]:
         if path == "a/boom.cs":

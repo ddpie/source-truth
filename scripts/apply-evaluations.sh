@@ -54,6 +54,9 @@ REGION="${REGION:-${DEPLOY_REGION:-}}"
 ACCOUNT="$(aws sts get-caller-identity --query Account --output text)"
 stage() { [[ -z "$ONLY" || "$ONLY" == "$1" ]]; }
 run() { if [[ "$DRY_RUN" == true ]]; then say info "[dry-run] $*"; else "$@"; fi; }
+# 成功消息也必须受 --dry-run 约束。第一版把它们写在 run 之外无条件打印，于是一次 dry-run 会报
+# 「✓ 角色已创建」「✓ 函数已创建」——宣称了从未发生的事，正是本仓库反复修过的「报告未曾达成的成功」。
+done_msg() { if [[ "$DRY_RUN" == true ]]; then say info "[dry-run] 将会: $*"; else say ok "$*"; fi; }
 
 # --- 前置：evaluator 定义必须可解析。宁可在这里失败，也不要创建出半套资源 ---
 [[ -f "$DEFS" ]] || { say err "缺少 $DEFS"; exit 1; }
@@ -116,13 +119,13 @@ if stage iam; then
     run aws iam create-role --role-name "$ROLE_NAME" \
       --description "source-truth citation evaluator Lambda" \
       --assume-role-policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"lambda.amazonaws.com"},"Action":"sts:AssumeRole"}]}' >/dev/null
-    say ok "角色已创建: $ROLE_NAME"
+    done_msg "角色已创建: $ROLE_NAME"
   fi
   # 只给两样：写日志，以及在 VPC 里建/删 ENI。评估器不读 S3、不调 Bedrock、不碰 Secrets——
   # 它唯一要做的事就是把一行源码读回来比对。
   run aws iam attach-role-policy --role-name "$ROLE_NAME" \
     --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole >/dev/null
-  say ok "已附加 AWSLambdaVPCAccessExecutionRole（含 CloudWatch Logs + ENI 管理）"
+  done_msg "已附加 AWSLambdaVPCAccessExecutionRole（含 CloudWatch Logs + ENI 管理）"
 fi
 
 # =====================================================================================
@@ -150,7 +153,26 @@ print(first.get('port') or 8080)
   BRIDGE_URL="http://${BRIDGE_HOST}:${PORT}/mcp"
   say info "bridge 地址: $BRIDGE_URL"
 
-  ENVVARS="Variables={BRIDGE_URL=$BRIDGE_URL,CITATION_WINDOW=4,READ_LIMIT=400}"
+  # 仓库子目录名。答案里的出处常写成裸文件名或缺这一层前缀的路径，校验器需要它才能把出处映射回
+  # 仓库——真机首次运行时这是最大的假失败来源（4 个 trace 全判 Fail，而出处经核对全部真实存在）。
+  PREFIXES="$(python3 -c "
+import json, pathlib
+p = pathlib.Path('$ROOT/.local/projects.json')
+if not p.exists():
+    print(''); raise SystemExit
+d = json.loads(p.read_text()).get('projects') or {}
+items = d.values() if isinstance(d, dict) else d
+subs = []
+for cfg in items:
+    for repo in (cfg or {}).get('repos', []):
+        s = repo.get('subdir')
+        if s and s not in subs:
+            subs.append(s)
+print(','.join(subs))
+" 2>/dev/null || echo "")"
+  say info "仓库前缀: ${PREFIXES:-<无>}"
+
+  ENVVARS="Variables={BRIDGE_URL=$BRIDGE_URL,CITATION_WINDOW=4,READ_LIMIT=400,REPO_PREFIXES=$PREFIXES}"
   VPCCFG="SubnetIds=$SUBNET,SecurityGroupIds=$SG"
   ROLE_ARN="arn:aws:iam::${ACCOUNT}:role/${ROLE_NAME}"
 
@@ -162,18 +184,18 @@ print(first.get('port') or 8080)
     run aws lambda wait function-updated --region "$REGION" --function-name "$FN_NAME"
     run aws lambda update-function-configuration --region "$REGION" --function-name "$FN_NAME" \
       --timeout 120 --memory-size 512 --environment "$ENVVARS" --vpc-config "$VPCCFG" >/dev/null
-    say ok "函数已更新: $FN_NAME"
+    done_msg "函数已更新: $FN_NAME"
   else
     run aws lambda create-function --region "$REGION" --function-name "$FN_NAME" \
       --runtime python3.12 --architectures arm64 --handler lambda_function.lambda_handler \
       --role "$ROLE_ARN" --zip-file "fileb://$ZIP" \
       --timeout 120 --memory-size 512 --environment "$ENVVARS" --vpc-config "$VPCCFG" \
       --description "Deterministically verifies source citations for AgentCore Evaluations" >/dev/null
-    say ok "函数已创建: $FN_NAME"
+    done_msg "函数已创建: $FN_NAME"
   fi
   run aws lambda wait function-active-v2 --region "$REGION" --function-name "$FN_NAME" 2>/dev/null || true
   FN_ARN="arn:aws:lambda:${REGION}:${ACCOUNT}:function:${FN_NAME}"
-  update_env "$CONFIG" EVALUATOR_LAMBDA_ARN "$FN_ARN"
+  run update_env "$CONFIG" EVALUATOR_LAMBDA_ARN "$FN_ARN"
 fi
 
 # =====================================================================================

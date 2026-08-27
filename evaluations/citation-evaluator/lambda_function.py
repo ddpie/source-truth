@@ -40,6 +40,9 @@ from citation_verify import FAILING, Verdict, extract_citations, verify
 BRIDGE_URL = os.environ.get("BRIDGE_URL", "")
 WINDOW = int(os.environ.get("CITATION_WINDOW", "4"))
 READ_LIMIT = int(os.environ.get("READ_LIMIT", "400"))
+# 仓库子目录名，逗号分隔。答案里的出处常缺这一层前缀，而它是部署时才确定的
+# （.local/projects.json 的 subdir），所以由 apply-evaluations.sh 注入而不是写死。
+REPO_PREFIXES = [p.strip() for p in os.environ.get("REPO_PREFIXES", "").split(",") if p.strip()]
 
 # 答案正文所在的属性键。OpenInference 把每条消息拆成 llm.output_messages.<i>.message.content.0
 # （纯文本）或 .message.contents.<j>.message_content.*（多模态/reasoning）。真实形状取自线上 span，
@@ -114,21 +117,101 @@ def files_actually_read(spans: list[dict[str, Any]]) -> dict[str, list[tuple[int
     return out
 
 
+def _candidates(path: str) -> list[str]:
+    """按 bridge 能接受的形态给出候选路径，从最具体到最宽松。
+
+    真机首次运行时这是最大的假失败来源：答案里的出处极少写成 bridge 需要的完整形态。实测出现过三种
+    写法——`daggerfall-unity/Assets/.../FormulaHelper.cs`（可直接读）、
+    `Assets/Scripts/Game/LevitateMotor.cs`（缺仓库前缀）、`LevitateMotor.cs:83`（裸文件名）。
+    直接把答案里的字符串当路径传，后两种一律 path_refused，于是 4 个 trace 全判 Fail，而人工核对发现
+    那些出处**全部真实存在**。这不是答案的问题，是校验器没能把出处映射回仓库。
+
+    REPO_PREFIXES 来自环境变量，因为仓库子目录名是部署时才确定的（.local/projects.json 里的 subdir），
+    写死在代码里就只对某一个项目成立。
+    """
+    out: list[str] = [path]
+    for prefix in REPO_PREFIXES:
+        if not prefix or path.startswith(prefix + "/"):
+            continue
+        out.append(f"{prefix}/{path}")
+    # 裸文件名交给 glob 解析（下面 _make_reader 里处理），这里只负责前缀补全
+    seen: set[str] = set()
+    uniq = []
+    for c in out:
+        if c not in seen:
+            seen.add(c)
+            uniq.append(c)
+    return uniq
+
+
 def _make_reader(client: BridgeClient):
-    def _read(path: str) -> dict[str, Any]:
+    """把 bridge 的 read_file 载荷转成 verify() 需要的整文件行列表。
+
+    bridge 返回的是 **JSON 字符串**（`{"path","content","lines","start_line","start_line_1based",
+    "total_lines","truncated"}`），不是裸文本。第一版直接对它 splitlines，于是每个文件都「只有 1 行」，
+    每条出处都被判 line_out_of_range —— 15 个单测全过，因为假客户端返回的是裸文本。这个缺陷只有在
+    真机上调用一次才暴露出来。
+
+    行号对齐靠 `start_line_1based`：从第 1 行开始读时它是 1，内容第 i 项就是第 i 行。文件超过读取窗口
+    时用 `total_lines`（文件真实行数）做范围判断，而不是拿到手的行数——否则一条指向窗口之外的正确出处
+    会被误判成越界。
+    """
+    cache: dict[str, dict[str, Any]] = {}
+
+    def _fetch(candidate: str) -> dict[str, Any]:
+        raw = client.read_file(candidate, line=1, limit=READ_LIMIT)
         try:
-            text = client.read_file(path, limit=READ_LIMIT * 100)
-        except BridgeError as e:
-            msg = str(e)
-            # bridge 用文字区分「路径不合法/被拒」与「文件不存在」；映射成 verify 认识的异常类型，
-            # 让判决落在 PATH_REFUSED / FILE_NOT_FOUND 而不是笼统的 READ_ERROR。
-            low = msg.lower()
-            if "withheld" in low or "outside" in low or "escap" in low or "not a regular file" in low:
-                raise ValueError(msg) from e
-            if "no such file" in low or "not found" in low or "enoent" in low:
-                raise FileNotFoundError(msg) from e
-            raise
-        return {"lines": text.splitlines()}
+            payload = json.loads(raw)
+        except ValueError as e:
+            raise BridgeError(f"read_file 返回的不是 JSON: {raw[:200]}") from e
+        if not isinstance(payload, dict):
+            raise BridgeError(f"read_file 返回的不是对象: {raw[:200]}")
+        if payload.get("error"):
+            raise ValueError(str(payload["error"]))
+        lines = (payload.get("content") or "").split("\n")
+        start1 = payload.get("start_line_1based")
+        if not isinstance(start1, int) or start1 < 1:
+            start1 = 1
+        lines = [""] * (start1 - 1) + lines
+        total = payload.get("total_lines")
+        return {"lines": lines,
+                "total_lines": total if isinstance(total, int) else len(lines),
+                "truncated": bool(payload.get("truncated"))}
+
+    def _read(path: str) -> dict[str, Any]:
+        if path in cache:
+            return cache[path]
+        last: Exception | None = None
+        for candidate in _candidates(path):
+            try:
+                cache[path] = _fetch(candidate)
+                return cache[path]
+            except (BridgeError, ValueError) as e:
+                last = e
+                continue
+
+        # 所有候选都不行：裸文件名（`LevitateMotor.cs`）用 glob 在仓库里找一次。这是最后一招，
+        # 命中多个同名文件时放弃——猜错文件比查不了更糟，会得出一个错误的「引用不成立」。
+        base = path.rsplit("/", 1)[-1]
+        if base and "*" not in base:
+            try:
+                matches = client.glob_files(f"**/{base}")
+            except BridgeError:
+                matches = []
+            if len(matches) == 1:
+                try:
+                    cache[path] = _fetch(matches[0])
+                    return cache[path]
+                except (BridgeError, ValueError) as e:
+                    last = e
+
+        msg = str(last) if last else f"无法把出处映射到仓库中的文件: {path}"
+        low = msg.lower()
+        if "withheld" in low or "not a regular file" in low:
+            raise ValueError(msg)
+        # 定位不到文件是**校验器**没能解析出处，不是答案引错了。抛 BridgeError 让它落在
+        # READ_ERROR（不计失败），而不是 ValueError→PATH_REFUSED 或 FileNotFoundError→FILE_NOT_FOUND。
+        raise BridgeError(f"未能把出处 {path!r} 映射到仓库文件（试过 {_candidates(path)}）: {msg[:200]}")
 
     return _read
 

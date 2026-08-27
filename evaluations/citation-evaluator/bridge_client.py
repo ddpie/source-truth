@@ -129,6 +129,28 @@ class BridgeClient:
         return text
 
 
+    def glob_files(self, pattern: str) -> list[str]:
+        """按 glob 找文件，用于把裸文件名映射回真实路径。
+
+        只在 read_file 的所有候选路径都失败时才用，而且命中多个同名文件时调用方会放弃——猜错文件比
+        「查不了」更糟：它会产出一个看起来确定的错误结论。
+        """
+        self.initialize()
+        result = self._rpc("tools/call", {"name": "codegraph_glob_files",
+                                          "arguments": {"pattern": pattern}})
+        if result.get("isError"):
+            raise BridgeError(_first_text(result) or "glob_files 返回 isError")
+        text = _first_text(result)
+        if not text:
+            return []
+        try:
+            payload = json.loads(text)
+        except ValueError:
+            return []
+        paths = payload.get("paths") if isinstance(payload, dict) else None
+        return [p for p in (paths or []) if isinstance(p, str)]
+
+
 def _first_text(result: dict[str, Any]) -> str | None:
     for item in result.get("content") or []:
         if isinstance(item, dict) and item.get("type") == "text":

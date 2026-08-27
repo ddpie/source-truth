@@ -95,6 +95,11 @@ def mod(monkeypatch):
 
 
 def stub_bridge(mod, monkeypatch, files: dict[str, list[str]], *, fail: str | None = None):
+    """假客户端必须返回 bridge 的**真实**载荷形状：一个 JSON 字符串，而不是裸文本。
+
+    第一版返回裸文本，于是 15 个测试全过，而真机上每个文件都「只有 1 行」、每条出处都被判越界——
+    handler 把整段 JSON 当成了内容。测试替身与真实契约不一致时，绿灯毫无意义。
+    """
     class FakeClient:
         def __init__(self, url, **kw):
             self.url = url
@@ -109,7 +114,16 @@ def stub_bridge(mod, monkeypatch, files: dict[str, list[str]], *, fail: str | No
                 raise mod.BridgeError(fail)
             if path not in files:
                 raise mod.BridgeError(f"no such file: {path}")
-            return "\n".join(files[path])
+            lines = files[path]
+            return json.dumps({
+                "path": path,
+                "content": "\n".join(lines),
+                "lines": len(lines),
+                "start_line": 0,
+                "start_line_1based": 1,
+                "total_lines": len(lines),
+                "truncated": False,
+            }, ensure_ascii=False)
 
     monkeypatch.setattr(mod, "BridgeClient", FakeClient)
 
@@ -254,6 +268,78 @@ def test_file_never_read_is_not_a_failure(mod, monkeypatch):
     out = mod.lambda_handler(event(spans))
     assert out["label"] == "Pass"
     assert "未出现在 read_file 调用中" in out["explanation"], "应作为参考信息写进 explanation"
+
+
+# --------------------------------------------------------------------- 路径映射
+def test_missing_repo_prefix_is_resolved(mod, monkeypatch):
+    """答案里的出处常缺仓库前缀。真机首次运行时这让 4 个 trace 全判 Fail，
+    而那些出处经人工核对全部真实存在——最大的单一假失败来源。"""
+    monkeypatch.setattr(mod, "REPO_PREFIXES", ["daggerfall-unity"])
+    stub_bridge(mod, monkeypatch, {"daggerfall-unity/Game/Formulas.cs": SRC_LINES})
+    spans = [make_llm_span(["`MaxEncumbrance` 见 Game/Formulas.cs:7。"])]
+    out = mod.lambda_handler(event(spans))
+    assert out["label"] == "Pass", out.get("explanation")
+
+
+def test_bare_filename_resolved_via_glob(mod, monkeypatch):
+    """裸文件名（`LevitateMotor.cs:83`）用 glob 兜底。"""
+    monkeypatch.setattr(mod, "REPO_PREFIXES", ["repo"])
+    files = {"repo/deep/nest/Formulas.cs": SRC_LINES}
+
+    class GlobClient:
+        def __init__(self, url, **kw):
+            pass
+
+        def initialize(self):
+            return None
+
+        def read_file(self, path, **kw):
+            if path not in files:
+                raise mod.BridgeError(f"no such file: {path}")
+            lines = files[path]
+            return json.dumps({"path": path, "content": "\n".join(lines),
+                               "lines": len(lines), "start_line": 0,
+                               "start_line_1based": 1, "total_lines": len(lines),
+                               "truncated": False}, ensure_ascii=False)
+
+        def glob_files(self, pattern):
+            return [p for p in files if p.endswith(pattern.replace("**/", "/"))]
+
+    monkeypatch.setattr(mod, "BridgeClient", GlobClient)
+    out = mod.lambda_handler(event([make_llm_span(["`MaxEncumbrance` 见 Formulas.cs:7。"])]))
+    assert out["label"] == "Pass", out.get("explanation")
+
+
+def test_ambiguous_bare_filename_is_not_guessed(mod, monkeypatch):
+    """同名文件命中多个时放弃，不猜。猜错文件比「查不了」更糟：它会产出一个看起来确定的错误结论。"""
+    monkeypatch.setattr(mod, "REPO_PREFIXES", [])
+
+    class AmbiguousClient:
+        def __init__(self, url, **kw):
+            pass
+
+        def initialize(self):
+            return None
+
+        def read_file(self, path, **kw):
+            raise mod.BridgeError(f"no such file: {path}")
+
+        def glob_files(self, pattern):
+            return ["a/Formulas.cs", "b/Formulas.cs"]
+
+    monkeypatch.setattr(mod, "BridgeClient", AmbiguousClient)
+    out = mod.lambda_handler(event([make_llm_span(["`MaxEncumbrance` 见 Formulas.cs:7。"])]))
+    assert out["errorCode"] == "BRIDGE_READ_FAILED", out
+    assert out["label"] != "Fail", "映射不到文件不是答案的问题"
+
+
+def test_unresolvable_path_is_not_a_failure(mod, monkeypatch):
+    """定位不到文件必须落在「校验未完成」而不是「引用不成立」。"""
+    monkeypatch.setattr(mod, "REPO_PREFIXES", [])
+    stub_bridge(mod, monkeypatch, {})
+    out = mod.lambda_handler(event([make_llm_span(["`Foo` 见 Nowhere/Missing.cs:3。"])]))
+    assert out["label"] != "Fail"
+    assert out.get("errorCode") == "BRIDGE_READ_FAILED"
 
 
 def test_dotted_symbol_does_not_become_a_missing_file(mod, monkeypatch):
