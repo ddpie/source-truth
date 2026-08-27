@@ -25,7 +25,7 @@ ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 source "$SCRIPT_DIR/lib/common.sh"
 source "$SCRIPT_DIR/lib/env-utils.sh"
 
-REGION=""; ONLY=""; DRY_RUN=false
+REGION=""; ONLY=""; DRY_RUN=false; ENABLE_ONLINE=false; SAMPLING=100
 FN_NAME="source-truth-citation-evaluator"
 ROLE_NAME="source-truth-evaluator-lambda-role"
 DEFS="$ROOT/evaluations/evaluators.json"
@@ -42,6 +42,9 @@ while [[ $# -gt 0 ]]; do
     --region) REGION="$2"; shift 2 ;;
     --only) ONLY="$2"; shift 2 ;;
     --dry-run) DRY_RUN=true; shift ;;
+    # 实时评估默认只创建不启用：启用中的 config 会锁定评估器，评估器还在迭代时就开等于自锁。
+    --enable) ENABLE_ONLINE=true; shift ;;
+    --sampling) SAMPLING="$2"; shift 2 ;;
     -h|--help) usage ;;
     *) say err "未知参数: $1"; exit 2 ;;
   esac
@@ -210,11 +213,62 @@ if stage evaluators; then
         say err "评估器注册失败"; printf '%s\n' "$OUT"; exit 1; }
     printf '%s\n' "$OUT"
     # 评估器 id 是后续 Evaluate / 批量评估的唯一句柄，写回配置，免得只能靠翻控制台找。
-    IDS="$(printf '%s\n' "$OUT" | sed -n 's/^EVALUATOR_ID *\([^ ]*\) *\(.*\)$/\1=\2/p' | tr '\n' ';')"
+    # 只取前两个空白分隔的字段（key 与 id）。第一版用 `\(.*\)$` 抓第二段，把行尾的
+    # 「(已存在，复用)」一起写进了配置，下游拿到的是一整行文本而不是 id。
+    IDS="$(printf '%s\n' "$OUT" | awk '/^EVALUATOR_ID/ {printf "%s=%s;", $2, $3}')"
     [[ -n "$IDS" ]] && update_env "$CONFIG" EVALUATOR_IDS "$IDS"
   fi
 fi
 
+# =====================================================================================
+# 实时（online）评估：按采样率自动评估线上流量，不用手工取 span 再调 Evaluate。
+#
+# 默认**只创建、不启用**，必须显式 --enable。原因不是谨慎，是一条硬约束加一个真实教训：
+#   * 启用中的 online config 会**锁定**它引用的评估器——不先禁用 config，评估器既不能改也不能删。
+#     所以在评估器还在迭代时开启它，等于给自己上锁。
+#   * 100% 采样意味着每一次线上问答都被当前版本评分。评估器若有已知的误判（本项目的 citation 评估器
+#     就曾把路径里的目录名当成待核对符号，产出假 symbol_mismatch），这些错误结论会持续写进评估数据，
+#     而评估数据的用途恰恰是判断答案质量——污染它比没有它更糟。
+# 先让评估器在 on-demand 模式下稳定，再开实时。
+say step "阶段 online：实时评估配置（采样 ${SAMPLING}%，默认创建为禁用）"
+if stage online; then
+  ONLINE_ROLE="source-truth-evaluation-exec-role"
+  # 评估服务自己的执行角色：读 CloudWatch Logs 取 span、调用代码型评估器的 Lambda、调用评委模型。
+  if aws iam get-role --role-name "$ONLINE_ROLE" >/dev/null 2>&1; then
+    say ok "执行角色已存在: $ONLINE_ROLE"
+  else
+    # 单行内联并以重定向收尾——validate_iam_policies.py 依此定位文档边界（见上文 create-role 处的说明）。
+    run aws iam create-role --role-name "$ONLINE_ROLE" \
+      --description "AgentCore Evaluations execution role for source-truth" \
+      --assume-role-policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"bedrock-agentcore.amazonaws.com"},"Action":"sts:AssumeRole","Condition":{"StringEquals":{"aws:SourceAccount":"'"${ACCOUNT}"'"}}}]}' >/dev/null
+    done_msg "执行角色已创建: $ONLINE_ROLE"
+  fi
+  # 两个标志必须相邻（中间只一个空格）：validate_iam_policies.py 的模式要求策略名紧接着文档，
+  # 中间隔一个续行符它就匹配不到，于是这份策略处于「未被审」状态而守卫仍是绿的。
+  run aws iam put-role-policy --role-name "$ONLINE_ROLE" --policy-name evaluation-exec --policy-document '{"Version":"2012-10-17","Statement":[{"Sid":"ReadSpans","Effect":"Allow","Action":["logs:StartQuery","logs:GetQueryResults","logs:FilterLogEvents","logs:DescribeLogGroups","logs:DescribeLogStreams","logs:GetLogEvents"],"Resource":"*"},{"Sid":"WriteEvaluationResults","Effect":"Allow","Action":["logs:CreateLogGroup","logs:CreateLogStream","logs:PutLogEvents","logs:PutRetentionPolicy"],"Resource":["arn:aws:logs:*:'"${ACCOUNT}"':log-group:/aws/bedrock-agentcore/evaluations/*","arn:aws:logs:*:'"${ACCOUNT}"':log-group:/aws/bedrock-agentcore/evaluations/*:*","arn:aws:logs:*:'"${ACCOUNT}"':log-group::log-stream:*"]},{"Sid":"InvokeCodeEvaluator","Effect":"Allow","Action":["lambda:InvokeFunction","lambda:GetFunction"],"Resource":"arn:aws:lambda:*:'"${ACCOUNT}"':function:source-truth-citation-evaluator"},{"Sid":"InvokeJudgeModel","Effect":"Allow","Action":["bedrock:InvokeModel","bedrock:InvokeModelWithResponseStream","bedrock:Converse","bedrock:ConverseStream"],"Resource":"*"}]}' >/dev/null
+  done_msg "执行角色策略已写入（读日志 + 调 Lambda + 调评委模型）"
+
+  # 评估器 id：从上一阶段的输出或配置里取
+  safe_source_env "$CONFIG" 2>/dev/null || true
+  IDS_RAW="${EVALUATOR_IDS:-}"
+  if [[ -z "$IDS_RAW" ]]; then
+    say err "配置里没有 EVALUATOR_IDS —— 先跑 --only evaluators"
+    exit 1
+  fi
+  run python3 "$SCRIPT_DIR/lib/apply_online_eval.py" \
+    --region "$REGION" \
+    --evaluator-ids "$IDS_RAW" \
+    --log-group "/aws/bedrock-agentcore/runtimes/${RUNTIME_LOG_SUFFIX:-}" \
+    --role-arn "arn:aws:iam::${ACCOUNT}:role/${ONLINE_ROLE}" \
+    --sampling "$SAMPLING" \
+    $( [[ "$ENABLE_ONLINE" == true ]] && printf '%s' "--enable" )
+fi
+
 say ok "apply-evaluations 完成（region=$REGION）"
-say info "跑一次评估：aws bedrock-agentcore evaluate --region $REGION --evaluator-id <id> --evaluation-input file://spans.json"
-say info "拆除：./scripts/teardown.sh 会删除这两个评估器与该 Lambda"
+say info "按需评估：aws bedrock-agentcore evaluate --region $REGION --evaluator-id <id> --evaluation-input file://spans.json"
+if [[ "$ENABLE_ONLINE" == true ]]; then
+  say warn "实时评估已启用（采样 ${SAMPLING}%）——被引用的评估器现在处于锁定状态，改动前须先禁用此配置"
+else
+  say info "实时评估配置已创建但未启用；确认评估器稳定后加 --enable 开启（100% 采样）"
+fi
+say info "拆除：./scripts/teardown.sh 会先删 online config（它锁定评估器），再删评估器与 Lambda"

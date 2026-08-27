@@ -422,11 +422,14 @@ try:
         if token:
             kw["nextToken"] = token
         resp = ctl.list_online_evaluation_configs(**kw)
-        items = resp.get("onlineEvaluationConfigSummaries") or resp.get("onlineEvaluationConfigs") or []
+        items = resp.get("onlineEvaluationConfigs") or resp.get("onlineEvaluationConfigSummaries") or []
         for c in items:
             cid = c.get("onlineEvaluationConfigId") or c.get("id")
             name = c.get("onlineEvaluationConfigName") or ""
-            if not cid or not name.startswith("source-truth"):
+            # 前缀是 `st_online_`，不是 `source-truth`：配置名的服务端约束是
+            # [a-zA-Z][a-zA-Z0-9_]{0,47}——不许连字符、上限 48 字符，所以项目前缀被迫缩写。
+            # 第一版按 "source-truth" 匹配，一个也删不到，而删不掉 config 就删不掉被它锁定的评估器。
+            if not cid or not name.startswith("st_online_"):
                 continue
             try:
                 ctl.delete_online_evaluation_config(onlineEvaluationConfigId=cid)
