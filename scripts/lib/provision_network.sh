@@ -238,8 +238,19 @@ nacl_rule() { # <ingress|egress> <rule-number> <aws-cli args...>
 
 # 100: TCP 8080-8099 from the VPC only — the index bridge ports.
 nacl_rule ingress 100 --protocol 6 --port-range "From=8080,To=8099" --cidr-block "$VPC_CIDR" --rule-action allow
-# 110: TCP 443 from the VPC only — internal HTTPS between co-located components.
+# 110: TCP 443 from the VPC only — internal HTTPS between co-located components, which now
+# includes the ECR interface endpoints created below (their ENIs sit in this same subnet).
 nacl_rule ingress 110 --protocol 6 --port-range "From=443,To=443" --cidr-block "$VPC_CIDR" --rule-action allow
+# 115: RETURN traffic for connections this subnet originated to something INSIDE the VPC —
+# in practice the interface endpoints. Kept separate from 120/130 on purpose: those guess the
+# client's ephemeral range, and that guess is exactly what broke image pulls before (see below).
+# Guessing is unavoidable for traffic returning from the internet, because the far side's source
+# port is 443 and only OUR port is in play; here it is avoidable, so it is avoided.
+#
+# Scoped to the VPC CIDR, this opens no service that rule 100 does not already open: 8080-8099 is
+# the only thing listening in this band and rule 100 already allows it from this same CIDR. The
+# security group remains the real control on who may reach the bridge.
+nacl_rule ingress 115 --protocol 6 --port-range "From=1024,To=65535" --cidr-block "$VPC_CIDR" --rule-action allow
 # 120/130: ephemeral RETURN traffic for connections this subnet originated through the NAT.
 # Range is 32768-65535, and BOTH bounds are load-bearing.
 #
@@ -265,9 +276,12 @@ nacl_rule ingress 110 --protocol 6 --port-range "From=443,To=443" --cidr-block "
 # start failing, which looks like an IAM fault). The VPC resolver, IMDS and Amazon Time Sync are
 # link-local and unaffected by NACLs.
 #
-# A stronger alternative, deliberately not taken here to keep the sample's footprint small: add
-# interface endpoints for ecr.api + ecr.dkr and a gateway endpoint for S3, so image pulls never
-# leave the VPC and depend on neither NAT nor this rule. Worth doing in a production copy.
+# These two rules are STILL required after the VPC endpoints below, and it is worth being precise
+# about why, because "we added endpoints" reads like it retires them. The endpoints take ECR and S3
+# off this path; they do not take Bedrock, and the model call is the agent's main egress. So the
+# remaining dependency on a guessed ephemeral range is real but no longer sits on the CONTAINER
+# START path — a wrong guess now degrades a running agent instead of preventing it from booting,
+# and the failure surfaces as an API error with a message rather than a bare health-check timeout.
 nacl_rule ingress 120 --protocol 6 --port-range "From=32768,To=65535" --cidr-block "0.0.0.0/0" --rule-action allow
 nacl_rule ingress 130 --protocol 17 --port-range "From=32768,To=65535" --cidr-block "0.0.0.0/0" --rule-action allow
 # 140: ICMP type 3 code 4 (fragmentation needed) so Path MTU Discovery works. Without it large
@@ -280,7 +294,7 @@ nacl_rule egress 100 --protocol -1 --cidr-block "0.0.0.0/0" --rule-action allow
 
 # Remove any stale custom entry that is NOT in the desired set — AFTER the desired rules are in
 # place, so convergence never passes through a deny-all state.
-_DESIRED_IN="100 110 120 130 140"
+_DESIRED_IN="100 110 115 120 130 140"
 _DESIRED_OUT="100"
 _nacl_rules="$(Q describe-network-acls --network-acl-ids "$NACL_ID" \
   --query 'NetworkAcls[0].Entries[?RuleNumber < `32767`].[RuleNumber,Egress]' --output text 2>/dev/null || echo "")"
@@ -308,6 +322,146 @@ else
   # provision_index_service.sh.
   say err "could not read the NACL association for subnet $PRIV — refusing to leave it on the default allow-all NACL; re-run"
   exit 1
+fi
+
+# ---- VPC endpoints: take the image pull off the internet entirely ----
+# WHY THIS EXISTS. Every container start pulled the agent image from ECR across the public internet
+# via the NAT gateway, and that path failed intermittently in a way that presents as an application
+# fault: "HTTP 424 Runtime health check failed", 3 seconds, everything else green. The container log
+# says what actually happened —
+#
+#   Failed to pull image: <acct>.dkr.ecr.<region>.amazonaws.com/source-truth/agent:latest!
+#   failed to resolve image: ... dial tcp <ecr-ip>:443: i/o timeout
+#
+# — and it recurred against a DIFFERENT ECR address after the NACL ephemeral range was already
+# widened to its maximum, with successful and failed pulls alternating minutes apart. So the NACL
+# range was one real cause but not the only one; the durable problem is that the most failure-
+# sensitive step in the whole deploy (no image, no agent, no diagnostics from inside) was riding a
+# NAT-to-internet round trip it never needed to make. These endpoints remove that dependency:
+# pulls stay inside the VPC, and no NACL rule, NAT gateway or public route is in the path.
+#
+# Three endpoints, because an ECR pull is two services. ecr.api serves the authentication and
+# manifest calls; ecr.dkr serves the registry protocol; and the layers themselves are S3 objects,
+# so without the S3 endpoint the bulk of every pull still leaves the VPC and the exercise is
+# pointless. S3 is a GATEWAY endpoint (a route-table entry, no ENI, no hourly charge); the two ECR
+# ones are INTERFACE endpoints (an ENI in the private subnet, billed per hour per AZ plus data
+# processing — see the AWS pricing page for the current figure in your region).
+VPCE_SG=""
+VPCE_IDS=""
+if [[ "${DEPLOY_VPC_ENDPOINTS:-true}" == "true" ]]; then
+  # Private DNS is the entire mechanism. The pull uses the PUBLIC ECR hostname; the endpoint only
+  # intercepts it because the VPC resolver answers that name with the endpoint's private IP. That
+  # resolution requires enableDnsSupport AND enableDnsHostnames on the VPC, so check both rather
+  # than assume: with them off, create-vpc-endpoint --private-dns-enabled fails outright, and if it
+  # somehow does not, the endpoint bills by the hour while every pull still goes out over the NAT.
+  # A silent no-op that costs money is the worst outcome available here, so this converges instead.
+  for _attr in enableDnsSupport enableDnsHostnames; do
+    _val="$(Q describe-vpc-attribute --vpc-id "$VPC_ID" --attribute "$_attr" \
+      --query "${_attr^}.Value" --output text 2>/dev/null || echo "")"
+    if [[ "$_val" != "True" && "$_val" != "true" ]]; then
+      Q modify-vpc-attribute --vpc-id "$VPC_ID" --"$(printf '%s' "$_attr" | sed 's/^enable/enable-/; s/DnsSupport/dns-support/; s/DnsHostnames/dns-hostnames/')" >/dev/null 2>&1 \
+        || Q modify-vpc-attribute --vpc-id "$VPC_ID" --"$_attr" >/dev/null
+      say info "enabled $_attr on $VPC_ID (required for endpoint private DNS)"
+    fi
+  done
+
+  # A dedicated SG rather than reusing source-truth-index-svc. That SG is self-referencing over
+  # 8080-8099 for the bridge; an endpoint needs 443 from the subnet and nothing else, and giving the
+  # endpoint its own group keeps "who may talk to ECR" separate from "who may read source code".
+  VPCE_SG="$(Q describe-security-groups --filters "Name=group-name,Values=source-truth-vpce" \
+    "Name=vpc-id,Values=$VPC_ID" --query 'SecurityGroups[0].GroupId' --output text 2>/dev/null || echo "")"
+  if [[ "$VPCE_SG" == "None" || -z "$VPCE_SG" ]]; then
+    VPCE_SG="$(Q create-security-group --group-name source-truth-vpce \
+      --description "HTTPS from the private subnet to the ECR interface endpoints" \
+      --vpc-id "$VPC_ID" \
+      --tag-specifications "$(tspec security-group source-truth-vpce)" \
+      --query GroupId --output text)"
+    say ok "endpoint security group created: $VPCE_SG"
+  fi
+  # Idempotent: authorize fails with Duplicate when the rule is already there, which is success.
+  if ! _sg_err="$(Q authorize-security-group-ingress --group-id "$VPCE_SG" --protocol tcp \
+      --port 443 --cidr "$VPC_CIDR" 2>&1 >/dev/null)"; then
+    printf '%s' "$_sg_err" | grep -q 'InvalidPermission.Duplicate' \
+      || { say err "could not allow 443 from $VPC_CIDR on $VPCE_SG: $(printf '%s' "$_sg_err" | tr -d '\n' | cut -c1-200)"; exit 1; }
+  fi
+
+  PRIV_RT="$(by_name route-tables source-truth-private-rt RouteTables RouteTableId "Name=vpc-id,Values=$VPC_ID")"
+
+  ensure_endpoint() { # <short-name> <service-suffix> <Interface|Gateway>
+    local name="source-truth-vpce-$1" svc="com.amazonaws.${REGION}.$2" kind="$3" id state
+    id="$(Q describe-vpc-endpoints --filters "Name=tag:Name,Values=$name" \
+      "Name=vpc-id,Values=$VPC_ID" "Name=service-name,Values=$svc" \
+      --query 'VpcEndpoints[0].VpcEndpointId' --output text 2>/dev/null || echo "")"
+
+    # A `failed` endpoint still carries our tag, so a plain existence check adopts it forever and
+    # the deploy reports success while every pull keeps going out over the NAT. Clear it out.
+    if [[ -n "$id" && "$id" != "None" ]]; then
+      state="$(Q describe-vpc-endpoints --vpc-endpoint-ids "$id" --query 'VpcEndpoints[0].State' --output text 2>/dev/null || echo "")"
+      if [[ "$state" == "failed" || "$state" == "deleted" || "$state" == "deleting" ]]; then
+        say warn "endpoint $name is in state '$state' — deleting and recreating"
+        Q delete-vpc-endpoints --vpc-endpoint-ids "$id" >/dev/null 2>&1 || true
+        id=""
+      fi
+    fi
+
+    if [[ -z "$id" || "$id" == "None" ]]; then
+      if [[ "$kind" == "Interface" ]]; then
+        id="$(Q create-vpc-endpoint --vpc-id "$VPC_ID" --service-name "$svc" \
+          --vpc-endpoint-type Interface --subnet-ids "$PRIV" --security-group-ids "$VPCE_SG" \
+          --private-dns-enabled \
+          --tag-specifications "$(tspec vpc-endpoint "$name")" \
+          --query 'VpcEndpoint.VpcEndpointId' --output text)"
+      else
+        id="$(Q create-vpc-endpoint --vpc-id "$VPC_ID" --service-name "$svc" \
+          --vpc-endpoint-type Gateway --route-table-ids "$PRIV_RT" \
+          --tag-specifications "$(tspec vpc-endpoint "$name")" \
+          --query 'VpcEndpoint.VpcEndpointId' --output text)"
+      fi
+      say ok "endpoint $name created: $id ($svc)"
+    else
+      # Converge the two properties that decide whether an EXISTING endpoint actually carries
+      # traffic. Both can be true of an endpoint that reads as available: an interface endpoint
+      # with private DNS off resolves nothing, and a gateway endpoint not attached to the private
+      # route table is not in any path. Neither shows up as an error anywhere.
+      if [[ "$kind" == "Interface" ]]; then
+        local dns; dns="$(Q describe-vpc-endpoints --vpc-endpoint-ids "$id" \
+          --query 'VpcEndpoints[0].PrivateDnsEnabled' --output text 2>/dev/null || echo "")"
+        if [[ "$dns" != "True" && "$dns" != "true" ]]; then
+          say warn "endpoint $name had private DNS disabled — enabling (it was billing without intercepting anything)"
+          Q modify-vpc-endpoint --vpc-endpoint-id "$id" --private-dns-enabled >/dev/null
+        fi
+      else
+        local rts; rts="$(Q describe-vpc-endpoints --vpc-endpoint-ids "$id" \
+          --query 'VpcEndpoints[0].RouteTableIds' --output text 2>/dev/null || echo "")"
+        if [[ " $rts " != *" $PRIV_RT "* ]]; then
+          say warn "endpoint $name was not attached to $PRIV_RT — attaching"
+          Q modify-vpc-endpoint --vpc-endpoint-id "$id" --add-route-table-ids "$PRIV_RT" >/dev/null
+        fi
+      fi
+    fi
+    VPCE_IDS="$VPCE_IDS $id"
+    printf '%s' "$id"
+  }
+
+  ensure_endpoint ecr-api ecr.api Interface >/dev/null
+  ensure_endpoint ecr-dkr ecr.dkr Interface >/dev/null
+  ensure_endpoint s3 s3 Gateway >/dev/null
+  VPCE_IDS="$(printf '%s' "$VPCE_IDS" | tr -s ' ' | sed 's/^ //; s/ $//')"
+
+  # Report the state we actually reached. An interface endpoint is `pending` for a minute or two
+  # after creation and does not serve traffic until `available`; saying "created" and moving on is
+  # how the first deploy after this change would appear to succeed and still pull over the NAT.
+  for _id in $VPCE_IDS; do
+    _st="$(Q describe-vpc-endpoints --vpc-endpoint-ids "$_id" --query 'VpcEndpoints[0].State' --output text 2>/dev/null || echo "?")"
+    [[ "$_st" == "available" ]] || say info "endpoint $_id state=$_st (interface endpoints take a minute to become available)"
+  done
+  say ok "vpc endpoints: ${VPCE_IDS:-<none>} (ecr.api + ecr.dkr interface, s3 gateway)"
+else
+  # Opt-out exists because the two interface endpoints bill by the hour whether or not a deploy is
+  # in use, and someone evaluating this sample for an afternoon should not have to pay for them.
+  # The cost of opting out is the pull path this section was written to fix.
+  say warn "DEPLOY_VPC_ENDPOINTS=false — image pulls will cross the NAT to the public internet"
+  say warn "  → that path failed intermittently with 'HTTP 424 Runtime health check failed'; see the comment in provision_network.sh"
 fi
 
 # ---- H7: VPC Flow Logs to S3 ----
@@ -370,4 +524,8 @@ update_env "$CONFIG" VPC_CIDR "$VPC_CIDR"
 update_env "$CONFIG" PUBLIC_SUBNET "$PUB"
 update_env "$CONFIG" PRIVATE_SUBNET "$PRIV"
 update_env "$CONFIG" NAT_GATEWAY "$NAT"
-say ok "network ready: vpc=$VPC_ID ($VPC_CIDR) priv=$PRIV pub=$PUB nat=$NAT"
+# Recorded for teardown: interface endpoints bill by the hour, so they are exactly the shape of
+# orphan this project has already been burned by. Teardown does NOT rely on this value — it also
+# sweeps by tag and by VPC — but a config-recorded id survives a tag being removed by hand.
+update_env "$CONFIG" VPC_ENDPOINTS "$VPCE_IDS"
+say ok "network ready: vpc=$VPC_ID ($VPC_CIDR) priv=$PRIV pub=$PUB nat=$NAT vpce=${VPCE_IDS:-none}"

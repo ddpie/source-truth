@@ -77,6 +77,29 @@ check "临时端口区间覆盖 Linux 默认 ephemeral 范围（32768-60999 起�
 (( E_TO >= 65535 && U_TO >= 65535 ))
 check "临时端口区间上界到 65535（AgentCore microVM 源端口高于 60999）" $?
 
+# 上面三条断言按规则号取值，而规则号是会变的：新增一条规则不会让它们变红。这一点已经被真实触发过
+# 一次——为 VPC 端点加回程规则时新增了 ingress 115，区间恰好是 1024-65535，也就是这个测试当初被写
+# 出来要防的那个值本身。它无害，只因为 cidr 是 $VPC_CIDR 而不是 0.0.0.0/0；但按规则号断言的测试对
+# 它一无所知，全绿。
+#
+# 所以真正的不变量不是「120 号规则不许包含 bridge 区间」，而是「**任何**跨过 bridge 端口的入站规则
+# 都必须限定在 VPC 内」。下面遍历源码里所有 nacl_rule ingress 行来断言这一条，与规则号无关。
+_wide=""
+while read -r _line; do
+  _n="$(printf '%s' "$_line" | awk '{print $3}')"
+  [[ "$_n" == 100 ]] && continue            # 100 本身就是 bridge 规则
+  _f="$(printf '%s' "$_line" | grep -oE 'From=[0-9]+' | head -1 | cut -d= -f2)"
+  _t="$(printf '%s' "$_line" | grep -oE 'To=[0-9]+'   | head -1 | cut -d= -f2)"
+  _c="$(printf '%s' "$_line" | grep -oE -- '--cidr-block "[^"]+"' | head -1 | sed 's/.*"\(.*\)"/\1/')"
+  [[ -z "$_f" || -z "$_t" ]] && continue    # 无端口区间的规则（如 ICMP）跳过
+  # 与 bridge 区间有任何重叠，且 cidr 不是 VPC CIDR → bridge 端口对该 cidr 开放
+  if (( _f <= B_TO && B_FROM <= _t )) && [[ "$_c" != '$VPC_CIDR' ]]; then
+    _wide="$_wide ${_n}(${_f}-${_t} from ${_c})"
+  fi
+done < <(grep -E '^nacl_rule ingress [0-9]+ ' "$F")
+[[ -z "$_wide" ]]
+check "没有任何非 VPC 限定的入站规则跨过 bridge 区间($B_FROM-$B_TO)${_wide:+ —— 违规:$_wide}" $?
+
 # nacl_rule 的收敛方向：create 失败要回退到 replace，且不得出现 delete-then-create。
 sed -n '/^nacl_rule() {/,/^}/p' "$F" | grep -q 'replace-network-acl-entry'
 check "nacl_rule 在 create 失败时回退 replace-network-acl-entry" $?

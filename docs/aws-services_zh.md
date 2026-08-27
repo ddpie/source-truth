@@ -28,10 +28,11 @@
 | 服务 | 规格 | 数量 | 用途 |
 |------|------|------|------|
 | **VPC** | CIDR `10.1.0.0/16`；公有子网 `10.1.0.0/24` + 私有子网 `10.1.1.0/24` | 1 | 网络隔离；默认两台拓扑下 index 主机在私有子网，`--local`（单台 EC2）下 index 主机在公有子网、带公网 IP，安全组只放行运维出口 IP 的 22 |
-| **NAT Gateway**（+ 弹性 IP） | 置于公有子网 | 1 | 私有子网出站（拉取 S3 产物、调用 Bedrock） |
+| **NAT Gateway**（+ 弹性 IP） | 置于公有子网 | 1 | 私有子网出站。有了下面的 VPC 端点后，它已不在拉镜像和 S3 的路径上，但调用 Bedrock 仍必须经它（Bedrock 在此没有端点） |
+| **VPC 端点** | `ecr.api` + `ecr.dkr`（Interface 型，置于私有子网，开启 private DNS，独立安全组只放行 VPC CIDR 的 443）与 `s3`（Gateway 型，挂在私有路由表上） | 3 | 让拉取容器镜像不出 VPC。经 NAT 走公网拉镜像会间歇失败，而且**唯一**的表现是 `HTTP 424 Runtime health check failed`——容器根本没起来，里面任何东西都报不出原因。一次 ECR 拉取需要三个端点齐备：`ecr.api` 负责认证与 manifest，`ecr.dkr` 负责 registry 协议，`s3` 是因为镜像层本身就是 S3 对象（缺了它，每次拉取的绝大部分字节仍然出 VPC）。两个 Interface 端点按小时按可用区计费；设 `DEPLOY_VPC_ENDPOINTS=false` 可跳过，代价是退回 NAT 路径 |
 | **Internet Gateway** | — | 1 | 公有子网入口 |
 | **Security Group** | 入站仅 `8080-8099`、限同 SG 成员 | 1（AgentCore Runtime 的 ENI 也加入此 SG） | 限制各项目 bridge 端口仅本 VPC 内可达 |
-| **Network ACL** | `source-truth-private-nacl`，关联私有子网（替换默认 NACL）。入站白名单：`100` TCP 8080-8099（限 VPC CIDR）、`110` TCP 443（限 VPC CIDR）、`120/130` TCP/UDP 32768-60999（经 NAT 发起连接的回程流量）、`140` ICMP type 3 code 4（Path MTU 发现）；出站全放通（NAT 出站需要）；其余走 32767 隐式拒绝 | 1 | 子网级第二道网络管控，收敛为增量式（先补齐目标规则、再清理多余规则，任何时刻都不会经过 deny-all 状态） |
+| **Network ACL** | `source-truth-private-nacl`，关联私有子网（替换默认 NACL）。入站白名单：`100` TCP 8080-8099（限 VPC CIDR）、`110` TCP 443（限 VPC CIDR）、`115` TCP 1024-65535（限 VPC CIDR，下面 VPC 端点的回程流量）、`120/130` TCP/UDP 32768-65535（经 NAT 发起连接的回程流量；上界必须到 65535，因为 AgentCore Runtime 的 ENI 是 AWS 托管 microVM，源端口高于 Linux 默认的 60999）、`140` ICMP type 3 code 4（Path MTU 发现）；出站全放通（NAT 出站需要）；其余走 32767 隐式拒绝 | 1 | 子网级第二道网络管控，收敛为增量式（先补齐目标规则、再清理多余规则，任何时刻都不会经过 deny-all 状态） |
 | **VPC Flow Logs** | 全流量（`ALL`），聚合间隔 600s，投递到 S3 `s3://<artifact-bucket>/vpc-flow-logs/` | 1 | 网络审计留痕；建不出来只 WARN 不阻断部署（审计辅助，非服务依赖） |
 | **Route 53**（私有托管区） | 私有域 `source-truth.internal`，A 记录 TTL 30s | 1 | 给 index 主机稳定 DNS 名（agent 侧不写死私有 IP；索引主机就地更新、不换实例，这个名字始终指向同一台在跑的主机） |
 

@@ -14,7 +14,9 @@
 # Phases (numbers match the operator-visible `say step "Phase N"` labels; --skip <name>):
 #   1  artifacts  : build/stage codegraph-server bin + index-service code + repo → S3
 #   1b iam        : execution + index-service instance roles/policies (describe-or-create)
-#   2  network    : VPC, public+private subnet, IGW, NAT, route tables (or reuse)
+#   2  network    : VPC, public+private subnet, IGW, NAT, route tables (or reuse), a restrictive
+#                   NACL, and VPC endpoints for ECR (ecr.api + ecr.dkr, interface) and S3
+#                   (gateway) so container image pulls never leave the VPC
 #   3  index-svc  : security groups + ARM EC2 (Ubuntu 24.04) running bootstrap.sh
 #   4  image      : build the agent container (ARM64) and push to ECR
 #   5  projects   : per-project deploy, looped over .local/projects.json — each project
@@ -142,6 +144,15 @@ Options:
   --dry-run           Print the plan and resolved IDs, make no changes
   --force             Bypass hard-block preflight checks (e.g. vCPU quota) with explicit acknowledgment
   -h, --help
+
+ENVIRONMENT:
+  DEPLOY_VPC_ENDPOINTS=false   Skip the ECR/S3 VPC endpoints in Phase 2. The two ECR interface
+                      endpoints bill per hour per AZ whether or not anything is running, so an
+                      evaluation that only needs the sample for an afternoon can opt out. The cost
+                      of opting out is that every container start pulls the image from ECR across
+                      the public internet via the NAT gateway — a path that has been observed to
+                      fail intermittently, surfacing as "HTTP 424 Runtime health check failed" with
+                      no other symptom (the runbook's image-pull section covers the diagnosis).
 
 PREREQUISITES (not auto-provisioned — the deploy hard-fails / WARNs if missing):
   • codegraph-server binary (ARM aarch64, glibc>=2.38, pinned 0.20.1) on PATH or via
@@ -957,7 +968,13 @@ if [[ "$LOCAL_MODE" == true ]]; then
 elif skip network; then say warn "skip network"; else
   say step "Phase 2: network"
   if [[ "$DRY_RUN" == true ]]; then
-    say info "[dry-run] provision_network.sh (VPC/subnets/IGW/NAT) — discovers + reconciles by tag"
+    say info "[dry-run] provision_network.sh (VPC/subnets/IGW/NAT/NACL + ECR & S3 VPC endpoints) — discovers + reconciles by tag"
+    if [[ "${DEPLOY_VPC_ENDPOINTS:-true}" == "true" ]]; then
+      say info "[dry-run]   ecr.api + ecr.dkr interface endpoints and an s3 gateway endpoint (image pulls stay inside the VPC)"
+      say info "[dry-run]   the two interface endpoints bill per hour per AZ — set DEPLOY_VPC_ENDPOINTS=false to skip them"
+    else
+      say warn "[dry-run]   DEPLOY_VPC_ENDPOINTS=false — image pulls will cross the NAT to the public internet"
+    fi
   else
     # ALWAYS run the provisioner — never short-circuit on a non-empty VPC_ID. A prior
     # run that died MID-network (e.g. NAT wait timed out, EIP quota) writes VPC_ID

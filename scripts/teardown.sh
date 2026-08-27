@@ -135,6 +135,7 @@ say step "teardown plan — region $REGION, account ${ACCOUNT:-?}"
 say info "  AgentCore runtimes: all source_truth_agent* (enumerated at delete)"
 say info "  index-service EC2 : ${ALL_INSTANCES:-<none>}"
 say info "  NAT gateway(s)    : ${ALL_NATS:-<none>} (+ every Elastic IP they hold)"
+say info "  VPC endpoint(s)   : ${VPC_ENDPOINTS:-<discover by tag/VPC>} (ECR interface endpoints bill hourly)"
 say info "  VPC + subnets/RT/IGW/SG : ${VPC:-<none>}"
 say info "  Route53 private zone    : ${ZONE_ID:-<discover by VPC>}"
 say info "  ECR repo source-truth/agent : (in $REGION)"
@@ -357,6 +358,41 @@ done
 for a in $( { printf '%s\n' $EIP_ALLOCS | grep -vE '^(None)?$' | sort -u; } || true ); do
   del "Elastic IP $a" Q release-address --allocation-id "$a"
 done
+
+# ---- 4b. VPC endpoints ----
+# The two ECR INTERFACE endpoints bill per hour per AZ for as long as they exist, which puts them in
+# the same class as the NAT gateway and the Elastic IP: a leak here is a recurring charge on an
+# account the operator believes is empty. They also have to go before the security group and the
+# subnet, because each one holds an ENI in the private subnet and delete-security-group /
+# delete-subnet fail with DependencyViolation while it is attached.
+#
+# Deleted by a UNION of three sources, and enumerated in every one of them — the [0] mistake this
+# script has already been fixed for four times over. Tag-scoped deletion runs even when the VPC is
+# NOT ours: an endpoint carrying source-truth-vpce-* is unambiguously this project's, and refusing to
+# delete it because the surrounding VPC was pre-existing would leave a billable resource behind for
+# no safety gain.
+TAGGED_VPCE="$(Q describe-vpc-endpoints --filters "Name=tag:Name,Values=source-truth-vpce-*" \
+  --query 'VpcEndpoints[?State!=`deleted` && State!=`deleting`].VpcEndpointId' --output text 2>/dev/null || echo "")"
+VPC_VPCE=""
+if is_set "$VPC" && [[ "$VPC_IS_OURS" == true ]]; then
+  # Sweep the whole VPC too, for an endpoint whose tag was removed by hand or that a future version
+  # of provisioning adds under a different name. Safe precisely because the VPC is ours.
+  VPC_VPCE="$(Q describe-vpc-endpoints --filters "Name=vpc-id,Values=$VPC" \
+    --query 'VpcEndpoints[?State!=`deleted` && State!=`deleting`].VpcEndpointId' --output text 2>/dev/null || echo "")"
+fi
+ALL_VPCE="$( { printf '%s\n' ${VPC_ENDPOINTS:-} $TAGGED_VPCE $VPC_VPCE | grep -vE '^(None)?$' | sort -u | tr '\n' ' '; } || true )"
+if is_set "$ALL_VPCE"; then
+  # delete-vpc-endpoints takes the whole list and, unlike most deletes, returns 0 while reporting
+  # per-endpoint failures in .Unsuccessful — the same shape that made create-flow-logs report a
+  # success it had not achieved. Delete one at a time through `del` so each gets its own verdict.
+  for _vpce in $ALL_VPCE; do
+    del "vpc endpoint $_vpce" Q delete-vpc-endpoints --vpc-endpoint-ids "$_vpce"
+  done
+  # The ENI is released asynchronously after the endpoint goes. Wait here rather than letting the
+  # SG/subnet delete below fail on DependencyViolation.
+  wait_gone "vpc endpoints" 180 Q describe-vpc-endpoints --vpc-endpoint-ids $ALL_VPCE \
+    --query 'VpcEndpoints[?State!=`deleted`].VpcEndpointId' --output text
+fi
 
 # ---- 5. VPC teardown (subnets, route tables, IGW, SG) then the VPC ----
 if is_set "$VPC" && [[ "$VPC_IS_OURS" == true ]]; then
@@ -606,6 +642,10 @@ say info "verify no billable orphans:  aws ec2 describe-nat-gateways --region $R
 # all future zone cleanup, neither of which the operator could otherwise discover.
 say info "    aws ec2 describe-addresses --region $REGION --filters Name=tag:Name,Values=source-truth-nat-eip --query 'Addresses[].AllocationId'"
 say info "    aws route53 list-hosted-zones --query \"HostedZones[?Name=='source-truth.internal.'].Id\""
+# Interface endpoints belong on this list for the same reason as the EIP: an hourly charge that
+# nothing on the console's front page draws attention to, in a region the operator has stopped
+# thinking about.
+say info "    aws ec2 describe-vpc-endpoints --region $REGION --filters Name=tag:Name,Values=source-truth-vpce-* --query 'VpcEndpoints[].[VpcEndpointId,VpcEndpointType,State]'"
 
 # RETAINED BY DESIGN — these are never deleted by a default run, and staying silent about them
 # is how a "complete" teardown quietly keeps billing. Secrets are ~$0.40/mo each and the log

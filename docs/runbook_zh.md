@@ -200,7 +200,7 @@ codegraph 索引占用内存较高，且随仓库增大而增长，按仓库规�
 - **GitHub 凭证（私有仓必看）**：该 EC2 需自行克隆仓库、下载 codegraph 二进制（私有 Release）、后续 `git pull` 升级，因此需访问 GitHub。`launch-host.sh` 取本机 `gh` 的登录 token（若无则提示粘贴一个只读 PAT，scope 仅需 repo:read）存入 Secrets Manager；在实例上执行的 `prepare-local-host.sh` 通过实例角色取回，并在实例上 `gh auth login` 持久化（存于该机 `~/.config/gh`，权限 600）。后续升级与 Release 下载均自动携带凭证，无需再次传入。**公开仓可跳过**（提示 token 时留空即可）。更换实例或停用时，请及时吊销该 token。
 - **机器规格**：必须为 ARM64（aarch64）、Ubuntu 24.04（镜像与 codegraph-server 均为 ARM，x86 会被拦下）；部署用户需具备免密 sudo。launch-host 已设置 IMDSv2 与 hop-limit 1。
 - **权限较大、建议专机专用**：`--local` 调用 AWS 用的是这台机器的**实例角色**（不是你本地的 profile——登录 EC2 后即不再可用），它既需建资源的权限，也需运行期权限，**范围偏大，这台机器不建议与其它业务共用**。角色名 `source-truth-index-role` 与默认部署共用（IAM 角色为账号级、不分区域）：`create-iam.sh` 幂等复用、只补权限不重建；但需注意，**若同账号已有默认部署在使用该角色，补上部署期权限后那台机器也会一并获得**——如需让默认部署保持最小权限，请换一个账号运行 `--local`。
-- **NAT 不可省略**：实例位于公有子网（有公网 IP 供 SSH），但 AgentCore Runtime 位于私有子网、经 **NAT** 访问 Bedrock——Runtime 的网卡由 AWS 托管、无公网 IP，无法经 IGW 访问外网，因此必须配置 NAT（固定费用约每月 $32 起）。bridge 端口（8080-8099）仅对同一安全组内成员开放，外部无法访问。
+- **NAT 不可省略**：实例位于公有子网（有公网 IP 供 SSH），但 AgentCore Runtime 位于私有子网、经 **NAT** 访问 Bedrock——Runtime 的网卡由 AWS 托管、无公网 IP，无法经 IGW 访问外网，因此必须配置 NAT（固定费用约每月 $32 起）。部署还会创建 ECR 与 S3 的 VPC 端点，把拉镜像这段从 NAT 路径上移走——但调用 Bedrock 这段移不走，所以端点只是减少了对 NAT 的依赖，并不能省掉 NAT。bridge 端口（8080-8099）仅对同一安全组内成员开放，外部无法访问。
 
 **升级**：登录**同一台实例**（部署状态 `.local/` 均保存于其上），运行 `cd source-truth && git pull && ./scripts/deploy-all.sh --region <r> --local`。部署就地更新这台机器：重跑 bootstrap 落地新的基础代码、重建镜像、更新 runtime、重启网关与索引服务，实例 ID / 私有 IP / 已建好的 graph.db 均保留，不新建实例。重跑 bootstrap 与重启服务期间会有一段服务中断（时长与首次部署相当），建议在低峰期操作。
 
@@ -411,7 +411,7 @@ aws ssm start-session --region <r> --target <INDEX_SERVICE_INSTANCE>
 `AnswerFailedBurst`（回答失败率激增）、`LogPipelineStalled`（网关每 60 秒发一次 `gateway_heartbeat` 心跳日志，
 心跳断了才告警——日志管道中断或网关异常；空闲夜里仍有心跳，不会误报）。
 
-**拆除整套资源（停止计费）**：试用完、或某次部署中途失败留下计费资源（NAT ~$32/月、EIP、EC2）时，一条命令按反依赖顺序清理：
+**拆除整套资源（停止计费）**：试用完、或某次部署中途失败留下计费资源（NAT ~$32/月、EIP、EC2、两个 ECR Interface 端点按小时计费）时，一条命令按反依赖顺序清理：
 
 ```bash
 ./scripts/teardown.sh --region <r> --dry-run     # 先看将删除哪些资源，不动资源
@@ -469,6 +469,7 @@ refreshIntervalSec?}`，`source` 默认 `git`、本地仓写 `local`）。顶层
 | 卡片回「查询失败」/ 日志 `AccessDenied` | 部署身份缺 `bedrock:InvokeModel`，或该模型在此区域无可用推理档 | 给部署身份补 `bedrock:InvokeModel`；模型档由部署按区域自动解析，查不到时 preflight 会列出该区域可用的档（见前置条件 3） |
 | 部署在 index-service 阶段超时 | 全新账号 NAT 路由未收敛 / 实例仍在冷启动建立索引 | 再等待一轮（bootstrap 对网络操作有重试）；查看 `/var/log/` 与 `journalctl -u 'index-build@*'` |
 | `/health` 长期非 200 | 索引损坏 / graph.db 空 / worker 反复重启 | 进实例查看 index-bridge-<项目> 日志；基础代码落后就重新运行 `deploy-all.sh`（就地重跑 bootstrap，实例与 graph.db 不动）；图确实损坏则在实例上 `sudo systemctl start index-build@<仓库子目录>` 全量重建该仓的图。注：本地仓在首次 `push-local-repo.sh` 之前本就是空图、`/health` 非 200，属正常，推代码后恢复 |
+| 每次问答都返回 `HTTP 424 Runtime health check failed`，约 3 秒就失败，而 `/health`、bridge、网关长连接全绿 | **容器根本没起来**——拉镜像失败。看起来最像应用故障，其实一层都没跑到。历史上有两个原因：① NACL 回程端口上界不够（AgentCore microVM 源端口高于 60999）；② 经 NAT 走公网到 ECR 的路径间歇性超时 | 先看 runtime 自己的日志组，拉取失败会明确写出来：`aws logs filter-log-events --log-group-name /aws/bedrock-agentcore/runtimes/<runtime-id>-DEFAULT --start-time <ms>` 里找 `Failed to pull image` 与 `i/o timeout`。确认后：查 VPC 端点是否齐备且 available——`aws ec2 describe-vpc-endpoints --filters Name=tag:Name,Values=source-truth-vpce-* --query 'VpcEndpoints[].[VpcEndpointId,ServiceName,State,PrivateDnsEnabled]'`，三个都要有、Interface 型的 `PrivateDnsEnabled` 必须是 `true`（否则端点在计费但不截流量）；重跑 `deploy-all.sh` 的 network 阶段即可收敛。子网内可直接验证解析是否落到端点私有 IP：`getent hosts api.ecr.<region>.amazonaws.com` 应返回 `10.1.1.x` |
 | 重新部署后行为仍是旧版本 | 仍存活的 microVM 继续使用旧镜像（约 15 分钟）/ 网关未重启 | 等待该 microVM 回收；重启网关以确保运行新代码 |
 | 中文问答未用上项目专属命名 / 术语表疑似为空 | 术语表后台构建未完成或失败（cc 未成功安装 / Bedrock 不可达或无权限） | 进实例查看 `journalctl` 与 `/var/log/glossary-build-*`，查 `glossary_gen_done`（成功）/ `glossary_gen_cc_failed`（构建失败）；不影响问答，问答会自动退回常规检索 |
 
