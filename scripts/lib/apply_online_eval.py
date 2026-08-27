@@ -22,8 +22,14 @@ GROUND_TRUTH = {"assertions", "expected_response", "expected_tool_trajectory",
                 "actual_tool_trajectory"}
 
 
-def existing(client) -> dict[str, str]:
-    out: dict[str, str] = {}
+def existing(client) -> tuple[dict[str, str], dict[str, str]]:
+    """返回 (名字→id, 名字→executionStatus)。
+
+    状态必须一起取回：--enable 对已存在的配置只能通过 UpdateOnlineEvaluationConfig 生效，
+    而判断要不要调用它需要知道当前状态，否则每次运行都会无谓地改一遍。
+    """
+    ids: dict[str, str] = {}
+    states: dict[str, str] = {}
     token = None
     while True:
         kw = {"maxResults": 50}
@@ -36,10 +42,11 @@ def existing(client) -> dict[str, str]:
             name = c.get("onlineEvaluationConfigName") or c.get("name")
             cid = c.get("onlineEvaluationConfigId") or c.get("id")
             if name and cid:
-                out[name] = cid
+                ids[name] = cid
+                states[name] = c.get("executionStatus") or ""
         token = resp.get("nextToken")
         if not token:
-            return out
+            return ids, states
 
 
 def uses_ground_truth(ctl, evaluator_id: str) -> bool:
@@ -114,7 +121,7 @@ def main() -> int:
         print("✗ 该区域没有 source_truth_agent* runtime", file=sys.stderr)
         return 1
 
-    have = existing(ctl)
+    have, states = existing(ctl)
     rc = 0
     created = 0
 
@@ -131,13 +138,45 @@ def main() -> int:
         safe = re.sub(r"[^a-zA-Z0-9_]", "_", name)[:40]
         cfg_name = f"st_online_{safe}"[:48]
         if cfg_name in have:
-            print(f"ONLINE_CONFIG {have[cfg_name]}   {cfg_name} (已存在，复用；改动前须先禁用)")
+            cid = have[cfg_name]
+            # 已存在的配置必须**收敛**执行状态，不能只报「复用」。enableOnCreate 只在创建时起作用，
+            # 所以对已存在的配置，--enable 若不落到 UpdateOnlineEvaluationConfig 上就完全没有效果——
+            # 脚本会打印成功而实时评估依然是关的，正是「报告未曾达成的成功」。
+            want = "ENABLED" if args.enable else "DISABLED"
+            current = states.get(cfg_name, "")
+            if current == want:
+                print(f"ONLINE_CONFIG {cid}   {cfg_name} (已存在，executionStatus={current})")
+                continue
+            try:
+                ctl.update_online_evaluation_config(
+                    onlineEvaluationConfigId=cid,
+                    executionStatus=want,
+                    rule={"samplingConfig": {"samplingPercentage": float(args.sampling)},
+                      # 显式给出会话超时。实时评估要等会话被判定**结束**才评分，所以这个值
+                      # 直接决定「问完多久能看到分数」。不设它就用服务默认值，而一个 sample
+                      # 不该把这种可观测延迟留成隐式的——运维会以为评估根本没工作。
+                      # 20 分钟略大于网关 15 分钟的空闲 TTL，避免一轮多问的会话被中途切断。
+                      "sessionConfig": {"sessionTimeoutMinutes": 20}},
+                )
+            except ClientError as e:
+                err = e.response.get("Error", {})
+                print(f"✗ {cfg_name}: 无法把 executionStatus 改为 {want}: "
+                      f"{err.get('Code')}: {(err.get('Message') or '')[:200]}", file=sys.stderr)
+                rc = 1
+                continue
+            print(f"ONLINE_CONFIG {cid}   {cfg_name} "
+                  f"(executionStatus {current or '?'} → {want}，采样 {args.sampling}%)")
             continue
         try:
             resp = ctl.create_online_evaluation_config(
                 onlineEvaluationConfigName=cfg_name,
                 description="Score source-truth answers for citation accuracy and evidence discipline",
-                rule={"samplingConfig": {"samplingPercentage": float(args.sampling)}},
+                rule={"samplingConfig": {"samplingPercentage": float(args.sampling)},
+                      # 显式给出会话超时。实时评估要等会话被判定**结束**才评分，所以这个值
+                      # 直接决定「问完多久能看到分数」。不设它就用服务默认值，而一个 sample
+                      # 不该把这种可观测延迟留成隐式的——运维会以为评估根本没工作。
+                      # 20 分钟略大于网关 15 分钟的空闲 TTL，避免一轮多问的会话被中途切断。
+                      "sessionConfig": {"sessionTimeoutMinutes": 20}},
                 dataSourceConfig={"cloudWatchLogs": {
                     "logGroupNames": [f"/aws/bedrock-agentcore/runtimes/{rid}-DEFAULT"],
                     "serviceNames": [f"{name}.DEFAULT"],
