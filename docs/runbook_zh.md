@@ -630,47 +630,53 @@ node_modules/.bin/ts-node --transpile-only src/index.ts
 
 ## 附录 E：可观测性（AgentCore span 与 trace）
 
-Agent 现在通过 `opentelemetry-instrument` 启动（见 `agent-container/Dockerfile` 的 `CMD`
-注释），因此会产出 OpenTelemetry span。**那层包装本身就是接入**：`aws-opentelemetry-distro`
-曾长期只是被钉在依赖里而没有它，结果是零遥测，而所有检查都是绿的。
+Agent 通过 `opentelemetry-instrument` 启动（见 `agent-container/Dockerfile` 的 `CMD` 注释），
+因此会产出 OpenTelemetry span。**那层包装本身就是接入**：`aws-opentelemetry-distro` 曾长期
+只是被钉在依赖里而没有它，结果是零遥测，而所有检查都是绿的。
 
-"产出 span"和"span 可查询"是两件事。后者需要 CloudWatch Transaction Search，那是按账号和
-区域的一次性开关，不属于本部署的职责。`deploy-all.sh` 会告知当前处于哪种状态，且**从不因此失败**
-——机器人回答问题不依赖它。
+"产出 span"和"能查到 span"是两件事，而后者需要**两处** AWS 侧配置，不是一处：
 
-**开启（每个区域一次）：**
+1. **CloudWatch Transaction Search**——账号加区域级。把 trace segment 指向 CloudWatch Logs，
+   并允许 X-Ray 写入 `aws/spans` 日志组。
+2. **按 runtime 的投递配置**——每个 agent runtime 都要为 `TRACES` 和 `APPLICATION_LOGS` 配
+   投递源与目标。这一条很容易漏：AWS 文档把它放在控制台操作一节，而漏掉它时账号级开关看起来
+   像是坏的。这里配好之前，每个 runtime 的日志流都是空的、`aws/spans` 一条 span 也没有——
+   连应用自己的输出都没到。
+
+两处由同一个幂等 stage 完成：
 
 ```bash
-# 1. 允许 X-Ray 把 span 写进 CloudWatch Logs
-aws logs put-resource-policy --region <region> --policy-name TransactionSearchXRayAccess \
-  --policy-document '<见英文附录 E 的完整策略 JSON>'
-
-# 2. 把 trace segment 指向 CloudWatch Logs
-aws xray update-trace-segment-destination --region <region> --destination CloudWatchLogs
-
-# 3.（可选）采样率低于 100%
-aws xray update-indexing-rule --region <region> --name Default \
-  --rule '{"Probabilistic":{"DesiredSamplingPercentage":10}}'
+./scripts/apply-monitoring.sh --region <region> --only observability
 ```
 
-用 `aws xray get-trace-segment-destination --region <region>` 复核；重跑 `deploy-all.sh`
-也会报告已开启。
+它同时是 `deploy-all.sh` Phase 7 的一部分。每一步做完都回读校验，而不是以退出码为准——
+因为这里所有的失败形态从外面看完全一样：一切都配好了，就是没有数据。
 
-**span 落在哪。** 默认进共享的 `aws/spans` 日志组。也可以让每个 agent 投到自己的
-`/aws/bedrock-agentcore/runtimes/<id>-<endpoint>`——对这里值得做，因为一台主机服务多个项目、
-而每个项目本来就有自己的日志组，这样访问控制和加密就能按项目收口。需要三件事同时成立：
-ADOT >= 0.18.0（已钉 0.19.0，满足）、runtime 上设 `UNIFIED_TRACES_DESTINATION_ENABLED=true`、
-以及给执行角色授予该日志组的 `logs:PutResourcePolicy`。本仓目前没有配置——这里的 runtime 建于
-该特性之前，仍走共享组。
+**怎么验证而不骗自己。** 不要用 `describe-log-streams` 的 `storedBytes` 判断——它是周期性统计的，
+事件早已到达时仍可能读到 0，这恰好会让正常工作的系统看起来是坏的。要查事件：
 
-**span 通了之后能做什么。** CloudWatch 的 *GenAI Observability* 页面按 agent 展示会话、trace
-和 token 用量。span 同时是 AgentCore Evaluations 的输入：它可以用内置裁判打分，也可以用你自己的
-Lambda 做确定性检查——对本项目而言后者才是关键，因为一条指向错误行号的引用在 LLM 裁判眼里是
-对的，在回读那一行的代码眼里不是。
+```bash
+aws logs filter-log-events --region <region> --log-group-name aws/spans \
+  --start-time $(( ($(date +%s) - 1800) * 1000 )) --limit 20
+```
 
-**一个需要留意的前提。** 会话关联取决于 session id 能否进到 span 属性里。网关是通过
-`invoke_agent_runtime` 的 `runtimeSessionId` 传的，而 AgentCore 文档描述的传播方式是
-`X-Amzn-Bedrock-AgentCore-Runtime-Session-Id` 请求头。这里的 span 最终有没有带上
-`attributes.session.id`，尚未在真机上验证过；而 Evaluations 是按 session 选 span 的，
-所以在此之上做任何东西之前，先确认这一点。
+正常时 runtime 自己的日志组里会有 span 记录，其 `scope.name` 包含
+`amazon.opentelemetry.distro.instrumentation.mcp`（到索引服务的证据通道被埋点）、
+`claude_agent_sdk._internal.transport.subprocess_cli` 与 `bedrock_agentcore.app`。
+
+**会话关联是通的，改动后值得复核这一条。** span 的 `attributes.session.id` 与网关在
+`invoke_start` 记录的 `sessionId` 一致，所以一个会话可以从飞书卡片一路跟到 agent 的工具调用。
+这也是 AgentCore Evaluations 依赖的性质——它按 session 选 span。
+
+**span 落在哪。** 默认进共享的 `aws/spans`。也可以让每个 agent 投到自己的
+`/aws/bedrock-agentcore/runtimes/<id>-<endpoint>`，这更契合这里的布局：一台主机、多个项目、
+每个项目本来就有自己的日志组，访问控制和加密可按项目收口。需要 ADOT >= 0.18.0（已钉 0.19.0，
+满足）、runtime 上设 `UNIFIED_TRACES_DESTINATION_ENABLED=true`、以及给执行角色授予
+`logs:PutResourcePolicy`。本仓未配置：这些 runtime 建于该特性之前，仍走共享组。
+
+**成本与一个需要留意的点。** Transaction Search 会为 span 建索引并按此计费；在意的话用
+`aws xray update-indexing-rule` 把采样降到 100% 以下。另外 ADOT 的自动埋点会增加启动开销——
+接上之后实测一次冷启动到首 token 是 142 秒，而 AgentCore 的 runtime 初始化上限是 120 秒。
+首 token 不等于初始化，所以这次没有触发，但余量比以前小了。若日后出现冷启动的
+`HTTP 424 Runtime health check failed`，第一个该查的就是这里。
 

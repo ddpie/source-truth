@@ -38,7 +38,8 @@ Usage: ./scripts/apply-monitoring.sh [--region <r>] [--dry-run] [--only <stage>]
 Applies the CloudWatch monitoring stack (idempotent). Default runs every stage in order:
 dashboards → metric-filters (A-class + by-project) → alarms → DAU lambda.
 
-  --only <s>    run only this stage: filters | dashboards | alarms | dau  (repeatable)
+  --only <s>    run only this stage: filters | dashboards | alarms | dau | observability
+                (repeatable)
   --region <r>  AWS region (default: DEPLOY_REGION from .local/deploy-config)
   --dry-run     print each stage's plan; NO AWS calls
   -h, --help    this help
@@ -56,8 +57,8 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --only)
       case "${2:-}" in
-        filters|dashboards|alarms|dau) ONLY+=("$2") ;;
-        *) say err "unknown --only stage: '${2:-}' (want filters|dashboards|alarms|dau)"; exit 2 ;;
+        filters|dashboards|alarms|dau|observability) ONLY+=("$2") ;;
+        *) say err "unknown --only stage: '${2:-}' (want filters|dashboards|alarms|dau|observability)"; exit 2 ;;
       esac
       shift 2 ;;
     --region) REGION="$2"; shift 2 ;;
@@ -118,6 +119,14 @@ fi
 if run_stage dau; then
   say step "monitoring: DAU lambda"
   bash "$LIB/apply-dau-lambda.sh" "${COMMON[@]}" "${EXTRA[@]}" || warn_fail apply-dau-lambda dau
+fi
+# Observability last: it depends on the runtimes existing, and unlike the others it configures
+# account-and-region state (Transaction Search) plus per-runtime delivery. Emitting spans and having
+# somewhere to put them are separate things, and all three failure modes look identical from outside
+# — everything configured, no data — so this stage read-backs each step instead of trusting rc=0.
+if run_stage observability; then
+  say step "monitoring: observability (Transaction Search + per-runtime delivery)"
+  bash "$LIB/apply-observability.sh" "$REGION" || warn_fail apply-observability observability
 fi
 
 if [[ "$rc" -eq 0 ]]; then

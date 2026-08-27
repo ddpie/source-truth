@@ -699,54 +699,58 @@ The agent is launched through `opentelemetry-instrument` (see the `CMD` note in
 integration: `aws-opentelemetry-distro` had been a pinned dependency for a long time
 without it, which produced no telemetry at all while every check stayed green.
 
-Spans being emitted and spans being **queryable** are two different things. The second
-needs CloudWatch Transaction Search, which is a one-time switch per account and Region
-and is not something the deploy owns. `deploy-all.sh` tells you which state you are in
-and never fails on it — the bot answers questions either way.
+Emitting spans and being able to query them are different things, and the second needs
+**two** pieces of AWS-side setup, not one:
 
-**Enable it (once per Region):**
+1. **CloudWatch Transaction Search** — account and Region level. Points trace segments at
+   CloudWatch Logs and lets X-Ray write into the `aws/spans` log group.
+2. **Per-runtime delivery** — each agent runtime needs a delivery source and destination
+   for `TRACES` and for `APPLICATION_LOGS`. This one is easy to miss: the AWS docs describe
+   it under console instructions, and without it the account-level switch looks broken.
+   Before it was configured here, every runtime log stream was empty and no span reached
+   `aws/spans` — the application's own output was not arriving either.
+
+Both are applied by one idempotent stage:
 
 ```bash
-# 1. Let X-Ray write spans into CloudWatch Logs.
-aws logs put-resource-policy --region <region> --policy-name TransactionSearchXRayAccess \
-  --policy-document '{"Version":"2012-10-17","Statement":[{"Sid":"TransactionSearchXRayAccess",
-  "Effect":"Allow","Principal":{"Service":"xray.amazonaws.com"},"Action":"logs:PutLogEvents",
-  "Resource":["arn:aws:logs:<region>:<account>:log-group:aws/spans:*",
-  "arn:aws:logs:<region>:<account>:log-group:/aws/application-signals/data:*"],
-  "Condition":{"ArnLike":{"aws:SourceArn":"arn:aws:xray:<region>:<account>:*"},
-  "StringEquals":{"aws:SourceAccount":"<account>"}}}]}'
-
-# 2. Point trace segments at CloudWatch Logs.
-aws xray update-trace-segment-destination --region <region> --destination CloudWatchLogs
-
-# 3. (Optional) Sample less than 100%.
-aws xray update-indexing-rule --region <region> --name Default \
-  --rule '{"Probabilistic":{"DesiredSamplingPercentage":10}}'
+./scripts/apply-monitoring.sh --region <region> --only observability
 ```
 
-Verify with `aws xray get-trace-segment-destination --region <region>`; re-running
-`deploy-all.sh` will also report it as enabled.
+It also runs as part of `deploy-all.sh` Phase 7. Every step reads its result back rather
+than trusting an exit code, because all the failure modes here look identical from the
+outside: everything configured, no data.
 
-**Where the spans land.** By default they go to the shared `aws/spans` log group. Agents
-can instead deliver to their own `/aws/bedrock-agentcore/runtimes/<id>-<endpoint>` log
-group, which is worth having here because one host serves several projects and each
-already has its own log group — it scopes access control and encryption per project.
-That needs three things together: ADOT >= 0.18.0 (pinned at 0.19.0, so satisfied),
-`UNIFIED_TRACES_DESTINATION_ENABLED=true` on the runtime, and `logs:PutResourcePolicy`
-granted to the execution role for that log group. Not configured by this repository
-today — the runtimes here predate the unified destination and keep the shared group.
+**Verifying it, without fooling yourself.** Do not judge by `storedBytes` in
+`describe-log-streams` — it is updated periodically and reads 0 long after events have
+arrived, which is exactly how this looks like a failure when it is working. Query events:
 
-**What you can do once spans are flowing.** The CloudWatch *GenAI Observability* page
-shows sessions, traces and token usage per agent. Spans are also the input to AgentCore
-Evaluations, which scores sessions with built-in judges or with your own Lambda for
-deterministic checks — the latter is the interesting one for this project, since a
-citation that points at the wrong line looks correct to an LLM judge but not to code
-that re-reads the line.
+```bash
+aws logs filter-log-events --region <region> --log-group-name aws/spans \
+  --start-time $(( ($(date +%s) - 1800) * 1000 )) --limit 20
+```
 
-**A caveat worth knowing.** Session correlation depends on the session id reaching the
-span attributes. The gateway passes `runtimeSessionId` on `invoke_agent_runtime`; the
-AgentCore docs describe propagation via the
-`X-Amzn-Bedrock-AgentCore-Runtime-Session-Id` header. Whether spans here end up carrying
-`attributes.session.id` has not been verified on a live deploy yet, and Evaluations
-selects spans by session — so check that first before building on it.
+On a healthy deploy the runtime's own log group carries span records whose `scope.name`
+includes `amazon.opentelemetry.distro.instrumentation.mcp` (the evidence channel to the
+index service is instrumented), `claude_agent_sdk._internal.transport.subprocess_cli` and
+`bedrock_agentcore.app`.
+
+**Session correlation works and is worth checking after any change.** A span's
+`attributes.session.id` matches the `sessionId` the gateway logs on `invoke_start`, so a
+session can be followed from the Feishu card through to the agent's tool calls. This is
+also the property AgentCore Evaluations depends on, since it selects spans by session.
+
+**Where spans land.** By default the shared `aws/spans` log group. Agents can instead
+deliver to their own `/aws/bedrock-agentcore/runtimes/<id>-<endpoint>` group, which suits
+this layout — one host, several projects, each already with its own group, so access
+control and encryption scope per project. That needs ADOT >= 0.18.0 (pinned at 0.19.0, so
+satisfied), `UNIFIED_TRACES_DESTINATION_ENABLED=true` on the runtime, and
+`logs:PutResourcePolicy` for the execution role. Not configured here: these runtimes
+predate the unified destination and keep the shared group.
+
+**Cost and one caveat.** Transaction Search indexes spans and is billed for that; sample
+below 100% with `aws xray update-indexing-rule` if that matters. And ADOT's
+auto-instrumentation adds startup work — a cold start measured 142s to first token after
+this was enabled, against an AgentCore runtime initialisation limit of 120s. First token
+is not initialisation, so this did not trip it, but the margin is smaller than before. If
+cold-start `HTTP 424 Runtime health check failed` ever appears, look here first.
 

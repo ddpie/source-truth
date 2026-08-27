@@ -34,6 +34,9 @@ FILES = [
     "scripts/lib/create-iam.sh",
     "scripts/lib/provision_iam.sh",
     "scripts/lib/apply-dau-lambda.sh",
+    # 可观测性 stage 里的 X-Ray → CloudWatch Logs 资源策略。它被 discover_policy_files()
+    # 直接抓到并要求登记——守卫按设计生效了一次。
+    "scripts/lib/apply-observability.sh",
 ]
 
 # Inline policies AND trust policies. Trust policies were invisible before: a malformed one fails
@@ -119,7 +122,15 @@ def main() -> int:
         # The anchor cannot simply be dropped: it is also what stops a double-quoted document being
         # truncated at its first \" by the non-greedy `".*?"`. So instead, count the documents that
         # are PRESENT independently and require the parser to have matched all of them.
-        present = len(re.findall(r"--policy-document|--assume-role-policy-document", src))
+        #
+        # Count over CODE only. The first version counted raw text, so a comment that merely NAMED
+        # `--policy-document` — for instance one explaining this very convention to the next author —
+        # inflated the denominator and failed the file for a document that does not exist. Same blind
+        # spot as any text-matching guard: it cannot tell code from prose about code.
+        code = "\n".join(
+            ln for ln in src.splitlines() if not ln.lstrip().startswith("#")
+        )
+        present = len(re.findall(r"--policy-document|--assume-role-policy-document", code))
         matched = len(DOC_RE.findall(src))
         if matched != present:
             print(
