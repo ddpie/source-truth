@@ -610,6 +610,32 @@ index host and appears nowhere in this manifest, at no known version.
 
 ---
 
+### 4.4 evaluations/citation-evaluator — OPTIONAL, not installed by a default deploy
+
+This component is the AWS Lambda function behind the `SourceTruthCitationAccuracy` custom evaluator.
+It exists on disk in every checkout but its dependencies are installed **only** when an operator
+explicitly runs `./scripts/apply-evaluations.sh`, which builds the deployment package inside the
+official AWS Lambda base image. A default deploy of this sample installs none of it, so it is listed
+separately from the three components above rather than merged into them.
+
+Direct dependencies are pinned in `evaluations/citation-evaluator/requirements.txt`:
+
+| Package | Version | License | Note |
+| --- | --- | --- | --- |
+| `bedrock-agentcore` | 1.14.1 | Apache-2.0 | Provides the official `@custom_code_based_evaluator` decorator and the `EvaluatorInput` / `EvaluatorOutput` models. Deliberately the **same version** `agent-container` pins, so the sample carries one version of this SDK rather than two |
+| `pydantic` | 2.13.1 | MIT | Required by the decorator's models. Listed explicitly because it carries the `pydantic-core` binary wheel, which is why the package is built inside a container matching the Lambda architecture rather than with the local pip |
+
+There is deliberately **no** `mcp` dependency here: the evaluator reaches the index-service bridge
+with three JSON-RPC calls over `urllib` from the standard library (`bridge_client.py`). A full MCP SDK
+would add transport code this component never uses, for a longer cold start.
+
+The transitive set is whatever pip resolves for those two pins inside
+`public.ecr.aws/lambda/python:3.12` at build time; unlike `agent-container` there is no committed
+lock file, because this component is optional, is not part of any published artifact, and is rebuilt
+from scratch on every `apply-evaluations.sh` run. Operators who need a pinned transitive set for
+compliance should capture `pip freeze` from the build image — the packaging step already runs inside
+it — and treat that output the way `agent-container/requirements.lock` is treated.
+
 ## Appendix: license strings reproduced verbatim
 
 The listings above print what upstream metadata says, character for character.

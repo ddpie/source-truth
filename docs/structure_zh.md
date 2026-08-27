@@ -71,10 +71,18 @@ scripts/                运维生命周期
   lib/activate_gateway.sh  经 SSM 写 /etc/bot-gateway-<项目>.env + 启动 bot-gateway@<项目>（gateway 与索引同主机）
   lib/stop_gateway.sh   经 SSM 停掉实例上的 bot-gateway@*（break-before-make：飞书长连接是全局单例，起新网关前先确认旧网关已退出）
   (p2) ops.sh           运维工具（status / logs / reindex）
+  apply-evaluations.sh  可选：部署两个自定义 AgentCore 评估器（打包→IAM→Lambda→注册；--only 选阶段、--dry-run；刻意不在 deploy-all 的必经路径上）
   teardown.sh           有序销毁 + 保留资源清单
   trace.sh              按 traceId 合并查询网关 + agent microVM 两个 log group 的全链路时间线（--since-hours / --raw）
   e2e-probe.py          对已部署 Runtime 跑真实端到端问答，校验只读边界 + 答案出处（test.sh --full 调用；缺部署自动 skip）
   tests/                shell 单测 test_*.sh（含 test_e2e_probe.sh：e2e-probe 纯逻辑单测）
+evaluations/            AgentCore Evaluations 的自定义评估器（**可选**，不在部署必经路径上）
+  evaluators.json       两个自定义评估器的声明式定义；每一条都写明「为什么内置的 31 个办不到」
+  citation-evaluator/   代码型（Lambda）评估器：把答案里每条 file:line 拿回真实仓库比对
+    lambda_function.py  handler，用官方 @custom_code_based_evaluator 装饰器
+    bridge_client.py    到 index-service bridge 的最小 MCP 客户端（只读，零第三方依赖）
+    requirements.txt    Lambda 直接依赖（与 agent-container 同一个 bedrock-agentcore 版本）
+    tests/              pytest（由 scripts/test.sh 调用）
 docs/
   README.md             文档总索引（按受众分类的入口地图）
   structure_zh.md       本文件（权威目录树，双语配对）

@@ -52,9 +52,12 @@ discover_units() {
 }
 
 # 发现 Python 测试目录：<component>/tests/ 含 test_*.py 的组件目录。
+#
+# 这个列表是硬编码的，所以新增组件必须同时改这里——否则它的测试会**静默不跑**，
+# 而套件依然全绿。evaluations/citation-evaluator 就是这么加进来的。
 discover_py_units() {
   local d
-  for d in agent-container index-service; do
+  for d in agent-container index-service evaluations/citation-evaluator; do
     if compgen -G "$ROOT/$d/tests/test_*.py" >/dev/null 2>&1; then
       printf '%s\n' "$ROOT/$d/tests"
     fi

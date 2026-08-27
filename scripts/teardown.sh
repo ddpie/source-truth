@@ -394,6 +394,100 @@ if is_set "$ALL_VPCE"; then
     --query 'VpcEndpoints[?State!=`deleted`].VpcEndpointId' --output text
 fi
 
+# ---- 4c. 自定义评估器 + 评估 Lambda（apply-evaluations.sh 建的，可选阶段） ----
+# 为什么要在这里删：评估 Lambda 挂在私有子网上，它的 ENI 和 VPC 端点一样会 pin 住安全组和子网，
+# 顺序错了后面的 delete-security-group / delete-subnet 会 DependencyViolation 失败。
+#
+# 评估器要先删、Lambda 后删：一个还被评估器引用的 Lambda 删掉之后，评估器就变成永久指向不存在函数的
+# 空壳，每次调用都失败，而它自己不会消失。
+#
+# 注意 online evaluation config：官方文档明确说，被启用的 online config 引用的评估器会被**锁定**，
+# 既不能改也不能删。所以先删 config，再删评估器；否则这里会以一个看不懂的 ConflictException 结束。
+if is_set "${EVALUATOR_IDS:-}" || aws lambda get-function --region "$REGION" \
+     --function-name source-truth-citation-evaluator >/dev/null 2>&1; then
+  python3 - "$REGION" <<'PYEVAL' || say warn "评估资源清理未完全成功（非致命，可重跑）"
+import sys
+
+import boto3
+from botocore.exceptions import ClientError
+
+region = sys.argv[1]
+ctl = boto3.client("bedrock-agentcore-control", region_name=region)
+
+# 1) 先停掉/删掉引用评估器的 online config，否则评估器是锁定状态
+try:
+    token = None
+    while True:
+        kw = {"maxResults": 50}
+        if token:
+            kw["nextToken"] = token
+        resp = ctl.list_online_evaluation_configs(**kw)
+        items = resp.get("onlineEvaluationConfigSummaries") or resp.get("onlineEvaluationConfigs") or []
+        for c in items:
+            cid = c.get("onlineEvaluationConfigId") or c.get("id")
+            name = c.get("onlineEvaluationConfigName") or ""
+            if not cid or not name.startswith("source-truth"):
+                continue
+            try:
+                ctl.delete_online_evaluation_config(onlineEvaluationConfigId=cid)
+                print(f"  ✓ 已删除 online eval config {name} ({cid})")
+            except ClientError as e:
+                print(f"  ✗ online eval config {cid}: {e.response.get('Error', {}).get('Code')}")
+        token = resp.get("nextToken")
+        if not token:
+            break
+except (ClientError, AttributeError) as e:
+    print(f"  · 跳过 online eval config 清理: {type(e).__name__}")
+
+# 2) 删自定义评估器。只删本项目建的（名字前缀 SourceTruth）——内置评估器删不掉，也不该尝试。
+try:
+    token = None
+    mine = []
+    while True:
+        kw = {"maxResults": 50}
+        if token:
+            kw["nextToken"] = token
+        resp = ctl.list_evaluators(**kw)
+        for e in resp.get("evaluatorSummaries") or resp.get("evaluators") or []:
+            name = e.get("evaluatorName") or e.get("name") or ""
+            eid = e.get("evaluatorId") or e.get("id")
+            kind = e.get("type") or e.get("evaluatorType") or ""
+            if eid and name.startswith("SourceTruth") and kind != "Builtin":
+                mine.append((name, eid))
+        token = resp.get("nextToken")
+        if not token:
+            break
+    for name, eid in mine:
+        try:
+            ctl.delete_evaluator(evaluatorId=eid)
+            print(f"  ✓ 已删除评估器 {name} ({eid})")
+        except ClientError as e:
+            print(f"  ✗ 评估器 {name}: {e.response.get('Error', {}).get('Code')}: "
+                  f"{e.response.get('Error', {}).get('Message', '')[:120]}")
+    if not mine:
+        print("  · 没有本项目的自定义评估器")
+except ClientError as e:
+    print(f"  ✗ 列举评估器失败: {e.response.get('Error', {}).get('Code')}")
+
+# 3) 最后删 Lambda
+lam = boto3.client("lambda", region_name=region)
+try:
+    lam.delete_function(FunctionName="source-truth-citation-evaluator")
+    print("  ✓ 已删除 Lambda source-truth-citation-evaluator")
+except lam.exceptions.ResourceNotFoundException:
+    print("  · Lambda 不存在")
+except ClientError as e:
+    print(f"  ✗ Lambda: {e.response.get('Error', {}).get('Code')}")
+PYEVAL
+  # Lambda 的 VPC ENI 是异步释放的。不等它，下面删安全组会 DependencyViolation——
+  # 和 VPC 端点完全相同的失败形状。
+  if is_set "$VPC" && [[ "$VPC_IS_OURS" == true ]]; then
+    wait_gone "评估 Lambda 的 ENI" 300 Q describe-network-interfaces \
+      --filters "Name=vpc-id,Values=$VPC" "Name=description,Values=AWS Lambda VPC ENI*" \
+      --query 'NetworkInterfaces[].NetworkInterfaceId' --output text
+  fi
+fi
+
 # ---- 5. VPC teardown (subnets, route tables, IGW, SG) then the VPC ----
 if is_set "$VPC" && [[ "$VPC_IS_OURS" == true ]]; then
   # The AgentCore runtime + the index EC2 leave requester-managed ENIs in the VPC that

@@ -1,0 +1,90 @@
+{
+  "_comment": [
+    "本项目的自定义评估器定义。只有两个，而且每一个都必须能回答「为什么内置的 31 个评估器办不到」——",
+    "办得到的就不该出现在这里。内置清单用 `aws bedrock-agentcore-control list-evaluators` 查。",
+    "",
+    "质量、相关性、简洁性、连贯性、指令遵循、工具选择/参数、轨迹匹配、安全性一律用内置的，",
+    "尤其 Builtin.Faithfulness（回答是否被提供的上下文支撑）已经覆盖了「答案与检索内容是否一致」。"
+  ],
+
+  "evaluators": [
+    {
+      "key": "citation-accuracy",
+      "evaluatorName": "SourceTruthCitationAccuracy",
+      "description": "Deterministically re-reads every file:line the answer cites, from the same repo copy the agent read, and checks the cited line exists and carries the symbol the answer claims.",
+      "level": "TRACE",
+      "kind": "codeBased",
+      "lambdaTimeoutInSeconds": 120,
+      "_why_not_builtin": [
+        "Builtin.Faithfulness 判的是「回答中的信息是否被**提供的上下文**支撑」——也就是答案与 agent",
+        "拿到的内容是否一致。它判不了那些内容**本身**对不对：检索环节若返回了错误的行号，答案忠实地",
+        "引用它，Faithfulness 会判 Completely Yes。这不是它的缺陷，是它的输入决定的——LLM 评委看不到仓库。",
+        "本评估器只补这一块，且是纯确定性判断，不消耗模型 token。"
+      ]
+    },
+    {
+      "key": "evidence-discipline",
+      "evaluatorName": "SourceTruthEvidenceDiscipline",
+      "description": "Scores whether the agent stayed inside the evidence: source-grounded specifics, or an explicit 'the code does not contain this' — and penalises plausible domain knowledge presented as if read from the repo.",
+      "level": "TRACE",
+      "kind": "llmAsAJudge",
+      "modelId": "jp.anthropic.claude-sonnet-4-5",
+      "_why_not_builtin": [
+        "Builtin.Refusal 把「回避或拒答」当作负面指标。对这个机器人恰好相反：当仓库里确实没有被问到的",
+        "东西时，明说「代码里没有」就是**正确**答案，而 Refusal 会把这个正确行为记成缺陷。",
+        "这个语义反转无法通过配置内置评估器解决。",
+        "它也比 Faithfulness 严格：Faithfulness 只看答案与上下文是否一致，而这里要抓的是另一种失败——",
+        "答案里那些听起来完全合理、符合该游戏/引擎通识、但并非来自本仓库源码的内容。这类内容与上下文",
+        "并不矛盾（上下文里根本没提），所以 Faithfulness 不会判它有问题。"
+      ],
+      "instructions": [
+        "You are auditing a code-question-answering agent whose single rule is: every claim about the",
+        "codebase must come from source code the agent actually read in THIS repository. The agent has",
+        "read-only search and file-reading tools over one specific repository.",
+        "",
+        "Judge ONLY evidence discipline. Do not judge writing quality, length, tone, or language.",
+        "Do not reward or penalise the answer for being in Chinese or English.",
+        "",
+        "Reward:",
+        "  - Concrete claims tied to specific files, symbols, or line numbers from the repository.",
+        "  - Explicitly stating that the repository does not contain the thing asked about. This is a",
+        "    CORRECT outcome, not a failure or a refusal — score it as high as a well-sourced answer.",
+        "  - Asking one clarifying question when the question is genuinely ambiguous.",
+        "  - Saying which part is uncertain, or that a search came back empty.",
+        "",
+        "Penalise:",
+        "  - Statements about the codebase that are plausible general knowledge about this kind of game,",
+        "    engine, or framework but are not attributed to anything in the repository. This is the main",
+        "    failure to catch: it reads as competent and is not contradicted by anything, which is exactly",
+        "    why it survives other checks.",
+        "  - Presenting an inference as if it were read from the code (\"the method does X\") when no file",
+        "    or symbol backs it.",
+        "  - Filling a gap with an invented symbol, file, or configuration name.",
+        "  - Answering confidently after every tool call came back empty.",
+        "",
+        "Do NOT penalise an answer merely for lacking line numbers, and do NOT try to verify that a cited",
+        "line number is correct — a separate deterministic evaluator re-reads the repository for that.",
+        "Judge only whether the answer stays inside what evidence can support."
+      ],
+      "ratingScale": {
+        "numerical": [
+          {
+            "value": 1.0,
+            "label": "Grounded",
+            "definition": "Every claim about the codebase is tied to source the agent read, or the answer explicitly says the repository does not contain what was asked. Uncertainty, where present, is stated."
+          },
+          {
+            "value": 0.5,
+            "label": "PartlyUnsourced",
+            "definition": "The core of the answer is sourced, but it also contains at least one unattributed claim about the codebase that appears to come from general domain knowledge rather than this repository."
+          },
+          {
+            "value": 0.0,
+            "label": "Unsourced",
+            "definition": "The answer's substance is not traceable to anything the agent read: invented symbols or files, confident claims after empty tool results, or general domain knowledge presented as if read from this repository."
+          }
+        ]
+      }
+    }
+  ]
+}

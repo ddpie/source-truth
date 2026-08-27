@@ -71,10 +71,18 @@ scripts/                Operational lifecycle
   lib/activate_gateway.sh  Write /etc/bot-gateway-<project>.env + start bot-gateway@<project> via SSM (gateway co-located with the index host)
   lib/stop_gateway.sh   Stop the instance's bot-gateway@* via SSM (break-before-make: the Feishu long-connection is a global singleton, so the running gateway must exit before a new one starts)
   (p2) ops.sh           Ops toolkit (status / logs / reindex)
+  apply-evaluations.sh  Optional: deploy the two custom AgentCore evaluators (package → IAM → Lambda → register; --only, --dry-run; deliberately NOT on deploy-all's required path)
   teardown.sh           Ordered teardown + retained-resource list
   trace.sh              Merge-query the gateway + agent microVM log groups by traceId for a full-chain timeline (--since-hours / --raw)
   e2e-probe.py          Run a real end-to-end Q&A against the deployed Runtime; checks read-only boundary + answer provenance (invoked by test.sh --full; auto-skips if not deployed)
   tests/                shell unit tests test_*.sh (incl. test_e2e_probe.sh: pure-logic tests for e2e-probe)
+evaluations/            Custom evaluators for AgentCore Evaluations (**optional**; not on the deploy path)
+  evaluators.json       Declarative definitions of the two custom evaluators; each states why none of the 31 built-ins covers it
+  citation-evaluator/   Code-based (Lambda) evaluator: re-reads every cited file:line from the real repo
+    lambda_function.py  Handler, built on the official @custom_code_based_evaluator decorator
+    bridge_client.py    Minimal read-only MCP client for the index-service bridge (no third-party deps)
+    requirements.txt    Lambda direct dependencies (same bedrock-agentcore version as agent-container)
+    tests/              pytest (invoked by scripts/test.sh)
 docs/
   README.md             Documentation index (audience-grouped entry map)
   structure_zh.md       Authoritative tree (Chinese, bilingual pair)

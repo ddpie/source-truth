@@ -68,6 +68,8 @@ For the details of each step (SSH private key, private-repository credentials, t
 - [Appendix B: running the gateway locally (development)](#appendix-b-running-the-gateway-locally-development)
 - [Appendix C: on-host checklist after the first deploy](#appendix-c-on-host-checklist-after-the-first-deploy)
 - [Appendix D: refreshing monitoring by hand](#appendix-d-refreshing-monitoring-by-hand)
+- [Appendix E: Observability (AgentCore spans and traces)](#appendix-e-observability-agentcore-spans-and-traces)
+- [Appendix F: Evaluations (AgentCore Evaluations)](#appendix-f-evaluations-agentcore-evaluations)
 
 ---
 
@@ -755,3 +757,110 @@ this was enabled, against an AgentCore runtime initialisation limit of 120s. Fir
 is not initialisation, so this did not trip it, but the margin is smaller than before. If
 cold-start `HTTP 424 Runtime health check failed` ever appears, look here first.
 
+---
+
+## Appendix F: Evaluations (AgentCore Evaluations)
+
+Evaluations are **optional** and deliberately not on the deploy path: the bot does not need them to
+answer questions, and they cost a different kind of money (a resident Lambda, plus model tokens per
+LLM-as-judge verdict). They also only mean anything once real traffic has produced telemetry — creating
+them during a first deploy buys you nothing but an empty run.
+
+### Prerequisite: instrumentation
+
+Evaluations accepts spans only from a fixed allow-list of instrumentation scopes and refuses anything
+else outright:
+
+```
+ValidationException: Provided input has no spans with supported scope.
+```
+
+This project satisfies that through `openinference-instrumentation-claude-agent-sdk` (see
+`agent-container/requirements.txt`). It is activated by the `[opentelemetry_instrumentor]` entry point it
+declares, so `opentelemetry-instrument` discovers it and **no agent code calls it**. Confirm it is live:
+
+```bash
+aws logs filter-log-events --region <r> \
+  --log-group-name /aws/bedrock-agentcore/runtimes/<runtime-id>-DEFAULT \
+  --start-time $(( ($(date +%s) - 3600) * 1000 )) --limit 500 \
+  | grep -c openinference.instrumentation.claude_agent_sdk
+```
+
+If that prints 0, stop here: every evaluator will fail with `no spans with supported scope`, and that is
+not the evaluator's fault.
+
+### Use the built-in evaluators first
+
+`aws bedrock-agentcore-control list-evaluators` lists every built-in evaluator, including the DeepEval and
+AutoEval third-party ones. Quality, relevance, conciseness, instruction following, tool selection and
+parameters, trajectory matching and safety all have built-ins — **do not hand-roll those**. The one closest
+to this project's purpose is `Builtin.Faithfulness`: whether the response is supported by the provided
+context.
+
+### The two custom evaluators, and why they exist
+
+`evaluations/evaluators.json` holds exactly two, and each states why no built-in covers it:
+
+| Evaluator | Kind | Why a built-in is not enough |
+|---|---|---|
+| `SourceTruthCitationAccuracy` | code-based (Lambda) | `Builtin.Faithfulness` judges whether the answer agrees with what the agent **was given**. It cannot judge whether that content was right: if retrieval returned a wrong line number and the answer faithfully cites it, Faithfulness scores Completely Yes. That is not a flaw in it — an LLM judge cannot open the repository |
+| `SourceTruthEvidenceDiscipline` | LLM-as-judge | `Builtin.Refusal` scores evasion or refusal as negative. For this bot the opposite holds: when the repository genuinely does not contain what was asked, saying so is the CORRECT answer. That inversion cannot be configured away |
+
+### Deploy
+
+```bash
+./scripts/apply-evaluations.sh --region <r>              # all stages
+./scripts/apply-evaluations.sh --region <r> --dry-run    # print the plan only
+./scripts/apply-evaluations.sh --region <r> --only evaluators
+```
+
+Stages run `package` → `iam` → `lambda` → `evaluators`, each idempotent. Three things worth knowing:
+
+- **Packaging must happen in a container.** `pydantic` carries the `pydantic-core` binary wheel, so a
+  package built with the local pip may simply fail to import on Lambda — and that failure only surfaces
+  during a real evaluation, where it appears as an evaluator fault in your evaluation data. The script
+  installs inside the official Lambda base image and imports the result there before uploading; a failed
+  import refuses the upload.
+- **The Lambda sits in the private subnet and joins `source-truth-index-svc`.** That is not an extra hole:
+  the bridge's inbound rule is "8080-8099 from members of the same security group", so the evaluator is
+  bound by the same boundary as the runtime.
+- **The verification logic has exactly one copy**, in `index-service/citation_verify.py`, copied into the
+  Lambda at package time. Not one copy per place — the day they drift, the evaluator and the live service
+  quietly disagree about what counts as a valid citation.
+
+### Run an evaluation
+
+```bash
+# Fetch a session's spans (Evaluate consumes spans, not answer text)
+aws logs filter-log-events --region <r> \
+  --log-group-name /aws/bedrock-agentcore/runtimes/<runtime-id>-DEFAULT \
+  --start-time <ms> --limit 3000 --output json > /tmp/events.json
+
+aws bedrock-agentcore evaluate --region <r> \
+  --evaluator-id <id> --evaluation-input file://spans.json
+```
+
+Evaluator ids are printed by `apply-evaluations.sh` and stored in `.local/deploy-config` as
+`EVALUATOR_IDS`. For bulk runs use `StartBatchEvaluation`, which discovers sessions straight from a
+CloudWatch log group — no data-collection pipeline of your own required.
+
+### One thing to know when reading results
+
+The code-based evaluator keeps "the evaluator failed" strictly separate from "the answer is wrong". A
+bridge that is unreachable, or a read that fails mid-run, returns an `errorCode`
+(`BRIDGE_UNREACHABLE` / `BRIDGE_READ_FAILED`) plus a non-scoring label `EvaluatorError` — never `Fail`.
+The reason is that an infrastructure outage recorded as `Fail` leaves a permanent, wrong "this citation
+does not hold" in your evaluation data. Likewise `Unverified` means not one citation could actually be
+checked (for example none carried a line number); it is not the same as `Pass`.
+
+The explanation may say some cited files never appeared in a `read_file` call. That is **informational
+and never a failure**: `search_files` results are not in the spans, so a citation may legitimately come
+from a search result rather than a read, and failing those would manufacture false failures at scale.
+
+### Cost and teardown
+
+The two custom evaluators carry no standing charge themselves, but the Lambda bills for requests and
+duration once it exists, and each LLM-as-judge verdict spends model tokens. `./scripts/teardown.sh`
+removes them in order: online evaluation configs first (an enabled config **locks** its evaluators, so
+they cannot be deleted until it is gone) → the two custom evaluators → the Lambda, then waits for its VPC
+ENI to be released, because otherwise the security-group delete later fails with `DependencyViolation`.

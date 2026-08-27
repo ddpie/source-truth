@@ -37,6 +37,9 @@ FILES = [
     # 可观测性 stage 里的 X-Ray → CloudWatch Logs 资源策略。它被 discover_policy_files()
     # 直接抓到并要求登记——守卫按设计生效了一次。
     "scripts/lib/apply-observability.sh",
+    # 评估器 Lambda 的执行角色信任策略。同上，也是被 discover_policy_files() 抓出来才补登记的，
+    # 说明这条「未登记即视为未审」的守卫是有效的，而不是装饰。
+    "scripts/apply-evaluations.sh",
 ]
 
 # Inline policies AND trust policies. Trust policies were invisible before: a malformed one fails

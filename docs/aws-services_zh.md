@@ -33,6 +33,8 @@
 | **Internet Gateway** | — | 1 | 公有子网入口 |
 | **Security Group** | 入站仅 `8080-8099`、限同 SG 成员 | 1（AgentCore Runtime 的 ENI 也加入此 SG） | 限制各项目 bridge 端口仅本 VPC 内可达 |
 | **Network ACL** | `source-truth-private-nacl`，关联私有子网（替换默认 NACL）。入站白名单：`100` TCP 8080-8099（限 VPC CIDR）、`110` TCP 443（限 VPC CIDR）、`115` TCP 1024-65535（限 VPC CIDR，下面 VPC 端点的回程流量）、`120/130` TCP/UDP 32768-65535（经 NAT 发起连接的回程流量；上界必须到 65535，因为 AgentCore Runtime 的 ENI 是 AWS 托管 microVM，源端口高于 Linux 默认的 60999）、`140` ICMP type 3 code 4（Path MTU 发现）；出站全放通（NAT 出站需要）；其余走 32767 隐式拒绝 | 1 | 子网级第二道网络管控，收敛为增量式（先补齐目标规则、再清理多余规则，任何时刻都不会经过 deny-all 状态） |
+| **Lambda**（可选） | `source-truth-citation-evaluator`，arm64、python3.12、512MB、120s，挂在私有子网并加入 `source-truth-index-svc` 安全组 | 0 或 1 | AgentCore Evaluations 的代码型评估器：把答案里每条 `file:line` 拿回 bridge 提供的**同一份**仓库副本比对。只有跑 `./scripts/apply-evaluations.sh` 才会创建；不属于服务依赖 |
+| **AgentCore 自定义评估器**（可选） | 2 个：`SourceTruthCitationAccuracy`（代码型，TRACE 级）与 `SourceTruthEvidenceDiscipline`（LLM-as-judge，TRACE 级） | 0 或 2 | 前者做内置评估器做不到的确定性判断（LLM 评委看不到仓库）；后者纠正一个语义反转——`Builtin.Refusal` 把「回避」当负面，而本机器人在仓库确实没有该内容时明说「代码里没有」是**正确**答案。质量/相关性/工具选择等一律用内置的 |
 | **VPC Flow Logs** | 全流量（`ALL`），聚合间隔 600s，投递到 S3 `s3://<artifact-bucket>/vpc-flow-logs/` | 1 | 网络审计留痕；建不出来只 WARN 不阻断部署（审计辅助，非服务依赖） |
 | **Route 53**（私有托管区） | 私有域 `source-truth.internal`，A 记录 TTL 30s | 1 | 给 index 主机稳定 DNS 名（agent 侧不写死私有 IP；索引主机就地更新、不换实例，这个名字始终指向同一台在跑的主机） |
 

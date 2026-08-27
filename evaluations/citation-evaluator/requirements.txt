@@ -1,0 +1,18 @@
+# 代码型评估器 Lambda 的直接依赖，精确钉版本（与 agent-container/requirements.txt 同一约定）。
+#
+# bedrock-agentcore 提供官方的 @custom_code_based_evaluator 装饰器与 EvaluatorInput/EvaluatorOutput
+# 模型。用它而不是自己解 Lambda 事件 dict：那份契约由服务端定义并会演进——官方文档此刻写的模块名
+# (`code_based_evaluators`) 就已经和 SDK 里的真实路径 (`custom_code_based_evaluators`) 不一致，
+# 自己解等于把一份注定漂移的副本钉死在这个仓库里。
+#
+# 版本与 agent-container 保持一致，刻意不用更新的 1.22.0：一个 sample 里同一个 SDK 钉两个版本，
+# 读者第一个问题就是「为什么」，而这里没有值得付出这个代价的收益。唯一的差别是 1.22.0 允许错误响应
+# 省略 label，1.14.1 要求必填——handler 因此给错误响应带一个明确的非评分 label（见 _error）。
+bedrock-agentcore==1.14.1
+
+# 装饰器的模型层用 pydantic。显式列出是因为它带 pydantic-core 二进制轮子，必须按 Lambda 的目标架构
+# 安装——这是本目录用容器打包而不是本地 pip 的唯一原因。
+pydantic==2.13.1
+
+# 注意：bridge 的 MCP 调用刻意不装 `mcp` 包。只需要三个 JSON-RPC 调用，标准库 urllib 足够，
+# 而 Lambda 包越小冷启动越快。见 bridge_client.py 的说明。

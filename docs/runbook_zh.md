@@ -65,6 +65,8 @@ bash /tmp/prepare-local-host.sh   # 建议直接复制 launch-host 输出的命�
 - [附录 B：本地手动启动网关（开发调试）](#附录-b本地手动启动网关开发调试)
 - [附录 C：首次部署后的真机核对清单](#附录-c首次部署后的真机核对清单)
 - [附录 D：手动刷新监控](#附录-d手动刷新监控)
+- [附录 E：可观测性（AgentCore span 与 trace）](#附录-e可观测性agentcore-span-与-trace)
+- [附录 F：评估（AgentCore Evaluations）](#附录-f评估agentcore-evaluations)
 
 ---
 
@@ -681,3 +683,97 @@ aws logs filter-log-events --region <region> --log-group-name aws/spans \
 首 token 不等于初始化，所以这次没有触发，但余量比以前小了。若日后出现冷启动的
 `HTTP 424 Runtime health check failed`，第一个该查的就是这里。
 
+---
+
+## 附录 F：评估（AgentCore Evaluations）
+
+评估是**可选**的，不在部署必经路径上：机器人回答问题不需要它，它花的也是另一类钱（一个常驻 Lambda，
+加上 LLM-as-judge 评估器每次判定的模型 token）。而且它需要一份**已经跑过真实问答**的遥测才有意义——
+首次部署时就创建它，除了空跑什么都得不到。
+
+### 前提：埋点
+
+Evaluations 只接受来自固定白名单 instrumentation scope 的 span，不在名单内的输入会被直接拒绝：
+
+```
+ValidationException: Provided input has no spans with supported scope.
+```
+
+本项目通过 `openinference-instrumentation-claude-agent-sdk` 满足这一条（见
+`agent-container/requirements.txt`）。它靠自己声明的 `[opentelemetry_instrumentor]` entry point 被
+`opentelemetry-instrument` 自动加载，**没有任何 agent 代码调用它**。确认埋点已生效：
+
+```bash
+aws logs filter-log-events --region <r> \
+  --log-group-name /aws/bedrock-agentcore/runtimes/<runtime-id>-DEFAULT \
+  --start-time $(( ($(date +%s) - 3600) * 1000 )) --limit 500 \
+  | grep -c openinference.instrumentation.claude_agent_sdk
+```
+
+数字为 0 就先别往下走：评估器全部会以 `no spans with supported scope` 失败，而那不是评估器的问题。
+
+### 先用内置评估器
+
+`aws bedrock-agentcore-control list-evaluators` 会列出全部内置评估器（含 DeepEval / AutoEval 的第三方
+评估器）。质量、相关性、简洁性、指令遵循、工具选择与参数、轨迹匹配、安全性都用内置的，**不要自己写**。
+和本项目最相关的是 `Builtin.Faithfulness`——「回答中的信息是否被提供的上下文支撑」。
+
+### 两个自定义评估器，以及它们为什么存在
+
+`evaluations/evaluators.json` 里只有两个，每一条都写明了为什么内置的办不到：
+
+| 评估器 | 类型 | 内置为什么不够 |
+|---|---|---|
+| `SourceTruthCitationAccuracy` | 代码型（Lambda） | `Builtin.Faithfulness` 判的是答案与 agent **拿到的内容**是否一致。它判不了那些内容本身对不对：检索若返回了错误行号，答案忠实引用它，Faithfulness 会判 Completely Yes。这不是它的缺陷，是它的输入决定的——LLM 评委看不到仓库 |
+| `SourceTruthEvidenceDiscipline` | LLM-as-judge | `Builtin.Refusal` 把「回避 / 拒答」当负面指标。对本机器人恰好相反：仓库确实没有被问到的东西时，明说「代码里没有」就是**正确**答案。这个语义反转无法通过配置内置评估器解决 |
+
+### 部署
+
+```bash
+./scripts/apply-evaluations.sh --region <r>              # 全部阶段
+./scripts/apply-evaluations.sh --region <r> --dry-run    # 只打印计划
+./scripts/apply-evaluations.sh --region <r> --only evaluators
+```
+
+阶段依次是 `package` → `iam` → `lambda` → `evaluators`，每步幂等。几点值得知道：
+
+- **打包必须在容器里做。** `pydantic` 带 `pydantic-core` 二进制轮子，用本机 pip 装出来的包在 Lambda 上
+  可能直接 import 失败，而那种失败只在真正评估时才暴露、并且会以「评估器故障」的形式出现在评估数据里。
+  脚本用 Lambda 官方基础镜像装依赖，装完立刻在镜像内 import 一次，import 不过就拒绝上传。
+- **Lambda 挂在私有子网、加入 `source-truth-index-svc` 安全组。** 这不是额外开口子：bridge 的入站规则
+  就是「同安全组成员的 8080-8099」，评估器和 runtime 受同一条边界约束。
+- **判据模块只有一份副本**，在 `index-service/citation_verify.py`，打包时复制进 Lambda。不在两处各存一份，
+  因为漂移的那天，评估器和线上服务对「什么算合法出处」的判断会悄悄分叉。
+
+### 跑一次评估
+
+```bash
+# 取某个会话的 span（Evaluate 的输入就是 span，不是问答文本）
+aws logs filter-log-events --region <r> \
+  --log-group-name /aws/bedrock-agentcore/runtimes/<runtime-id>-DEFAULT \
+  --start-time <ms> --limit 3000 --output json > /tmp/events.json
+
+aws bedrock-agentcore evaluate --region <r> \
+  --evaluator-id <id> --evaluation-input file://spans.json
+```
+
+评估器 id 在 `apply-evaluations.sh` 运行时打印，也写进了 `.local/deploy-config` 的 `EVALUATOR_IDS`。
+批量评估用 `StartBatchEvaluation`，它直接从 CloudWatch 日志组发现会话，不需要自己搭取数管道。
+
+### 读结果时要注意的一件事
+
+代码型评估器把「评估器自己出错」和「答案有问题」严格分开：bridge 不可达或读取途中失败会返回
+`errorCode`（`BRIDGE_UNREACHABLE` / `BRIDGE_READ_FAILED`）加一个非评分 label `EvaluatorError`，**不会**
+返回 `Fail`。原因是一次基础设施中断若被记成 `Fail`，评估数据里就会留下一条永久且错误的「答案引用不
+成立」。同理，`Unverified` 表示一条出处都没能真正核对上（例如出处都没带行号），它和 `Pass` 不是一回事。
+
+`explanation` 里可能出现「以下出处的文件未出现在 read_file 调用中」——这**只是参考信息、不计失败**。
+`search_files` 的结果不在 span 里，所以一条出处完全可能来自搜索结果而非 `read_file`；把它判失败会制造
+大量假失败。
+
+### 成本与拆除
+
+两个自定义评估器本身不产生常驻费用，但 Lambda 存在即计入请求/时长，LLM-as-judge 每次判定消耗模型
+token。`./scripts/teardown.sh` 会按顺序删除：online evaluation config（被启用的 config 会**锁定**评估器，
+不先删它就删不掉评估器）→ 两个自定义评估器 → Lambda，并等待它的 VPC ENI 释放，否则后面删安全组会
+`DependencyViolation` 失败。
