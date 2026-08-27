@@ -34,21 +34,45 @@ SUPPORTED_SCOPE = "openinference.instrumentation.claude_agent_sdk"
 _OUT_TEXT_RE = re.compile(r"^llm\.output_messages\.(\d+)\.message\.content(?:\.0)?$")
 
 
-def fetch_events(region: str, group: str, start_ms: int, limit: int = 5000) -> list[dict]:
-    out = subprocess.run(
-        ["aws", "logs", "filter-log-events", "--region", region, "--log-group-name", group,
-         "--start-time", str(start_ms), "--limit", str(limit), "--output", "json"],
-        capture_output=True, text=True, timeout=600)
-    if out.returncode != 0:
-        return []
-    recs = []
-    for e in json.loads(out.stdout or "{}").get("events", []):
-        m = e.get("message", "")
-        if m.lstrip().startswith("{"):
-            try:
-                recs.append(json.loads(m))
-            except ValueError:
-                pass
+def fetch_events(region: str, group: str, start_ms: int, limit: int = 5000,
+                 pattern: str = "") -> list[dict]:
+    """分页拉日志事件，可带服务端过滤模式。
+
+    两处都被真实数据逼出来：
+      * **必须分页** —— `--limit` 是从窗口起点往后截断，一轮 36 条用例的 span 远超单次上限。
+        不分页时只关联上最早的 9 条，恰好是被截断的位置。
+      * **必须服务端过滤** —— 光分页也不够：一轮 25 分钟的日志量把 40 页也吃满，后段（正好是
+        桶 2/3/4）依然取不到，于是报告显示这三个桶「0 条关联」，看起来像系统性故障，实际问答
+        全部成功跑完（网关日志 161 次 answer_completed）。用 --filter-pattern 让服务端只回
+        需要的记录，量级直接降一到两个数量级。
+    如果报告把「未关联」算成失败，这两个缺陷都会变成几十条虚假的质量回归。
+    """
+    recs: list[dict] = []
+    token: str | None = None
+    pages = 0
+    while True:
+        cmd = ["aws", "logs", "filter-log-events", "--region", region,
+               "--log-group-name", group, "--start-time", str(start_ms),
+               "--limit", str(limit), "--output", "json"]
+        if pattern:
+            cmd += ["--filter-pattern", pattern]
+        if token:
+            cmd += ["--next-token", token]
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        if out.returncode != 0:
+            break
+        payload = json.loads(out.stdout or "{}")
+        for e in payload.get("events", []):
+            m = e.get("message", "")
+            if m.lstrip().startswith("{"):
+                try:
+                    recs.append(json.loads(m))
+                except ValueError:
+                    pass
+        token = payload.get("nextToken")
+        pages += 1
+        if not token or pages >= 60:
+            break
     return recs
 
 
@@ -121,13 +145,22 @@ def main() -> int:
 
     earliest = min(r["sent_at"] for r in records)
     start_ms = (earliest - 300) * 1000
-    groups = [f"/aws/bedrock-agentcore/runtimes/{args.agent}-DEFAULT", "aws/spans"]
-    spans: list[dict] = []
-    for g in groups:
-        spans.extend(fetch_events(args.region, g, start_ms))
-    print(f"取到 {len(spans)} 条 span 记录", file=sys.stderr)
+    runtime_group = f"/aws/bedrock-agentcore/runtimes/{args.agent}-DEFAULT"
 
-    p2t = prompt_to_trace(spans)
+    # 分两次取，各带服务端过滤，而不是把整个窗口拉下来再筛。一轮 25 分钟的原始日志量会把分页也吃满，
+    # 后段用例因此完全取不到——那会让报告显示整桶「0 条关联」，而实际问答全部成功。
+    #   1) 关联用：只要带 request_payload 的记录（里面有问题原文与 traceId）
+    #   2) 评估用：只要带受支持 scope 的埋点 span
+    link_spans = fetch_events(args.region, runtime_group, start_ms,
+                              pattern='"request_payload"')
+    eval_spans = fetch_events(args.region, runtime_group, start_ms,
+                              pattern=f'"{SUPPORTED_SCOPE}"')
+    eval_spans += fetch_events(args.region, "aws/spans", start_ms,
+                               pattern=f'"{SUPPORTED_SCOPE}"')
+    spans = eval_spans
+    print(f"关联用记录 {len(link_spans)} 条，评估用埋点 span {len(eval_spans)} 条", file=sys.stderr)
+
+    p2t = prompt_to_trace(link_spans)
     by_session = spans_by_session(spans)
     trace_to_session = {}
     for sid, ss in by_session.items():
