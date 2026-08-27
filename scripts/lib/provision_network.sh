@@ -241,14 +241,35 @@ nacl_rule ingress 100 --protocol 6 --port-range "From=8080,To=8099" --cidr-block
 # 110: TCP 443 from the VPC only — internal HTTPS between co-located components.
 nacl_rule ingress 110 --protocol 6 --port-range "From=443,To=443" --cidr-block "$VPC_CIDR" --rule-action allow
 # 120/130: ephemeral RETURN traffic for connections this subnet originated through the NAT.
-# Scoped to the Linux ephemeral range (32768-60999), NOT 1024-65535: the wider range fully
-# contained rule 100, so the bridge ports were in practice reachable from 0.0.0.0/0 and rule
-# 100's VPC-CIDR restriction was dead. UDP is listed too — egress allows all protocols, so a
-# TCP-only return rule silently blackholes UDP replies (an NTP fallback off the link-local
-# source then drifts the clock until SigV4 signatures start failing, which looks like an IAM
-# fault). The VPC resolver, IMDS and Amazon Time Sync are link-local and unaffected by NACLs.
-nacl_rule ingress 120 --protocol 6 --port-range "From=32768,To=60999" --cidr-block "0.0.0.0/0" --rule-action allow
-nacl_rule ingress 130 --protocol 17 --port-range "From=32768,To=60999" --cidr-block "0.0.0.0/0" --rule-action allow
+# Range is 32768-65535, and BOTH bounds are load-bearing.
+#
+# The lower bound is what keeps rule 100 alive: an earlier version used 1024-65535, which fully
+# contained 8080-8099, so the bridge ports were in practice reachable from 0.0.0.0/0 and rule 100's
+# VPC-CIDR restriction was dead. 32768 sits well above 8099, so that hole stays closed.
+#
+# The upper bound was 60999 — the Linux ephemeral default — and that silently broke the AgentCore
+# runtime. Its ENI lives in THIS subnet, but it is an AWS-managed microVM, not a Linux host with
+# our sysctl defaults, and it picks source ports above 60999. Its outbound SYN to ECR was ACCEPTed
+# and the return traffic was REJECTed, so `docker pull` timed out, the container never started, and
+# every invoke returned "HTTP 424 Runtime health check failed". Diagnosed from this VPC's own flow
+# logs: `52.193.58.182:443 -> 10.1.1.158:64868 REJECT` against `10.1.1.158:64868 -> :443 ACCEPT`,
+# i.e. request out, answer dropped — 64868 being outside 32768-60999. The same subnet's EC2 host was
+# unaffected the whole time because Linux keeps to 32768-60999, which is exactly what made this look
+# like an application fault: /health green, bridge green, gateway connected, answers failing.
+#
+# It is also PROBABILISTIC, which is worse for a published sample: a source port lands inside the
+# old range often enough that a first deploy can pass and a later one fail with nothing changed.
+#
+# UDP is listed too — egress allows all protocols, so a TCP-only return rule silently blackholes UDP
+# replies (an NTP fallback off the link-local source then drifts the clock until SigV4 signatures
+# start failing, which looks like an IAM fault). The VPC resolver, IMDS and Amazon Time Sync are
+# link-local and unaffected by NACLs.
+#
+# A stronger alternative, deliberately not taken here to keep the sample's footprint small: add
+# interface endpoints for ecr.api + ecr.dkr and a gateway endpoint for S3, so image pulls never
+# leave the VPC and depend on neither NAT nor this rule. Worth doing in a production copy.
+nacl_rule ingress 120 --protocol 6 --port-range "From=32768,To=65535" --cidr-block "0.0.0.0/0" --rule-action allow
+nacl_rule ingress 130 --protocol 17 --port-range "From=32768,To=65535" --cidr-block "0.0.0.0/0" --rule-action allow
 # 140: ICMP type 3 code 4 (fragmentation needed) so Path MTU Discovery works. Without it large
 # TLS transfers hang rather than fail — ECR layer pulls, npm ci, apt — which is intermittent and
 # very expensive to diagnose.

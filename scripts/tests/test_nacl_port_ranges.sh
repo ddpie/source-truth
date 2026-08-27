@@ -61,6 +61,22 @@ u_overlap=0
 (( E_FROM >= 32768 && E_TO >= 60999 ))
 check "临时端口区间覆盖 Linux 默认 ephemeral 范围（32768-60999 起）" $?
 
+# 上界必须到 65535，不能只到 Linux 的 60999。
+#
+# 这个子网里不止有 Linux 主机：AgentCore runtime 的 ENI 也在这里，而它是 AWS 托管的 microVM，
+# 用的源端口高于 60999。上界曾经就是 60999，后果是它拉 ECR 镜像时出站 SYN 被 ACCEPT、返回流量
+# 被 REJECT，`docker pull` 超时、容器起不来，每次调用都返回「HTTP 424 Runtime health check
+# failed」。本 VPC 自己的 flow log 上是这样一对记录：
+#   10.1.1.158:64868 -> 52.193.58.182:443  ACCEPT   （请求出去了）
+#   52.193.58.182:443 -> 10.1.1.158:64868  REJECT   （答案被丢了）
+# 而同一子网的 EC2 主机全程正常，因为 Linux 只用 32768-60999——这正是它看起来像应用故障的原因：
+# /health 绿、bridge 绿、网关长连接 connected，只有回答失败。
+#
+# 而且它是概率性的：源端口有相当比例会落在旧区间内，所以一次部署可能通过、下一次在什么都没改的
+# 情况下失败。对一个要发布的 sample，这种间歇性错误比稳定失败更贵。
+(( E_TO >= 65535 && U_TO >= 65535 ))
+check "临时端口区间上界到 65535（AgentCore microVM 源端口高于 60999）" $?
+
 # nacl_rule 的收敛方向：create 失败要回退到 replace，且不得出现 delete-then-create。
 sed -n '/^nacl_rule() {/,/^}/p' "$F" | grep -q 'replace-network-acl-entry'
 check "nacl_rule 在 create 失败时回退 replace-network-acl-entry" $?
