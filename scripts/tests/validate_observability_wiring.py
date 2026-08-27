@@ -64,5 +64,25 @@ else:
         f"当前 {ver}",
     )
 
-print(f"\n  ran={4} failed={fail}")
+# --- OpenInference instrumentation: what makes the spans EVALUABLE -----------------------
+# ADOT alone produces spans, but AgentCore Evaluations accepts spans only from a fixed list of
+# instrumentation scopes and rejects anything else outright:
+#   ValidationException: Provided input has no spans with supported scope.
+# Measured against the live deploy: the seven scopes ADOT produced for this agent had an EMPTY
+# intersection with that list, so Evaluate could not score a single session. The scope on the list
+# for this SDK is `openinference.instrumentation.claude_agent_sdk`, which is exactly what this
+# package registers. Dropping it does not break the bot or the telemetry — it silently makes
+# evaluation impossible again, with no failing test anywhere else.
+reqs_text = REQS.read_text(encoding="utf-8")
+m_oi = re.search(r"^openinference-instrumentation-claude-agent-sdk==([0-9][0-9a-zA-Z.]*)",
+                 reqs_text, re.M)
+check(
+    "requirements.txt 钉住 openinference-instrumentation-claude-agent-sdk"
+    "（Evaluations 只接受受支持 scope 的 span）",
+    m_oi is not None,
+    "未找到该依赖：移除它不会让任何其他测试失败，但 Evaluate 会退回"
+    " 'no spans with supported scope'。",
+)
+
+print(f"\n  ran={5} failed={fail}")
 sys.exit(1 if fail else 0)

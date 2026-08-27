@@ -182,6 +182,18 @@ HTTP client for CodeGraph MCP-over-HTTP evidence channel.
 
 ---
 
+openinference-instrumentation-claude-agent-sdk
+Version: 0.1.13
+License: Apache-2.0
+URL: https://github.com/Arize-ai/openinference
+OpenInference instrumentation for claude-agent-sdk. Emits GenAI semantic-convention
+spans for the query, each tool call and each subagent, under instrumentation scope
+`openinference.instrumentation.claude_agent_sdk`. Not redundant with ADOT, whose
+generic auto-instrumentation only sees the transport layer: AgentCore Evaluations
+accepts spans ONLY from a fixed list of scopes, and this is the one on that list
+for this SDK. Enabled by the [opentelemetry_instrumentor] entry point it declares,
+so no agent code calls it.
+
 aws-opentelemetry-distro
 Version: 0.19.0
 License: Apache-2.0
@@ -309,12 +321,12 @@ and 0.49.0 (agent-container, transitive).
 
 ## 4. Full shipped (transitive) listings
 
-### 4.1 agent-container — 114 packages
+### 4.1 agent-container — 117 packages
 
 Generated from `agent-container/requirements.lock`, which is itself
 `pip freeze` output from a verified ARM64 build and is the file the Dockerfile
 installs from. Licenses were read from each exact version's core metadata,
-read inside that build (88 from PEP 639
+read inside that build (91 from PEP 639
 `License-Expression`, 24 from the legacy `License` field,
 2 from `License ::` classifiers);
 0 packages are unverified.
@@ -348,6 +360,9 @@ read inside that build (88 from PEP 639
 | `jsonschema` | 4.26.0 | MIT |
 | `jsonschema-specifications` | 2025.9.1 | MIT |
 | `mcp` | 1.28.0 | MIT |
+| `openinference-instrumentation` | 0.1.59 | Apache-2.0 |
+| `openinference-instrumentation-claude-agent-sdk` | 0.1.13 | Apache-2.0 |
+| `openinference-semantic-conventions` | 0.1.33 | Apache-2.0 |
 | `opentelemetry-api` | 1.44.0 | Apache-2.0 |
 | `opentelemetry-distro` | 0.65b0 | Apache-2.0 |
 | `opentelemetry-exporter-otlp-proto-common` | 1.44.0 | Apache-2.0 |
