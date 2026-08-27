@@ -61,6 +61,9 @@ printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n' > "$TMP/scripts/tests
 # 同理：run_lint 现在还调许可清单漂移校验。少了它，假仓的 --lint 又会恒为非零，
 # 下面那条「全部守卫通过时退出零」的正向断言就会失败 —— 它正是为了发现这种情况才加的。
 printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n' > "$TMP/scripts/tests/validate_license_manifest.py"
+# 以及可观测接线校验。这条桩是被上面那条注释预言到的情况抓出来的：给 run_lint 加了新一步却
+# 没在假仓里造桩，正向断言立刻挂 —— 正是它存在的意义。以后每加一个 lint 校验器都要在这里加一行。
+printf '#!/usr/bin/env python3\\nimport sys\\nsys.exit(0)\\n' > "$TMP/scripts/tests/validate_observability_wiring.py"
 printf '#!/usr/bin/env bash\nexit 1\n' > "$TMP/scripts/check-invariants.sh"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$TMP/scripts/check-versions.sh"
 bash "$TMP/scripts/test.sh" --lint >/dev/null 2>&1; lintfail_rc=$?

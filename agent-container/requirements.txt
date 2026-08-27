@@ -10,4 +10,4 @@ claude-agent-sdk==0.2.103          # agent reasoning loop (query / ClaudeAgentOp
 bedrock-agentcore==1.14.1          # microVM HTTP/streaming host (BedrockAgentCoreApp)
 boto3==1.43.31                     # AWS control plane
 httpx==0.28.1                      # CodeGraph MCP-over-HTTP evidence channel
-aws-opentelemetry-distro==0.17.1   # observability (toolkit default)
+aws-opentelemetry-distro==0.19.0    # observability — see the CMD note in Dockerfile

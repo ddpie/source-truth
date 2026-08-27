@@ -567,7 +567,27 @@ preflight_gnu_tar
 # --dry-run as well. Withholding them made `--dry-run` answer "what would be built" while staying
 # silent on "can this machine and account actually do it" — which is the question the operator was
 # asking by running a plan first.
-preflight_model_access; preflight_agentcore
+# Observability reachability. The agent is launched through `opentelemetry-instrument`, so it EMITS
+# spans; whether they are queryable depends on CloudWatch Transaction Search, which is an
+# account+region switch this deploy does not own. Without it the spans go nowhere and the symptom is
+# indistinguishable from having no instrumentation at all — the exact shape of the defect this
+# wiring just fixed. Advisory, never fatal: answering questions does not depend on it.
+preflight_observability() {
+  local dest
+  dest="$(aws xray get-trace-segment-destination --region "$REGION" \
+    --query 'Destination' --output text 2>/dev/null || echo "")"
+  if [[ "$dest" == "CloudWatchLogs" ]]; then
+    say ok "CloudWatch Transaction Search 已开（span 可查询）"
+  else
+    say warn "CloudWatch Transaction Search 未开（region $REGION）——agent 会产出 span，但无处可查。"
+    say warn "  开启（一次性，按区域）："
+    say warn "    aws xray update-trace-segment-destination --region $REGION --destination CloudWatchLogs"
+    say warn "  还需给 X-Ray 加 logs 资源策略，见 docs/runbook_en.md \"Observability\"。"
+    say warn "  不影响本次部署，也不影响机器人回答问题。"
+  fi
+}
+
+preflight_model_access; preflight_agentcore; preflight_observability
 if [[ "$DRY_RUN" != true ]]; then
   # preflight_quota checks EIP/VPC/vCPU headroom — all for resources we're about to CREATE. --local
   # creates none of them (reuses this host's VPC/subnet, doesn't run-instances or allocate an EIP),

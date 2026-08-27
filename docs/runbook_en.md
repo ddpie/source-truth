@@ -691,3 +691,62 @@ identity needs `logs:PutMetricFilter`, `cloudwatch:PutDashboard`, `cloudwatch:Pu
 - Alarm thresholds live in `config/alarm-thresholds.json` and can be adjusted; re-run `--only alarms` after editing.
 - The SNS subscription must be confirmed once by hand: `aws sns subscribe --region <r> --topic-arn <the ARN the script printed> --protocol email --notification-endpoint you@example.com` (then click the link in the email).
 - Skipping the dau phase leaves the dashboard's "daily active" widget permanently empty; the other widgets are unaffected.
+
+## Appendix E: Observability (AgentCore spans and traces)
+
+The agent is launched through `opentelemetry-instrument` (see the `CMD` note in
+`agent-container/Dockerfile`), so it emits OpenTelemetry spans. That wrapper *is* the
+integration: `aws-opentelemetry-distro` had been a pinned dependency for a long time
+without it, which produced no telemetry at all while every check stayed green.
+
+Spans being emitted and spans being **queryable** are two different things. The second
+needs CloudWatch Transaction Search, which is a one-time switch per account and Region
+and is not something the deploy owns. `deploy-all.sh` tells you which state you are in
+and never fails on it — the bot answers questions either way.
+
+**Enable it (once per Region):**
+
+```bash
+# 1. Let X-Ray write spans into CloudWatch Logs.
+aws logs put-resource-policy --region <region> --policy-name TransactionSearchXRayAccess \
+  --policy-document '{"Version":"2012-10-17","Statement":[{"Sid":"TransactionSearchXRayAccess",
+  "Effect":"Allow","Principal":{"Service":"xray.amazonaws.com"},"Action":"logs:PutLogEvents",
+  "Resource":["arn:aws:logs:<region>:<account>:log-group:aws/spans:*",
+  "arn:aws:logs:<region>:<account>:log-group:/aws/application-signals/data:*"],
+  "Condition":{"ArnLike":{"aws:SourceArn":"arn:aws:xray:<region>:<account>:*"},
+  "StringEquals":{"aws:SourceAccount":"<account>"}}}]}'
+
+# 2. Point trace segments at CloudWatch Logs.
+aws xray update-trace-segment-destination --region <region> --destination CloudWatchLogs
+
+# 3. (Optional) Sample less than 100%.
+aws xray update-indexing-rule --region <region> --name Default \
+  --rule '{"Probabilistic":{"DesiredSamplingPercentage":10}}'
+```
+
+Verify with `aws xray get-trace-segment-destination --region <region>`; re-running
+`deploy-all.sh` will also report it as enabled.
+
+**Where the spans land.** By default they go to the shared `aws/spans` log group. Agents
+can instead deliver to their own `/aws/bedrock-agentcore/runtimes/<id>-<endpoint>` log
+group, which is worth having here because one host serves several projects and each
+already has its own log group — it scopes access control and encryption per project.
+That needs three things together: ADOT >= 0.18.0 (pinned at 0.19.0, so satisfied),
+`UNIFIED_TRACES_DESTINATION_ENABLED=true` on the runtime, and `logs:PutResourcePolicy`
+granted to the execution role for that log group. Not configured by this repository
+today — the runtimes here predate the unified destination and keep the shared group.
+
+**What you can do once spans are flowing.** The CloudWatch *GenAI Observability* page
+shows sessions, traces and token usage per agent. Spans are also the input to AgentCore
+Evaluations, which scores sessions with built-in judges or with your own Lambda for
+deterministic checks — the latter is the interesting one for this project, since a
+citation that points at the wrong line looks correct to an LLM judge but not to code
+that re-reads the line.
+
+**A caveat worth knowing.** Session correlation depends on the session id reaching the
+span attributes. The gateway passes `runtimeSessionId` on `invoke_agent_runtime`; the
+AgentCore docs describe propagation via the
+`X-Amzn-Bedrock-AgentCore-Runtime-Session-Id` header. Whether spans here end up carrying
+`attributes.session.id` has not been verified on a live deploy yet, and Evaluations
+selects spans by session — so check that first before building on it.
+

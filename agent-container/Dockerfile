@@ -91,4 +91,25 @@ COPY . .
 # rather than re-adding a check that cannot fail.
 
 # Thin @app.entrypoint shell; BedrockAgentCoreApp.run() serves the runtime.
-CMD ["python", "agent.py"]
+#
+# Launched through `opentelemetry-instrument` because that is what actually turns AgentCore
+# Observability on. `aws-opentelemetry-distro` had been a pinned dependency for a long time with the
+# note "observability (toolkit default)", but nothing ever activated it: the package was installed
+# into the image and never used, so no spans were produced, the account had no `aws/spans` log group,
+# and each runtime's log group carried only platform events such as image-pull failures. Installing
+# ADOT is not integrating it — the auto-instrumentation wrapper is the integration, per the AgentCore
+# docs for agents HOSTED IN the runtime ("For containerized environment add the following command:
+# CMD ["opentelemetry-instrument", "python", "main.py"]").
+#
+# Nothing else is set here on purpose. For an AgentCore-hosted agent the runtime injects the ADOT
+# environment itself (which is why an escape hatch named DISABLE_ADOT_OBSERVABILITY exists); the long
+# list of OTEL_* / AGENT_OBSERVABILITY_ENABLED variables in the docs applies to agents hosted OUTSIDE
+# AgentCore, and setting them here would fight the platform rather than help it.
+#
+# The pin is >=0.18.0 (0.19.0) for a second reason: earlier versions IGNORE the span-destination
+# setting and always deliver to the shared `aws/spans` log group. 0.18.0+ is what makes it possible
+# to send spans to each agent's own log group, which is the isolation this project's layout wants —
+# one host serving six projects, each already with its own log group. Turning that on additionally
+# needs UNIFIED_TRACES_DESTINATION_ENABLED=true plus logs:PutResourcePolicy for the execution role;
+# deliberately NOT done here, so this change stays reviewable on its own.
+CMD ["opentelemetry-instrument", "python", "agent.py"]

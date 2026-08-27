@@ -627,3 +627,50 @@ node_modules/.bin/ts-node --transpile-only src/index.ts
 - 告警阈值在 `config/alarm-thresholds.json`，可调整，修改后重跑 `--only alarms`。
 - SNS 订阅需手动确认一次：`aws sns subscribe --region <r> --topic-arn <脚本打印的 ARN> --protocol email --notification-endpoint you@example.com`（邮件点确认链接）。
 - 不跑 dau 阶段则看板「日活」widget 持续为空，其余 widget 不受影响。
+
+## 附录 E：可观测性（AgentCore span 与 trace）
+
+Agent 现在通过 `opentelemetry-instrument` 启动（见 `agent-container/Dockerfile` 的 `CMD`
+注释），因此会产出 OpenTelemetry span。**那层包装本身就是接入**：`aws-opentelemetry-distro`
+曾长期只是被钉在依赖里而没有它，结果是零遥测，而所有检查都是绿的。
+
+"产出 span"和"span 可查询"是两件事。后者需要 CloudWatch Transaction Search，那是按账号和
+区域的一次性开关，不属于本部署的职责。`deploy-all.sh` 会告知当前处于哪种状态，且**从不因此失败**
+——机器人回答问题不依赖它。
+
+**开启（每个区域一次）：**
+
+```bash
+# 1. 允许 X-Ray 把 span 写进 CloudWatch Logs
+aws logs put-resource-policy --region <region> --policy-name TransactionSearchXRayAccess \
+  --policy-document '<见英文附录 E 的完整策略 JSON>'
+
+# 2. 把 trace segment 指向 CloudWatch Logs
+aws xray update-trace-segment-destination --region <region> --destination CloudWatchLogs
+
+# 3.（可选）采样率低于 100%
+aws xray update-indexing-rule --region <region> --name Default \
+  --rule '{"Probabilistic":{"DesiredSamplingPercentage":10}}'
+```
+
+用 `aws xray get-trace-segment-destination --region <region>` 复核；重跑 `deploy-all.sh`
+也会报告已开启。
+
+**span 落在哪。** 默认进共享的 `aws/spans` 日志组。也可以让每个 agent 投到自己的
+`/aws/bedrock-agentcore/runtimes/<id>-<endpoint>`——对这里值得做，因为一台主机服务多个项目、
+而每个项目本来就有自己的日志组，这样访问控制和加密就能按项目收口。需要三件事同时成立：
+ADOT >= 0.18.0（已钉 0.19.0，满足）、runtime 上设 `UNIFIED_TRACES_DESTINATION_ENABLED=true`、
+以及给执行角色授予该日志组的 `logs:PutResourcePolicy`。本仓目前没有配置——这里的 runtime 建于
+该特性之前，仍走共享组。
+
+**span 通了之后能做什么。** CloudWatch 的 *GenAI Observability* 页面按 agent 展示会话、trace
+和 token 用量。span 同时是 AgentCore Evaluations 的输入：它可以用内置裁判打分，也可以用你自己的
+Lambda 做确定性检查——对本项目而言后者才是关键，因为一条指向错误行号的引用在 LLM 裁判眼里是
+对的，在回读那一行的代码眼里不是。
+
+**一个需要留意的前提。** 会话关联取决于 session id 能否进到 span 属性里。网关是通过
+`invoke_agent_runtime` 的 `runtimeSessionId` 传的，而 AgentCore 文档描述的传播方式是
+`X-Amzn-Bedrock-AgentCore-Runtime-Session-Id` 请求头。这里的 span 最终有没有带上
+`attributes.session.id`，尚未在真机上验证过；而 Evaluations 是按 session 选 span 的，
+所以在此之上做任何东西之前，先确认这一点。
+

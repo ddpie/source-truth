@@ -79,6 +79,10 @@ run_lint() {
   # network and stay a release-time task.
   say step "lint：许可清单漂移校验 validate_license_manifest / licence manifest drift"
   python3 "$ROOT/scripts/tests/validate_license_manifest.py" || rc=1
+  # 可观测接线：ADOT 装了但不经 opentelemetry-instrument 启动 = 零遥测，而所有其他检查都会是绿的。
+  # 这个缺陷在本仓真实存在过数月，症状只是"没有数据"，没有任何断言会失败。
+  say step "lint：可观测接线校验 validate_observability_wiring / observability wiring"
+  python3 "$ROOT/scripts/tests/validate_observability_wiring.py" || rc=1
   return "$rc"
 }
 
