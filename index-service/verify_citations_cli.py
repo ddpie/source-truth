@@ -35,7 +35,7 @@ def make_reader(repo_root: str, repo: str = ""):
     """构造读取器：路径经 to_local_path 限制后才打开，行数按 splitlines 计。"""
     cache: dict[str, dict[str, Any]] = {}
 
-    def _read(path: str) -> dict[str, Any]:
+    def _read(path: str, line: int | None = None) -> dict[str, Any]:
         if path in cache:
             return cache[path]
         # to_local_path 越界时抛 ValueError，被 verify 记成 PATH_REFUSED

@@ -22,7 +22,7 @@ from citation_verify import (
 
 
 def reader_from(files: dict[str, str]):
-    def _read(path: str) -> dict[str, str]:
+    def _read(path: str, line: int | None = None) -> dict[str, str]:
         if path not in files:
             raise FileNotFoundError(f"no such file: {path}")
         return {"content": files[path]}
@@ -102,7 +102,7 @@ def test_path_refused_is_not_read() -> None:
     """
     opened: list[str] = []
 
-    def _read(path: str) -> dict[str, str]:
+    def _read(path: str, line: int | None = None) -> dict[str, str]:
         opened.append(path)
         return {"content": "SECRET=1\n"}
 
@@ -193,11 +193,17 @@ def test_no_line_is_uncheckable_not_ok() -> None:
     assert r.summary()["confirmed"] == 0, "没带行号不能算成已确认"
 
 
-def test_no_symbols_is_uncheckable_not_confirmed() -> None:
-    """答案里没有反引号标识符时，第三级判据没有输入。此时必须说「查不了」。"""
+def test_no_symbols_is_never_counted_as_confirmed() -> None:
+    """答案里没有可核对的符号时，第三级判据没有输入。
+
+    这一条原本断言 UNCHECKABLE；`LINE_EXISTS` 出现后判决变了，但它真正要守住的性质没变，也是加
+    LINE_EXISTS 时最容易破掉的那条：**绝不能算成 confirmed**。行真实存在只证明了行存在，
+    没证明那一行与结论相关。
+    """
     r = verify("答案见 Game/Formulas.cs:7", reader_from({"Game/Formulas.cs": SRC}))
-    assert r.results[0].verdict is Verdict.UNCHECKABLE
+    assert r.results[0].verdict is not Verdict.SYMBOL_CONFIRMED
     assert r.summary()["confirmed"] == 0
+    assert r.results[0].verdict is Verdict.LINE_EXISTS
 
 
 def test_all_uncheckable_report_is_distinguishable_from_confirmed() -> None:
@@ -225,7 +231,7 @@ def test_total_lines_beats_window_for_range_check() -> None:
     真机上被抓到的缺陷的第二半：拿到手的行数当作文件长度，会把一条指向窗口之外的**正确**出处
     误判成越界——响亮的假失败。
     """
-    def _read(path: str) -> dict[str, object]:
+    def _read(path: str, line: int | None = None) -> dict[str, object]:
         return {"lines": ["a", "b", "c"], "total_lines": 5000, "truncated": True}
 
     r = verify("`Foo` 见 a/b.cs:4000", _read)
@@ -236,7 +242,7 @@ def test_total_lines_beats_window_for_range_check() -> None:
 
 def test_line_beyond_real_total_is_still_out_of_range() -> None:
     """上一条不能把真正的越界也放过。"""
-    def _read(path: str) -> dict[str, object]:
+    def _read(path: str, line: int | None = None) -> dict[str, object]:
         return {"lines": ["a", "b", "c"], "total_lines": 5000, "truncated": True}
 
     r = verify("`Foo` 见 a/b.cs:99999", _read)
@@ -280,8 +286,28 @@ def test_glob_pattern_is_not_a_symbol() -> None:
     assert "Network" not in primary + context
 
 
+def test_line_exists_when_no_symbol_available() -> None:
+    """真实答案里大量出处形如「`path/File.cs:231`：中毒四档扣血」——中文说明不含标识符。
+
+    这类出处天然无法用符号判据核对（实测占 30%），但行号成立时仍能确定性地判「该行真实存在且非空」。
+    全判 UNCHECKABLE 会让分子分母都很小，于是「几乎什么都没核对」和「全部核对通过」拿到同样的 Pass。
+    """
+    r = verify("见 Game/Formulas.cs:7：负重上限计算", reader_from({"Game/Formulas.cs": SRC}))
+    assert r.results[0].verdict is Verdict.LINE_EXISTS
+    assert r.summary()["line_exists"] == 1
+    assert r.summary()["confirmed"] == 0, "行存在不等于符号确认"
+    assert r.ok
+
+
+def test_empty_cited_line_stays_uncheckable() -> None:
+    """引用到空行且无符号可核对：这时连「行有内容」都不成立，仍是查不了。"""
+    r = verify("见 Game/Formulas.cs:2：说明", reader_from({"Game/Formulas.cs": SRC}))
+    assert r.results[0].verdict is Verdict.UNCHECKABLE
+    assert r.summary()["line_exists"] == 0
+
+
 def test_read_error_does_not_abort_report() -> None:
-    def _read(path: str) -> dict[str, str]:
+    def _read(path: str, line: int | None = None) -> dict[str, str]:
         if path == "a/boom.cs":
             raise RuntimeError("transport blew up")
         return {"content": SRC}
@@ -298,7 +324,7 @@ def test_read_error_is_not_a_statement_about_the_answer() -> None:
     """READ_ERROR 不属于 FAILING，这是被真实缺陷推出来的：它原本在 FAILING 里，于是 bridge 不可达时
     每条出处都变成 READ_ERROR、整份报告判成失败——一次基础设施中断被永久记成「答案引用不成立」。
     FAILING 只放对**答案**下判断的判决；读不到是校验器自己的问题，调用方应看 read_errors。"""
-    def _read(path: str) -> dict[str, str]:
+    def _read(path: str, line: int | None = None) -> dict[str, str]:
         raise RuntimeError("bridge down")
 
     r = verify("`CalculateMaxEncumbrance` 见 a/b.cs:3", _read)
@@ -308,15 +334,26 @@ def test_read_error_is_not_a_statement_about_the_answer() -> None:
     assert len(r.read_errors) == 1, "但必须能被调用方发现，否则会静默当成校验通过"
 
 
-def test_reader_called_once_per_path() -> None:
-    calls: list[str] = []
+def test_reader_cached_per_path_and_line() -> None:
+    """缓存按 (路径, 行号) 分，不是仅按路径。
 
-    def _read(path: str) -> dict[str, str]:
-        calls.append(path)
+    读取方现在只读引用行附近的一段（从第 1 行读固定长度时，行号超出窗口的引用根本读不到，实测占
+    全部出处的 22%）。因此同一文件的两个不同行号需要两个窗口；只按路径缓存会让第二条引用拿到第一条
+    的窗口，从而在正确的引用上报 symbol_mismatch。
+    """
+    calls: list[tuple[str, int | None]] = []
+
+    def _read(path: str, line: int | None = None) -> dict[str, str]:
+        calls.append((path, line))
         return {"content": SRC}
 
     verify("`CalculateMaxEncumbrance` 见 Game/Formulas.cs:7 与 Game/Formulas.cs:9", _read)
-    assert calls == ["Game/Formulas.cs"], "同一文件应只读一次"
+    assert calls == [("Game/Formulas.cs", 7), ("Game/Formulas.cs", 9)], calls
+
+    # 同一 (路径, 行号) 重复出现时仍然只读一次
+    calls.clear()
+    verify("`CalculateMaxEncumbrance` 见 Game/Formulas.cs:7，重复一次 Game/Formulas.cs:7", _read)
+    assert calls == [("Game/Formulas.cs", 7)], calls
 
 
 def test_nearby_symbols_splits_member_from_container() -> None:

@@ -156,10 +156,18 @@ def _make_reader(client: BridgeClient):
     时用 `total_lines`（文件真实行数）做范围判断，而不是拿到手的行数——否则一条指向窗口之外的正确出处
     会被误判成越界。
     """
-    cache: dict[str, dict[str, Any]] = {}
+    cache: dict[tuple[str, int | None], dict[str, Any]] = {}
 
-    def _fetch(candidate: str) -> dict[str, Any]:
-        raw = client.read_file(candidate, line=1, limit=READ_LIMIT)
+    def _fetch(candidate: str, line: int | None) -> dict[str, Any]:
+        # 围绕引用行读，而不是从第 1 行读固定长度。从头读 READ_LIMIT 行时，任何行号超过该值的引用
+        # 都读不到——实测占全部出处的 22%，而它们与答案质量无关，纯粹是校验器读错了范围。
+        # 窗口给 ±40 行：足够覆盖「出处指向声明行、符号在紧邻几行」的情况，也远小于整文件。
+        if line is None:
+            start, limit = 1, READ_LIMIT
+        else:
+            start = max(1, line - 40)
+            limit = 81
+        raw = client.read_file(candidate, line=start, limit=limit)
         try:
             payload = json.loads(raw)
         except ValueError as e:
@@ -178,14 +186,15 @@ def _make_reader(client: BridgeClient):
                 "total_lines": total if isinstance(total, int) else len(lines),
                 "truncated": bool(payload.get("truncated"))}
 
-    def _read(path: str) -> dict[str, Any]:
-        if path in cache:
-            return cache[path]
+    def _read(path: str, line: int | None = None) -> dict[str, Any]:
+        key = (path, line)
+        if key in cache:
+            return cache[key]
         last: Exception | None = None
         for candidate in _candidates(path):
             try:
-                cache[path] = _fetch(candidate)
-                return cache[path]
+                cache[key] = _fetch(candidate, line)
+                return cache[key]
             except (BridgeError, ValueError) as e:
                 last = e
                 continue
@@ -200,8 +209,8 @@ def _make_reader(client: BridgeClient):
                 matches = []
             if len(matches) == 1:
                 try:
-                    cache[path] = _fetch(matches[0])
-                    return cache[path]
+                    cache[key] = _fetch(matches[0], line)
+                    return cache[key]
                 except (BridgeError, ValueError) as e:
                     last = e
 
@@ -284,19 +293,28 @@ def lambda_handler(evaluation: EvaluatorInput, _context: Any = None) -> Evaluato
 
     if report.failing:
         label, value = "Fail", 0.0
-    elif summary["confirmed"] > 0:
+    elif summary["confirmed"] > 0 or summary["line_exists"] > 0 or summary["partial"] > 0:
         label = "Pass"
-        # 分数 = 被确认的出处 / 可校验的出处。UNCHECKABLE 不进分母：那是查不了，不是查出问题，
-        # 计入会让「出处没带行号」这种正常写法压低分数。
+        # 分数 = 加权已核对 / 可核对总数。三档权重不同，因为它们的证明力不同：
+        #   符号确认 1.0  —— 那一行确实有答案声称的东西
+        #   仅外层    0.6  —— 引到了类而非成员，方向对但不够准
+        #   行存在    0.4  —— 只证明了行真实存在且非空，没证明它与结论相关
+        # 全部按 1.0 计会让「答案只给路径行号加中文说明」和「答案精确到符号」拿到同样的满分，
+        # 那样这个分数就不再能区分答案质量了。
         checkable = summary["total"] - summary["uncheckable"]
-        value = round(summary["confirmed"] / checkable, 3) if checkable else 1.0
+        if checkable:
+            scored = (summary["confirmed"] + 0.6 * summary["partial"]
+                      + 0.4 * summary["line_exists"])
+            value = round(scored / checkable, 3)
+        else:
+            value = 1.0
     else:
         # 一条都没真正核对上。绝不能报 Pass —— 那会和「全部确认」产生同样的绿灯。
         label, value = "Unverified", None
 
-    lines = [f"出处 {summary['total']} 条：确认 {summary['confirmed']}，"
-             f"仅命中外层 {summary['partial']}，不成立 {summary['failing']}，"
-             f"无法核对 {summary['uncheckable']}"]
+    lines = [f"出处 {summary['total']} 条：符号确认 {summary['confirmed']}，"
+             f"仅命中外层 {summary['partial']}，仅确认行存在 {summary['line_exists']}，"
+             f"不成立 {summary['failing']}，无法核对 {summary['uncheckable']}"]
     for r in report.results:
         if r.verdict in FAILING or r.verdict is Verdict.SYMBOL_PARTIAL:
             lines.append(f"  [{r.verdict.value}] {r.citation.raw} — {r.detail}")

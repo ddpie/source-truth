@@ -109,6 +109,12 @@ class Verdict(str, Enum):
     OK = "ok"                              # 文件与行号都成立（符号未检查或已确认）
     SYMBOL_CONFIRMED = "symbol_confirmed"  # 最强：引用行附近有答案声称的**那个成员**
     SYMBOL_PARTIAL = "symbol_partial"      # 只命中外层类型/命名空间，没命中成员本身
+    # 行号成立且该行有实际代码，但答案没给可核对的符号。这一档是看真实答案加出来的：项目里大量答案
+    # 形如「`path/File.cs:231`：中毒四档扣血」——路径 + 行号 + 中文说明，说明里不含任何标识符。
+    # 那不是答案写得不好，是这类出处天然无法用符号判据核对。此时仍能确定性地判一件事：该行真实存在
+    # 且不是空行/纯注释边界。比 UNCHECKABLE 强（确实核对了行的存在与内容非空），比 SYMBOL_CONFIRMED
+    # 弱（没有验证那一行与结论相关），所以必须是独立一档——并进任何一边都会让评分失真。
+    LINE_EXISTS = "line_exists"
     SYMBOL_MISMATCH = "symbol_mismatch"    # 有可检查的符号，但引用行附近找不到 → 大概率引错
     LINE_OUT_OF_RANGE = "line_out_of_range"
     FILE_NOT_FOUND = "file_not_found"
@@ -198,6 +204,8 @@ class Report:
             "failing": len(self.failing),
             "confirmed": len(self.confirmed),
             "partial": counts.get(Verdict.SYMBOL_PARTIAL.value, 0),
+            # 行存在但无符号可核对。单列出来而不是并进 confirmed：它验证了行的存在，没验证相关性。
+            "line_exists": counts.get(Verdict.LINE_EXISTS.value, 0),
             "uncheckable": counts.get(Verdict.UNCHECKABLE.value, 0),
             "by_verdict": counts,
             "ok": self.ok,
@@ -293,7 +301,9 @@ def verify(
     """
     report = Report()
     cits = list(citations) if citations is not None else extract_citations(text)
-    cache: dict[str, dict[str, Any] | Exception] = {}
+    # 按 (路径, 行号) 缓存：读取方现在只读引用行附近的一段，同一文件的不同引用需要不同的窗口，
+    # 只按路径缓存会让第二条引用拿到第一条的窗口。
+    cache: dict[tuple[str, int | None], dict[str, Any] | Exception] = {}
 
     for c in cits:
         if path_filter is not None:
@@ -302,16 +312,20 @@ def verify(
                 report.results.append(CitationResult(c, Verdict.PATH_REFUSED, reason))
                 continue
 
-        if c.path not in cache:
+        ckey = (c.path, c.line)
+        if ckey not in cache:
             try:
-                cache[c.path] = reader(c.path)
+                # 把引用行传给读取方：它可以只读该行附近的一段，而不是从头读固定长度。
+                # 这不是优化——从第 1 行读 400 行时，任何行号大于 400 的引用都读不到，实测占全部
+                # 出处的 22%，而它们与答案质量无关，纯粹是校验器读错了范围。
+                cache[ckey] = reader(c.path, c.line)
             except FileNotFoundError as e:
-                cache[c.path] = e
+                cache[ckey] = e
             except ValueError as e:
-                cache[c.path] = e
+                cache[ckey] = e
             except Exception as e:  # noqa: BLE001 — 任何读取异常都记成判决，不让它中断整份报告
-                cache[c.path] = e
-        got = cache[c.path]
+                cache[ckey] = e
+        got = cache[ckey]
 
         if isinstance(got, FileNotFoundError):
             report.results.append(CitationResult(c, Verdict.FILE_NOT_FOUND, str(got)))
@@ -354,8 +368,18 @@ def verify(
 
         primary, context = nearby_symbols(text, c.start)
         if not primary and not context:
-            report.results.append(CitationResult(
-                c, Verdict.UNCHECKABLE, "附近没有反引号标识符，无法核对内容", expected_symbols=()))
+            # 没有可核对的符号，但行号成立——仍能确定性地判「该行真实存在且有内容」。
+            # 这比直接放弃有用得多：实测这类出处占 30%，全判 UNCHECKABLE 会让大多数答案的分子分母都很小，
+            # 于是「几乎什么都没核对」和「全部核对通过」拿到同样的 Pass。
+            body = lines[c.line - 1].strip() if c.line - 1 < len(lines) else ""
+            if body:
+                report.results.append(CitationResult(
+                    c, Verdict.LINE_EXISTS,
+                    f"第 {c.line} 行存在且非空（答案未给可核对的符号）：{body[:80]!r}"))
+            else:
+                report.results.append(CitationResult(
+                    c, Verdict.UNCHECKABLE,
+                    f"第 {c.line} 行是空行，且答案未给可核对的符号"))
             continue
 
         lo = max(0, c.line - 1 - window)
