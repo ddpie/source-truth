@@ -244,6 +244,42 @@ def test_line_beyond_real_total_is_still_out_of_range() -> None:
     assert "共 5000" in r.results[0].detail or "只有 5000" in r.results[0].detail
 
 
+def test_comma_separated_line_list_is_a_citation() -> None:
+    """线上答案的真实写法：一个文件多个行号，逗号分隔。取第一个行号。
+
+    这是真机上假失败的根源。正则原本不认这种写法，于是整个反引号 token 不算出处 → 路径被按 `.` 和
+    空白拆开 → `Assets`、`Scripts`、`Game`、`MagicAndEffects` 这些**目录名**成了待核对符号 →
+    必然找不到 → 假 symbol_mismatch。
+    """
+    cits = extract_citations("`a/b/PoisonEffect.cs:231,235,240,254`")
+    assert len(cits) == 1
+    assert cits[0].path == "a/b/PoisonEffect.cs"
+    assert cits[0].line == 231
+
+
+def test_directory_names_never_become_symbols() -> None:
+    """判据按**形状**认路径，不依赖 _CITATION_RE 是否恰好匹配——那种耦合正是上面缺陷的成因：
+    只要行号写法超出正则覆盖，目录名就会变成符号。"""
+    for text in (
+        "`Assets/Scripts/Game/Effects/Poisons/PoisonEffect.cs:231,235,240`",
+        "`Assets/Scripts/Game/Effects/HealthLeech.cs:89,91,131`",
+        "见 `Assets/Scripts/Game/WeaponManager.cs` 第 420 行",
+    ):
+        cits = extract_citations(text)
+        assert cits, text
+        primary, context = nearby_symbols(text, cits[0].start)
+        bad = {"Assets", "Scripts", "Game", "Effects", "Poisons"} & set(primary + context)
+        assert not bad, f"{text} → 目录名被当成符号: {bad}"
+
+
+def test_glob_pattern_is_not_a_symbol() -> None:
+    """答案里会写「搜过 `*Network*.cs` 没有结果」——那是搜索模式，不是待核对的符号。"""
+    text = "搜过 `*Network*.cs` 没有结果，见 a/b.cs:5"
+    cits = extract_citations(text)
+    primary, context = nearby_symbols(text, cits[0].start)
+    assert "Network" not in primary + context
+
+
 def test_read_error_does_not_abort_report() -> None:
     def _read(path: str) -> dict[str, str]:
         if path == "a/boom.cs":

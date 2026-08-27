@@ -39,7 +39,12 @@ _CODE_EXT = (
     "asset|prefab|unity|shader|cginc|hlsl|sql|proto"
 )
 
-# 出处形态：可选目录段 + 文件名 + 扩展名 + 可选 `:行号`（也接受 `:行-行` 区间，取起始行）。
+# 出处形态：可选目录段 + 文件名 + 扩展名 + 可选行号。行号支持三种真实写法，都取自线上答案：
+#   `a/b.cs:75`            单行号
+#   `a/b.cs:40-52`         区间（取起始行）
+#   `a/b.cs:231,235,240`   逗号列表（取第一个）—— 这一种是真机上的假失败来源：正则不认它时，整个
+#                          反引号 token 就不被视为出处，于是路径被拆成 Assets / Scripts / Game 这些
+#                          目录名，当作「答案声称此处存在的符号」去核对，必然找不到 → 假 symbol_mismatch。
 #
 # 三处边界约束都是必需的，第一条是测试直接抓出来的真缺陷：
 #   * 结尾 `(?!\w)` —— 没有它，`FormulaHelper.CalculateMaxEncumbrance` 会被当成文件
@@ -50,7 +55,7 @@ _CODE_EXT = (
 #     UNCHECKABLE，无害）；收益是 `Some.Cs`、`Config.Json` 这类符号名不再被误判成文件。
 _CITATION_RE = re.compile(
     rf"(?<![\w.])(?P<path>(?:[\w.\-]+/)*[\w.\-]+\.(?:{_CODE_EXT}))(?!\w)"
-    r"(?::(?P<line>\d+)(?:-(?P<end>\d+))?)?"
+    r"(?::(?P<line>\d+)(?:-(?P<end>\d+))?(?P<more>(?:,\d+)*))?"
 )
 
 # 反引号里的标识符。用于第三级判据：答案说「在 `FormulaHelper.CalculateMaxEncumbrance` 里」，
@@ -59,6 +64,25 @@ _BACKTICK_RE = re.compile(r"`([^`\n]{1,120})`")
 _IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{2,}")
 # 句/子句边界。中文标点必须在列：答案主要是中文，只按 ". " 断句等于不断句。
 _BOUNDARY_RE = re.compile(r"[。；！？\n]|(?<=[a-z0-9)\]])\.\s")
+
+
+def _looks_like_path(raw: str) -> str | bool:
+    """反引号内容是否是路径（而非符号）。**按形状判断，不依赖 _CITATION_RE 是否恰好匹配。**
+
+    这一条是真机假失败的直接修复。原来的判据是 `_CITATION_RE.fullmatch(raw)`，也就是「只有能被完整
+    解析成出处的字符串才算路径」。但线上答案写出了 `PoisonEffect.cs:231,235,240,254` 这种逗号行号列表，
+    正则当时不认它，于是它不算路径 → 整个路径被按 `.` 和空白拆开 → `Assets`、`Scripts`、`Game`、
+    `MagicAndEffects` 这些**目录名**成了「答案声称此处存在的符号」，核对必然失败，产出假
+    symbol_mismatch。也就是说：判据的成立与否，取决于另一个正则的覆盖面是否完整——这种耦合本身就是缺陷。
+
+    所以改成形状判断：带路径分隔符，或以代码扩展名结尾，或含 glob 通配（`*Network*.cs` 是模式不是出处），
+    都不作为待核对符号。正则再漏掉哪种行号写法，都不会再让目录名变成符号。
+    """
+    if "/" in raw or "\\" in raw:
+        return True
+    if "*" in raw or "?" in raw:
+        return True
+    return bool(re.search(rf"\.(?:{_CODE_EXT})\b", raw))
 
 
 def _clause_span(text: str, pos: int, before: int, after: int) -> tuple[int, int]:
@@ -220,8 +244,8 @@ def nearby_symbols(text: str, pos: int, *, before: int = 400,
     scored: list[tuple[int, str, bool]] = []   # (distance, ident, is_primary)
     for m in _BACKTICK_RE.finditer(text, lo, hi):
         raw = m.group(1).strip()
-        if _CITATION_RE.fullmatch(raw):
-            continue  # 反引号里的路径不是符号
+        if _looks_like_path(raw):
+            continue  # 路径不是符号
         dist = abs(m.start() - pos)
         # 去掉调用写法的括号：`CalculateMaxEncumbrance(strength)`
         parts = [p for p in raw.replace("(", " ").replace(")", " ").split() if p]
