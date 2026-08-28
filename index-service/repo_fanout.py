@@ -57,6 +57,11 @@ def _payload_error(data: dict) -> str | None:
 
     除了显式的 `error` 键，还识别「isError=false 但 message 说定位失败」这种形态——
     见 _LOCATE_FAILURE_MARKERS 的说明。
+
+    **刻意不在这里判「调用图为空」**：merge_fanout 会丢弃报错的仓库，而「该符号确实没有调用者」
+    是完全合法的结果，把它当错误会让多仓路径静默丢掉整个仓库的结果。调用图缺失是在
+    http_bridge._note_empty_call_graph 里**附加提示**处理的，不是转成错误——两者的区别是
+    「让答案说得诚实」和「让结果消失」。
     """
     if "error" in data:
         return str(data.get("error"))

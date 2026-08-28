@@ -11,7 +11,7 @@ import json
 import pytest
 
 from codegraph_session import CodegraphSession
-from http_bridge import _parse_symbol_location, _pick_symbol_match
+from http_bridge import _align_paths, _parse_symbol_location, _pick_symbol_match
 from repo_fanout import merge_fanout
 
 
@@ -22,7 +22,6 @@ def test_search_truncation_is_surfaced() -> None:
     此前 total_matches 在整个 bridge 里出现 0 次，agent 只看到 20 条却无从知道被截断，
     于是答案写出「共找到 20 处」——一个具体、可信、且错的数字。
     """
-    from http_bridge import _align_paths
 
     raw = json.dumps({"results": [{"symbol": {"name": f"s{i}"}} for i in range(20)],
                       "total_matches": 67})
@@ -34,7 +33,6 @@ def test_search_truncation_is_surfaced() -> None:
 
 def test_no_truncation_note_when_all_matches_returned() -> None:
     """没被截断时不得加噪声——否则每条答案都会带一句无意义的提示。"""
-    from http_bridge import _align_paths
 
     raw = json.dumps({"results": [{"symbol": {"name": "s"}}], "total_matches": 1})
     out = json.loads(_align_paths(raw, "codegraph_symbol_search", index_root="/w", repo=""))
@@ -48,7 +46,6 @@ def test_call_site_line_semantics_are_labelled() -> None:
     载荷里此前只有一个裸 line，agent 只能理解成「调用在这一行」，照它写出的出处指向一个与调用
     无关的位置——出处看起来精确，实际错位，没有任何一环报错。
     """
-    from http_bridge import _align_paths
 
     raw = json.dumps({"callers": [{"symbol": {"name": "Caller",
                                               "location": {"file": "/w/a.cs", "line": 10}},
@@ -80,6 +77,65 @@ def test_exact_name_match_beats_semantic_first_result() -> None:
     picked = _pick_symbol_match(results, "to_container_path")
     assert picked is not None
     assert picked["symbol"]["name"] == "to_container_path"
+
+
+def test_empty_callers_with_engine_admission_is_annotated() -> None:
+    """调用图查不到边时，空列表不能被当成「没有调用者」这个事实结论。
+
+    实测形态：`get_callers` 对任何符号都返回 `callers: []`，而 `node_found` 为 true。强制全量
+    重解析后引擎称 `resolved 1057 cross-file call edges`，入库边数却只 +25，且符号 node_id 从
+    4781 变成 24190（旧边指向的 id 已失效）。引擎侧缺陷，本项目只能保证不把它表述成结论。
+    """
+    raw = json.dumps({
+        "callers": [],
+        "symbol_name": "DecreaseHealth",
+        "diagnostic": {
+            "node_found": True, "node_id": "24190", "total_edges_in_graph": 16422,
+            "note": "No callers found. This may indicate: (1) the function is not called "
+                    "anywhere, (2) the language parser doesn't extract call relationships, "
+                    "or (3) indexes need to be rebuilt.",
+        },
+    })
+    out = json.loads(_align_paths(raw, "codegraph_get_callers", index_root="/w", repo=""))
+    assert out["call_graph_unavailable"] is True
+    assert "不等于" in out["call_graph_note"], "必须明确否掉「没有调用者」这个读法"
+    assert "search_files" in out["call_graph_note"], "必须给出可用的替代路径"
+
+
+def test_genuinely_empty_callers_is_not_annotated() -> None:
+    """引擎没有承认调用关系可能缺失时，空列表就是正常结果，不能加噪声。
+
+    与上一个测试成对：如果两种情况都加提示，提示就失去了区分力，答案会对每个真正无调用者的
+    符号都附上「可能不准」——那和不加一样没用。
+    """
+    raw = json.dumps({"callers": [], "symbol_name": "PrivateHelper",
+                      "diagnostic": {"node_found": True, "note": "No callers found."}})
+    out = json.loads(_align_paths(raw, "codegraph_get_callers", index_root="/w", repo=""))
+    assert "call_graph_unavailable" not in out
+    assert "call_graph_note" not in out
+
+
+def test_zero_impact_is_marked_unverified() -> None:
+    """analyze_impact 的零影响必须标注为未经验证。
+
+    这是本项目最危险的输出形态：`risk_level: "low"` + `total_impacted: 0` 读起来是一个确定的
+    安全结论，而在调用图缺失的仓库上它对**任何**符号都成立。analyze_impact 不返回 diagnostic，
+    所以无法逐次判别真零还是图空——这个不可区分本身就是要说清的事。
+    """
+    raw = json.dumps({"symbol_id": "4781", "symbol_name": "DecreaseHealth",
+                      "impacted": [], "indirect_impacted": [], "direct_impacted": 0,
+                      "total_impacted": 0, "risk_level": "low", "breaking_changes": 0})
+    out = json.loads(_align_paths(raw, "codegraph_analyze_impact", index_root="/w", repo=""))
+    assert out["impact_zero_is_unverified"] is True
+    assert "影响范围为零" in out["call_graph_note"]
+
+
+def test_nonzero_impact_is_left_alone() -> None:
+    """有实际影响项时不加提示——那说明调用图在这个符号上是有效的。"""
+    raw = json.dumps({"symbol_id": "9", "impacted": [{"path": "a.cs"}],
+                      "indirect_impacted": [], "total_impacted": 1, "risk_level": "medium"})
+    out = json.loads(_align_paths(raw, "codegraph_analyze_impact", index_root="/w", repo=""))
+    assert "impact_zero_is_unverified" not in out
 
 
 def test_tied_scores_pick_deterministically() -> None:

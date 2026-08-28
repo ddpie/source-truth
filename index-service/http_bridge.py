@@ -241,6 +241,7 @@ def _align_paths(raw_json: str, tool_name: str, *, index_root: str, repo: str = 
     elif tool_name == "codegraph_get_callers":
         for item in data.get("callers", []) if isinstance(data.get("callers"), list) else []:
             fix_location(item)
+        _note_empty_call_graph(data, "callers")
     elif tool_name == "codegraph_analyze_impact":
         for key in ("impacted", "indirect_impacted", "direct_impacted"):
             seq = data.get(key)
@@ -248,7 +249,66 @@ def _align_paths(raw_json: str, tool_name: str, *, index_root: str, repo: str = 
                 for item in seq:
                     if isinstance(item, dict) and "path" in item:
                         item["path"] = _align_one(item.get("path"), index_root=index_root, repo=repo)
+        _note_empty_call_graph(data, "impact")
     return json.dumps(data, ensure_ascii=False)
+
+
+# 调用图为空时的措辞。这段注释是这个函数存在的全部理由，删掉它就没人知道为什么要加这个提示。
+#
+# 实测（daggerfall-unity，1040 个 .cs 文件）：`get_callers` 对**任何**符号都返回 `callers: []`，
+# 而 `diagnostic.node_found` 为 true——符号定位成功，只是查不到入边。`analyze_impact` 同样恒返回
+# `total_impacted: 0, risk_level: "low"`。
+#
+# 排查过程（每一步都否掉了一个更省事的假设）：
+#   * 解析失败不是主因 —— 失败率 22/1040（2%）
+#   * 图不是本轮建的   —— 日志 `Indexed 1029 files (0 parsed, 1029 skipped)`，
+#                          图来自 `Loaded persisted graph from previous session`
+#   * 强制全量重解析后 —— `1029 parsed, 0 skipped`，节点 18891→24164，引擎称
+#                          `Phase 2: resolved 1057 cross-file call edges`，
+#                          但入库边数仅 16397→16422（+25）。1057 条解析出来、25 条落库。
+#                          且重建后同一符号 node_id 从 4781 变成 24190——旧边指向的 id 已失效。
+#
+# 结论：引擎侧缺陷，不在本项目可修范围内。能做且必须做的只有一件事——**不要把「回答不了」
+# 表述成「答案是没有」**。空列表配上 `risk_level: low` 是本项目最危险的输出形态：它不是不准，
+# 而是语义上就是错的，且下游完全无从察觉。
+#
+# 这里刻意只加提示、不改成报错：符号确实可能真的没有调用者，把那种情况报成错误同样是撒谎。
+# 提示的作用是让答案能诚实地说「调用图查不到，已改用文本搜索确认」。
+_EMPTY_GRAPH_NOTE = (
+    "调用图中查不到该符号的调用关系，且引擎提示调用关系可能未被提取或索引需重建。"
+    "这**不等于**没有调用者/无影响——不要据此表述为「没有任何地方调用它」或「影响范围为零」。"
+    "请改用 search_files 做文本搜索来确认，并在答案里说明依据是文本搜索而非调用图。")
+
+
+def _note_empty_call_graph(data: dict, kind: str) -> None:
+    """当结果为空且引擎自己承认调用关系可能缺失时，附上提示。
+
+    放在 _align_paths 里而不是 merge_fanout 里：单仓路径直接返回 _align_paths 的结果，
+    根本不经过合并函数，而单仓恰恰是最常见的部署形态。同类错误本项目已犯过一次
+    （标量在多仓合并里被丢弃，而单仓正常——方向正好相反）。
+    """
+    diag = data.get("diagnostic")
+    note = str(diag.get("note") or "") if isinstance(diag, dict) else ""
+    # 引擎把「解析器不提取调用关系」「索引需重建」列为可能原因时，它自己就无法区分，我们也不能。
+    engine_admits = ("extract call relationships" in note) or ("need to be rebuilt" in note)
+
+    if kind == "callers":
+        empty = isinstance(data.get("callers"), list) and not data["callers"]
+        located = isinstance(diag, dict) and diag.get("node_found") is True
+        if empty and located and engine_admits:
+            data["call_graph_unavailable"] = True
+            data["call_graph_note"] = _EMPTY_GRAPH_NOTE
+        return
+
+    # analyze_impact 不返回 diagnostic，所以无法逐次判别。它的零影响与「图里没有边」在单次调用
+    # 里不可区分——这正是要说清的事，而不是可以沉默略过的事。
+    if data.get("symbol_id") is None:
+        return
+    zero = (data.get("total_impacted") == 0 and not (data.get("impacted") or [])
+            and not (data.get("indirect_impacted") or []))
+    if zero:
+        data["impact_zero_is_unverified"] = True
+        data["call_graph_note"] = _EMPTY_GRAPH_NOTE
 
 
 # symbol_search 的 score 下限。实测：精确匹配落在 0.75-0.97，纯语义噪声落在 0.33-0.43，
