@@ -105,11 +105,29 @@ def spans_by_session(spans: list[dict]) -> dict[str, list[dict]]:
 
 def evaluate(region: str, evaluator_id: str, session_spans: list[dict],
              trace_id: str | None) -> list[dict]:
+    """调 AgentCore 的 Evaluate。分数一律来自它返回的 evaluationResults，本脚本不自行计算。
+
+    输入**只给目标 trace 自己的 span**，不给整会话。这是对照实验逼出来的：
+
+      整会话 720 span + target  →  ModelContextWindowExceededError
+      只给该 trace 的 22 span   →  Grounded 1.0
+
+    原因是 LLM-as-judge 的提示词含 `{context}` 占位符，服务端把**整个会话的历史轮次**填进去。
+    黄金测试集的 36 条用例都落在同一个飞书会话里（一个会话 56 个 trace），于是越靠后的 trace
+    上下文越大，最终超过评委模型的窗口。两轮 72 次执行里证据纪律只回了 2 条结果，就是只有最早
+    那两条侥幸没超——这被我先前误记成「评估器几乎不产出」，实际是本脚本喂错了输入范围。
+
+    代码型评估器不受影响（它只看目标 trace），所以这个缺陷只在 LLM 评委上显形。
+    """
     import boto3
     from botocore.exceptions import ClientError
 
     client = boto3.client("bedrock-agentcore", region_name=region)
-    kw: dict = {"evaluatorId": evaluator_id, "evaluationInput": {"sessionSpans": session_spans}}
+    scoped = ([s for s in session_spans if (s.get("traceId") or s.get("trace_id")) == trace_id]
+              if trace_id else session_spans)
+    if not scoped:
+        scoped = session_spans
+    kw: dict = {"evaluatorId": evaluator_id, "evaluationInput": {"sessionSpans": scoped}}
     if trace_id:
         kw["evaluationTarget"] = {"traceIds": [trace_id]}
     try:
