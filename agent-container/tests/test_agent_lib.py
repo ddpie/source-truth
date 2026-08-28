@@ -873,3 +873,57 @@ def test_run_agent_stamps_traceid_on_logs(monkeypatch, caplog):
     assert retry_lines, "a cold-start retry must have been logged"
     assert any('"traceId": "st-abc123"' in line for line in retry_lines), \
         "the traceId must be stamped on the agent's retry log (unified field name: traceId, not trace)"
+
+
+def test_prompt_citation_examples_all_carry_a_full_path():
+    """提示词的**示例块**里给出的每条 `文件:行号` 都必须带路径分隔符。
+
+    这条比断言规则文字更要紧：对模型来说示例的教学力强于规则，而改这段之前示例写的正是
+    `Foo.cs:88`——一个裸文件名，恰好违反同一段里要求的「完整仓库相对路径」。b4 轮的
+    gs_prod_0014 就照着写出了 `DaggerfallInventoryWindow.cs:1417` 这种无法唯一定位的出处。
+
+    只看示例块，不扫全文：规则文字里必然出现被**禁止**的写法作为反例，而纯文本匹配分不清
+    「该照抄的样板」和「明令禁止的反例」——本项目已经在三处栽过同一个坑（IAM 校验器把注释里
+    的一句话当成策略文档、NACL 测试把断言挂在规则编号上）。判据要落在模型真正会照抄的那段。
+    """
+    import re
+
+    text = agent_lib.load_system_prompt()
+    # 判据落在**依据区示例行**上：`> - ` 开头、带 `文件:行号` 的那些行就是模型会照抄的样板。
+    #
+    # 不用围栏配对来切示例块——这份提示词里有 ```chart 之类的块和缩进围栏，`re.findall("```(.*?)```")`
+    # 会把散文段落错配成「块」，于是断言落在了空处：把示例改成裸文件名后测试依然全绿。
+    # 「够不到被测对象的测试，和正常代码一样绿」是本项目已经付过的学费，所以这条判据是反向验证过的。
+    sample_lines = [ln for ln in text.splitlines() if ln.lstrip().startswith("> - ")]
+    assert sample_lines, "提示词里应当有依据区的示例行，否则格式约定没有可照抄的样板"
+    cited: list[tuple[str, str]] = []
+    for ln in sample_lines:
+        cited += re.findall(r"`([^`\s]+\.(?:cs|py|ts|js|json|csv|xlsx)):(\d+)`", ln)
+    assert cited, "示例行里应当至少有一条带行号的出处"
+    bare = [f"{p}:{ln}" for p, ln in cited if "/" not in p]
+    assert not bare, f"示例出处缺少仓库相对路径，模型会照抄裸文件名：{bare}"
+
+
+def test_prompt_forbids_merged_and_continued_line_numbers():
+    """提示词必须明确禁掉「多行号压一条」和「路径写一次后只写 :行号」两种写法。
+
+    这两种写法都在真实答案里出现过，且每次都让出处核验器认不出来——把一个精确的答案判成
+    「无法核对」。修验证器只能追着形态跑；把格式定死才是根治。
+    """
+    text = agent_lib.load_system_prompt()
+    assert "一个行号一条" in text
+    assert "231,235,240,254" in text, "要给出被禁写法的具体反例，否则约束太抽象"
+    assert "路径写一次" in text
+
+
+def test_prompt_handles_an_unavailable_call_graph():
+    """提示词不能要求把调用图的空结果当结论。
+
+    改这条之前，提示词要求影响分析「要经 get_callers / analyze_impact 佐证」，而这两个工具
+    在实测的 C# 仓库上对任何符号都返回零（引擎报告解析出上千条跨文件调用边、入库仅个位数）。
+    指令指向坏工具比没有指令更糟，而且它与运行时已经注入的 call_graph_unavailable 提示互相矛盾。
+    """
+    text = agent_lib.load_system_prompt()
+    assert "call_graph_unavailable" in text
+    assert "影响范围为零" in text, "必须点名禁止这个具体表述"
+    assert "文本搜索" in text, "必须给出调用图不可用时的替代路径"
