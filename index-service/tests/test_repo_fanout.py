@@ -53,7 +53,11 @@ def test_analyze_impact_merges_all_impact_keys():
     out = json.loads(merge_fanout("codegraph_analyze_impact", [a, b]))
     assert [x["path"] for x in out["impacted"]] == ["repoA/a.cs", "repoB/b.cs"]
     assert [x["path"] for x in out["indirect_impacted"]] == ["repoA/i.cs"]
-    assert out["direct_impacted"] == []  # key always present even if no repo had it
+    # direct_impacted 不再出现在这里：引擎返回的是**整数**（直接受影响的节点数），不是列表。
+    # 这条断言原本写的是 `out["direct_impacted"] == []`，等于把缺陷本身固化成期望——真实载荷里
+    # 的 `15` 会被合并成 `[]`，影响面从「15 处」变成「无影响」。它现在按数值键相加，
+    # 由 tests/test_engine_contract.py::test_direct_impacted_is_summed_not_concatenated 覆盖。
+    assert "direct_impacted" not in out, "本例的两个仓都没给这个键，不应凭空造一个"
 
 
 # ── errored repos ─────────────────────────────────────────────────────────────

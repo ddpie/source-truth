@@ -225,6 +225,71 @@ def _align_paths(raw_json: str, tool_name: str, *, index_root: str, repo: str = 
     return json.dumps(data, ensure_ascii=False)
 
 
+# symbol_search 的 score 下限。实测：精确匹配落在 0.75-0.97，纯语义噪声落在 0.33-0.43，
+# 0.60 在两者之间且离两端都有余量。低于此值时宁可报「没找到」——拿语义近似的符号当答案，
+# 会让后续 get_callers 返回 [] 并被读成「确认没有调用者」，产出一个看起来确定的错误结论。
+_SCORE_FLOOR = 0.60
+
+
+def _pick_symbol_match(results: list, query: str) -> dict | None:
+    """从 symbol_search 的结果里挑出真正对应 ``query`` 的那一条。
+
+    为什么不能取 ``results[0]``：codegraph 0.20.1 的语义回退会把非精确匹配排在前面。实测
+    ``to_container_path`` 的首条结果是 ``test_backslash_path_normalized_to_forward_slash``，
+    于是后续 ``get_callers`` 返回 ``[]``——而空列表在回答里会被当成权威结论「没有任何地方调用它」。
+    答案完全错，却没有任何一环报错。
+
+    引擎其实给了三个判别信号，此前全被丢掉：
+      * ``match_reason`` —— 精确名字匹配时为 ``SymbolName``
+      * ``score``       —— 实测精确匹配 0.75-0.97，语义噪声 0.33-0.43，区分度足够
+      * ``symbol_name`` —— 结果里对查询词的回显，可用于交叉核对
+
+    判别顺序（强到弱）：
+      1. ``match_reason == "SymbolName"`` 且 ``symbol.name`` 精确等于 query
+      2. ``symbol.name`` 精确等于 query（引擎未给 match_reason 时的退路）
+      3. ``score`` 最高且 >= _SCORE_FLOOR 的一条
+    三条都不满足时返回 None——宁可报「没找到」，也不要拿一个语义近似的符号去当答案，
+    因为后者会静默产出错误结论。
+    """
+    exact_with_reason: list[dict] = []
+    exact_only: list[dict] = []
+    scored: list[tuple[float, dict]] = []
+    # 被判别信号明确否掉的结果。单独记账，因为末尾的「只有一条就接受」兜底**不能**把它们救回来——
+    # 测试抓到过这个漏洞：回显 symbol_name 与 symbol.name 不一致的唯一一条结果，被兜底放行了。
+    disqualified = 0
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        sym = item.get("symbol")
+        name = sym.get("name") if isinstance(sym, dict) else None
+        # symbol_name 是引擎对查询词的回显；与 symbol.name 不一致说明这条结果不是在讲这个符号
+        echoed = item.get("symbol_name")
+        if isinstance(echoed, str) and echoed and echoed != name:
+            disqualified += 1
+            continue
+        reason = item.get("match_reason")
+        if name == query:
+            (exact_with_reason if reason == "SymbolName" else exact_only).append(item)
+        raw_score = item.get("score")
+        if isinstance(raw_score, (int, float)):
+            scored.append((float(raw_score), item))
+
+    if exact_with_reason:
+        return exact_with_reason[0]
+    if exact_only:
+        return exact_only[0]
+    if scored:
+        best_score, best = max(scored, key=lambda t: t[0])
+        if best_score >= _SCORE_FLOOR:
+            return best
+        return None
+    # 引擎既没给 score 也没有精确匹配：只有一条结果时接受它（老版本引擎的行为），
+    # 多条时不猜——猜错会产出一个看起来确定的错误答案。被判别信号否掉过的结果不走这条兜底。
+    if disqualified:
+        return None
+    return results[0] if len(results) == 1 and isinstance(results[0], dict) else None
+
+
 def _parse_symbol_location(raw: str, query: str) -> tuple[str, int]:
     """Pure parse of a symbol_search payload → index-space (uri, 0-based line).
 
@@ -241,7 +306,11 @@ def _parse_symbol_location(raw: str, query: str) -> tuple[str, int]:
     # be `{"symbol": null}` or a non-dict; `.get("symbol", {})` only defaults a
     # MISSING key, so a null VALUE would make `None.get("location")` raise
     # AttributeError → mislabelled as an internal "{tool} failed".
-    top = results[0]
+    top = _pick_symbol_match(results, query)
+    if top is None:
+        raise ValueError(
+            f"no symbol matched query {query!r} closely enough "
+            f"({len(results)} semantic-only result(s) rejected)")
     sym = top.get("symbol") if isinstance(top, dict) else None
     loc = sym.get("location") if isinstance(sym, dict) else None
     index_file = loc.get("file") if isinstance(loc, dict) else None
