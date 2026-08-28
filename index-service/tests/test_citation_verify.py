@@ -475,3 +475,14 @@ def test_bare_line_binds_to_the_nearest_not_the_first_path() -> None:
     cites = [c for c in extract_citations(text) if c.line == 88]
     assert len(cites) == 1
     assert cites[0].path == "b/Two.cs"
+
+
+def test_slash_separated_bare_lines_are_all_verified() -> None:
+    """`:434/:443` 这种斜杠并列的裸行号，每个都要单独核对。
+
+    取自 b4 轮 gs_edge_0002 的答案原文。与逗号列表同类——只查第一个就等于放过其余，
+    这个错误在逗号列表上已经犯过一次，没有理由在斜杠形态上重犯。
+    """
+    text = "近战在 `Assets/Scripts/Game/Formulas/FormulaHelper.cs:538` 起算，技能档位见 `:434/:443`。"
+    lines = sorted(c.line for c in extract_citations(text) if c.line)
+    assert lines == [434, 443, 538], f"三个行号都要认出来，实际 {lines}"

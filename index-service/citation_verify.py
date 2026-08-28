@@ -269,7 +269,9 @@ def extract_citations(text: str) -> list[Citation]:
 #
 # 只把裸行号绑到**它前面最近出现过的路径**上，且要求该路径在同一段文本里出现过。不做跨段推断：
 # 猜错路径会产出一个自信的错误判定，比判不出来更糟——这一课在「路径候选歧义时放弃」那次已经付过。
-_BARE_LINE_RE = re.compile(r"`:(?P<line>\d+)(?:-(?P<end>\d+))?`")
+# 允许 `:434/:443` 这种斜杠并列（真实答案里出现过，与逗号列表同类）。每个行号都要单独核对，
+# 只查第一个就等于放过其余——这个错误在逗号列表上已经犯过一次。
+_BARE_LINE_RE = re.compile(r"`:(?P<line>\d+)(?:-(?P<end>\d+))?(?P<more>(?:/:\d+)*)`")
 
 
 def _bare_line_citations(text: str, found: list[Citation],
@@ -282,20 +284,26 @@ def _bare_line_citations(text: str, found: list[Citation],
         return []
     extra: list[Citation] = []
     for m in _BARE_LINE_RE.finditer(text):
-        line = int(m.group("line"))
-        if line < 1:
-            continue
         prior = [p for pos, p in anchors if pos < m.start()]
         if not prior:
             continue
         path = prior[-1]
-        key = (path, line)
-        if key in seen:
-            continue
-        seen.add(key)
         end_s = m.group("end")
-        extra.append(Citation(raw=f"{path}:{line}", path=path, line=line, start=m.start(),
-                              end_line=int(end_s) if end_s else None))
+        nums = [int(m.group("line"))]
+        for tok in (m.group("more") or "").split("/"):
+            tok = tok.strip().lstrip(":")
+            if tok.isdigit():
+                nums.append(int(tok))
+        for i, line in enumerate(nums):
+            if line < 1:
+                continue
+            key = (path, line)
+            if key in seen:
+                continue
+            seen.add(key)
+            extra.append(Citation(
+                raw=f"{path}:{line}", path=path, line=line, start=m.start(),
+                end_line=int(end_s) if end_s and i == 0 else None))
     return extra
 
 
