@@ -225,6 +225,12 @@ def _make_reader(client: BridgeClient):
     return _read
 
 
+# 有出处站不住时的分数惩罚系数。取 0.5 是要同时满足两个约束：
+#   * 必须落在及格线之下 —— 错一条就不该看起来像通过（label 也仍是 Fail）
+#   * 必须仍然可比 —— 46 条里错 3 条要排在 3 条里错 2 条之前，否则度量无法区分详尽与草率
+# 不取 0：那正是 b5 暴露的问题，全部记 0 会让指标朝质量的反方向走。
+_FAIL_PENALTY = 0.5
+
 # 错误响应用的非评分 label。
 #
 # 为什么必须带 label：钉住的 SDK 1.14.1 里 EvaluatorOutput.label 是必填字段，构造不出「只有 errorCode」
@@ -291,23 +297,33 @@ def lambda_handler(evaluation: EvaluatorInput, _context: Any = None) -> Evaluato
     read_map = files_actually_read(spans)
     not_read = sorted({c.path for c in cits if c.path not in read_map})
 
+    checkable = summary["total"] - summary["uncheckable"]
+    # 加权已核对分。三档权重不同，因为证明力不同：
+    #   符号确认 1.0 —— 那一行确实有答案声称的东西
+    #   仅外层   0.6 —— 引到了类而非成员，方向对但不够准
+    #   行存在   0.4 —— 只证明了行真实存在且非空，没证明它与结论相关
+    # 全部按 1.0 计会让「只给路径行号加中文说明」和「精确到符号」拿到同样的满分。
+    scored = (summary["confirmed"] + 0.6 * summary["partial"]
+              + 0.4 * summary["line_exists"])
+
     if report.failing:
-        label, value = "Fail", 0.0
+        # 有站不住的出处 —— 一定不是 Pass。但**不能一律记 0**。
+        #
+        # 这条是第五轮（b5）逼出来的。规定了出处格式之后，答案的引用数从 170 涨到 215、精确到符号的
+        # 从 96 涨到 143、无法核对的从 20 降到 7 —— 也就是答案变得更详尽、更可证伪。代价是不成立
+        # 从 3 涨到 12，而在「有一条不成立就整条 0 分」的规则下，桶一的通过数从 18/22 掉到 12/22。
+        #
+        # 于是指标朝质量的反方向走了：`gs_prod_0013` 有 46 条出处、3 条错，和「只有 1 条出处且错了」
+        # 拿同一个 0.0。一个分不出这两者的度量，不能用来判断答案好坏——它惩罚详尽。
+        #
+        # 所以改成按比例给分，再乘一个惩罚系数：错一条就拿不到及格线，但 46 条里错 3 条仍应排在
+        # 3 条里错 2 条之前。**label 依旧是 Fail**——对一个以「代码为唯一依据」立身的产品，
+        # 一条站不住的出处就是缺陷，不因为占比小而变成通过。
+        label = "Fail"
+        value = round(_FAIL_PENALTY * scored / checkable, 3) if checkable else 0.0
     elif summary["confirmed"] > 0 or summary["line_exists"] > 0 or summary["partial"] > 0:
         label = "Pass"
-        # 分数 = 加权已核对 / 可核对总数。三档权重不同，因为它们的证明力不同：
-        #   符号确认 1.0  —— 那一行确实有答案声称的东西
-        #   仅外层    0.6  —— 引到了类而非成员，方向对但不够准
-        #   行存在    0.4  —— 只证明了行真实存在且非空，没证明它与结论相关
-        # 全部按 1.0 计会让「答案只给路径行号加中文说明」和「答案精确到符号」拿到同样的满分，
-        # 那样这个分数就不再能区分答案质量了。
-        checkable = summary["total"] - summary["uncheckable"]
-        if checkable:
-            scored = (summary["confirmed"] + 0.6 * summary["partial"]
-                      + 0.4 * summary["line_exists"])
-            value = round(scored / checkable, 3)
-        else:
-            value = 1.0
+        value = round(scored / checkable, 3) if checkable else 1.0
     else:
         # 一条都没真正核对上。绝不能报 Pass —— 那会和「全部确认」产生同样的绿灯。
         label, value = "Unverified", None

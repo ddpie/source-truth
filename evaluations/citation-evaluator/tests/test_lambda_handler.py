@@ -349,3 +349,29 @@ def test_dotted_symbol_does_not_become_a_missing_file(mod, monkeypatch):
     spans = [make_llm_span(["`FormulaHelper.MaxEncumbrance` 见 Game/Formulas.cs:7。"])]
     out = mod.lambda_handler(event(spans))
     assert out["label"] == "Pass", out.get("explanation")
+
+
+def test_failing_score_still_ranks_thorough_above_sloppy() -> None:
+    """有出处站不住时仍按比例给分——一律记 0 会让度量惩罚详尽。
+
+    这条是第五轮（b5）逼出来的。规定出处格式后答案变得更详尽也更可证伪：桶一的引用数 170→215、
+    精确到符号的 96→143、无法核对的 20→7；代价是不成立 3→12。在「有一条不成立就整条 0 分」的
+    规则下，桶一通过数从 18/22 掉到 12/22，于是指标朝质量的反方向走了——`gs_prod_0013` 46 条出处
+    错 3 条，和「1 条出处且错了」拿同一个 0.0。
+
+    label 仍必须是 Fail：对一个以「代码为唯一依据」立身的产品，一条站不住的出处就是缺陷，
+    不因为占比小而变成通过。要修的只是**分数要可比**。
+    """
+    from lambda_function import _FAIL_PENALTY, Verdict
+
+    assert 0 < _FAIL_PENALTY < 1, "系数必须压到及格线下，又不能把分数抹平成 0"
+
+    def score(confirmed: int, failing: int) -> float:
+        total = confirmed + failing
+        return round(_FAIL_PENALTY * confirmed / total, 3)
+
+    thorough = score(confirmed=43, failing=3)    # 46 条里错 3
+    sloppy = score(confirmed=1, failing=2)       # 3 条里错 2
+    assert thorough > sloppy, f"详尽({thorough}) 必须排在草率({sloppy}) 之前"
+    assert thorough < 1.0, "有错就不能拿满分"
+    assert Verdict is not None
