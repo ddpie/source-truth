@@ -208,10 +208,36 @@ def _align_paths(raw_json: str, tool_name: str, *, index_root: str, repo: str = 
         call_site = item.get("call_site") if isinstance(item, dict) else None
         if isinstance(call_site, dict) and "file" in call_site:
             call_site["file"] = _align_one(call_site.get("file"), index_root=index_root, repo=repo)
+            # 标注这个 line 的真实含义。实测 0.20.1 的 call_site.line 指向**调用者的声明行**，
+            # 不是调用发生的那一行。此前载荷里只有一个裸 `line`，agent 只能理解成「调用在这一行」，
+            # 于是照它写出的出处指向一个与调用无关的位置——出处看起来精确，实际错位，而且没有任何
+            # 一环报错。黄金测试集里 symbol_partial（只命中外层类型）多半就是这么来的。
+            #
+            # 不改写 line 本身：那是引擎给的事实，改了会让排查更难。加一个同义但明确的字段，
+            # 并声明它的语义，让 agent 引用时知道自己在引什么。
+            if isinstance(call_site.get("line"), int):
+                call_site["caller_declaration_line"] = call_site["line"]
+                call_site["line_semantics"] = (
+                    "declaration line of the CALLING symbol, not the line where the call occurs")
 
     if tool_name == "codegraph_symbol_search":
         for item in data.get("results", []) if isinstance(data.get("results"), list) else []:
             fix_location(item)
+        # 引擎把 results 截断在 20 条，同时用 total_matches 报告真实命中数（实测见过 67）。
+        # 此前 total_matches 在整个 bridge 里出现 0 次，于是 agent 只看到 20 条却无从知道被截断，
+        # 答案会写成「共找到 20 处」——一个具体、可信、且错的数字。
+        #
+        # 不去补拉剩余结果：那要改引擎调用契约。这里只把「你看到的不是全部」这件事讲清楚，
+        # 让答案能诚实地说「至少 N 处，已列出前 20」。
+        results = data.get("results")
+        total = data.get("total_matches", data.get("totalMatches"))
+        if isinstance(results, list) and isinstance(total, int) and total > len(results):
+            data["truncated"] = True
+            data["shown"] = len(results)
+            data["total_matches"] = total
+            data["truncation_note"] = (
+                f"showing {len(results)} of {total} matches — the rest were not returned by the "
+                f"engine, so any count in the answer must be stated as 'at least {len(results)}'")
     elif tool_name == "codegraph_get_callers":
         for item in data.get("callers", []) if isinstance(data.get("callers"), list) else []:
             fix_location(item)

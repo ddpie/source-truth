@@ -15,6 +15,51 @@ from http_bridge import _parse_symbol_location, _pick_symbol_match
 from repo_fanout import merge_fanout
 
 
+# ---------------------------------------------------------------- 6. 截断与 call_site 语义
+def test_search_truncation_is_surfaced() -> None:
+    """引擎把 results 截断在 20 条并用 total_matches 报真实命中数（实测见过 67）。
+
+    此前 total_matches 在整个 bridge 里出现 0 次，agent 只看到 20 条却无从知道被截断，
+    于是答案写出「共找到 20 处」——一个具体、可信、且错的数字。
+    """
+    from http_bridge import _align_paths
+
+    raw = json.dumps({"results": [{"symbol": {"name": f"s{i}"}} for i in range(20)],
+                      "total_matches": 67})
+    out = json.loads(_align_paths(raw, "codegraph_symbol_search", index_root="/w", repo=""))
+    assert out["truncated"] is True
+    assert out["shown"] == 20 and out["total_matches"] == 67
+    assert "at least 20" in out["truncation_note"]
+
+
+def test_no_truncation_note_when_all_matches_returned() -> None:
+    """没被截断时不得加噪声——否则每条答案都会带一句无意义的提示。"""
+    from http_bridge import _align_paths
+
+    raw = json.dumps({"results": [{"symbol": {"name": "s"}}], "total_matches": 1})
+    out = json.loads(_align_paths(raw, "codegraph_symbol_search", index_root="/w", repo=""))
+    assert "truncation_note" not in out
+    assert out.get("truncated") is not True
+
+
+def test_call_site_line_semantics_are_labelled() -> None:
+    """call_site.line 指向**调用者的声明行**，不是调用发生的行。
+
+    载荷里此前只有一个裸 line，agent 只能理解成「调用在这一行」，照它写出的出处指向一个与调用
+    无关的位置——出处看起来精确，实际错位，没有任何一环报错。
+    """
+    from http_bridge import _align_paths
+
+    raw = json.dumps({"callers": [{"symbol": {"name": "Caller",
+                                              "location": {"file": "/w/a.cs", "line": 10}},
+                                   "call_site": {"file": "/w/a.cs", "line": 7}}]})
+    out = json.loads(_align_paths(raw, "codegraph_get_callers", index_root="/w", repo=""))
+    cs = out["callers"][0]["call_site"]
+    assert cs["caller_declaration_line"] == 7
+    assert "not the line where the call occurs" in cs["line_semantics"]
+    assert cs["line"] == 7, "不改写引擎给的事实，只补充语义"
+
+
 # ---------------------------------------------------------------- 1. results[0] 取错符号
 def test_exact_name_match_beats_semantic_first_result() -> None:
     """0.20.1 的语义回退会把非精确匹配排在前面。

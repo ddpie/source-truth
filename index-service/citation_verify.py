@@ -228,12 +228,28 @@ def extract_citations(text: str) -> list[Citation]:
         # 行号 0 或负数不是有效的 1-based 行号；当作没带行号处理，而不是当成有效值去读。
         if line is not None and line < 1:
             line = None
-        key = (path, line)
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(Citation(raw=m.group(0), path=path, line=line, start=m.start(),
-                            end_line=int(end_s) if end_s else None))
+        # 逗号列表里的**每一个**行号都要校验，不能只看第一个。
+        #
+        # 这是黄金测试集抓到的：`gs_replay_0002`（毒素在哪几行扣血）的答案写成
+        # `PoisonEffect.cs:231,235,240,254`，此前只核对 231，其余三个行号完全没查——而这条回放
+        # 用例存在的理由正是这种写法。修完正则能解析形态之后，它仍然报 Unverified，因为解析出来的
+        # `more` 组被捕获后从未使用。
+        lines: list[int | None] = [line]
+        more = m.group("more")
+        if line is not None and more:
+            for extra in more.split(","):
+                extra = extra.strip()
+                if extra.isdigit() and int(extra) >= 1:
+                    lines.append(int(extra))
+        for i, ln in enumerate(lines):
+            key = (path, ln)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(Citation(
+                raw=m.group(0) if i == 0 else f"{path}:{ln}",
+                path=path, line=ln, start=m.start(),
+                end_line=int(end_s) if end_s and i == 0 else None))
     return out
 
 

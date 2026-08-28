@@ -250,6 +250,27 @@ def test_line_beyond_real_total_is_still_out_of_range() -> None:
     assert "共 5000" in r.results[0].detail or "只有 5000" in r.results[0].detail
 
 
+def test_every_line_in_a_comma_list_is_verified() -> None:
+    """逗号列表里的每个行号都要成为一条待校验的出处，不能只看第一个。
+
+    黄金测试集抓到的：`gs_replay_0002`（毒素在哪几行扣血）答案写成
+    `PoisonEffect.cs:231,235,240,254`，修完正则能解析形态之后它**仍然**报 Unverified——因为
+    解析出的 `more` 组被捕获后从未使用，只有 231 进了校验。
+    """
+    cits = extract_citations("`a/b/PoisonEffect.cs:231,235,240,254`")
+    assert [c.line for c in cits] == [231, 235, 240, 254]
+    assert all(c.path == "a/b/PoisonEffect.cs" for c in cits)
+
+
+def test_comma_list_lines_are_each_checked_against_the_file() -> None:
+    """每个行号独立判定：有的成立、有的不成立时，两种结论都要出现。"""
+    src = "\n".join([f"line{i}" for i in range(1, 11)] + ["MaxEncumbrance here"])
+    r = verify("`MaxEncumbrance` 见 a/b.cs:11,3", reader_from({"a/b.cs": src}), window=0)
+    verdicts = {res.citation.line: res.verdict for res in r.results}
+    assert verdicts[11] is Verdict.SYMBOL_CONFIRMED
+    assert verdicts[3] is Verdict.SYMBOL_MISMATCH, "第 3 行没有该符号，必须单独判为不成立"
+
+
 def test_comma_separated_line_list_is_a_citation() -> None:
     """线上答案的真实写法：一个文件多个行号，逗号分隔。取第一个行号。
 
@@ -258,7 +279,11 @@ def test_comma_separated_line_list_is_a_citation() -> None:
     必然找不到 → 假 symbol_mismatch。
     """
     cits = extract_citations("`a/b/PoisonEffect.cs:231,235,240,254`")
-    assert len(cits) == 1
+    # 这条原本断言「算 1 条出处、取第一个行号」——那是修复的中间态：正则能解析这个形态了，
+    # 但只有 231 进校验，于是 gs_replay_0002 仍报 Unverified。现在每个行号各成一条出处，
+    # 由 test_every_line_in_a_comma_list_is_verified 覆盖。这里保留的是它最初要守的性质：
+    # 这个形态必须被识别为出处，而不是被拆成目录名当符号。
+    assert len(cits) == 4
     assert cits[0].path == "a/b/PoisonEffect.cs"
     assert cits[0].line == 231
 
