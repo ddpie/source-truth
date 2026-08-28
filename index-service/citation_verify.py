@@ -250,7 +250,53 @@ def extract_citations(text: str) -> list[Citation]:
                 raw=m.group(0) if i == 0 else f"{path}:{ln}",
                 path=path, line=ln, start=m.start(),
                 end_line=int(end_s) if end_s and i == 0 else None))
+    out.extend(_bare_line_citations(text or "", out, seen))
+    out.sort(key=lambda c: c.start)
     return out
+
+
+# 裸行号形态：`路径` 写一次，随后用独立的 `:231` `:235` 逐个列行号。
+#
+# 这是同一条回放用例（gs_replay_0002，「毒素在哪几行扣血」）第二次逼出的修改，而第二次比第一次
+# 更说明问题。第一次答案写的是 `PoisonEffect.cs:231,235,240,254`，于是正则学会了逗号列表；
+# 下一轮同一个问题的答案改写成：
+#
+#     `Assets/.../PoisonEffect.cs` 的 `IncrementPoisonEffects()` …… `:231` …… `:235` ……
+#
+# 于是又报 Unverified——不是因为答案变差了（四个行号依然精确），而是因为**答案的引用写法本身
+# 跨轮在变**，这正是已经查实的模型层波动。所以判据不能一次只认一种写法：认不出来的代价是
+# 把一个精确的答案判成「无法核对」，也就是用测量误差冒充质量问题。
+#
+# 只把裸行号绑到**它前面最近出现过的路径**上，且要求该路径在同一段文本里出现过。不做跨段推断：
+# 猜错路径会产出一个自信的错误判定，比判不出来更糟——这一课在「路径候选歧义时放弃」那次已经付过。
+_BARE_LINE_RE = re.compile(r"`:(?P<line>\d+)(?:-(?P<end>\d+))?`")
+
+
+def _bare_line_citations(text: str, found: list[Citation],
+                         seen: set[tuple[str, int | None]]) -> list[Citation]:
+    """把 `:NNN` 这类裸行号归到前文最近的那个路径上。"""
+    # 文本里出现过的路径及其位置，用于「最近的前文路径」判断。
+    anchors: list[tuple[int, str]] = sorted(
+        {(c.start, c.path) for c in found if c.path}, key=lambda t: t[0])
+    if not anchors:
+        return []
+    extra: list[Citation] = []
+    for m in _BARE_LINE_RE.finditer(text):
+        line = int(m.group("line"))
+        if line < 1:
+            continue
+        prior = [p for pos, p in anchors if pos < m.start()]
+        if not prior:
+            continue
+        path = prior[-1]
+        key = (path, line)
+        if key in seen:
+            continue
+        seen.add(key)
+        end_s = m.group("end")
+        extra.append(Citation(raw=f"{path}:{line}", path=path, line=line, start=m.start(),
+                              end_line=int(end_s) if end_s else None))
+    return extra
 
 
 def nearby_symbols(text: str, pos: int, *, before: int = 400,

@@ -444,3 +444,34 @@ def test_failing_verdicts_make_report_not_ok(v: Verdict) -> None:
 
     r = Report(results=[CitationResult(Citation("x", "a.cs", 1, 0), v)])
     assert not r.ok
+
+
+def test_bare_line_numbers_bind_to_the_nearest_prior_path() -> None:
+    """路径写一次、随后用独立 `:231` 列行号——这是真实答案的写法，必须能核对。
+
+    取自 b4 轮 gs_replay_0002 的答案原文。同一条回放用例第二次逼出修改，而第二次更说明问题：
+    第一轮答案写的是 `PoisonEffect.cs:231,235,240,254`（逗号列表），下一轮同一个问题改成了
+    路径 + 裸行号。四个行号依然精确，但验证器认不出来就报 Unverified——那是用测量误差冒充质量
+    问题。答案的引用写法本身跨轮在变，这正是已查实的模型层波动。
+    """
+    text = ("毒素在 `Assets/Scripts/Game/MagicAndEffects/Effects/Poisons/PoisonEffect.cs` 的 "
+            "`IncrementPoisonEffects()` 里按档位扣血：一档 `:231` 调用 `Random.Range(2,12)`，"
+            "二档 `:235`，三档 `:240`，四档 `:254`。")
+    cites = extract_citations(text)
+    lines = sorted(c.line for c in cites if c.line)
+    assert lines == [231, 235, 240, 254], f"四个行号都要认出来，实际 {lines}"
+    assert all(c.path.endswith("PoisonEffect.cs") for c in cites if c.line), \
+        "裸行号必须绑到前文最近的路径"
+
+
+def test_bare_line_without_any_prior_path_is_ignored() -> None:
+    """前文没有路径时，裸行号不能凭空绑一个——猜错路径会产出自信的错误判定。"""
+    assert extract_citations("大概在 `:231` 附近") == []
+
+
+def test_bare_line_binds_to_the_nearest_not_the_first_path() -> None:
+    """答案提到多个文件时，裸行号归属最近的那个，而不是第一个。"""
+    text = "先看 `a/One.cs`，再看 `b/Two.cs`，其中 `:88` 是关键。"
+    cites = [c for c in extract_citations(text) if c.line == 88]
+    assert len(cites) == 1
+    assert cites[0].path == "b/Two.cs"
