@@ -82,6 +82,42 @@ def test_exact_name_match_beats_semantic_first_result() -> None:
     assert picked["symbol"]["name"] == "to_container_path"
 
 
+def test_tied_scores_pick_deterministically() -> None:
+    """同分并列时必须每次挑同一个，否则同一问题两次问得到不同出处。
+
+    实测（同一查询连调 4 次）：codegraph 的 score 完全稳定（`MaxEncumbrance` 恒 1.0、
+    `GetMaxEncumbrance` 恒 0.8875685334205627、total_matches 恒 40），变的只是**同分项的相对顺序**
+    ——`MaxEncumbrance` 与 `EncumbranceMax` 同为 1.0，谁排第一每次都可能不同。
+    对一个宣称「代码是唯一依据」的系统，答案不可复现是实质问题。
+    """
+    a = {"symbol": {"name": "EncumbranceMax", "location": {"file": "/w/b.cs", "line": 9}},
+         "score": 0.72}
+    b = {"symbol": {"name": "CarryWeightMax", "location": {"file": "/w/a.cs", "line": 3}},
+         "score": 0.72}
+    # 两种输入顺序（模拟引擎的随机轮换）必须得到同一个结果
+    first = _pick_symbol_match([a, b], "SomethingElse")
+    second = _pick_symbol_match([b, a], "SomethingElse")
+    assert first is not None and second is not None
+    assert first["symbol"]["name"] == second["symbol"]["name"]
+    assert first["symbol"]["name"] == "CarryWeightMax", "按符号名排序，C 在 E 之前"
+
+
+def test_exact_match_is_stable_regardless_of_engine_order() -> None:
+    """精确名匹配是主要防线：无论引擎把它排第几都要被挑出来。
+
+    这是 results[0] 缺陷的真正成因——`EncumbranceMax` 会在约一半的调用里排在
+    `MaxEncumbrance` 前面，而两者 score 都是 1.0，盲取第一个就是抛硬币。
+    """
+    exact = {"symbol": {"name": "MaxEncumbrance", "location": {"file": "/w/F.cs", "line": 75}},
+             "score": 1.0, "match_reason": "SymbolName"}
+    tie = {"symbol": {"name": "EncumbranceMax", "location": {"file": "/w/G.cs", "line": 12}},
+           "score": 1.0, "match_reason": "SymbolName"}
+    for order in ([exact, tie], [tie, exact]):
+        picked = _pick_symbol_match(order, "MaxEncumbrance")
+        assert picked is not None
+        assert picked["symbol"]["name"] == "MaxEncumbrance"
+
+
 def test_semantic_only_results_are_rejected_not_guessed() -> None:
     """全是语义近似、没有精确匹配时，宁可报「没找到」也不猜。
 

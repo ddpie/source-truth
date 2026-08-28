@@ -257,6 +257,24 @@ def _align_paths(raw_json: str, tool_name: str, *, index_root: str, repo: str = 
 _SCORE_FLOOR = 0.60
 
 
+def _stable_pick(candidates: list[dict]) -> dict | None:
+    """在并列的候选里做**确定性**选择：按 (符号名, 文件, 行号) 排序取第一个。
+
+    引擎在同分时不保证顺序（实测同一查询 4 次，同为 1.0 的两个符号顺序来回换），所以不能依赖
+    "引擎给的第一个"——那等于抛硬币。排序键取符号自身的标识信息，同一份索引下恒定。
+    """
+    if not candidates:
+        return None
+
+    def key(item: dict) -> tuple[str, str, int]:
+        sym = item.get("symbol") if isinstance(item.get("symbol"), dict) else {}
+        loc = sym.get("location") if isinstance(sym.get("location"), dict) else {}
+        return (str(sym.get("name") or ""), str(loc.get("file") or ""),
+                int(loc.get("line")) if isinstance(loc.get("line"), int) else 0)
+
+    return sorted(candidates, key=key)[0]
+
+
 def _pick_symbol_match(results: list, query: str) -> dict | None:
     """从 symbol_search 的结果里挑出真正对应 ``query`` 的那一条。
 
@@ -301,13 +319,25 @@ def _pick_symbol_match(results: list, query: str) -> dict | None:
             scored.append((float(raw_score), item))
 
     if exact_with_reason:
-        return exact_with_reason[0]
+        return _stable_pick(exact_with_reason)
     if exact_only:
-        return exact_only[0]
+        return _stable_pick(exact_only)
     if scored:
-        best_score, best = max(scored, key=lambda t: t[0])
+        best_score = max(sc for sc, _ in scored)
         if best_score >= _SCORE_FLOOR:
-            return best
+            # 同分并列时必须有确定性的次级排序，否则同一查询每次挑到不同符号。
+            #
+            # 实测（同一查询连调 4 次）：codegraph 的 score 本身完全稳定——`MaxEncumbrance` 恒为
+            # 1.0、`GetMaxEncumbrance` 恒为 0.8875685334205627、total_matches 恒为 40。变的只是
+            # **同分项的相对顺序**：`MaxEncumbrance` 与 `EncumbranceMax` 同为 1.0，谁排第一每次都可
+            # 能不同；`DecreaseMagnitude`/`DecreaseMagicka`/`DecreaseFatigue` 同为 0.5603286027908325，
+            # 三者顺序随机轮换。像是底层用了无序容器或并行归并。
+            #
+            # 后果不是"排序不好看"：没有精确名匹配、只能靠最高分时，答案会跨轮指向不同符号，
+            # 于是同一个问题问两次得到不同出处。对一个宣称"代码是唯一依据"的系统，答案不可复现
+            # 是实质问题。按符号名排序打破并列，代价是可能不选引擎"本来"排第一的那个——但引擎
+            # 在同分时并没有稳定的"第一个"。
+            return _stable_pick([it for sc, it in scored if sc == best_score])
         return None
     # 引擎既没给 score 也没有精确匹配：只有一条结果时接受它（老版本引擎的行为），
     # 多条时不猜——猜错会产出一个看起来确定的错误答案。被判别信号否掉过的结果不走这条兜底。
