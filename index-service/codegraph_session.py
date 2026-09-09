@@ -132,6 +132,8 @@ class CodegraphSession:
         # serve when this is False (never answers on a broken/empty index).
         self._healthy = False
         self._health_detail = "starting"
+        # 向量索引降级说明；None 表示正常。与 _health_detail 分开，因为降级不是不健康。
+        self._embedding_detail: str | None = None
         # Count CONSECUTIVE restarts that were BLOCKED (old thread won't die, or the
         # orphan set couldn't be verified). Such a block is usually PERSISTENT — the
         # worker thread is wedged in a C call join() can't interrupt — so every later
@@ -390,7 +392,51 @@ class CodegraphSession:
         warning = str(data.get("warning", ""))
         if "0 nodes" in warning or "only 0" in warning:
             return True, "graph has 0 nodes (corrupt/unindexed)"
+        # STRUCTURAL check, because the substring test above is the engine's wording and nothing
+        # else. If codegraph-server rewords that warning or stops emitting it, the only
+        # empty-graph assertion in the system silently stops working — and the symptom is the bot
+        # answering 'not found' forever with /health green. When the response reports a count, use
+        # it; a reported zero is unambiguous regardless of wording.
+        for count_key in ("nodeCount", "node_count", "totalNodes", "total_nodes", "entityCount"):
+            if count_key in data:
+                try:
+                    if int(data[count_key]) <= 0:
+                        return True, f"graph reports {count_key}=0 (corrupt/unindexed)"
+                except (TypeError, ValueError):
+                    pass
+                break
         return False, "ok"
+
+    # 引擎用 embedding_status 报告向量索引的构建状态。此前这个字段在整个 index-service 里
+    # 出现 **0 次**——也就是完全没人读。
+    #
+    # 后果不是崩溃，而是一段静默的降级窗口：向量索引还在建时语义匹配不可用，检索质量明显下降，
+    # 但 /health 照样 200、日志里没有任何痕迹，运维看不到自己正处在降级状态，只会看到「机器人
+    # 今天答得不太准」。
+    #
+    # 它不能计入 _classify 的返回值：那会让 /health 变红并触发重启，而降级期间服务是可用的，
+    # 重启只会让索引重新开始建。所以单独记录，由 /health 以附加字段暴露。
+    _DEGRADED_EMBEDDING_STATES = ("building", "pending", "in_progress", "indexing",
+                                  "not_ready", "unavailable", "failed", "error")
+
+    @classmethod
+    def _embedding_degradation(cls, data: dict) -> str | None:
+        """从响应载荷里读 embedding_status；处于降级态时返回说明，正常时返回 None。"""
+        raw = data.get("embedding_status") or data.get("embeddingStatus")
+        if raw is None:
+            return None
+        if isinstance(raw, dict):
+            # 形如 {"status": "building", "progress": 0.4}
+            state = str(raw.get("status") or raw.get("state") or "").lower()
+            extra = raw.get("progress")
+            if state and state in cls._DEGRADED_EMBEDDING_STATES:
+                return (f"embedding index {state}"
+                        + (f" (progress={extra})" if extra is not None else ""))
+            return None
+        state = str(raw).lower()
+        if state in cls._DEGRADED_EMBEDDING_STATES:
+            return f"embedding index {state}"
+        return None
 
     @property
     def healthy(self) -> bool:
@@ -404,6 +450,15 @@ class CodegraphSession:
     @property
     def health_detail(self) -> str:
         return self._health_detail
+
+    @property
+    def embedding_detail(self) -> str | None:
+        """向量索引的降级说明；None 表示正常。
+
+        /health 应把它作为**附加**字段暴露，而不是让它影响 200/503：降级期间检索质量下降但服务
+        可用，误报不健康会触发重启，而重启让索引从头再建，反而延长降级窗口。
+        """
+        return self._embedding_detail
 
     async def wait_ready(self, timeout: float = 120.0) -> bool:
         """Block (cooperatively) until warmup finishes, then report health.
@@ -449,7 +504,23 @@ class CodegraphSession:
             self._healthy = False
             self._health_detail = reason
             raise IndexUnhealthy(reason)
-        return getattr(result.content[0], "text", "")
+        text = getattr(result.content[0], "text", "")
+        # 记录向量索引的降级状态。**不影响 healthy**——降级期间服务可用，把它算成不健康会触发
+        # 重启，而重启只会让索引从头再建。这里只是让这段窗口可见：此前 embedding_status 在整个
+        # index-service 里出现 0 次，于是语义匹配不可用的时段完全没有痕迹，/health 仍是 200。
+        try:
+            payload = json.loads(text) if text else None
+        except (ValueError, TypeError):
+            payload = None
+        if isinstance(payload, dict):
+            degraded = self._embedding_degradation(payload)
+            if degraded != self._embedding_detail:
+                self._embedding_detail = degraded
+                if degraded:
+                    logger.warning("codegraph embedding degraded: %s (tool=%s)", degraded, name)
+                else:
+                    logger.info("codegraph embedding index ready again (tool=%s)", name)
+        return text
 
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> str:
         """Relay one tool call into the resident worker; self-heals once on death.

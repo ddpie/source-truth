@@ -29,6 +29,7 @@ from time import perf_counter
 from typing import Any
 
 import path_align
+import served_paths
 from perf import perf_entry
 from text_decode import decode_bytes
 
@@ -298,6 +299,11 @@ def read_table(requested: str, *, local_root: str, repo: str = "") -> dict[str, 
     namespace. Raises ValueError on a bad/escaping path, a missing file, or an
     unsupported extension (so the bridge reports a clean, actionable error)."""
     t0 = perf_counter()
+    # Same default-deny filter as read_file: an .sqlite/.db under .home/ is the graph store, and
+    # a parser is the last place to hand attacker-controlled internal state to.
+    _withheld = served_paths.withheld_reason(requested)
+    if _withheld:
+        raise ValueError(_withheld)
     local_path = path_align.to_local_path(requested, local_root=local_root, repo=repo)
     if not os.path.isfile(local_path):
         raise ValueError(f"not a readable file: {requested!r}")

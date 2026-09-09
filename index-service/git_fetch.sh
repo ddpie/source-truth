@@ -25,6 +25,19 @@ if [ -z "$SUBDIR" ] || [ -z "$URL" ] || [ -z "$DEST" ]; then
 fi
 fail() { echo "GIT_FETCH_FAILED: $SUBDIR $*" >&2; exit 1; }
 
+# SERIALIZE PER REPO. Two callers touch the same worktree: activate_project.sh runs this directly,
+# and index-refresh-<subdir>.timer runs it via glossary_refresh.sh — the timer can fire DURING an
+# activation. Concurrent `git fetch` / `reset --hard` on one worktree collide on .git/index.lock and
+# can leave a partially-reset tree that the codegraph watcher then indexes. The lock lives NEXT to
+# the repo (not inside it) so it also covers the clone case, where $DEST does not exist yet.
+# Blocking with a bound, not `-n`: an overlapping refresh should WAIT for the activation, not fail
+# the timer. 900s is longer than any clone/fetch we expect; hitting it means something is wedged and
+# a loud failure is correct.
+mkdir -p "$(dirname "$DEST")" || fail "mkdir parent of dest failed"
+FETCH_LOCK="$(dirname "$DEST")/.$(basename "$DEST").git-fetch.lock"
+exec 8>"$FETCH_LOCK" || fail "cannot open fetch lock $FETCH_LOCK"
+flock -w 900 8 || fail "timed out waiting for the per-repo git lock ($FETCH_LOCK) — another fetch/clone is stuck"
+
 # Non-interactive: never block on a credential/host-key prompt (would hang the timer).
 export GIT_TERMINAL_PROMPT=0
 
@@ -52,8 +65,27 @@ guard_graph_dirs() {  # $1 = repo dir (must contain .git)
 # changed files (the glossary's incremental path). Empty on a fresh clone → caller does a
 # full build. Full sha (not --short) so `git diff old..new` is unambiguous.
 OLD_SHA=""
+# A dest that EXISTS but is NOT a git repo used to fall through to `git clone <url> "$DEST"`, which
+# refuses a non-empty destination — failing every 300s forever with "clone failed". That happens on
+# a source:local → source:git flip and after a half-failed clone. Converge in place instead:
+# init + remote add, then the normal fetch/reset path below. In place, NOT moved aside: the live
+# graph (.codegraph/ and .home/, including graph.db) lives INSIDE $DEST and the project's bridge has
+# it open read-write — moving the directory would pull the store out from under the writer. `reset
+# --hard` only touches tracked paths, so the graph dirs survive (and guard_graph_dirs re-excludes
+# them right after).
+if [ -d "$DEST" ] && [ ! -d "$DEST/.git" ] && [ -n "$(ls -A "$DEST" 2>/dev/null)" ]; then
+  echo "git_fetch: $SUBDIR — $DEST exists but is not a git repo; initializing it in place (keeps the live graph dirs)"
+  git -C "$DEST" init --quiet || fail "git init on existing non-repo dest failed"
+  git -C "$DEST" remote add origin "$URL" 2>/dev/null \
+    || git -C "$DEST" remote set-url origin "$URL" \
+    || fail "could not set origin on initialized dest"
+fi
 if [ -d "$DEST/.git" ]; then
-  OLD_SHA="$(git -C "$DEST" rev-parse HEAD 2>/dev/null || echo '')"
+  # --verify --quiet: on an UNBORN HEAD (a dir we just `git init`ed above, or a half-failed clone)
+  # a plain `rev-parse HEAD` prints the literal string "HEAD" on stdout and exits non-zero, so the
+  # `|| echo ''` fallback never runs and OLD_SHA becomes "HEAD" — which the caller would then feed
+  # to `git diff HEAD..<sha>` instead of treating it as "no previous state → full build".
+  OLD_SHA="$(git -C "$DEST" rev-parse --verify --quiet HEAD 2>/dev/null || echo '')"
   git -C "$DEST" fetch --quiet --prune origin || fail "fetch failed"
   guard_graph_dirs "$DEST"
   if [ -n "$REF" ]; then
@@ -68,11 +100,29 @@ if [ -d "$DEST/.git" ]; then
     [ -n "$DEF" ] || fail "cannot determine origin default branch"
     git -C "$DEST" reset --hard --quiet "origin/$DEF" || fail "reset to default branch '$DEF' failed"
   fi
+  # `reset --hard` only rewrites TRACKED paths, so files that were untracked in a previous state
+  # (or left by a killed clone) stayed in the worktree forever and codegraph kept indexing them —
+  # the graph then answers with code that is no longer in the repo. Remove them.
+  # NO -x, and an explicit -e for each graph dir: the live graph (.codegraph/, .home/ with graph.db
+  # and .build-ok) is IGNORED via .git/info/exclude, and `clean -fd` without -x never touches
+  # ignored paths — the -e flags are the belt to that suspenders. .snapshot-time is ops state written
+  # by reindex_local_repo.sh. Non-fatal: a failed cleanup must not fail an otherwise good refresh.
+  git -C "$DEST" clean -fdq \
+      -e '/.codegraph/' -e '/.home/' -e '/.snapshot-time' \
+    || echo "git_fetch: WARN $SUBDIR — git clean reported an error (stale untracked files may remain)" >&2
 else
   mkdir -p "$(dirname "$DEST")" || fail "mkdir parent of dest failed"
   if [ -n "$REF" ]; then
-    # Try a shallow-ish clone at the branch; if --branch doesn't match a branch (e.g. a tag or
-    # sha), fall back to a plain clone then checkout the ref.
+    # FULL clone at the branch (the old comment said "shallow-ish" — it never was: there is no
+    # --depth / --filter here, so this pulls COMPLETE history). Kept full ON PURPOSE: the
+    # incremental glossary path diffs OLD_SHA..NEW_SHA on every refresh, and a shallow or
+    # blobless clone can lose OLD_SHA (or need a network round trip per blob), which silently
+    # degrades every refresh into a full rebuild. COST, unbudgeted and worth watching: full
+    # history for N repos shares one 30GiB root volume with every graph.db. If disk becomes the
+    # binding constraint, the change is `--filter=blob:none` + sparse checkout AND a matching
+    # change to the diff path — not a bare --depth 1.
+    # If --branch doesn't match a branch (e.g. a tag or sha), fall back to a plain clone then
+    # checkout the ref.
     if git clone --quiet --branch "$REF" "$URL" "$DEST" 2>/dev/null; then
       :
     else
@@ -85,9 +135,9 @@ else
   guard_graph_dirs "$DEST"
 fi
 
-HEAD_SHA="$(git -C "$DEST" rev-parse --short HEAD 2>/dev/null || echo '?')"
+HEAD_SHA="$(git -C "$DEST" rev-parse --verify --quiet --short HEAD 2>/dev/null || echo '?')"
 echo "git_fetch ok: $SUBDIR @ $HEAD_SHA"
 # Machine-parseable line for the refresh unit: old (pre-reset) + new (post-reset) full shas.
 # OLD empty => fresh clone => caller should do a FULL glossary build; OLD==NEW => no-op.
-NEW_SHA="$(git -C "$DEST" rev-parse HEAD 2>/dev/null || echo '')"
+NEW_SHA="$(git -C "$DEST" rev-parse --verify --quiet HEAD 2>/dev/null || echo '')"
 echo "git_fetch_shas: $SUBDIR OLD=$OLD_SHA NEW=$NEW_SHA"

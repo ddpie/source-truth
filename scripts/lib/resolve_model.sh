@@ -31,6 +31,7 @@
 model_basename() {
   local m="$1"
   m="${m##*anthropic.}"   # drop everything up to and including the last 'anthropic.'
+  m="${m##*openai.}"
   echo "$m"
 }
 
@@ -42,7 +43,7 @@ rank_profiles() {
   local p geo="" glob=""
   for p in "$@"; do
     # Must be the SAME model: the id ends with the basename (e.g. us.anthropic.claude-opus-4-8).
-    [[ "$p" == *"$base" ]] || continue
+    [[ "$(model_basename "$p")" == "$base" ]] || continue
     case "$p" in
       global.*) glob="$p" ;;
       *)        [[ -z "$geo" ]] && geo="$p" ;;   # first geo/in-region match wins

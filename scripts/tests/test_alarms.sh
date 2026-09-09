@@ -24,7 +24,27 @@ TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 out="$(python3 "$RENDER" "$THRESH" --namespace SourceTruth/Gateway 2>"$TMP/err")"; rc=$?
 check "real thresholds render (rc 0)" "$rc"
 n="$(printf '%s\n' "$out" | grep -c . || true)"
-[[ "$n" -eq 4 ]]; check "4 enabled alarms rendered (got $n)" $?
+# Derive the expectation from the config rather than hardcoding a number. A literal count is the
+# brittle shape this suite exists to avoid: it fails on every legitimate alarm addition (it did,
+# when four alarms were added for the failure modes that had none) while telling you nothing about
+# whether the RENDERER is correct. What matters is "every declared alarm renders exactly once".
+want="$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))["alarms"]))' "$THRESH")"
+[[ "$n" -eq "$want" ]]; check "every declared alarm rendered (want $want, got $n)" $?
+# And each rendered alarm must name a metric that some filter actually creates — an alarm whose
+# metric is never emitted sits in INSUFFICIENT_DATA forever and never fires.
+printf '%s\n' "$out" | python3 -c '
+import json, sys, pathlib
+root = pathlib.Path(sys.argv[1])
+filters = {m["name"] for m in json.loads((root / "infra/monitoring/queries/metric-filters/alarm-metrics.json").read_text())["metrics"]}
+missing = []
+for line in sys.stdin:
+    if not line.strip():
+        continue
+    a = json.loads(line)
+    if a["metricName"] not in filters:
+        missing.append((a["alarmName"], a["metricName"]))
+assert not missing, "alarm(s) whose metric has no backing filter: %r" % (missing,)
+' "$ROOT"; check "每条告警的 metric 都有对应的 metric-filter（否则永远 INSUFFICIENT_DATA）" $?
 # AnswerFailedBurst must watch the DENSE AnswerFailedTotal (not the sparse dimensioned
 # AnswerFailed) so a burst alarm evaluates stably — the documented gap, now closed.
 printf '%s\n' "$out" | python3 -c '

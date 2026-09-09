@@ -7,6 +7,7 @@
  */
 
 import { sanitizeAnswerText, renderFinalText, clampForCard, MAX_CARD_BODY_CHARS, MAX_CARD_EVIDENCE_CHARS } from "../src/sanitize-answer";
+import { extractFollowUps } from "../src/extract-followups";
 
 const REDACTED = "[已隐藏]";
 
@@ -94,6 +95,144 @@ describe("order contract", () => {
     const out = sanitizeAnswerText(long, { mode: "live" });
     expect(out.body.length).toBeLessThan(MAX_CARD_BODY_CHARS + 200);
     expect(out.body).toContain("已截断");
+  });
+});
+
+describe.each(["live", "final"] as const)("decorated follow-up pipeline (%s)", (mode) => {
+  it.each([
+    "> 💡 你可能还想问：",
+    "> **💡 你可能还想问：**",
+    "> ### 💡 **你可能还想问**：",
+  ])("keeps raw-answer buttons when quoted evidence is cleaned: %s", (marker) => {
+    // Production regression: splitEvidence removes the quote prefix before
+    // stripping, while button extraction consumes the original quoted answer.
+    const answer = [
+      "结论：负重上限由力量决定。",
+      "",
+      "> 🔍 **供研发复核**",
+      "> FormulaHelper.cs:75 MaxEncumbrance()",
+      "> ---",
+      marker,
+      "> - 调用方有哪些？",
+      "> 1. 调用方有哪些？",
+      "> - 改了会影响什么？",
+    ].join("\n");
+    const questions = ["调用方有哪些？", "改了会影响什么？"];
+    expect(extractFollowUps(answer)).toEqual(questions);
+    const out = sanitizeAnswerText(answer, { mode });
+    expect(out.body).toBe("结论：负重上限由力量决定。");
+    expect(out.evidence.trim()).toBe("FormulaHelper.cs:75 MaxEncumbrance()");
+    for (const text of [out.body, out.evidence]) {
+      expect(text).not.toContain("你可能还想问");
+      for (const question of questions) expect(text).not.toContain(question);
+    }
+  });
+
+  it("preserves evidence after a decorated follow-up section and never makes it a button", () => {
+    const answer = [
+      "结论：基础伤害为 50。",
+      "",
+      "> ---",
+      "> ### **💡 你可能还想问：**",
+      "> - 调用方有哪些？",
+      "",
+      "> 🔍 **供研发复核**",
+      "> - Combat.cs:42 baseDamage = 50",
+      "> - Config.cs:10 damageScale = 1",
+    ].join("\n");
+    expect(extractFollowUps(answer)).toEqual(["调用方有哪些？"]);
+    const out = sanitizeAnswerText(answer, { mode });
+    expect(out.body).toBe("结论：基础伤害为 50。");
+    expect(out.evidence).toContain("Combat.cs:42 baseDamage = 50");
+    expect(out.evidence).toContain("Config.cs:10 damageScale = 1");
+    expect(out.evidence).not.toContain("调用方有哪些");
+    expect(out.body).not.toContain("你可能还想问");
+  });
+
+  it("preserves a quoted ordinary sentence and its data rows without creating buttons", () => {
+    const answer = [
+      "结论：这些是已经查到的数据。",
+      "> ### **你可能还想问的逻辑在 Config.cs:10 定义。**",
+      "> - 基础伤害 50",
+      "> - 暴击倍率 1.5",
+      "> 🔍 **供研发复核**",
+      "> Config.cs:10 为配置入口",
+    ].join("\n");
+    expect(extractFollowUps(answer)).toEqual([]);
+    const out = sanitizeAnswerText(answer, { mode });
+    expect(out.body).toContain("你可能还想问的逻辑在 Config.cs:10 定义。");
+    expect(out.body).toContain("基础伤害 50");
+    expect(out.body).toContain("暴击倍率 1.5");
+    expect(out.evidence).toContain("Config.cs:10 为配置入口");
+  });
+
+  it.each(["> 📎 依据", "> **🔍 供研发复核**"])("preserves later evidence without turning it into buttons: %s", (heading) => {
+    const answer = [
+      "结论：基础伤害为 50。",
+      "> ### **💡 你可能还想问：**",
+      "> - 调用方有哪些？",
+      heading,
+      "> Config.cs:10 基础伤害 = 50",
+    ].join("\n");
+    const out = sanitizeAnswerText(answer, { mode });
+    expect(out.body).toBe("结论：基础伤害为 50。");
+    expect(out.evidence).toBe("Config.cs:10 基础伤害 = 50");
+    expect(extractFollowUps(answer)).toEqual(["调用方有哪些？"]);
+  });
+
+  it("retains the subsequent quoted clarification prompt and all its options", () => {
+    const answer = [
+      "结论：请先核对配置版本。",
+      "> ### **💡 你可能还想问：**",
+      "> - 调用方有哪些？",
+      "> 🔀 需要你确认：请选择配置版本。",
+      "> - 当前正式服配置是什么？",
+      "> - 当前测试服配置是什么？",
+    ].join("\n");
+    const out = sanitizeAnswerText(answer, { mode });
+    expect(out.body).toContain("🔀 需要你确认：请选择配置版本。");
+    expect(out.body).toContain("当前正式服配置是什么？");
+    expect(out.body).toContain("当前测试服配置是什么？");
+    expect(out.body).not.toContain("你可能还想问");
+    expect(out.body).not.toContain("调用方有哪些？");
+    expect(extractFollowUps(answer)).toEqual(["调用方有哪些？"]);
+  });
+
+  it("retains a later chart fence after removing the quoted suggestions", () => {
+    const chart = '```chart\n{"type":"line","data":{"values":[]}}\n```';
+    const answer = [
+      "结论：趋势如下。",
+      "> ### **💡 你可能还想问：**",
+      "> - 调用方有哪些？",
+      chart,
+    ].join("\n");
+    const out = sanitizeAnswerText(answer, { mode });
+    expect(out.body).toContain(chart);
+    expect(out.body).not.toContain("你可能还想问");
+    expect(out.body).not.toContain("调用方有哪些？");
+    expect(extractFollowUps(answer)).toEqual(["调用方有哪些？"]);
+  });
+
+  it("keeps fenced template text when a delimiter with a suffix occurs inside it", () => {
+    const template = [
+      "```markdown",
+      "```text",
+      "> **💡 你可能还想问：**",
+      "> - 这里是模板里的示例问题？",
+      "```",
+    ].join("\n");
+    const answer = [
+      "结论：以下为模板原文。",
+      template,
+      "真实说明必须保留。",
+      "💡 你可能还想问：",
+      "- 真正的推荐问题是什么？",
+    ].join("\n");
+    const out = sanitizeAnswerText(answer, { mode });
+    expect(out.body).toContain(template);
+    expect(out.body).toContain("真实说明必须保留。");
+    expect(out.body).not.toContain("真正的推荐问题是什么？");
+    expect(extractFollowUps(answer)).toEqual(["真正的推荐问题是什么？"]);
   });
 });
 

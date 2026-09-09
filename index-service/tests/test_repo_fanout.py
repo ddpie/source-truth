@@ -10,6 +10,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 SVC_DIR = Path(__file__).resolve().parent.parent
 if str(SVC_DIR) not in sys.path:
     sys.path.insert(0, str(SVC_DIR))
@@ -53,7 +55,11 @@ def test_analyze_impact_merges_all_impact_keys():
     out = json.loads(merge_fanout("codegraph_analyze_impact", [a, b]))
     assert [x["path"] for x in out["impacted"]] == ["repoA/a.cs", "repoB/b.cs"]
     assert [x["path"] for x in out["indirect_impacted"]] == ["repoA/i.cs"]
-    assert out["direct_impacted"] == []  # key always present even if no repo had it
+    # direct_impacted 不再出现在这里：引擎返回的是**整数**（直接受影响的节点数），不是列表。
+    # 这条断言原本写的是 `out["direct_impacted"] == []`，等于把缺陷本身固化成期望——真实载荷里
+    # 的 `15` 会被合并成 `[]`，影响面从「15 处」变成「无影响」。它现在按数值键相加，
+    # 由 tests/test_engine_contract.py::test_direct_impacted_is_summed_not_concatenated 覆盖。
+    assert "direct_impacted" not in out, "本例的两个仓都没给这个键，不应凭空造一个"
 
 
 # ── errored repos ─────────────────────────────────────────────────────────────
@@ -109,3 +115,161 @@ def test_single_repo_passthrough_shape_preserved():
     a = json.dumps({"results": [_sym("repoA/x.cs", 9)]})
     out = json.loads(merge_fanout("codegraph_symbol_search", [a]))
     assert out["results"][0]["symbol"]["location"] == {"file": "repoA/x.cs", "line": 9}
+
+
+def _merge(tool, *payloads):
+    return json.loads(merge_fanout(
+        tool, [json.dumps(p) for p in payloads],
+        repo_names=[f"repo-{index}" for index in range(len(payloads))],
+    ))
+
+
+def test_partial_locate_failure_cannot_be_read_as_no_callers():
+    out = _merge(
+        "codegraph_get_callers",
+        {"callers": [], "message": "Could not find starting node for Foo"},
+        {"callers": [], "diagnostic": {"node_found": True}},
+    )
+    assert out["callers"] == []
+    assert out["partial"] is True
+    assert "error" not in out  # The successful repository remains usable.
+    assert "does not prove" in out["warning"]
+    assert out["repo_results"][0]["repo"] == "repo-0"
+    assert out["repo_results"][0]["status"] == "error"
+    assert "starting node" in out["repo_results"][0]["error"]
+    assert out["repo_results"][1]["metadata"]["diagnostic"] == {"node_found": True}
+    assert "diagnostic" not in out  # One repository's location is not a global finding.
+
+
+@pytest.mark.parametrize("states", [("ready", "building"), ("building", "ready")])
+def test_ready_repository_cannot_hide_degraded_embedding(states):
+    out = _merge(
+        "codegraph_symbol_search",
+        *({"results": [], "embedding_status": state} for state in states),
+    )
+    assert out["embedding_status"] == "mixed"
+    assert [r["metadata"]["embedding_status"] for r in out["repo_results"]] == list(states)
+    assert "embedding states differ" in out["warning"]
+
+
+def test_embedding_objects_and_all_repository_warnings_survive():
+    state = {"status": "building", "progress": 0.4}
+    out = _merge(
+        "codegraph_symbol_search",
+        {"results": [], "embedding_status": state, "warning": "A: graph incomplete"},
+        {"results": [], "warning": "B: semantic search unavailable"},
+    )
+    assert out["embedding_status"] == state
+    assert out["repo_results"][0]["metadata"]["embedding_status"] == state
+    assert "A: graph incomplete" in out["warning"]
+    assert "B: semantic search unavailable" in out["warning"]
+
+
+def test_failed_repository_metadata_is_retained():
+    out = _merge(
+        "codegraph_symbol_search",
+        {"error": "index unavailable", "embedding_status": {"status": "failed"},
+         "warning": "index needs rebuilding"},
+        {"results": [_sym("repo-1/a.cs")], "embedding_status": "ready"},
+    )
+    assert len(out["results"]) == 1
+    assert out["partial"] is True
+    assert out["embedding_status"] == "mixed"
+    assert "index needs rebuilding" in out["warning"]
+    assert out["repo_results"][0]["metadata"]["embedding_status"] == {"status": "failed"}
+
+
+def test_truncation_totals_describe_the_merged_list():
+    out = _merge(
+        "codegraph_symbol_search",
+        *({"results": [_sym(f"{repo}/{i}.cs") for i in range(20)],
+           "total_matches": total, "shown": 20, "truncated": True,
+           "truncation_note": f"showing 20 of {total}"}
+          for repo, total in [("repo-0", 30), ("repo-1", 40)]),
+    )
+    assert len(out["results"]) == out["shown"] == 40
+    assert out["total_matches"] == 70
+    assert out["truncated"] is True
+    assert out["total_matches_complete"] is True
+    assert "showing 40 of 70" in out["truncation_note"]
+    assert [r["metadata"]["total_matches"] for r in out["repo_results"]] == [30, 40]
+
+
+def test_later_repository_truncation_is_not_hidden_by_first_false():
+    out = _merge(
+        "codegraph_symbol_search",
+        {"results": [_sym("repo-0/a.cs")], "total_matches": 1, "truncated": False},
+        {"results": [_sym("repo-1/b.cs")], "total_matches": 8, "truncated": True},
+    )
+    assert out["truncated"] is True
+    assert out["shown"] == 2 and out["total_matches"] == 9
+
+
+@pytest.mark.parametrize("missing", [{}, {"total_matches": True}, {"total_matches": 0}])
+def test_missing_or_invalid_total_is_only_a_lower_bound(missing):
+    out = _merge(
+        "codegraph_symbol_search",
+        {"results": [_sym("repo-0/a.cs")], "total_matches": 3},
+        {"results": [_sym("repo-1/b.cs")], **missing},
+    )
+    assert "total_matches" not in out
+    assert out["total_matches_complete"] is False
+    assert out["total_matches_lower_bound"] == 4
+    assert out["shown"] == 2
+    assert "at least 4" in out["truncation_note"]
+
+
+def test_failed_repository_prevents_an_exact_global_search_total():
+    out = _merge(
+        "codegraph_symbol_search",
+        {"results": [_sym("repo-0/a.cs")], "total_matches": 3},
+        {"error": "index unavailable"},
+    )
+    assert out["partial"] is True
+    assert "total_matches" not in out
+    assert out["total_matches_lower_bound"] == 3
+    assert out["total_matches_complete"] is False
+
+
+def test_camel_case_total_matches_is_normalized():
+    out = _merge(
+        "codegraph_symbol_search",
+        {"results": [_sym("repo-0/a.cs")], "totalMatches": 2},
+        {"results": [_sym("repo-1/b.cs")], "total_matches": 3},
+    )
+    assert out["total_matches"] == 5
+    assert out["shown"] == 2
+    assert "totalMatches" not in out
+
+
+def test_repository_diagnostics_are_not_presented_as_global():
+    out = _merge(
+        "codegraph_get_callers",
+        {"callers": [], "diagnostic": {"node_found": True}, "call_graph_unavailable": False},
+        {"callers": [], "diagnostic": {"node_found": False}, "call_graph_unavailable": True},
+    )
+    assert "diagnostic" not in out
+    assert out["call_graph_unavailable"] is True
+    assert [r["metadata"]["diagnostic"]["node_found"] for r in out["repo_results"]] == [True, False]
+
+
+@pytest.mark.parametrize("raw", ["invalid json", "[]", "{}"])
+def test_all_invalid_responses_cannot_be_reported_as_empty_success(raw):
+    out = json.loads(merge_fanout("codegraph_symbol_search", [raw, raw]))
+    assert out["error"]
+    assert all(r["status"] == "error" for r in out["repo_results"])
+
+
+def test_all_location_failures_have_an_explicit_tool_error():
+    out = _merge(
+        "codegraph_get_callers",
+        {"callers": [], "message": "Could not find starting node for Foo"},
+        {"callers": [], "message": "Could not find symbol Foo"},
+    )
+    assert "starting node" in out["error"]
+    assert len(out["repo_results"]) == 2
+
+
+def test_repository_names_must_match_response_count():
+    with pytest.raises(ValueError, match="every repository response"):
+        merge_fanout("codegraph_symbol_search", ['{"results": []}'], repo_names=[])

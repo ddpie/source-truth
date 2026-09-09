@@ -43,8 +43,9 @@ REAL="$(cd "$LOCAL_PATH" && pwd -P)"
 SSH=(ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new)
 if [ -n "$IDENTITY" ]; then
   [ -f "$IDENTITY" ] || { say err "--identity keyfile not found: $IDENTITY"; exit 2; }
-  # rsync 对 -e 字符串只做空白切分 + 双引号分组，不解释 printf %q 的反斜杠转义——
-  # 含空格的路径会被切成两截（-e 下面用双引号包每个词，故这里禁掉引号字符本身）。
+  # rsync splits the -e string on whitespace and groups on double quotes only — it does NOT interpret
+  # printf %q's backslash escapes, so a path containing a space would be torn in two (the -e string
+  # below double-quotes each word, hence rejecting the quote character itself here).
   case "$IDENTITY" in
     *\"*) say err "--identity path must not contain double quotes"; exit 2 ;;
   esac
@@ -59,8 +60,10 @@ REINDEX="/opt/idx/app/reindex_local_repo.sh"
 # index files outside the repo (info leak). --exclude .git keeps VCS metadata out; protect filters
 # are belt-and-suspenders (stage has no graph dirs, but if someone points --host at a live dir by
 # mistake, --delete still won't strip them).
-# -e：rsync 只按空白切词 + 认双引号分组（不解释 %q 的反斜杠转义），所以逐词双引号包裹。
-# 词表全部来自本脚本的固定选项 + 已校验的 IDENTITY（上面禁了双引号字符），不会注入。
+# -e: rsync only splits on whitespace and honours double-quote grouping (it does not interpret %q's
+# backslash escapes), so each word is wrapped in double quotes individually. Every word comes from
+# this script's own fixed options plus the validated IDENTITY (the quote character was rejected
+# above), so there is no injection vector.
 _SSH_E=""
 for _w in "${SSH[@]}"; do _SSH_E+="\"${_w}\" "; done
 RSYNC=(rsync -az --delete --safe-links --no-links

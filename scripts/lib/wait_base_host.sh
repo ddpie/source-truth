@@ -33,10 +33,24 @@ fi
 
 # Poll the bootstrap log for the terminal marker. BOOTSTRAP_DONE = success; a BOOTSTRAP_FAILED
 # line means a hard failure → fail fast (re-running won't help until the cause is fixed).
+#
+# BOOTSTRAP_DONE is matched over the WHOLE log, not a `tail -3` window. bootstrap.sh runs under
+# `set -x` with an EXIT trap, so lines keep arriving AFTER `echo BOOTSTRAP_DONE` — today exactly the
+# trap's two xtrace lines, i.e. the marker sat on the very last line the old window could still see.
+# One more command in that trap pushed it out and this gate burned its full timeout reporting "did
+# not finish bootstrap" on a SUCCESSFUL run. A stale marker is not a risk: bootstrap.sh's `tee`
+# truncates the log fresh every run. deploy-all.sh's local-mode check already greps the whole file,
+# so the two paths now agree.
+#
+# BOOTSTRAP_FAILED stays WINDOWED (and is only consulted when there is no DONE), deliberately: the
+# marker is not exclusive to fatal paths — bootstrap.sh's retry_net prints it before returning 1, and
+# the cloudwatch-agent download TOLERATES that failure and continues to a successful DONE. A
+# whole-file FAILED grep would therefore abort a healthy deploy. The window is 8 lines rather than 3
+# so a fatal marker cannot be hidden by the `exit`/trap xtrace that follows it.
 while (( SECONDS < DEADLINE )); do
   CID="$(aws ssm send-command --region "$REGION" --instance-ids "$IID" \
     --document-name AWS-RunShellScript \
-    --parameters 'commands=["tail -3 /var/log/index-svc-bootstrap.log 2>/dev/null | grep -oE \"BOOTSTRAP_DONE|BOOTSTRAP_FAILED[^\\n]*\" | tail -1 || echo PENDING"]' \
+    --parameters 'commands=["if grep -q BOOTSTRAP_DONE /var/log/index-svc-bootstrap.log 2>/dev/null; then echo BOOTSTRAP_DONE; else tail -8 /var/log/index-svc-bootstrap.log 2>/dev/null | grep -oE \"BOOTSTRAP_FAILED.*\" | tail -1 || echo PENDING; fi"]' \
     --query Command.CommandId --output text 2>/dev/null || echo "")"
   if [[ -n "$CID" ]]; then
     sleep 6

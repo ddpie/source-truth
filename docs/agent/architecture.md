@@ -26,17 +26,21 @@
         Session Storage 约 14 天过期。网关的 session 复用 TTL 与该 idle 值同源对齐（见下文「Runtime 调参」）
       · microVM 内运行 agent-container（Python，agent-container/agent.py）
           · @app.entrypoint 异步流式 handler（bedrock_agentcore.runtime.BedrockAgentCoreApp）
-          · Claude Code Agent SDK（claude_agent_sdk.query / ClaudeAgentOptions），
-            CLAUDE_CODE_USE_BEDROCK=1 走 Bedrock 计费
-          · 取证只读通道（全部经 index-service 的 MCP-over-HTTP 接口；microVM 不挂任何文件系统）：
-              · 术语表（旁路辅助，非前置步骤）：中文业务词（战力/爆率…）可经 codegraph_glossary_index /
+          · 按项目部署配置选择 OpenAI Agents SDK（默认）或 Claude Agent SDK，
+            均通过 Bedrock Runtime；统一流事件由 engine_runner 输出
+          · 取证只读通道（共 7 个核心只读工具，全部经 index-service 的 MCP-over-HTTP 接口；microVM 不挂仓库文件系统；
+            与 [`invariants.md`](invariants.md) §6 的「7 核心 + 2 术语表 = ≤9」一致）：
+              · 术语表（旁路辅助，非前置步骤，属那 2 个附加工具）：中文业务词（战力/爆率…）可经 codegraph_glossary_index /
                   codegraph_glossary_lookup 对应到英文代码符号，与 agent 自身想到的检索词**并用**——
                   不是「先查术语表再搜」的串行关卡（项目已知时才注册；辅助线索，结论仍须实际查看代码取证）
-              (1) CodeGraph 定位 → 先查「哪个工程 / 哪些文件」（symbol_search / get_callers / analyze_impact）
-              (2) 文件读取 → 按定位结果精准读取最新主分支源码与工程内配置表（Excel/JSON/CSV）：
-                  codegraph_read_file / codegraph_glob_files / codegraph_search_files（仓库相对路径）
+              (1) CodeGraph 定位（3 个）→ 先查「哪个工程 / 哪些文件」（codegraph_symbol_search /
+                  codegraph_get_callers / codegraph_analyze_impact）
+              (2) 文件读取（4 个）→ 按定位结果精准读取最新主分支源码与工程内配置表（Excel/JSON/CSV）：
+                  codegraph_read_file / codegraph_glob_files / codegraph_search_files（仓库相对路径），
+                  以及 codegraph_read_table 读结构化配置表（.xlsx/.xlsm/.xltx/.xltm 等二进制表格转文本，
+                  见 `index-service/file_table.py`）
           · 每会话写入使用 Session Storage /mnt/workspace（microVM 级隔离的临时文件）
-          · 逐步流式产出（AssistantMessage / ResultMessage）
+          · engine_runner 将所选 SDK 的输出统一为版本化文本、工具和终态事件
   → bot-gateway 把流式输出更新到 CardKit 卡片（src/cardkit-client.ts；SSE 解析 src/parse-stream.ts）
       · 单一 markdown 组件适配所有格式；注意飞书卡片 update 有频控与 10 分钟更新窗口
       · 流式完成后按 AI 实际输出动态追加交互组件：多方案→选项按钮、数值→VChart 图表
@@ -56,7 +60,7 @@
 **唯一一份代码、本地副本**：仓库只在 index-service 的**本地磁盘** `/data/repo/<subdir>`，由
 `index-service/activate_project.sh` 用单一**只读 git 凭证**（Secrets Manager
 `source-truth/git-credentials`，host 侧取出）`git clone` 各仓到本地；codegraph-server 索引该本地副本，
-文件读取工具也读取该副本。**会话 microVM 不挂任何文件系统**——全部源码经 index-service 的 HTTP 接口读取，
+文件读取工具也读取该副本。**会话 microVM 不挂仓库文件系统**——全部源码经 index-service 的 HTTP 接口读取，
 没有共享挂载，故没有副本同步问题。
 
 **刷新方式（git，自动）**：每个仓库一个 systemd timer `index-refresh-<subdir>.timer`（默认 300 秒，
@@ -77,12 +81,16 @@
 只重建变更文件的条目——与 git 仓按 `git diff` 增量是同一条路径，只是变更集来自 rsync 而非 git。本地仓是手动推送的
 **快照**，更新时机由运维决定、可能滞后于真实主分支——重新推送后才更新。
 
-**术语表（构建期引擎，离线）**：同一刷新链上，index 主机用本地 `claude` (cc) CLI 扫自有代码副本，产出
+**术语表（构建期引擎，离线）**：同一刷新链上，index 主机用项目选定的 OpenAI Agents SDK
+或本地 `claude` (cc) CLI 扫自有代码副本，产出
 「中文词→英文符号」术语表（per-repo slice `/data/glossary/<项目>/<subdir>.jsonl`），供上面取证通道作旁路
-线索用（非前置步骤）。这是对「不在 microVM 外跑引擎」的**明确例外**：构建期、无用户输入、无会话、不在请求路径上；cc 被锁定
-（无写/执行/网络工具、不加载 repo 的 `.claude`），臆造中文别名由 grounding 校验丢弃。首建全量、刷新按
-git diff 增量。完整工作原理、grounding 把关与价值边界见 `docs/agent/glossary.md`；边界约束见
+线索用（非前置步骤）。这是对「不在 microVM 外跑引擎」的**明确例外**：构建期、无用户输入、无会话、不在请求路径上。
+Claude CLI 禁用写入、执行、联网工具与 repo 的 `.claude`；OpenAI 只开放本批次的分页读取工具，
+通过 ConverseStream 调用模型。臆造中文别名由 grounding 校验丢弃。首建全量；配置不变时按 git diff 增量，
+SDK、模型或 API 等指纹变化时重新全量构建。完整工作原理、grounding 把关与价值边界见 `docs/agent/glossary.md`；边界约束见
 `docs/agent/invariants.md` §6 与 AGENTS.md「构建期引擎」。
+
+双 SDK 配置、流协议、构建指纹与旧项目迁移见 [`../dual-sdk_zh.md`](../dual-sdk_zh.md)。
 
 ## 会话隔离模型（README 未展开）
 
@@ -143,28 +151,28 @@ replay 保留），但响应慢几秒。为此两个值由同一参数驱动：
 source-truth 不同于「在容器外把 AI 当远程 MCP 客户端」的常见托管 MCP 形态——它把 AI 引擎放进 microVM
 内，并围绕代码取证新增了两个有状态组件。四个核心选择：
 
-1. **AI 在容器内运行**——会话 microVM 内直接运行 Claude Code Agent SDK（`agent-container/agent.py` 的
+1. **AI 在容器内运行**——会话 microVM 内直接运行所选 Agent SDK（`agent-container/agent.py` 的
    agent 循环），AI 既是推理主体，也直接调用 MCP 工具，而不是容器外的 MCP 客户端。
 2. **飞书 Bot 网关**——机器人身份 + 长连接事件流 + 会话→runtimeSessionId 映射。MVP 不引入每用户
    OAuth 体系；上下文挂在飞书对话上、按需拉取。**部署形态**：网关与 index-service **同主机**（每个项目一个
    systemd 实例 `bot-gateway@<projectId>.service`），由 deploy 的 gateway 阶段经 SSM 写
    `/etc/bot-gateway-<projectId>.env` + 启动；飞书凭证运行时从 Secrets Manager 取（不落盘）。注意飞书长连接是**全局单例**（同 app 只能一个
-   client，否则争抢事件）——故蓝绿换 index 实例时，gateway 走 **break-before-make**（先停旧实例网关、确认长连接断开，
-   再启动新实例网关），与 index/codegraph 的 make-before-break 相反。
+   client，否则争抢事件）——故每次部署更新网关时，gateway 走 **break-before-make**（先停掉正在跑的网关、确认长连接
+   断开，再启动新版本）。
 3. **独立 CodeGraph 索引服务**——常驻服务，由唯一进程独占写 graph.db、stdio→streamable-HTTP 接口，对会话容器
    提供只读**定位 + 读文件**查询；每个项目一个 bridge 进程 `index-bridge-<projectId>`（各占独立端口
    8080/8081/…，仅服务该项目的仓库，靠重复 `--workspace` 限定范围），其 file-watcher 对定时 git pull 的
    变更做增量重建（详见上文「代码如何进入 index-service、索引如何更新」）。
 4. **代码仓只在 index-service 本地**——它在本地磁盘持唯一一份代码副本，由 `activate_project.sh` 用只读 git
    凭证 `git clone` 写入、systemd timer 定时 `git pull` 刷新，既供 codegraph 索引、又经 HTTP 接口的文件工具
-   服务给会话容器；会话 microVM 不挂任何文件系统（无共享挂载）。
+   服务给会话容器；会话 microVM 不挂仓库文件系统（无共享挂载）。
 
 其余沿用通用运维惯例：ARM64 容器 + DockerImageAsset、CDK / boto3 分两层管 IaC、飞书 SDK / CardKit 生态、
 空闲缩零按量计费、按游戏项目隔离机器人、结构化 JSON 日志 + hashUserId 脱敏、`deploy/ops/test` 三类脚本。
 
 ## 待验证技术点（POC 优先，影响架构定型）
 
-- CodeGraph 对前端 Unity 风格 C# 与后端 Node.js（及 Lua 元表等动态模式）的索引召回率；
+- CodeGraph 对 C# / TypeScript / Lua 等动态特性较强语言的索引召回率；
 - 首次全量索引耗时（社区 13 万文件约 1 小时量级）；
 - CodeGraph stdio→HTTP 转换（mcp-proxy 类）的稳定性、并发、路径对齐（工具返回仓库相对路径，如 `Assets/Scripts/Foo.cs`）；
 - 经 HTTP 接口读文件的延迟（索引精准读取 vs 全仓文本检索兜底两条路径）；

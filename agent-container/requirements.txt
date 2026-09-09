@@ -10,4 +10,16 @@ claude-agent-sdk==0.2.103          # agent reasoning loop (query / ClaudeAgentOp
 bedrock-agentcore==1.14.1          # microVM HTTP/streaming host (BedrockAgentCoreApp)
 boto3==1.43.31                     # AWS control plane
 httpx==0.28.1                      # CodeGraph MCP-over-HTTP evidence channel
-aws-opentelemetry-distro==0.17.1   # observability (toolkit default)
+aws-opentelemetry-distro==0.19.0    # observability — see the CMD note in Dockerfile
+# OpenInference instrumentation for claude-agent-sdk. NOT redundant with ADOT: ADOT's generic
+# auto-instrumentation only sees the transport layer (a subprocess call), while this emits GenAI
+# semantic-convention spans for the query, each tool call and each subagent. AgentCore Evaluations
+# accepts spans ONLY from a fixed list of instrumentation scopes and rejects everything else with
+# "Provided input has no spans with supported scope" — `openinference.instrumentation.claude_agent_sdk`
+# is on that list and is exactly the scope this package registers, so it is what makes evaluation
+# possible at all. No agent code calls it: the wheel declares an [opentelemetry_instrumentor] entry
+# point, so the opentelemetry-instrument wrapper in the CMD discovers and enables it.
+openinference-instrumentation-claude-agent-sdk==0.1.13
+openai-agents==0.22.1
+openai[bedrock]==3.10.0
+openinference-instrumentation-openai-agents==2.2.0

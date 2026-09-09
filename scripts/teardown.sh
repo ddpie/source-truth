@@ -37,7 +37,9 @@ Usage: $0 --region <r> [--dry-run] [--yes] [--include-shared]
   --region <r>        AWS region to tear down (required)
   --dry-run           print the deletion plan, change nothing
   --yes               skip the interactive confirmation
-  --include-shared    ALSO delete the IAM roles + S3 artifact bucket (account-shared)
+  --include-shared    ALSO delete the IAM roles (account-wide) + the S3 artifact bucket
+                      (region-scoped — its name embeds the region, so declining this flag
+                      to protect OTHER regions also leaves THIS region's bucket behind)
 EOF
 }
 
@@ -69,34 +71,71 @@ is_set() { [[ -n "${1:-}" && "${1:-}" != "None" ]]; }
 
 # --- discover (config first, then tag) ---
 # (AgentCore runtimes are enumerated directly at delete time — see phase 1 below — not from config.)
-# Discover ALL index-service instances by tag, then UNION with the two config-recorded
-# ids — there can be MORE than one alive (a blue-green overlap window, or a failed-refresh
-# leftover), and the old tag query used `Reservations[].Instances[0]` (first per
-# reservation) + only the 2 config vars, so it could miss a second tagged instance and
+# Discover ALL index-service instances by tag, then UNION with the config-recorded id.
+# The TAG SWEEP is the load-bearing half and stays that way: deploys only ever update the
+# one host in place, but more than one tagged instance can still be alive (a hand-launched
+# box, an instance the config never captured because the deploy died mid-run, a stale
+# config file), and the old tag query used `Reservations[].Instances[0]` (first per
+# reservation) + only the config var, so it could miss a second tagged instance and
 # leave it billing after reporting "teardown complete" (cross-review P1). Collect every
-# `Instances[].InstanceId` across all reservations + the config ids, dedup, terminate all.
+# `Instances[].InstanceId` across all reservations + the config id, dedup, terminate all.
 # Both tag names: source-truth-index-service (default two-machine) AND source-truth-host (the
 # --local single host launch-host.sh creates). Missing the latter left the --local box billing and,
 # because its ENI kept the VPC's SG/subnet pinned, cascaded into DependencyViolation on VPC delete.
 TAGGED_INSTANCES="$(Q describe-instances --filters "Name=tag:Name,Values=source-truth-index-service,source-truth-host" "Name=instance-state-name,Values=pending,running,stopping,stopped" --query 'Reservations[].Instances[].InstanceId' --output text 2>/dev/null || echo "")"
-# space-separated, deduped union of config ids + every tagged id. CRITICAL: `|| true`
+# space-separated, deduped union of the config id + every tagged id. CRITICAL: `|| true`
 # on the pipeline — `grep -v` exits 1 when NOTHING matches (the zero-instances case: EC2
 # already torn down but NAT/EIP/zone still billing), and under `set -euo pipefail` that
 # rc-1 would ABORT teardown right here, BEFORE the plan/confirm/delete phases — i.e. the
 # script would refuse to run in the exact leak scenario it exists to clean up (2nd-pass
 # cross-review P1). The `|| true` makes an empty result a clean empty string.
-ALL_INSTANCES="$( { printf '%s\n' ${INDEX_SERVICE_INSTANCE:-} ${INDEX_OLD_INSTANCE:-} $TAGGED_INSTANCES | grep -vE '^(None)?$' | sort -u | tr '\n' ' '; } || true )"
+ALL_INSTANCES="$( { printf '%s\n' ${INDEX_SERVICE_INSTANCE:-} $TAGGED_INSTANCES | grep -vE '^(None)?$' | sort -u | tr '\n' ' '; } || true )"
 # (No separate EC2_ID: the full deduped ALL_INSTANCES set is both displayed in the plan
 # and terminated in the loop below; the SG/ENI-drain later discovers the SG by group-name,
 # not via an instance id, so no single "primary" id is needed.)
 VPC="${VPC_ID:-}"; is_set "$VPC" || VPC="$(by_tag vpcs source-truth-vpc Vpcs VpcId)"
-NAT="${NAT_GATEWAY:-}"; is_set "$NAT" || NAT="$(Q describe-nat-gateways --filter "Name=tag:Name,Values=source-truth-nat" "Name=state,Values=available,pending" --query 'NatGateways[0].NatGatewayId' --output text 2>/dev/null || echo "")"
+# OWNERSHIP GATE. A vpc-id in deploy-config does NOT mean we created it: on the --local path the
+# id written there is the operator's own pre-existing VPC. Deleting inside it would destroy
+# subnets, security groups, the IGW and route tables this tool never created — worse than leaving
+# something billable behind. The TAG is authoritative (provision_network.sh sets it on the VPC it
+# creates); VPC_OWNED=false in config is a second, explicit signal from the --local path.
+VPC_IS_OURS=false
+if is_set "$VPC"; then
+  _vpc_tag="$(Q describe-vpcs --vpc-ids "$VPC" \
+    --query "Vpcs[0].Tags[?Key=='Name'].Value | [0]" --output text 2>/dev/null || echo "")"
+  if [[ "$_vpc_tag" == "source-truth-vpc" ]]; then
+    VPC_IS_OURS=true
+  fi
+  if [[ "${VPC_OWNED:-}" == "false" ]]; then
+    VPC_IS_OURS=false
+  fi
+  if [[ "$VPC_IS_OURS" != true ]]; then
+    say warn "VPC $VPC is NOT tagged source-truth-vpc (or is marked VPC_OWNED=false) — it was not"
+    say warn "  created by this tool, most likely a --local deploy onto an existing host. Its"
+    say warn "  subnets / security groups / IGW / route tables will NOT be touched. Only the"
+    say warn "  security groups this tool created by name are removed."
+  fi
+fi
+# NAT gateways: enumerate ALL of them and UNION with the config id — the same shape the EC2
+# path above uses, and for the same reason. Two separate bugs lived in the old one-liner:
+# `NatGateways[0]` took only the first tagged NAT, and `is_set "$NAT" ||` meant a config-recorded
+# NAT_GATEWAY suppressed the tag sweep entirely, so even a fixed [0] would never have run it.
+# A second tagged NAT is reachable in normal operation: provisioning scopes its lookup by VPC
+# (provision_network.sh), so once a delete-vpc failure leaves the old VPC behind (this script
+# warns and continues), the next deploy builds a NEW VPC with a NEW NAT under the SAME tag.
+# The region then has two, and the old code deleted one and reported "teardown complete" —
+# ~$33/mo billing on, silently. That is the most expensive leak this script can produce.
+TAGGED_NATS="$(Q describe-nat-gateways --filter "Name=tag:Name,Values=source-truth-nat" "Name=state,Values=available,pending" --query 'NatGateways[].NatGatewayId' --output text 2>/dev/null || echo "")"
+# `|| true` for the same pipefail reason documented on ALL_INSTANCES above: grep -v exits 1 when
+# nothing matches, which is precisely the already-clean case.
+ALL_NATS="$( { printf '%s\n' ${NAT_GATEWAY:-} $TAGGED_NATS | grep -vE '^(None)?$' | sort -u | tr '\n' ' '; } || true )"
 ZONE_ID="${INDEX_DNS_ZONE_ID:-}"
 
 say step "teardown plan — region $REGION, account ${ACCOUNT:-?}"
 say info "  AgentCore runtimes: all source_truth_agent* (enumerated at delete)"
 say info "  index-service EC2 : ${ALL_INSTANCES:-<none>}"
-say info "  NAT gateway       : ${NAT:-<none>} (+ its Elastic IP)"
+say info "  NAT gateway(s)    : ${ALL_NATS:-<none>} (+ every Elastic IP they hold)"
+say info "  VPC endpoint(s)   : ${VPC_ENDPOINTS:-<discover by tag/VPC>} (ECR interface endpoints bill hourly)"
 say info "  VPC + subnets/RT/IGW/SG : ${VPC:-<none>}"
 say info "  Route53 private zone    : ${ZONE_ID:-<discover by VPC>}"
 say info "  ECR repo source-truth/agent : (in $REGION)"
@@ -116,7 +155,34 @@ fi
 
 # Helper: run a delete, tolerate "already gone", log each step. Never aborts the
 # whole teardown on one resource's failure — we want to remove as much as possible.
-del() { local what="$1"; shift; if "$@" >/dev/null 2>&1; then say ok "deleted $what"; else say warn "skip/failed $what (may already be gone)"; fi; }
+TEARDOWN_INCOMPLETE=0
+LEFT_BEHIND=""
+
+# del <what> <cmd...> — delete one resource, telling the truth about the outcome.
+#
+# The previous one-liner collapsed EVERY failure into "may already be gone" with stdout and
+# stderr discarded, so AccessDenied, DependencyViolation, DeleteConflict, BucketNotEmpty,
+# throttling and genuinely-absent were indistinguishable — and the script still exited 0. Two
+# structural bugs (an EventBridge target id mismatch and an undetached managed policy) sat
+# invisible behind that message while printing a green check.
+del() {
+  local what="$1"; shift
+  local err
+  if err="$("$@" 2>&1 >/dev/null)"; then
+    say ok "deleted $what"
+    return 0
+  fi
+  # Resource-specific not-found codes are the ONLY genuine success-by-absence.
+  if printf '%s' "$err" | grep -qE 'NotFound|NoSuchEntity|NoSuchBucket|ResourceNotFoundException|does not exist|NoSuchHostedZone'; then
+    say ok "$what already gone"
+    return 0
+  fi
+  say warn "FAILED $what — $(printf '%s' "$err" | tr -d '\n' | cut -c1-200)"
+  TEARDOWN_INCOMPLETE=$((TEARDOWN_INCOMPLETE + 1))
+  LEFT_BEHIND="${LEFT_BEHIND}
+  • ${what}"
+  return 0
+}
 
 # wait_gone <desc> <max_secs> <cmd...> — poll until <cmd> prints empty/None (the
 # resource is gone), or the timeout elapses. AWS deletes for NAT/ENI are ASYNC, so a
@@ -132,7 +198,14 @@ wait_gone() {
     sleep 5; waited=$((waited + 5))
   done
   say warn "$desc still present after ${max}s — continuing (may strand a dependent resource; re-run teardown)"
-  return 1
+  # MUST be 0, not 1: every call site is a bare command under `set -euo pipefail`, so returning
+  # non-zero here ABORTED the whole teardown at the first slow NAT — the EIP was never released,
+  # the VPC/SGs/subnets were never touched, and monitoring cleanup never ran, all while the
+  # operator read a warning that promised the opposite ("continuing"). A wait timeout is a
+  # degraded outcome to record, not a reason to stop cleaning up. TEARDOWN_INCOMPLETE carries
+  # the signal to the final exit code instead.
+  TEARDOWN_INCOMPLETE=$((TEARDOWN_INCOMPLETE + 1))
+  return 0
 }
 
 # ---- 1. AgentCore runtime(s) (boto3; no aws-cli verb in older CLIs) ----
@@ -171,10 +244,16 @@ PY
 # keyed on the index SG further down.
 
 # ---- 2. EC2 index-service instance(s) — terminate EVERY discovered one ----
-# Iterate the full deduped union (tag-discovered + both config ids), not just the two
-# config vars, so a leaked blue-green/failed-refresh peer can't survive teardown.
+# Iterate the full deduped union (tag-discovered + the config id), not just the config
+# var, so an instance the config never recorded can't survive teardown and keep billing.
 for inst in $ALL_INSTANCES; do
   if is_set "$inst"; then
+    # Termination protection is enabled at provision time (arm_instance_resilience) to stop an
+    # accidental console/CLI terminate. It also makes terminate-instances fail outright, so
+    # teardown MUST clear it first or the host survives every teardown and the operator is left
+    # with an instance they cannot delete from the documented path. Best-effort: an instance that
+    # never had it set, or is already gone, must not abort the teardown.
+    Q modify-instance-attribute --instance-id "$inst" --no-disable-api-termination >/dev/null 2>&1 || true
     del "instance $inst" Q terminate-instances --instance-ids "$inst"
     Q wait instance-terminated --instance-ids "$inst" 2>/dev/null || true
   fi
@@ -195,11 +274,37 @@ if ! is_set "$ZONE_ID"; then
   # associations include one in THIS region — otherwise `teardown --region A` could delete
   # region B's still-live zone (2nd-pass cross-review P2). Walk each same-named private
   # zone and check its GetHostedZone VPCs for a match on $REGION.
+  # The comment above says this fallback exists to survive an ALREADY-DELETED VPC. It did not:
+  # it converged on the zone's VPC ASSOCIATION, and Route53 drops that association when the VPC
+  # is deleted — the very precondition the fallback is for. So on a 2nd pass, and on every pass
+  # after the VPC delete a few lines below, no candidate ever matched, ZONE_ID stayed empty, and
+  # the whole record-cleanup block was skipped in silence. This region's
+  # index.<region>.source-truth.internal record then survives forever inside the SHARED zone,
+  # which means the zone can never reach "no records left" and becomes un-deletable from ANY
+  # region. Converge on the RECORD instead: it is region-named by construction and it outlives
+  # the VPC.
   for cand in $(aws route53 list-hosted-zones --query "HostedZones[?Name=='source-truth.internal.' && Config.PrivateZone].Id" --output text 2>/dev/null | sed 's#/hostedzone/##'); do
+    if aws route53 list-resource-record-sets --hosted-zone-id "$cand" \
+         --query "ResourceRecordSets[?Name=='index.${REGION}.source-truth.internal.'] | length(@)" \
+         --output text 2>/dev/null | grep -qx '[1-9][0-9]*'; then
+      ZONE_ID="$cand"; break
+    fi
+    # Keep the association test as a SECOND chance: covers a re-run where the record was already
+    # removed but the zone is still associated (a partial Route53 step on pass 1).
     if aws route53 get-hosted-zone --id "$cand" --query 'VPCs[].VPCRegion' --output text 2>/dev/null | grep -qw "$REGION"; then
       ZONE_ID="$cand"; break
     fi
   done
+fi
+if ! is_set "$ZONE_ID"; then
+  # Say so. The plan line printed "<discover by VPC>", which an operator reads as handled.
+  say warn "no source-truth.internal private zone converged on $REGION."
+  say warn "  The record index.${REGION}.source-truth.internal may still exist in the SHARED zone."
+  say warn "  It is shared cross-region — do NOT delete the zone. Inspect with:"
+  say warn "    aws route53 list-hosted-zones --query \"HostedZones[?Name=='source-truth.internal.']\""
+  TEARDOWN_INCOMPLETE=$((TEARDOWN_INCOMPLETE + 1))
+  LEFT_BEHIND="${LEFT_BEHIND}
+  • Route53 record index.${REGION}.source-truth.internal (zone not converged; shared — do not delete)"
 fi
 if is_set "$ZONE_ID"; then
   # The private zone `source-truth.internal` is SHARED across regions: each region owns its OWN
@@ -219,28 +324,175 @@ if is_set "$ZONE_ID"; then
   if [[ "$remaining" == "0" ]]; then
     del "hosted zone $ZONE_ID (no records left)" aws route53 delete-hosted-zone --id "$ZONE_ID"
   else
-    say info "保留共享私有区 $ZONE_ID（仍有其它区域记录：$remaining 条 A）——只删本区域的记录"
+    say info "保留共享私有区 $ZONE_ID（仍有其它区域的记录：$remaining 条 A）——只删本区域的记录 / keeping shared private zone $ZONE_ID ($remaining A records from other regions remain) — only this region's record was deleted"
   fi
 fi
 
-# ---- 4. NAT gateway + release its Elastic IP ----
-if is_set "$NAT"; then
-  # Capture the EIP allocation BEFORE deleting the NAT (it's reported on the NAT).
-  EIP_ALLOC="$(Q describe-nat-gateways --nat-gateway-ids "$NAT" --query 'NatGateways[0].NatGatewayAddresses[0].AllocationId' --output text 2>/dev/null || echo "")"
-  del "NAT gateway $NAT" Q delete-nat-gateway --nat-gateway-id "$NAT"
+# ---- 4. NAT gateway(s) + release EVERY Elastic IP they hold ----
+# Every public IPv4 address bills whether or not it is associated, so a stranded EIP is real
+# recurring money (~$3.65/mo), not a rounding error.
+EIP_ALLOCS=""
+for nat in $ALL_NATS; do
+  is_set "$nat" || continue
+  # ALL addresses, not [0]: a NAT gateway can carry several EIPs (associate-nat-gateway-address),
+  # and any allocation not captured here becomes unfindable the moment the NAT is deleted —
+  # it is no longer reachable through the NAT and may carry no tag of its own.
+  for a in $(Q describe-nat-gateways --nat-gateway-ids "$nat" --query 'NatGateways[].NatGatewayAddresses[].AllocationId' --output text 2>/dev/null || echo ""); do
+    is_set "$a" && EIP_ALLOCS="$EIP_ALLOCS $a"
+  done
+  del "NAT gateway $nat" Q delete-nat-gateway --nat-gateway-id "$nat"
   # Wait until the NAT is truly DELETED before releasing its EIP — release-address
   # fails while the EIP is still associated with a deleting NAT, which would strand
   # the (billable) EIP (cross-review P0). Poll, don't one-shot.
-  wait_gone "NAT $NAT" 300 Q describe-nat-gateways --nat-gateway-ids "$NAT" \
+  wait_gone "NAT $nat" 300 Q describe-nat-gateways --nat-gateway-ids "$nat" \
     --query 'NatGateways[?State!=`deleted`].NatGatewayId' --output text
+done
+# Union in every tagged UNASSOCIATED address. Two cases the loop above cannot see: a NAT that was
+# already gone but left its EIP allocated (the mid-deploy-crash orphan provision_network.sh warns
+# about, between allocate-address and create-nat-gateway), and a second tagged spare. The
+# AssociationId==null filter is what keeps this from releasing an address still attached to
+# something the operator cares about — the old code had no such filter.
+for a in $(Q describe-addresses --filters "Name=tag:Name,Values=source-truth-nat-eip" "Name=domain,Values=vpc" --query 'Addresses[?AssociationId==`null`].AllocationId' --output text 2>/dev/null || echo ""); do
+  is_set "$a" && EIP_ALLOCS="$EIP_ALLOCS $a"
+done
+for a in $( { printf '%s\n' $EIP_ALLOCS | grep -vE '^(None)?$' | sort -u; } || true ); do
+  del "Elastic IP $a" Q release-address --allocation-id "$a"
+done
+
+# ---- 4b. VPC endpoints ----
+# The two ECR INTERFACE endpoints bill per hour per AZ for as long as they exist, which puts them in
+# the same class as the NAT gateway and the Elastic IP: a leak here is a recurring charge on an
+# account the operator believes is empty. They also have to go before the security group and the
+# subnet, because each one holds an ENI in the private subnet and delete-security-group /
+# delete-subnet fail with DependencyViolation while it is attached.
+#
+# Deleted by a UNION of three sources, and enumerated in every one of them — the [0] mistake this
+# script has already been fixed for four times over. Tag-scoped deletion runs even when the VPC is
+# NOT ours: an endpoint carrying source-truth-vpce-* is unambiguously this project's, and refusing to
+# delete it because the surrounding VPC was pre-existing would leave a billable resource behind for
+# no safety gain.
+TAGGED_VPCE="$(Q describe-vpc-endpoints --filters "Name=tag:Name,Values=source-truth-vpce-*" \
+  --query 'VpcEndpoints[?State!=`deleted` && State!=`deleting`].VpcEndpointId' --output text 2>/dev/null || echo "")"
+VPC_VPCE=""
+if is_set "$VPC" && [[ "$VPC_IS_OURS" == true ]]; then
+  # Sweep the whole VPC too, for an endpoint whose tag was removed by hand or that a future version
+  # of provisioning adds under a different name. Safe precisely because the VPC is ours.
+  VPC_VPCE="$(Q describe-vpc-endpoints --filters "Name=vpc-id,Values=$VPC" \
+    --query 'VpcEndpoints[?State!=`deleted` && State!=`deleting`].VpcEndpointId' --output text 2>/dev/null || echo "")"
 fi
-# Release the NAT EIP — by captured alloc, else by its Name tag (covers a NAT that
-# was already gone but left its EIP allocated, the exact mid-deploy-crash orphan).
-is_set "${EIP_ALLOC:-}" || EIP_ALLOC="$(Q describe-addresses --filters "Name=tag:Name,Values=source-truth-nat-eip" --query 'Addresses[0].AllocationId' --output text 2>/dev/null || echo "")"
-is_set "${EIP_ALLOC:-}" && del "Elastic IP $EIP_ALLOC" Q release-address --allocation-id "$EIP_ALLOC"
+ALL_VPCE="$( { printf '%s\n' ${VPC_ENDPOINTS:-} $TAGGED_VPCE $VPC_VPCE | grep -vE '^(None)?$' | sort -u | tr '\n' ' '; } || true )"
+if is_set "$ALL_VPCE"; then
+  # delete-vpc-endpoints takes the whole list and, unlike most deletes, returns 0 while reporting
+  # per-endpoint failures in .Unsuccessful — the same shape that made create-flow-logs report a
+  # success it had not achieved. Delete one at a time through `del` so each gets its own verdict.
+  for _vpce in $ALL_VPCE; do
+    del "vpc endpoint $_vpce" Q delete-vpc-endpoints --vpc-endpoint-ids "$_vpce"
+  done
+  # The ENI is released asynchronously after the endpoint goes. Wait here rather than letting the
+  # SG/subnet delete below fail on DependencyViolation.
+  wait_gone "vpc endpoints" 180 Q describe-vpc-endpoints --vpc-endpoint-ids $ALL_VPCE \
+    --query 'VpcEndpoints[?State!=`deleted`].VpcEndpointId' --output text
+fi
+
+# ---- 4c. 自定义评估器 + 评估 Lambda（apply-evaluations.sh 建的，可选阶段） ----
+# 为什么要在这里删：评估 Lambda 挂在私有子网上，它的 ENI 和 VPC 端点一样会 pin 住安全组和子网，
+# 顺序错了后面的 delete-security-group / delete-subnet 会 DependencyViolation 失败。
+#
+# 评估器要先删、Lambda 后删：一个还被评估器引用的 Lambda 删掉之后，评估器就变成永久指向不存在函数的
+# 空壳，每次调用都失败，而它自己不会消失。
+#
+# 注意 online evaluation config：官方文档明确说，被启用的 online config 引用的评估器会被**锁定**，
+# 既不能改也不能删。所以先删 config，再删评估器；否则这里会以一个看不懂的 ConflictException 结束。
+if is_set "${EVALUATOR_IDS:-}" || aws lambda get-function --region "$REGION" \
+     --function-name source-truth-citation-evaluator >/dev/null 2>&1; then
+  python3 - "$REGION" <<'PYEVAL' || say warn "评估资源清理未完全成功（非致命，可重跑）"
+import sys
+
+import boto3
+from botocore.exceptions import ClientError
+
+region = sys.argv[1]
+ctl = boto3.client("bedrock-agentcore-control", region_name=region)
+
+# 1) 先停掉/删掉引用评估器的 online config，否则评估器是锁定状态
+try:
+    token = None
+    while True:
+        kw = {"maxResults": 50}
+        if token:
+            kw["nextToken"] = token
+        resp = ctl.list_online_evaluation_configs(**kw)
+        items = resp.get("onlineEvaluationConfigs") or resp.get("onlineEvaluationConfigSummaries") or []
+        for c in items:
+            cid = c.get("onlineEvaluationConfigId") or c.get("id")
+            name = c.get("onlineEvaluationConfigName") or ""
+            # 前缀是 `st_online_`，不是 `source-truth`：配置名的服务端约束是
+            # [a-zA-Z][a-zA-Z0-9_]{0,47}——不许连字符、上限 48 字符，所以项目前缀被迫缩写。
+            # 第一版按 "source-truth" 匹配，一个也删不到，而删不掉 config 就删不掉被它锁定的评估器。
+            if not cid or not name.startswith("st_online_"):
+                continue
+            try:
+                ctl.delete_online_evaluation_config(onlineEvaluationConfigId=cid)
+                print(f"  ✓ 已删除 online eval config {name} ({cid})")
+            except ClientError as e:
+                print(f"  ✗ online eval config {cid}: {e.response.get('Error', {}).get('Code')}")
+        token = resp.get("nextToken")
+        if not token:
+            break
+except (ClientError, AttributeError) as e:
+    print(f"  · 跳过 online eval config 清理: {type(e).__name__}")
+
+# 2) 删自定义评估器。只删本项目建的（名字前缀 SourceTruth）——内置评估器删不掉，也不该尝试。
+try:
+    token = None
+    mine = []
+    while True:
+        kw = {"maxResults": 50}
+        if token:
+            kw["nextToken"] = token
+        resp = ctl.list_evaluators(**kw)
+        for e in resp.get("evaluatorSummaries") or resp.get("evaluators") or []:
+            name = e.get("evaluatorName") or e.get("name") or ""
+            eid = e.get("evaluatorId") or e.get("id")
+            kind = e.get("type") or e.get("evaluatorType") or ""
+            if eid and name.startswith("SourceTruth") and kind != "Builtin":
+                mine.append((name, eid))
+        token = resp.get("nextToken")
+        if not token:
+            break
+    for name, eid in mine:
+        try:
+            ctl.delete_evaluator(evaluatorId=eid)
+            print(f"  ✓ 已删除评估器 {name} ({eid})")
+        except ClientError as e:
+            print(f"  ✗ 评估器 {name}: {e.response.get('Error', {}).get('Code')}: "
+                  f"{e.response.get('Error', {}).get('Message', '')[:120]}")
+    if not mine:
+        print("  · 没有本项目的自定义评估器")
+except ClientError as e:
+    print(f"  ✗ 列举评估器失败: {e.response.get('Error', {}).get('Code')}")
+
+# 3) 最后删 Lambda
+lam = boto3.client("lambda", region_name=region)
+try:
+    lam.delete_function(FunctionName="source-truth-citation-evaluator")
+    print("  ✓ 已删除 Lambda source-truth-citation-evaluator")
+except lam.exceptions.ResourceNotFoundException:
+    print("  · Lambda 不存在")
+except ClientError as e:
+    print(f"  ✗ Lambda: {e.response.get('Error', {}).get('Code')}")
+PYEVAL
+  # Lambda 的 VPC ENI 是异步释放的。不等它，下面删安全组会 DependencyViolation——
+  # 和 VPC 端点完全相同的失败形状。
+  if is_set "$VPC" && [[ "$VPC_IS_OURS" == true ]]; then
+    wait_gone "评估 Lambda 的 ENI" 300 Q describe-network-interfaces \
+      --filters "Name=vpc-id,Values=$VPC" "Name=description,Values=AWS Lambda VPC ENI*" \
+      --query 'NetworkInterfaces[].NetworkInterfaceId' --output text
+  fi
+fi
 
 # ---- 5. VPC teardown (subnets, route tables, IGW, SG) then the VPC ----
-if is_set "$VPC"; then
+if is_set "$VPC" && [[ "$VPC_IS_OURS" == true ]]; then
   # The AgentCore runtime + the index EC2 leave requester-managed ENIs in the VPC that
   # AWS releases asynchronously; deleting a subnet/SG/VPC while one is still attached
   # fails with DependencyViolation and STRANDS that resource (cross-review P1). Wait
@@ -279,12 +531,54 @@ if is_set "$VPC"; then
     del "route table $rt" Q delete-route-table --route-table-id "$rt"
   done
 
-  del "VPC $VPC" Q delete-vpc --vpc-id "$VPC"
+  # Flow logs + custom NACLs (both added by provision_network.sh: H7 / H5). Removed explicitly
+  # rather than relying on delete-vpc cascade, so they can never be the thing that pins the VPC.
+  for fl in $(Q describe-flow-logs --filter "Name=resource-id,Values=$VPC" --query 'FlowLogs[].FlowLogId' --output text 2>/dev/null || echo ""); do
+    is_set "$fl" && del "flow log $fl" Q delete-flow-logs --flow-log-ids "$fl"
+  done
+  for acl in $(Q describe-network-acls --filters "Name=vpc-id,Values=$VPC" --query 'NetworkAcls[?IsDefault==`false`].NetworkAclId' --output text 2>/dev/null || echo ""); do
+    is_set "$acl" && del "network acl $acl" Q delete-network-acl --network-acl-id "$acl"
+  done
+
+  # delete-vpc with a BOUNDED RETRY. A NAT gateway's ENI keeps draining for a while after the NAT
+  # is deleted, so the first attempt can lose a race and fail with DependencyViolation. The old
+  # code made one attempt through `del`, which reports "may already be gone" on failure — so a
+  # VPC that was very much still there leaked silently, burning one of the account's 5 VPC slots
+  # on every teardown (observed 2026-08-20). Retry, then report the REAL API error.
+  vpc_err=""
+  for attempt in 1 2 3 4 5 6; do
+    if vpc_err="$(Q delete-vpc --vpc-id "$VPC" 2>&1 >/dev/null)"; then
+      say ok "deleted VPC $VPC"
+      vpc_err=""
+      break
+    fi
+    # Gone already (a 2nd-pass teardown) is success, not a failure to retry.
+    if printf '%s' "$vpc_err" | grep -q InvalidVpcID.NotFound; then
+      say ok "VPC $VPC already gone"
+      vpc_err=""
+      break
+    fi
+    [[ $attempt -lt 6 ]] && sleep 10
+  done
+  if [[ -n "$vpc_err" ]]; then
+    say err "VPC $VPC NOT deleted — it is still billable-adjacent and holds a VPC-quota slot"
+    say err "  → $(printf '%s' "$vpc_err" | tr -d '\n' | cut -c1-300)"
+    say err "  re-run this teardown, or delete the remaining dependency shown above by hand"
+  fi
 fi
 
 # ---- 6. monitoring stack (region-scoped, best-effort — Phase 7 of deploy-all builds it) ----
 # DAU Lambda + its EventBridge daily rule (+ the lambda permission that rule installs).
-del "EventBridge rule source-truth-dau-daily targets" aws events remove-targets --region "$REGION" --rule source-truth-dau-daily --ids 1
+# Enumerate the target ids instead of guessing one. `--ids 1` never matched: apply-dau-lambda.sh
+# registers Id=dau. remove-targets is a BATCH api that exits 0 and reports per-entry failure only
+# in its response body, so the mismatch printed a green check while the target survived — and
+# EventBridge then refuses to delete a rule that still has targets, so the rule leaked too
+# (firing daily at a Lambda this script had already deleted).
+_DAU_TARGET_IDS="$(aws events list-targets-by-rule --region "$REGION" --rule source-truth-dau-daily --query 'Targets[].Id' --output text 2>/dev/null || echo "")"
+if is_set "$_DAU_TARGET_IDS"; then
+  # shellcheck disable=SC2086  # deliberate word-split: --ids takes a list
+  del "EventBridge rule source-truth-dau-daily targets ($_DAU_TARGET_IDS)" aws events remove-targets --region "$REGION" --rule source-truth-dau-daily --ids $_DAU_TARGET_IDS
+fi
 del "EventBridge rule source-truth-dau-daily" aws events delete-rule --region "$REGION" --name source-truth-dau-daily
 del "Lambda source-truth-dau-preaggregate" aws lambda delete-function --region "$REGION" --function-name source-truth-dau-preaggregate
 # Dashboards (both pages).
@@ -303,6 +597,29 @@ for mf in $(aws logs describe-metric-filters --region "$REGION" --log-group-name
   del "metric filter $mf" aws logs delete-metric-filter --region "$REGION" --log-group-name "$GW_LOG" --filter-name "$mf"
 done
 
+# vpc-flow-logs/ OBJECTS. The flow-log subscription is deleted above, but the delivered objects
+# were only ever removed by the bucket purge inside --include-shared — so a default teardown left
+# them, and the RETAINED block did not mention them either: uncleaned AND undeclared. They are this
+# region's VPC traffic and unambiguously ours, so purge them here in the default path.
+_fl_bucket="${ARTIFACT_BUCKET:-}"
+if [[ -z "$_fl_bucket" && -n "${ACCOUNT:-}" ]]; then
+  _fl_bucket="source-truth-repo-${ACCOUNT}-$(printf '%s' "$REGION" | tr -d '-')"
+fi
+if is_set "$_fl_bucket"; then
+  aws s3 rm "s3://${_fl_bucket}/vpc-flow-logs/" --recursive >/dev/null 2>&1 || true
+  say info "purged flow-log objects under s3://${_fl_bucket}/vpc-flow-logs/ (best-effort)"
+fi
+
+# AgentCore runtime log groups: ONE SET PER RUNTIME GENERATION. teardown deletes the runtime, so
+# the next deploy gets a fresh agentRuntimeId and therefore a fresh log group — without this, every
+# teardown/redeploy cycle strands another never-expiring group. Enumerate by prefix, because the
+# runtime ids are already gone by the time we reach this point.
+for lg in $(aws logs describe-log-groups --region "$REGION" \
+    --log-group-name-prefix /aws/bedrock-agentcore/runtimes/ \
+    --query 'logGroups[?contains(logGroupName, `source_truth_agent`)].logGroupName' --output text 2>/dev/null || echo ""); do
+  is_set "$lg" && del "log group $lg" aws logs delete-log-group --region "$REGION" --log-group-name "$lg"
+done
+
 # ---- 7. ECR repository (region-scoped) ----
 del "ECR repo source-truth/agent" aws ecr delete-repository --repository-name source-truth/agent --region "$REGION" --force
 
@@ -311,19 +628,67 @@ if [[ "$INCLUDE_SHARED" == true ]]; then
   # CROSS-REGION GUARD: the IAM roles + S3 bucket are ACCOUNT-global and shared by every region's
   # host. Deleting them while another region still runs a host would instantly break its
   # S3/Secrets/Bedrock access. Refuse if any source-truth host exists in ANOTHER region.
-  OTHER=""
-  for r in $(aws ec2 describe-regions --query 'Regions[].RegionName' --output text 2>/dev/null || echo ""); do
+  # This guard must FAIL CLOSED. The old version ended every probe with `2>/dev/null || echo ""`,
+  # which collapsed AccessDenied and throttling into "no regions" / "no hosts there" — so a
+  # restricted credential silently DISABLED the guard and went straight to deleting the roles.
+  # That is exactly backwards: a scoped credential in a shared account is the case where the
+  # guard most needs to hold. "Could not tell" is now distinct from "nothing there", and only
+  # the second one proceeds.
+  OTHER=""; UNKNOWN=""
+  _regions="$(aws ec2 describe-regions --query 'Regions[].RegionName' --output text 2>&1)" || _regions=""
+  if ! printf '%s' "$_regions" | grep -qE '^[a-z]{2}(-[a-z]+)+-[0-9]'; then
+    say err "cannot enumerate regions (${_regions:0:120}) — REFUSING --include-shared."
+    say err "  The guard protecting other regions' hosts cannot run. Grant ec2:DescribeRegions,"
+    say err "  or remove the shared IAM roles + bucket by hand once every region is torn down."
+    exit 1
+  fi
+  for r in $_regions; do
     [[ "$r" == "$REGION" ]] && continue
-    hit="$(aws ec2 describe-instances --region "$r" \
-      --filters "Name=tag:Name,Values=source-truth-index-service,source-truth-host" "Name=instance-state-name,Values=pending,running,stopping,stopped" \
-      --query 'Reservations[].Instances[].InstanceId' --output text 2>/dev/null || echo "")"
-    is_set "$hit" && OTHER="$OTHER $r"
+    _seen=""
+    if hit="$(aws ec2 describe-instances --region "$r" \
+        --filters "Name=tag:Name,Values=source-truth-index-service,source-truth-host" "Name=instance-state-name,Values=pending,running,stopping,stopped" \
+        --query 'Reservations[].Instances[].InstanceId' --output text 2>&1)"; then
+      is_set "$hit" && _seen="yes"
+    else
+      UNKNOWN="$UNKNOWN $r"; continue    # denied/throttled is NOT "empty"
+    fi
+    # A region can use these shared roles with NO EC2 instance at all: a PUBLIC-mode deploy runs
+    # an AgentCore runtime and no index-service, so an instance-tag sweep reports it clean while
+    # its runtime is actively using SourceTruthAgentRuntimeRole and the artifact bucket. Check
+    # runtimes too, or --include-shared here silently breaks that region.
+    if [[ -z "$_seen" ]]; then
+      if rts="$(aws bedrock-agentcore-control list-agent-runtimes --region "$r" \
+          --query 'agentRuntimes[?starts_with(agentRuntimeName, `source_truth_agent`)].agentRuntimeName' --output text 2>&1)"; then
+        is_set "$rts" && _seen="yes"
+      else
+        UNKNOWN="$UNKNOWN $r"; continue
+      fi
+    fi
+    is_set "$_seen" && OTHER="$OTHER $r"
   done
+  if is_set "$UNKNOWN"; then
+    say err "could not check for source-truth resources in:$UNKNOWN — REFUSING --include-shared."
+    say err "  A denied or throttled probe reads the same as an empty one; treating it as empty is"
+    say err "  how another region's host loses its S3/Secrets/Bedrock access."
+    exit 1
+  fi
   if is_set "$OTHER"; then
-    say warn "跳过共享 IAM 角色 + S3 桶：其它区域仍有 source-truth 主机在跑（$OTHER）——删了会让那些机器失权。"
-    say info "  等所有区域都拆完，再在最后一个区域跑 --include-shared。"
+    say warn "跳过共享 IAM 角色 + S3 桶：其它区域仍有 source-truth 主机在跑（$OTHER）——删了会让那些机器失权 / skipping the shared IAM roles + S3 bucket: source-truth hosts are still running in other regions ($OTHER) — deleting them would strip those hosts of their access."
+    say info "  等所有区域都拆完，再在最后一个区域跑 --include-shared / tear the other regions down first, then run --include-shared in the last one."
   else
   # DAU Lambda's IAM role (account-global, created by apply-monitoring.sh's dau stage).
+  # Detach MANAGED policies before deleting a role: delete-role fails with DeleteConflict while
+  # any remains. Applied to ALL THREE roles via one helper \u2014 the enumerate-don't-name fix was
+  # first written for the DAU role only, leaving source-truth-index-role deleting a single ARN by
+  # name and SourceTruthAgentRuntimeRole detaching nothing, so either could still leak.
+  detach_managed() { # <role-name>
+    local r="$1" pa
+    for pa in $(aws iam list-attached-role-policies --role-name "$r" --query 'AttachedPolicies[].PolicyArn' --output text 2>/dev/null || echo ""); do
+      is_set "$pa" && aws iam detach-role-policy --role-name "$r" --policy-arn "$pa" >/dev/null 2>&1 || true
+    done
+  }
+
+  detach_managed source-truth-dau-lambda-role
   for p in $(aws iam list-role-policies --role-name source-truth-dau-lambda-role --query 'PolicyNames[]' --output text 2>/dev/null || echo ""); do
     aws iam delete-role-policy --role-name source-truth-dau-lambda-role --policy-name "$p" >/dev/null 2>&1 || true
   done
@@ -331,7 +696,7 @@ if [[ "$INCLUDE_SHARED" == true ]]; then
   # IAM index role: detach managed, delete inline + profile, then the role.
   aws iam remove-role-from-instance-profile --instance-profile-name source-truth-index-profile --role-name source-truth-index-role >/dev/null 2>&1 || true
   del "instance profile source-truth-index-profile" aws iam delete-instance-profile --instance-profile-name source-truth-index-profile
-  aws iam detach-role-policy --role-name source-truth-index-role --policy-arn arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore >/dev/null 2>&1 || true
+  detach_managed source-truth-index-role
   # Delete ALL inline policies before the role (delete-role fails if any remain). Enumerate
   # rather than name them (the set grew: s3-artifacts, secrets-read, cloudwatch-logs, …).
   for p in $(aws iam list-role-policies --role-name source-truth-index-role --query 'PolicyNames[]' --output text 2>/dev/null || echo ""); do
@@ -339,17 +704,65 @@ if [[ "$INCLUDE_SHARED" == true ]]; then
   done
   del "IAM role source-truth-index-role" aws iam delete-role --role-name source-truth-index-role
   # Runtime role: delete any inline policies, then the role.
+  detach_managed SourceTruthAgentRuntimeRole
   for p in $(aws iam list-role-policies --role-name SourceTruthAgentRuntimeRole --query 'PolicyNames[]' --output text 2>/dev/null || echo ""); do
     aws iam delete-role-policy --role-name SourceTruthAgentRuntimeRole --policy-name "$p" >/dev/null 2>&1 || true
   done
   del "IAM role SourceTruthAgentRuntimeRole" aws iam delete-role --role-name SourceTruthAgentRuntimeRole
   # S3 artifact bucket (empty then delete).
-  if is_set "${ARTIFACT_BUCKET:-}"; then
-    aws s3 rm "s3://${ARTIFACT_BUCKET}" --recursive >/dev/null 2>&1 || true
-    del "S3 bucket ${ARTIFACT_BUCKET}" aws s3api delete-bucket --bucket "${ARTIFACT_BUCKET}" --region "$REGION"
+  # Derive the name when config is absent. The rule is fixed (deploy-all.sh) and
+  # provision_network.sh already re-derives it standalone for exactly this reason; teardown was
+  # the only one of the three that just gave up. With no .local/deploy-config — another machine, a
+  # clone, a crash before the config line is written — the old `is_set` guard was false, the block
+  # was skipped with NO output, and the script still printed "teardown complete", even though the
+  # operator had explicitly asked for the bucket by passing --include-shared.
+  _bucket="${ARTIFACT_BUCKET:-}"
+  if [[ -z "$_bucket" && -n "${ACCOUNT:-}" ]]; then
+    _bucket="source-truth-repo-${ACCOUNT}-$(printf '%s' "$REGION" | tr -d '-')"
+    say info "ARTIFACT_BUCKET absent from config — derived $_bucket"
+  fi
+  if is_set "$_bucket"; then
+    aws s3 rm "s3://${_bucket}" --recursive >/dev/null 2>&1 || true
+    del "S3 bucket ${_bucket}" aws s3api delete-bucket --bucket "${_bucket}" --region "$REGION"
+  else
+    say warn "artifact bucket name unresolved (no config, no account id) — it may still be billing"
+    TEARDOWN_INCOMPLETE=$((TEARDOWN_INCOMPLETE + 1))
+    LEFT_BEHIND="${LEFT_BEHIND}
+  • S3 artifact bucket (name unresolved)"
   fi
   fi   # cross-region guard
 fi
 
-say ok "teardown complete for $REGION"
 say info "verify no billable orphans:  aws ec2 describe-nat-gateways --region $REGION --filter Name=tag:Name,Values=source-truth-nat"
+# The hint above covered only the NAT. Cover the EIP too — it is the leak most likely to survive
+# (every public IPv4 address bills whether associated or not), plus the Route53 record that blocks
+# all future zone cleanup, neither of which the operator could otherwise discover.
+say info "    aws ec2 describe-addresses --region $REGION --filters Name=tag:Name,Values=source-truth-nat-eip --query 'Addresses[].AllocationId'"
+say info "    aws route53 list-hosted-zones --query \"HostedZones[?Name=='source-truth.internal.'].Id\""
+# Interface endpoints belong on this list for the same reason as the EIP: an hourly charge that
+# nothing on the console's front page draws attention to, in a region the operator has stopped
+# thinking about.
+say info "    aws ec2 describe-vpc-endpoints --region $REGION --filters Name=tag:Name,Values=source-truth-vpce-* --query 'VpcEndpoints[].[VpcEndpointId,VpcEndpointType,State]'"
+
+# RETAINED BY DESIGN — these are never deleted by a default run, and staying silent about them
+# is how a "complete" teardown quietly keeps billing. Secrets are ~$0.40/mo each and the log
+# groups keep storage charges (the Lambda one has no retention at all).
+say info "RETAINED (billable, delete by hand or with --include-shared):"
+say info "  • Secrets Manager: source-truth/feishu-<projectId>, /log-hash-salt, /git-credentials, /deploy-github-token"
+say info "  • Log groups: /source-truth/bot-gateway, /source-truth/index-bridge, /aws/lambda/source-truth-dau-preaggregate"
+if [[ "$INCLUDE_SHARED" != true ]]; then
+  say info "  • IAM roles + instance profile + S3 artifact bucket (pass --include-shared to remove)"
+fi
+
+# Exit non-zero when anything actually failed, so CI and the operator can tell a partial
+# teardown from a clean one. The old script exited 0 unconditionally.
+#
+# The success line lives HERE, not above: printed unconditionally it sat directly above the
+# failure report, so an operator saw a green "complete" over a red "INCOMPLETE", and any wrapper
+# grepping for "teardown complete" reported success on a run that leaked a billable VPC.
+if [[ "$TEARDOWN_INCOMPLETE" -gt 0 ]]; then
+  say err "teardown INCOMPLETE — ${TEARDOWN_INCOMPLETE} operation(s) failed:${LEFT_BEHIND}"
+  say err "re-run this teardown; resources above may still be billable"
+  exit 1
+fi
+say ok "teardown complete for $REGION"

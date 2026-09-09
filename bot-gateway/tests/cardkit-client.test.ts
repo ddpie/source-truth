@@ -259,6 +259,18 @@ describe("close streaming", () => {
 });
 
 describe("buildFinalizeCard", () => {
+  it("keeps the chat-width layout when streaming is replaced by any terminal card", () => {
+    const initial = JSON.parse(JSON.parse(buildCreateCardBody()).data);
+    expect(initial.config.width_mode).toBe("fill");
+    for (const opts of [{}, { followUp: true }, { failed: true }, { aborted: true },
+      { turnCapped: true }, { clarify: true }, { timedOut: true }]) {
+      expect(buildFinalizeCard("答案", [], opts).config).toMatchObject({
+        width_mode: initial.config.width_mode,
+        streaming_mode: false,
+      });
+    }
+  });
+
   it("carries streaming_mode:false so the full-PUT closes the stream by itself", () => {
     // Regression: the separate closeStreaming PATCH (/settings) intermittently 300308s
     // (Server Internal Error). If finalize's full-PUT does not ALSO turn streaming off,
@@ -511,4 +523,3 @@ describe("finalizeTitle clarify branch", () => {
     expect(finalizeTitle(false, false, false, "1m 7s")).toBe("回答完成 · 用时 1m 7s");
   });
 });
-

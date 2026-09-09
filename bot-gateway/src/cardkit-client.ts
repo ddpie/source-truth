@@ -104,6 +104,7 @@ export function buildCreateCardBody(opts?: { summary?: string; followUp?: boolea
     schema: "2.0",
     config: {
       update_multi: true,
+      width_mode: "fill", // Follow the chat pane's available width.
       streaming_mode: true,
       summary: { content: summary },
       streaming_config: {
@@ -482,7 +483,8 @@ export function buildFinalizeCard(conclusion: string, steps: string[], opts: Fin
     schema: "2.0",
     // streaming_mode:false makes the full-PUT close the stream by itself — see the
     // docstring above (300308 backstop). update_multi keeps partial element updates.
-    config: { update_multi: true, streaming_mode: false },
+    // Full replacement must preserve the streaming card's responsive width.
+    config: { update_multi: true, width_mode: "fill", streaming_mode: false },
     header: {
       title: { tag: "plain_text", content: finalizeTitle(followUp, aborted, failed, elapsedLabel, turnCapped, clarify, timedOut) },
       template: failed ? "red" : aborted ? "grey" : turnCapped ? "orange" : timedOut ? "orange" : clarify ? "blue" : "green",

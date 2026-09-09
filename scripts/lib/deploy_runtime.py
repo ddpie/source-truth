@@ -16,7 +16,7 @@ Usage:
   python3 deploy_runtime.py --region us-east-1 --account <your-account-id> \
     --role-arn arn:...:role/SourceTruthAgentRuntimeRole \
     --image <acct>.dkr.ecr.<region>.amazonaws.com/source-truth/agent:latest \
-    --model global.anthropic.claude-opus-4-8 [--name source_truth_agent]
+    --sdk claude --model global.anthropic.claude-opus-4-8 [--name source_truth_agent]
 
 Prints `AGENT_RUNTIME_ID=<id>` and `AGENT_RUNTIME_ARN=<arn>` on success.
 """
@@ -24,10 +24,14 @@ Prints `AGENT_RUNTIME_ID=<id>` and `AGENT_RUNTIME_ARN=<arn>` on success.
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 import sys
 import time
 
 import boto3
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "agent-container"))
+from agent_settings import AgentSettings  # noqa: E402
 
 
 def find_existing(client, name: str) -> str | None:
@@ -49,6 +53,22 @@ def find_existing(client, name: str) -> str | None:
             return None
 
 
+def validate_options(
+    sdk: str, model: str, agent_max_turns: int,
+    subnets: list[str] | None, security_groups: list[str] | None,
+    idle_timeout: int | None, max_lifetime: int | None,
+) -> None:
+    AgentSettings(sdk, model, model, agent_max_turns)
+    if bool(subnets) != bool(security_groups):
+        raise ValueError("--subnets and --security-groups must be provided together")
+    if any(not item.strip() for item in (subnets or []) + (security_groups or [])):
+        raise ValueError("subnets and security groups must not contain empty IDs")
+    for flag, value in (("--idle-timeout", idle_timeout), ("--max-lifetime", max_lifetime)):
+        if value is not None and (isinstance(value, bool) or not isinstance(value, int)
+                                  or not 60 <= value <= 28800):
+            raise ValueError(f"{flag} must be in 60..28800 seconds, got {value}")
+
+
 def deploy(
     *,
     region: str,
@@ -56,12 +76,15 @@ def deploy(
     image: str,
     name: str,
     model: str,
+    sdk: str = "openai",
+    agent_max_turns: int = 60,
     subnets: list[str] | None = None,
     security_groups: list[str] | None = None,
     codegraph_mcp_url: str | None = None,
     idle_timeout: int | None = None,
     max_lifetime: int | None = None,
 ) -> tuple[str, str]:
+    validate_options(sdk, model, agent_max_turns, subnets, security_groups, idle_timeout, max_lifetime)
     client = boto3.client("bedrock-agentcore-control", region_name=region)
     artifact = {"containerConfiguration": {"containerUri": image}}
     # Pin the agent's Bedrock region to the DEPLOY region, overriding the image's
@@ -70,8 +93,10 @@ def deploy(
     # mainly correctness + lower cross-region latency — but it's REQUIRED if an
     # operator deploys with a region-pinned --model (apac.*/jp.*) where a us-east-1
     # endpoint would mismatch. Track --region so the runtime's region is never stale.
-    env = {"CLAUDE_CODE_USE_BEDROCK": "1", "ANTHROPIC_MODEL": model,
+    env = {"AGENT_SDK": sdk, "AGENT_MODEL": model, "AGENT_MAX_TURNS": str(agent_max_turns),
            "AWS_REGION": region, "AWS_DEFAULT_REGION": region}
+    if sdk == "claude":
+        env.update(CLAUDE_CODE_USE_BEDROCK="1", ANTHROPIC_MODEL=model)
     # CodeGraph MCP endpoint (index-service). Only set when provided so a
     # PUBLIC-mode runtime without an index-service stays a plain agent.
     if codegraph_mcp_url:
@@ -119,6 +144,25 @@ def deploy(
 
     existing = find_existing(client, name)
     if existing:
+        current = client.get_agent_runtime(agentRuntimeId=existing)
+        # Update replaces the environment map. Retain operational settings (for
+        # example OTEL tuning), while replacing every SDK-owned key together so
+        # a switch to OpenAI cannot inherit ANTHROPIC_MODEL from the old runtime.
+        managed = {
+            "AGENT_SDK", "AGENT_MODEL", "AGENT_MAX_TURNS", "AWS_REGION", "AWS_DEFAULT_REGION",
+            "CODEGRAPH_MCP_URL", "CLAUDE_CODE_USE_BEDROCK", "ANTHROPIC_MODEL",
+        }
+        common["environmentVariables"] = {
+            **{key: value for key, value in current.get("environmentVariables", {}).items()
+               if key not in managed and not key.startswith(
+                   ("ANTHROPIC_", "OPENAI_", "CLAUDE_CODE_", "CLAUDE_AGENT_")
+               )},
+            **env,
+        }
+        for key in ("description", "authorizerConfiguration", "requestHeaderConfiguration",
+                    "protocolConfiguration", "metadataConfiguration", "lifecycleConfiguration"):
+            if key not in common and key in current:
+                common[key] = current[key]
         print(f"  updating existing runtime {existing}", file=sys.stderr)
         client.update_agent_runtime(agentRuntimeId=existing, **common)
         rid = existing
@@ -167,6 +211,9 @@ def main() -> int:
     # resolved MODEL — so this script can't silently deploy a different default than
     # the orchestrator intends. Callers must pass --model explicitly.
     p.add_argument("--model", required=True)
+    p.add_argument("--sdk", choices=("openai", "claude"), default="openai")
+    p.add_argument("--agent-max-turns", type=int, default=60)
+    p.add_argument("--validate-only", action="store_true", help="validate local inputs without AWS calls")
     # VPC mode (to reach the in-VPC index-service): both must be provided together.
     p.add_argument("--subnets", help="comma-separated subnet ids (VPC mode)")
     p.add_argument("--security-groups", help="comma-separated security group ids")
@@ -178,10 +225,16 @@ def main() -> int:
 
     # Validate lifecycle bounds up front so a bad value fails with a clear message
     # here, not as an opaque ValidationException minutes into the deploy.
-    for flag, val in (("--idle-timeout", args.idle_timeout), ("--max-lifetime", args.max_lifetime)):
-        if val is not None and not (60 <= val <= 28800):
-            print(f"{flag} must be in 60..28800 seconds, got {val}", file=sys.stderr)
-            return 2
+    subnets = args.subnets.split(",") if args.subnets else None
+    security_groups = args.security_groups.split(",") if args.security_groups else None
+    try:
+        validate_options(args.sdk, args.model, args.agent_max_turns, subnets, security_groups,
+                         args.idle_timeout, args.max_lifetime)
+    except ValueError as error:
+        print(str(error), file=sys.stderr)
+        return 2
+    if args.validate_only:
+        return 0
 
     rid, arn = deploy(
         region=args.region,
@@ -189,8 +242,10 @@ def main() -> int:
         image=args.image,
         name=args.name,
         model=args.model,
-        subnets=args.subnets.split(",") if args.subnets else None,
-        security_groups=args.security_groups.split(",") if args.security_groups else None,
+        sdk=args.sdk,
+        agent_max_turns=args.agent_max_turns,
+        subnets=subnets,
+        security_groups=security_groups,
         codegraph_mcp_url=args.codegraph_mcp_url,
         idle_timeout=args.idle_timeout,
         max_lifetime=args.max_lifetime,

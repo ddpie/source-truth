@@ -416,3 +416,127 @@ describe("redactDeep (chart specs)", () => {
     expect(Object.keys(out.data.values[0])).toEqual(["name", "secret"]); // keys intact
   });
 });
+
+describe("Feishu object identifiers", () => {
+  // These reach the logs through the URL PATH of a failed API call, e.g.
+  // `feishu POST /open-apis/im/v1/messages/om_xxx/reactions HTTP 400: ...`. Before this pattern
+  // existed, every error string that had been passed through redactSensitive still published raw
+  // message / chat / user ids — breaking log.ts's own contract while looking redacted.
+  it("redacts message, chat, user and bot ids", () => {
+    const s = redactSensitive(
+      // Synthetic ids. These assertions test the SHAPE rule, so real values add nothing and
+    // publishing them contradicts the very rule under test.
+    "feishu POST /open-apis/im/v1/messages/om_00000000000000000000000000000002/reactions HTTP 400",
+    );
+    expect(s).not.toContain("om_00000000000000000000000000000002");
+    expect(redactSensitive("asker ou_00000000000000000000000000000002")).not.toContain("ou_0000");
+    expect(redactSensitive("chat oc_00000000000000000000000000000002")).not.toContain("oc_0000");
+  });
+
+  it("keeps the CardKit card id, which is the operator's correlation key and identifies no user", () => {
+    expect(redactSensitive("card 7676398624397905194 failed")).toContain("7676398624397905194");
+  });
+
+  it("leaves short lookalikes alone so ordinary prose is not mangled", () => {
+    expect(redactSensitive("om_short")).toContain("om_short");
+  });
+});
+
+describe("bare high-entropy tokens (no adjacent keyword)", () => {
+  // The keyword rules only fire when a credential is LABELLED (`secret=`, `token:`). A value
+  // pasted or quoted on its own was not caught here, while index-service/glossary_build.py had
+  // been widened to catch exactly these shapes — an asymmetry with a real consequence: the same
+  // string blocked from entering a glossary could still flow through an ANSWER into a chat card.
+  it("redacts a 32-char mixed-case token — the Feishu app_secret shape", () => {
+    const s = "kZ8mQ3vXpL0aRt7YbN2wEcHs6UdFjG1i";
+    expect(redactSensitive(s)).not.toContain(s);
+  });
+
+  it("redacts a 32-char hex digest (the old floor of 40 let MD5-shaped secrets through)", () => {
+    const s = "d41d8cd98f00b204e9800998ecf8427e";
+    expect(redactSensitive(s)).not.toContain(s);
+  });
+
+  // These are what protect answer prose. A false positive costs one redacted noun in an answer;
+  // over-redacting identifiers would make the product look broken on every reply.
+  it.each([
+    ["CONSTANT_CASE identifier", "背包格子上限由 INVENTORY_SLOT_ITEM_1 决定"],
+    ["long CamelCase with no digits", "GetBagSizeFromContainerFieldNumSlots"],
+    ["file:line citation", "Player.h:577 里的 enum InventorySlots"],
+    ["prose plus identifier", "伤害公式在 CalculateMeleeDamage 里实现"],
+    ["constant and a number", "MAX_BAG_SIZE 是 36"],
+  ])("leaves legitimate answer prose intact: %s", (_why, text) => {
+    expect(redactSensitive(text)).toBe(text);
+  });
+
+  // The five cases above were BARE — nothing followed the identifier. That is what made them pass
+  // against a broken implementation: the original rule used lookaheads, which scan forward over the
+  // REST OF THE STRING rather than the matched token, so "must contain 2+ digits" was satisfied by
+  // digits appearing anywhere LATER in the answer. With nothing later, no digits were findable and
+  // the test reported success while real answers had their symbol names redacted. Any fixture used
+  // to prove an in-token condition must therefore carry realistic trailing context.
+  it.each([
+    [
+      "symbol name followed by digits and capitals",
+      "背包容量由 GetBagSizeFromContainerFieldNumSlots 决定，见 2 处调用，Lv30 时上限 120。",
+    ],
+    [
+      "two symbol names in one answer, digits after both",
+      "上层入口是 getUserInventorySlotCapacityForPlayerV2Handler，配合 GetBagSizeFromContainerFieldNumSlots；Lv30 上限 120。",
+    ],
+    [
+      "identifier in the evidence block after a numeric table",
+      "等级 30 上限 120。供研发复核：Assets/Scripts/GetBagSizeFromContainerFieldNumSlots.cs",
+    ],
+  ])("keeps identifiers when digits follow them: %s", (_why, text) => {
+    expect(redactSensitive(text)).toBe(text);
+  });
+
+  it("redacts a token identically wherever it sits in the answer", () => {
+    const secret = "kZ8mQ3vXpL0aRt7YbN2wEcHs6UdFjG1i";
+    const early = redactSensitive(`值为 ${secret}，见 Lv30 的 A 档`);
+    const late = redactSensitive(`见 Lv30 的 A 档，值为 ${secret}`);
+    expect(early).not.toContain(secret);
+    expect(late).not.toContain(secret);
+  });
+
+  it("keeps this gateway's own traceId readable", () => {
+    // redactSensitive wraps ~25 log sites and scripts/trace.sh takes exactly this value as its only
+    // argument, so redacting it would write st-[REDACTED] into CloudWatch and destroy the handle for
+    // diagnosing the error being logged.
+    const line = "invoke failed traceId=st-ed49eb4234454d15851b875a076e22f9 status=424";
+    expect(redactSensitive(line)).toContain("st-ed49eb4234454d15851b875a076e22f9");
+  });
+
+  it("still redacts a bare hex digest that is not a traceId", () => {
+    const digest = "d41d8cd98f00b204e9800998ecf8427e";
+    expect(redactSensitive(`hash ${digest}`)).not.toContain(digest);
+  });
+
+  it("keeps an all-digit constant and an all-F mask", () => {
+    expect(redactSensitive("阈值 12345678901234567890123456789012")).toContain("12345678901234567890123456789012");
+    expect(redactSensitive("掩码 FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF")).toContain("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF");
+  });
+
+  // This runs on EVERY streamed frame: the live typewriter re-sanitizes the FULL accumulated text
+  // every THROTTLE_MS, and clampForCard runs AFTER redactSensitive so the card's char cap does not
+  // bound this input. The first implementation was O(n^2) — 2240 ms on 211 KB — which stalled the
+  // single-threaded event loop for every session at once, reachable from model-authored answer text.
+  it("stays linear on digit-sparse input (ReDoS guard)", () => {
+    const unit = "xY" + "z".repeat(30) + " ";
+    const small = unit.repeat(400);      // ~13 KB
+    const large = unit.repeat(3200);     // ~106 KB, 8x
+    const time = (s: string): number => {
+      const t0 = Date.now();
+      redactSensitive(s);
+      return Date.now() - t0;
+    };
+    time(small);                          // warm up
+    const tSmall = Math.max(1, time(small));
+    const tLarge = time(large);
+    // Quadratic would be ~64x for 8x the input. Allow generous headroom for a noisy CI box while
+    // still failing loudly on a return to backtracking.
+    expect(tLarge).toBeLessThan(tSmall * 20);
+    expect(tLarge).toBeLessThan(1000);
+  });
+});

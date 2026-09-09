@@ -94,8 +94,15 @@ aws iam put-role-policy --role-name "$ROLE" --policy-name deploy-network --polic
     "ec2:AttachInternetGateway","ec2:CreateNatGateway","ec2:AllocateAddress","ec2:CreateRouteTable",
     "ec2:CreateRoute","ec2:AssociateRouteTable","ec2:CreateSecurityGroup",
     "ec2:AuthorizeSecurityGroupIngress","ec2:CreateTags","ec2:ModifyVpcAttribute",
-    "ec2:ModifySubnetAttribute","ec2:ModifyInstanceAttribute","ec2:RunInstances","ec2:TerminateInstances"],
-    "Resource":"*"}]}' >/dev/null
+    "ec2:ModifySubnetAttribute","ec2:ModifyInstanceAttribute","ec2:ModifyInstanceMetadataOptions","ec2:RunInstances","ec2:TerminateInstances",
+    "ec2:StartInstances","ec2:CreateKeyPair","ec2:ReplaceRoute",
+    "ec2:CreateNetworkAcl","ec2:CreateNetworkAclEntry","ec2:ReplaceNetworkAclEntry",
+    "ec2:DeleteNetworkAclEntry","ec2:ReplaceNetworkAclAssociation","ec2:CreateFlowLogs",
+    "ec2:CreateVpcEndpoint","ec2:ModifyVpcEndpoint","ec2:DeleteVpcEndpoints"],
+    "Resource":"*"},
+    {"Effect":"Allow","Action":["logs:CreateLogDelivery","logs:DeleteLogDelivery"],"Resource":"*"},
+    {"Effect":"Allow","Action":["s3:GetBucketPolicy","s3:PutBucketPolicy"],
+     "Resource":"arn:aws:s3:::source-truth-repo-'"${ACCOUNT}"'-*"}]}' >/dev/null
 
 aws iam put-role-policy --role-name "$ROLE" --policy-name deploy-ecr --policy-document '{
   "Version":"2012-10-17",
@@ -135,27 +142,51 @@ aws iam put-role-policy --role-name "$ROLE" --policy-name deploy-iam --policy-do
   \"Statement\":[
     {\"Effect\":\"Allow\",\"Action\":[
       \"iam:GetRole\",\"iam:CreateRole\",\"iam:PutRolePolicy\",\"iam:DeleteRolePolicy\",
-      \"iam:AttachRolePolicy\",\"iam:GetInstanceProfile\",\"iam:CreateInstanceProfile\",
-      \"iam:AddRoleToInstanceProfile\",\"iam:CreateServiceLinkedRole\",\"iam:PassRole\"],
+      \"iam:GetInstanceProfile\",\"iam:CreateInstanceProfile\",
+      \"iam:AddRoleToInstanceProfile\"],
       \"Resource\":[
         \"arn:aws:iam::${ACCOUNT}:role/source-truth-*\",
         \"arn:aws:iam::${ACCOUNT}:role/SourceTruthAgentRuntimeRole\",
         \"arn:aws:iam::${ACCOUNT}:instance-profile/source-truth-*\"]},
+    {\"Effect\":\"Allow\",\"Action\":\"iam:PassRole\",
+      \"Resource\":[
+        \"arn:aws:iam::${ACCOUNT}:role/source-truth-*\",
+        \"arn:aws:iam::${ACCOUNT}:role/SourceTruthAgentRuntimeRole\"],
+      \"Condition\":{\"StringEquals\":{\"iam:PassedToService\":[
+        \"ec2.amazonaws.com\",\"bedrock-agentcore.amazonaws.com\",\"lambda.amazonaws.com\"]}}},
+    {\"Effect\":\"Allow\",\"Action\":\"iam:AttachRolePolicy\",
+      \"Resource\":[
+        \"arn:aws:iam::${ACCOUNT}:role/source-truth-*\",
+        \"arn:aws:iam::${ACCOUNT}:role/SourceTruthAgentRuntimeRole\"],
+      \"Condition\":{\"ArnEquals\":{\"iam:PolicyARN\":[
+        \"arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore\",
+        \"arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole\"]}}},
     {\"Effect\":\"Allow\",\"Action\":\"iam:CreateServiceLinkedRole\",\"Resource\":\"*\",
-      \"Condition\":{\"StringEquals\":{\"iam:AWSServiceName\":\"bedrock-agentcore.amazonaws.com\"}}}]}" >/dev/null
+      \"Condition\":{\"StringEquals\":{\"iam:AWSServiceName\":\"bedrock-agentcore.amazonaws.com\"}}},
+    {\"Effect\":\"Allow\",\"Action\":\"iam:CreateServiceLinkedRole\",\"Resource\":\"*\",
+      \"Condition\":{\"StringEquals\":{\"iam:AWSServiceName\":\"events.amazonaws.com\"}}}]}" >/dev/null
 
 aws iam put-role-policy --role-name "$ROLE" --policy-name deploy-misc --policy-document '{
   "Version":"2012-10-17",
   "Statement":[
     {"Effect":"Allow","Action":["s3:PutObject","s3:CreateBucket","s3:GetBucketLocation","s3:ListAllMyBuckets"],
       "Resource":"*"},
-    {"Effect":"Allow","Action":["ssm:SendCommand","ssm:GetCommandInvocation"],"Resource":"*"},
+    {"Effect":"Allow","Action":["ssm:SendCommand","ssm:GetCommandInvocation","ssm:CancelCommand","ssm:DescribeInstanceInformation"],"Resource":"*"},
     {"Effect":"Allow","Action":[
       "route53:ListHostedZonesByVPC","route53:ListHostedZones","route53:ChangeResourceRecordSets",
       "route53:CreateHostedZone","route53:GetChange","route53:GetHostedZone",
       "route53:AssociateVPCWithHostedZone","route53:DisassociateVPCFromHostedZone"],"Resource":"*"},
     {"Effect":"Allow","Action":"sts:GetCallerIdentity","Resource":"*"}]}' >/dev/null
 
+# deploy-monitoring.
+#
+# iam:PassRole is a SEPARATE, scoped statement here — deliberately. It used to sit in the same
+# statement as lambda:CreateFunction with "Resource":"*", which is a full account
+# privilege-escalation chain: create a function, pass ANY role in the account (an
+# AdministratorAccess role, a CI role, a cross-account role), invoke it, and act as that role.
+# It also silently nullified the narrow PassRole grant in deploy-iam above, because IAM unions
+# statements and the broadest one wins. Now limited to this project's own roles, and to Lambda
+# as the only service allowed to receive them.
 aws iam put-role-policy --role-name "$ROLE" --policy-name deploy-monitoring --policy-document '{
   "Version":"2012-10-17",
   "Statement":[
@@ -166,9 +197,11 @@ aws iam put-role-policy --role-name "$ROLE" --policy-name deploy-monitoring --po
       "sns:CreateTopic","sns:Subscribe","sns:ListTopics","sns:GetTopicAttributes","sns:SetTopicAttributes",
       "lambda:CreateFunction","lambda:UpdateFunctionCode","lambda:UpdateFunctionConfiguration",
       "lambda:GetFunction","lambda:AddPermission","lambda:RemovePermission",
-      "events:PutRule","events:PutTargets","events:RemoveTargets","events:DeleteRule","events:DescribeRule",
-      "iam:PassRole"],
-      "Resource":"*"}]}' >/dev/null
+      "events:PutRule","events:PutTargets","events:RemoveTargets","events:DeleteRule","events:DescribeRule"],
+      "Resource":"*"},
+    {"Effect":"Allow","Action":"iam:PassRole",
+      "Resource":["arn:aws:iam::'"${ACCOUNT}"':role/source-truth-*"],
+      "Condition":{"StringEquals":{"iam:PassedToService":"lambda.amazonaws.com"}}}]}' >/dev/null
 
 # --- instance profile (create if missing; attach role if not already on it) --------------------
 if ! aws iam get-instance-profile --instance-profile-name "$PROFILE_NAME" >/dev/null 2>&1; then

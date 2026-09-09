@@ -32,6 +32,23 @@ source "$HERE/lib/env-utils.sh"
 # out the SAME code, not a stale main. Falls back to main if we can't tell (not a git checkout).
 REPO_REF="$(git -C "$HERE" rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)"
 [ -n "$REPO_REF" ] && [ "$REPO_REF" != HEAD ] || REPO_REF=main
+# The URL must travel WITH the ref. We used to send only REPO_REF, so the instance cloned the
+# upstream project URL and then checked out a branch that exists only in the operator's fork —
+# a bare `error: pathspec ... did not match` under set -e. The README explicitly anticipates forks,
+# so this was the common case, not an edge one. Derive origin from the very checkout that produced
+# the ref; fall back to upstream only when there is no origin at all (a tarball download).
+REPO_URL="${REPO_URL:-$(git -C "$HERE" remote get-url origin 2>/dev/null || true)}"
+[ -n "$REPO_URL" ] || REPO_URL=https://github.com/ddpie/source-truth.git
+# Normalise an SSH remote to https. Deriving the URL from the operator's own checkout fixed the
+# fork case, but it BROKE the SSH-clone case that used to work: an ssh remote
+# (git@github.com:owner/repo.git) was handed to an instance with no GitHub SSH key, and the
+# credential path this script sets up (deploy-github-token -> gh auth login --with-token)
+# authenticates https ONLY. So an SSH-cloning operator, fork or not, got
+# "Permission denied (publickey)" where before they silently got the working upstream https URL.
+case "$REPO_URL" in
+  git@*:*)      REPO_URL="https://github.com/${REPO_URL#*:}" ;;
+  ssh://git@*)  REPO_URL="https://github.com/${REPO_URL#*github.com/}" ;;
+esac
 
 # Prior-choice state for pre-fill is per-account (set once ACCOUNT is known, below): keys like the
 # SSH key name / CIDR / region only make sense within one account, so a single shared file would
@@ -84,13 +101,13 @@ pick_one() {
 print_manual_fallback() {
   local ip="$1"
   cat >&2 <<NEXT
-  手动部署（把 <你的key>.pem 换成你的私钥）：
-    # ① 本机：把脚本传上去
-    scp -i <你的key>.pem "$HERE/lib/prepare-local-host.sh" ubuntu@${ip}:/tmp/
-    # ② 本机：SSH 登录机器
-    ssh -t -i <你的key>.pem ubuntu@${ip}
-    # ③ 登录后在机器上运行（region 由机器自动检测，无需传）
-    REPO_REF=${REPO_REF} bash /tmp/prepare-local-host.sh
+  手动部署（把 <your-key>.pem 换成你的私钥）/ deploy by hand (replace <your-key>.pem with your own private key):
+    # ① 本机：把脚本传上去 / on YOUR machine: copy the script up
+    scp -i <your-key>.pem "$HERE/lib/prepare-local-host.sh" ubuntu@${ip}:/tmp/
+    # ② 本机：SSH 登录机器 / on YOUR machine: SSH into the box
+    ssh -t -i <your-key>.pem ubuntu@${ip}
+    # ③ 登录后在机器上运行（region 由机器自动检测，无需传）/ then run this ON the box (region is auto-detected, don't pass it)
+    REPO_URL=${REPO_URL} REPO_REF=${REPO_REF} bash /tmp/prepare-local-host.sh
 NEXT
 }
 
@@ -104,6 +121,8 @@ deploy_to_host() {
   cat >&2 <<NEXT
 
 ✓ EC2 ${iid}（${ip}）。这台机器长期保留：它的仓库 .local/ 会存部署状态，以后升级登录同一台机器重跑即可。
+  / Keep this instance around: its checkout's .local/ holds the deploy state, so a later upgrade just
+  means SSH-ing back into the SAME box and re-running.
 NEXT
   if [ "$DRY_RUN" = true ]; then
     say info "[dry-run] would scp scripts/lib/prepare-local-host.sh to ubuntu@${ip} and run it (installs deps, gh login, clone, install.sh)"
@@ -111,7 +130,7 @@ NEXT
   fi
   # KEY is the chosen key-pair name on the launch path; on the reuse path it's unset — default blank.
   def=""; [ -n "${KEY:-}" ] && def="$HOME/.ssh/${KEY}.pem"
-  read -e -rp "  SSH 私钥路径（用于把部署脚本传上去；留空=稍后手动）[${def}]: " key || true
+  read -e -rp "  SSH 私钥路径（用于把部署脚本传上去；留空=稍后手动）/ SSH private key path (used to copy the deploy script up; blank = do it by hand later) [${def}]: " key || true
   key="${key:-$def}"
   # `read` does NOT expand a leading ~ (tilde), so a hand-typed ~/.ssh/foo.pem would be taken
   # literally and fail the -f check below. Expand ~ / ~user ourselves. (The ~ in these case
@@ -123,33 +142,37 @@ NEXT
     "~"*) key="$(eval echo "$key")" ;;   # ~otheruser/... — let the shell resolve the home dir
   esac
   if [ -z "$key" ] || [ ! -f "$key" ]; then
-    [ -n "$key" ] && say warn "私钥文件不存在：$key"
-    say info "跳过自动部署。请手动执行："
+    [ -n "$key" ] && say warn "私钥文件不存在 / private key file not found: $key"
+    say info "跳过自动上传，请手动执行 / skipping the automatic upload — do it by hand:"
     print_manual_fallback "$ip"
     return 0
   fi
   local sshopt=(-o StrictHostKeyChecking=accept-new -o ConnectTimeout=8 -i "$key")
   # Fresh instance: SSH may not answer for a bit. Bounded backoff, not back-to-back.
-  say step "等待 SSH 就绪 ..."
+  say step "等待 SSH 就绪 / waiting for SSH to come up ..."
   local ok=false i
   for i in $(seq 1 24); do   # ~120s: a fresh EC2's cloud-init can take >60s to open sshd
     if ssh "${sshopt[@]}" -o BatchMode=yes ubuntu@"$ip" true 2>/dev/null; then ok=true; break; fi
     sleep 5
   done
   if [ "$ok" != true ]; then
-    say warn "SSH 暂时连不上 $ip。常见原因：① 私钥不对；② 安全组的 22 端口放行的不是你真实出口 IP（launch-host 用 curl checkip 取，经 NAT/代理可能不准——到控制台核对）；③ 机器还没起好。稍后手动执行："
+    say warn "SSH 暂时连不上 $ip / cannot reach $ip over SSH yet。常见原因 / common causes:"
+    say warn "  ① 私钥不对 / wrong private key;"
+    say warn "  ② 安全组的 22 端口放行的不是你真实出口 IP（launch-host 用 curl checkip 取，经 NAT/代理可能不准——到控制台核对）/ the security group opens 22 to something other than your real egress IP (launch-host reads it from curl checkip; behind NAT or a proxy that can be wrong — verify in the console);"
+    say warn "  ③ 机器还没起好 / the instance isn't fully up yet."
+    say info "稍后手动执行 / do it by hand later:"
     print_manual_fallback "$ip"; return 0
   fi
-  say step "把部署脚本传到 EC2（/tmp/prepare-local-host.sh）..."
+  say step "把部署脚本传到 EC2（/tmp/prepare-local-host.sh）/ copying the deploy script to the EC2 ..."
   if ! scp "${sshopt[@]}" "$HERE/lib/prepare-local-host.sh" ubuntu@"$ip":/tmp/prepare-local-host.sh; then
-    say warn "scp 失败。请手动执行："; print_manual_fallback "$ip"; return 0
+    say warn "scp 失败，请手动执行 / scp failed — do it by hand:"; print_manual_fallback "$ip"; return 0
   fi
-  say ok "脚本已上传。接下来 SSH 进机器、手动运行它（能看到每一步；卡住就地处理，断了重连再跑即可）："
+  say ok "脚本已上传。接下来 SSH 进机器、手动运行它（能看到每一步；卡住就地处理，断了重连再跑即可）/ script uploaded. Now SSH in and run it yourself — you see every step, can fix a stall in place, and after a dropped connection just reconnect and re-run:"
   cat >&2 <<NEXT
 
   ssh -t -i ${key} ubuntu@${ip}
-  # 登录后，在机器上运行（region 由机器自动检测，无需传）：
-  REPO_REF=${REPO_REF} bash /tmp/prepare-local-host.sh
+  # 登录后，在机器上运行（region 由机器自动检测，无需传）/ then run this ON the box (region is auto-detected, don't pass it):
+  REPO_URL=${REPO_URL} REPO_REF=${REPO_REF} bash /tmp/prepare-local-host.sh
 NEXT
 }
 
@@ -197,8 +220,9 @@ if [ "$DRY_RUN" = true ]; then
 else
   GH_TOK="$(gh auth token 2>/dev/null || true)"
   if [ -z "$GH_TOK" ]; then
-    say info "未检测到本机 gh 登录态。私有仓需要一个只读 GitHub token（scope 仅需 repo:read）；公开仓可留空跳过。"
-    read -rsp "  GitHub token（留空 = 公开仓，跳过）: " GH_TOK || true; echo >&2
+    say info "未检测到本机 gh 登录态 / no local gh login detected."
+    say info "  私有仓需要一个只读 GitHub token（scope 仅需 repo:read）；公开仓可留空跳过 / a private repo needs a read-only GitHub token (repo:read scope is enough); for a public repo leave it blank to skip."
+    read -rsp "  GitHub token（留空 = 公开仓，跳过）/ GitHub token (blank = public repo, skip): " GH_TOK || true; echo >&2
   fi
   if [ -n "$GH_TOK" ]; then
     # Pass the token via stdin (file:///dev/stdin), NOT --secret-string "$GH_TOK": a command-line
@@ -208,9 +232,9 @@ else
     else
       printf '%s' "$GH_TOK" | aws secretsmanager create-secret --name source-truth/deploy-github-token --secret-string file:///dev/stdin >/dev/null
     fi
-    say ok "GitHub 凭证已写入 Secrets Manager（source-truth/deploy-github-token）"
+    say ok "GitHub 凭证已写入 Secrets Manager（source-truth/deploy-github-token）/ GitHub credential stored in Secrets Manager (source-truth/deploy-github-token)"
   else
-    say info "未提供 GitHub token —— 按公开仓处理（clone 时若为私有仓会失败）"
+    say info "未提供 GitHub token —— 按公开仓处理（clone 时若为私有仓会失败）/ no GitHub token given — treating the repo as public (the clone will fail if it is actually private)"
   fi
   unset GH_TOK
 fi
@@ -223,7 +247,7 @@ EXISTING=(); while IFS= read -r _line; do EXISTING+=("$_line"); done < <(aws ec2
   --filters "Name=tag:Name,Values=source-truth-host" "Name=instance-state-name,Values=running,pending,stopped,stopping" \
   --query 'Reservations[].Instances[].[InstanceId,State.Name,PublicIpAddress]' --output text 2>/dev/null | grep -v '^[[:space:]]*$' || true)
 if [ "${#EXISTING[@]}" -gt 0 ] && [ "$NEW_HOST" != true ]; then
-  say info "发现已有 source-truth-host，复用它（不再起新机；要强制新建用 --new-host）："
+  say info "发现已有 source-truth-host，复用它（不再起新机；要强制新建用 --new-host）/ an existing source-truth-host was found and will be REUSED (no new instance is launched; pass --new-host to force one):"
   printf '    %s\n' "${EXISTING[@]}" >&2
   read -r EX_ID EX_STATE EX_IP <<<"${EXISTING[0]}"
   if [ "$DRY_RUN" = true ]; then
@@ -232,7 +256,7 @@ if [ "${#EXISTING[@]}" -gt 0 ] && [ "$NEW_HOST" != true ]; then
   fi
   # A stopped box must be started before you can SSH in.
   if [ "$EX_STATE" = stopped ] || [ "$EX_STATE" = stopping ]; then
-    say info "实例当前 ${EX_STATE}，正在启动 / starting it ..."
+    say info "实例当前 ${EX_STATE}，正在启动 / instance is currently ${EX_STATE}, starting it ..."
     aws ec2 start-instances --instance-ids "$EX_ID" >/dev/null
     aws ec2 wait instance-running --instance-ids "$EX_ID"
   fi
@@ -341,7 +365,7 @@ IID="$(aws ec2 run-instances --image-id "$AMI" --instance-type "$ITYPE" \
   --subnet-id "$PUBLIC_SUBNET" --associate-public-ip-address --security-group-ids "$SG" --key-name "$KEY" \
   --iam-instance-profile Name=source-truth-index-profile \
   --metadata-options 'HttpTokens=required,HttpPutResponseHopLimit=1,HttpEndpoint=enabled' \
-  --block-device-mappings "[{\"DeviceName\":\"/dev/sda1\",\"Ebs\":{\"VolumeSize\":${DISK},\"VolumeType\":\"gp3\"}}]" \
+  --block-device-mappings "[{\"DeviceName\":\"/dev/sda1\",\"Ebs\":{\"VolumeSize\":${DISK},\"VolumeType\":\"gp3\",\"Encrypted\":true}}]" \
   --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=source-truth-host}]' \
   --query 'Instances[0].InstanceId' --output text)"
 say info "launched $IID — waiting for it to run ..."

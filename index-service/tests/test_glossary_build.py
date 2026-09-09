@@ -323,7 +323,14 @@ def test_code_source_classification():
 
 
 # --- batching: large file sets are chunked into multiple cc calls (arg-limit fix) ---
-def test_build_batches_large_file_set(monkeypatch):
+def _write_source_fixtures(root: Path, files: list[str]) -> None:
+    for name in files:
+        path = root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("int power;\n")
+
+
+def test_build_batches_large_file_set(monkeypatch, tmp_path):
     # 750 files with CC_BATCH_FILES=300 → 3 cc calls; outputs concatenated, all entries returned.
     monkeypatch.setattr(glossary_build, "CC_BATCH_FILES", 300)
     calls = {"n": 0, "sizes": []}
@@ -333,30 +340,33 @@ def test_build_batches_large_file_set(monkeypatch):
         return f'{{"concept_id":"c{calls["n"]}","kind":"symbol","value":"sym{calls["n"]}","source":"f.cpp","line":1,"confidence":"high"}}'
     monkeypatch.setattr(glossary_build, "run_cc", fake_run)
     files = [f"f{i}.cpp" for i in range(750)]
-    entries = glossary_build.build(files, project="p", cwd="/tmp", model="m", region="r")
+    _write_source_fixtures(tmp_path, files)
+    entries = glossary_build.build(files, project="p", cwd=str(tmp_path), model="m", region="r")
     assert calls["n"] == 3                       # 750 / 300 → 3 batches
     assert len(entries) == 3                      # one entry per batch, concatenated
     assert {e.value for e in entries} == {"sym1", "sym2", "sym3"}
 
 
-def test_build_single_batch_when_small(monkeypatch):
+def test_build_single_batch_when_small(monkeypatch, tmp_path):
     monkeypatch.setattr(glossary_build, "CC_BATCH_FILES", 300)
     calls = {"n": 0}
     monkeypatch.setattr(glossary_build, "run_cc",
                         lambda *a, **k: calls.__setitem__("n", calls["n"] + 1) or "")
-    glossary_build.build(["a.cpp", "b.cpp"], project="p", cwd="/tmp", model="m", region="r")
+    _write_source_fixtures(tmp_path, ["a.cpp", "b.cpp"])
+    glossary_build.build(["a.cpp", "b.cpp"], project="p", cwd=str(tmp_path), model="m", region="r")
     assert calls["n"] == 1                        # under batch size → one call
 
 
-def test_build_emits_per_batch_progress(monkeypatch, caplog):
+def test_build_emits_per_batch_progress(monkeypatch, caplog, tmp_path):
     # A full scan loops dozens of batches with no slice write until the end; a per-batch
     # heartbeat is the only way to tell "working" from "hung". Assert one log line per batch,
     # carrying batch/batches so progress is computable from the log alone.
     monkeypatch.setattr(glossary_build, "CC_BATCH_FILES", 300)
     monkeypatch.setattr(glossary_build, "run_cc", lambda *a, **k: "")
     files = [f"f{i}.cpp" for i in range(750)]      # → 3 batches
+    _write_source_fixtures(tmp_path, files)
     with caplog.at_level("INFO", logger="glossary-build"):
-        glossary_build.build(files, project="p", cwd="/tmp", model="m", region="r")
+        glossary_build.build(files, project="p", cwd=str(tmp_path), model="m", region="r")
     events = [json.loads(r.message) for r in caplog.records
               if r.name == "glossary-build" and "glossary_build_batch" in r.message]
     # Batches run concurrently now, so the log ORDER isn't deterministic; assert the SET of
@@ -458,6 +468,7 @@ def test_build_batches_preserve_order_under_concurrency(tmp_path, monkeypatch):
     # thread finishes first. Each emits one valid symbol entry with a batch-ordinal concept.
     monkeypatch.setenv("GLOSSARY_BUILD_CONCURRENCY", "4")
     files = [f"src/f{i}.cs" for i in range(700)]
+    _write_source_fixtures(tmp_path, files)
 
     def run(prompt, *, cwd, model, region, timeout):
         # the prompt lists the batch's files; find which batch by its first file index
@@ -480,6 +491,7 @@ def test_build_propagates_batch_failure_as_overall(monkeypatch, tmp_path):
     monkeypatch.setenv("GLOSSARY_BUILD_RETRY_BASE_S", "1")
     monkeypatch.setattr(glossary_build.time, "sleep", lambda s: None)
     files = [f"src/f{i}.cs" for i in range(400)]  # 2 batches
+    _write_source_fixtures(tmp_path, files)
 
     def run(prompt, *, cwd, model, region, timeout):
         if "src/f300.cs" in prompt:  # the second batch always throttles
@@ -493,3 +505,101 @@ def test_build_propagates_batch_failure_as_overall(monkeypatch, tmp_path):
         assert False, "expected build() to raise on a batch that never succeeds"
     except _subp.CalledProcessError:
         pass
+
+
+# ---------------------------------------------------------------------------
+# Credential-shape output filter (layer 3 of the glossary threat model).
+#
+# This is the last gate before an entry reaches /data/glossary, which is served by the glossary
+# tools and rendered into user-visible answers — so a secret that gets past it is a published
+# secret. It had NO tests, and a security review found that most modern base64url tokens matched
+# nothing at all because a `-` or `_` disqualified the opaque heuristic outright.
+#
+# The negative corpus matters as much as the positive one: a false positive silently costs a real
+# glossary entry, and phrases like "token bucket rate limiter" are exactly what a naive keyword
+# rule over-matches.
+# ---------------------------------------------------------------------------
+import pytest  # noqa: E402
+from glossary_build import _looks_like_credential  # noqa: E402
+
+
+@pytest.mark.parametrize("value", [
+    "AKIAIOSFODNN7EXAMPLE",                                    # AWS access key id
+    "ghp_" + "a" * 24,                                         # GitHub token
+    "github_pat_" + "b" * 24,                                  # GitHub fine-grained PAT
+    "glpat-" + "c" * 20,                                       # GitLab PAT
+    "glptt-" + "d" * 20,                                       # GitLab project token
+    "glrt-" + "e" * 20,                                        # GitLab runner token
+    "gldt-" + "f" * 20,                                        # GitLab deploy token
+    "xoxb-1234567890-abcdefghij",                              # Slack bot token
+    "AIza" + "g" * 32,                                         # Google API key
+    "-----BEGIN RSA PRIVATE KEY-----",                         # PEM header
+    "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.x",      # JWT
+    "password: hunter2hunter2",                                # keyword form
+    "client_secret=aVeryLongOpaqueTokenValue12345",            # keyword form
+    "Authorization: Bearer sk-live-abcdef123456",              # scheme between keyword and value
+    "bearer=aVeryLongOpaqueTokenValue12345",
+    "sig=" + "a" * 40 + ";",                                   # hex digest with surrounding text
+    "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY1",               # AWS secret access key shape
+    # base64url, no padding, contains - and _ : the widest hole before the entropy floor.
+    "xK9mQ2pL-vN4wR7tY_aB3cD6eF8gH1jK5lM0nO2pQ4rS",
+])
+def test_credential_shapes_are_refused(value):
+    assert _looks_like_credential(value), f"credential shape not caught: {value[:40]}"
+
+
+@pytest.mark.parametrize("value", [
+    "getUserInventorySlotCapacityForPlayerV2Handler",           # long camelCase identifier
+    "source_truth_index_service_bridge_port_number_value",      # long snake_case identifier
+    "source-truth-index-service-bridge-port-number",            # long kebab-case name
+    "SourceTruthAgentRuntimeRole",
+    "Assets/Scripts/Game/Entities/PlayerEntity.cs",             # file path (a real `source` value)
+    "公会战积分结算规则",                                        # Chinese alias
+    "token bucket rate limiter",                                # keyword in ordinary prose
+    "basic block scheduling",                                   # `basic` scheme word in prose
+    "INDEX_SERVICE_SG",
+])
+def test_ordinary_identifiers_are_not_refused(value):
+    assert not _looks_like_credential(value), f"false positive drops a real entry: {value[:40]}"
+
+
+# --- 凭据过滤器：曾经漏过的形状 ------------------------------------------------
+# 这些全部是实测漏过的，不是假想。列在这里是因为它们各自对应一个具体的失效原因，
+# 而不是"再加几个样本"。
+@pytest.mark.parametrize(
+    "sample, why",
+    [
+        # `_` 是 word char，所以关键字规则开头的 \b 在 snake_case 里永远不匹配。
+        # 上一版注释明确声称 client_secret 已覆盖 —— 而那条测试其实是被 base64 长度规则命中的
+        # （样本恰好 44 字符），把这个漏洞掩盖住了。
+        ("client_secret=abc12345", "snake_case 前缀让 \\b 失效"),
+        ("app_secret=abc12345", "同上"),
+        ("refresh_token=abc12345", "同上"),
+        # 结尾的 \b 让 `secretKey:` 这种驼峰后缀也进不来。
+        ("secretKey: abc12345", "驼峰后缀让结尾 \\b 失效"),
+        # 长度地板曾是 40，而飞书 app_secret 恰好 32 位 —— 正是本模块 threat model 点名的目标。
+        ("kZ8mQ3vXpL0aRt7YbN2wEcHs6UdFjG1i", "32 位混合大小写，旧地板 40 放行"),
+        # has_lower AND has_upper 让纯单一大小写的高熵 token 整类漏过。
+        ("k3j9d0s8a7f6g5h4z2x1c9v8b7n6m5q4w3e2r1t0", "纯小写高熵，AND 条件放行"),
+        # hex 地板曾是 40，漏掉 MD5 / Twilio auth token 这一类 32 位 hex。
+        ("d41d8cd98f00b204e9800998ecf8427e", "32 位 hex，旧地板 40 放行"),
+    ],
+)
+def test_previously_leaking_credential_shapes_are_caught(sample, why):
+    assert _looks_like_credential(sample), f"应被拦下（{why}）: {sample}"
+
+
+@pytest.mark.parametrize(
+    "sample",
+    [
+        "背包格子数量上限",
+        "InventorySlots",
+        "MAX_BAG_SIZE",
+        "player health regeneration rate",
+        "GetBagSize",
+        "BankBagSlotPrices.dbc",
+    ],
+)
+def test_legitimate_glossary_terms_still_pass(sample):
+    # 放宽地板后最大的风险是误杀真实术语，所以正向用例和反向用例一起钉住。
+    assert not _looks_like_credential(sample), f"不应被拦下: {sample}"

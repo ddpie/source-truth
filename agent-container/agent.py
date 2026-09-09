@@ -2,7 +2,7 @@
 """source-truth agent container entrypoint (thin shell).
 
 Runs inside the AgentCore Firecracker microVM. All testable logic lives in
-``agent_lib`` (see agent_lib.run_agent); this module only wires it into the
+``engine_runner``; this module only wires it into the
 ``@app.entrypoint`` async streaming handler. Keep it thin.
 
 Payload contract: ``{"prompt": <question text>, "traceId": <joins both-side logs>,
@@ -14,10 +14,11 @@ depends only on ``prompt``.
 from __future__ import annotations
 
 import logging
+from contextlib import aclosing
 
 from bedrock_agentcore.runtime import BedrockAgentCoreApp
 
-import agent_lib
+import engine_runner
 
 # Configure logging so the agent's structured perf lines (agent_lib's
 # logging.getLogger("agent") → agent_run_total / agent_first_message /
@@ -36,8 +37,9 @@ app = BedrockAgentCoreApp()
 @app.entrypoint
 async def run_main(payload):
     """Stream messages from the read-only Q&A agent loop back to the gateway."""
-    async for message in agent_lib.run_agent(payload):
-        yield message
+    async with aclosing(engine_runner.run_agent(payload)) as messages:
+        async for message in messages:
+            yield message
 
 
 if __name__ == "__main__":

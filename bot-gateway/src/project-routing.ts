@@ -72,8 +72,17 @@ export function validateProjectsConfig(raw: unknown): ProjectsConfig {
   for (const [pid, pv] of Object.entries(projects as Record<string, unknown>)) {
     if (!pv || typeof pv !== "object") throw new Error(`project '${pid}': must be an object`);
     const { port, repos } = pv as Record<string, unknown>;
-    if (typeof port !== "number" || !Number.isInteger(port) || port <= 0) {
-      throw new Error(`project '${pid}': port must be a positive integer, got ${JSON.stringify(port)}`);
+    // Upper bound matters beyond "is it a valid port": the gateway derives its health port as
+    // bridge + 10000 (see health.ts deriveHealthPort), so anything above 55535 would overflow
+    // past 65535. An out-of-range port made listen() throw synchronously and crash the gateway.
+    if (typeof port !== "number" || !Number.isInteger(port) || port <= 0 || port > 55535) {
+      throw new Error(`project '${pid}': port must be an integer in 1..55535 (health port is derived as port+10000), got ${JSON.stringify(port)}`);
+    }
+    // The 10000+ band is reserved for those derived health ports. Declaring a bridge port there
+    // would let one project's bridge steal another project's health port (the bridge binds hard
+    // and wins; the health server then fails soft and that project loses its endpoint).
+    if (port >= 10000) {
+      throw new Error(`project '${pid}': port ${port} falls in the 10000+ range reserved for derived health ports — use a bridge port below 10000`);
     }
     if (seenPorts.has(port)) throw new Error(`projects config: duplicate port ${port} across projects`);
     seenPorts.add(port);

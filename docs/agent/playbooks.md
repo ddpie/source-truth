@@ -38,13 +38,18 @@
 - **验证**：`cd index-service && python -m pytest -q`；增加路径逃逸/注入用例。
 - **上线**：重新部署 index-service（重启各项目 bridge）+ 重建镜像（agent 侧允许清单已变更）。
 
-## 场景 3：切换模型
+## 场景 3：切换 SDK / 模型（问答与术语表一起切）
 
-- **修改位置**：`scripts/deploy-all.sh` 的 `DEFAULT_MODEL`，或部署时传 `--model <id>`。
-- **注意**：`global.*` 推理档只在部分区域承载；跨区域用区域级档（`apac.*`/`us.*`/`eu.*`）。
-  目标区域 Bedrock 控制台需先开通该模型访问。
-- **验证**：deploy 的 `preflight_model_access` 会检查可用性，并对 AccessDenied/不可用给出可处置的 WARN 提示。
-- **上线**：重新运行 deploy 的 runtime 阶段（写入 runtime env `ANTHROPIC_MODEL`）。
+- **修改位置**：完整 `.local/projects.json` 中目标项目的 `agent.sdk`、`agent.model`、
+  `agent.glossaryModel`。`--model` 只保留旧 Claude 配置的回退用途，不覆盖明确的项目选择。
+  新项目默认 OpenAI，不会自动迁移已有 Claude 项目。
+- **上线**：先确认共享产物与 IAM 已支持双 SDK，再用 `install.sh` 的「重新部署现有项目」
+  应用目标项目配置；跨版本升级按 [`双 SDK 升级顺序`](../dual-sdk_zh.md#升级与切换顺序) 操作。
+  必须同时更新 Runtime 和 index 主机项目配置，只改 `ANTHROPIC_MODEL` 不会完成切换。
+- **模型**：部署查询目标区域的 system inference profiles，只匹配同一模型，不猜区域前缀或换用较弱模型。
+- **验证**：预检告警或 Runtime READY 都不等于实测通过。用新会话验证实际 SDK / 模型、
+  工具取证与流式终态，再检查术语表的构建日志和配置指纹。
+  SDK / 模型改变会触发术语表全量重建，期间保留旧表；成本与回退见 [`双 SDK 配置`](../dual-sdk_zh.md)。
 
 ## 场景 4：刷新代码索引（目标仓库更新了）
 
@@ -70,17 +75,20 @@
 
 ## 场景 6：全新账号 / 新区域一键部署
 
-- 见 [`../runbook.md`](../runbook.md)（前置 → 一条命令 → 连飞书 → 起网关 → 验证 → 运维 → 排错）。
+- 见 [`../runbook_zh.md`](../runbook_zh.md)（前置 → 一条命令 → 连飞书 → 起网关 → 验证 → 运维 → 排错）。
 - 幂等：每个资源 describe-or-create，按 tag 复用；中途失败后重新运行会继续未完成步骤。
 - 飞书密钥由 `install.sh` 交互式创建（Secrets Manager：`source-truth/feishu-<projectId>` + 全局 `source-truth/git-credentials`）；纯 `deploy-all.sh`（CI）要求密钥已存在。
 
 ## 场景 7：改顶层目录 / 加文档
 
 - 改顶层目录 ⇒ 同步 `docs/structure_zh.md` 和 `_en.md`。
-- 新增 `docs/*_zh.md` ⇒ 补充 `_en.md`（反之亦然）；非双语的运维文档用中性名（如 `runbook.md`）避开配对校验。
+- 新增 `docs/*_zh.md` ⇒ 补充 `_en.md`（反之亦然）。**中性文件名不再能绕过配对校验**：
+  `check-invariants.sh` 现在枚举 `docs/` 下每份 md，要么成对，要么显式写进脚本里的
+  `DOC_CHINESE_ONLY` 豁免名单 —— 后者是一个在 review 里看得见的决定。runbook 正是因为旧的
+  中性名豁免而长期只有中文，英文读者无法据此部署，所以它已拆成 `runbook_en.md` / `runbook_zh.md`。
 - 运行 `./scripts/check-invariants.sh`，确认结构/双语/权威依据校验通过。
 
 ---
 
 相关：不变量映射见 [`invariants.md`](invariants.md)；架构见 [`architecture.md`](architecture.md)；
-部署/运维/排错见 [`../runbook.md`](../runbook.md)。
+部署/运维/排错见 [`../runbook_zh.md`](../runbook_zh.md)。

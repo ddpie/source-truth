@@ -124,8 +124,9 @@ export async function handleMessageEvent(
     return { handled: false, reason: "self_message" };
   }
 
-  // 3. Only text messages are answered in MVP.
-  if (event.message_type !== "text") {
+  // 3. Accept text questions, including the textual part of a rich-text post.
+  // Images/files alone remain unsupported; the adapter never passes media.
+  if (event.message_type !== "text" && event.message_type !== "post") {
     return { handled: false, reason: "unsupported_type" };
   }
 

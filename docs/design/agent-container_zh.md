@@ -1,5 +1,8 @@
 # agent-container 组件设计
 
+> 更新说明（2026-09-09）：本文保留早期 Claude POC 设计。当前问答与术语表已支持统一选择
+> OpenAI Agents SDK / Claude Agent SDK，具体配置和 API 见 [双 SDK 文档](../dual-sdk_zh.md)。
+
 > 设计概览，面向人工阅读。工作原理见 [`../agent/architecture.md`](../agent/architecture.md)，MVP 边界见
 > [`requirements_zh.md`](requirements_zh.md)；实现细节以 [`../../agent-container/README.md`](../../agent-container/README.md) 为准。
 
@@ -7,7 +10,7 @@
 
 会话 microVM 内运行的 **Claude Code Agent（Python）**——source-truth 的推理与编排核心。收到飞书转来的问题后，
 在 AgentCore Firecracker microVM 内跑一轮**只读问答**：经远程 index-service 定位并读取
-最新主分支源码，流式产出答案。microVM 本身不挂任何文件系统，取证一律走 index-service 的 MCP-over-HTTP 接口。
+最新主分支源码，流式产出答案。microVM 本身不挂仓库文件系统，取证一律走 index-service 的 MCP-over-HTTP 接口。
 
 ```
 bot-gateway ──InvokeAgentRuntime──▶ agent-container（本组件，microVM 内）
@@ -38,7 +41,7 @@ bot-gateway ──InvokeAgentRuntime──▶ agent-container（本组件，micr
 |----|------|
 | 入参 | payload `{ "prompt", "traceId"?, "repos"? }`（agent 只依赖 `prompt`；`traceId`/`repos` 可选）；runtimeSessionId 经 AgentCore 请求头到达，不进 payload |
 | 出参 | 流式 `yield` `AssistantMessage` / `ResultMessage`，由网关渲染为 CardKit |
-| 代码/配置 | 经 index-service 文件工具读取（仓库副本只在 index-service 本地磁盘；microVM 不挂文件系统；路径为仓库相对，如 `Assets/Scripts/Foo.cs`） |
+| 代码/配置 | 经 index-service 文件工具读取（仓库副本只在 index-service 本地磁盘；microVM 不挂仓库文件系统；路径为仓库相对，如 `Assets/Scripts/Foo.cs`） |
 | 临时文件 | Session Storage 可写挂载 `/mnt/workspace`（每会话，约 14 天过期） |
 | CodeGraph + 文件读取 | index-service 提供的 MCP-over-HTTP 端点（env 注入）；定位与读文件都走此接口 |
 | 会话标识 | 经头 `X-Amzn-Bedrock-AgentCore-Runtime-Session-Id` 到达，仅用于审计关联 |
@@ -72,7 +75,7 @@ MVP 用 `agentcore` toolkit（`configure --disable-memory` → `deploy --env CLA
 2. **路径对齐**：codegraph-server 0.18.5 真实返回 `./`-前缀相对路径（workspace 用 `.` 时）或 workspace 绝对路径；
    `index-service/path_align.py` 已按真实输出实现并测试通过，统一输出仓库相对路径（如 `Assets/Scripts/Foo.cs`）。
 3. **代码读取经 HTTP 接口**：仓库副本只在 index-service 本地磁盘，agent 经其文件工具
-   （`codegraph_read_file` / `codegraph_glob_files` / `codegraph_search_files`）读取源码；microVM 不挂任何文件系统。
+   （`codegraph_read_file` / `codegraph_glob_files` / `codegraph_search_files`）读取源码；microVM 不挂仓库文件系统。
    Runtime 仍 `networkMode=VPC`（为在 VPC 内经 HTTP `:8080` 访问 index-service）+ NAT 出站；模型用 `global.anthropic.*`。
 4. **真实 invoke**：`InvokeAgentRuntime`（`CLAUDE_CODE_USE_BEDROCK=1`）已验证，返回真实流式响应。
 

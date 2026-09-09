@@ -1,3 +1,5 @@
+[中文](aws-services_zh.md) | [English](aws-services_en.md)
+
 # AWS Services Inventory
 
 The system deploys into a single account, single region (Tokyo `ap-northeast-1` by default). This document
@@ -11,15 +13,15 @@ project count); the rest are globally shared.
 
 | Service | Specs | Count | Purpose |
 |---------|-------|-------|---------|
-| **EC2** (index-service host) | ARM Graviton `t4g.large` (2 vCPU / 8 GiB) default; up to `m7g.2xlarge` (8 vCPU / 32 GiB) | 1 (shared by all projects) | Resident CodeGraph index + MCP-over-HTTP interface, per-project bot-gateway processes; holds the single local code copy; also runs the build-time glossary engine (a local `claude` CLI scans code offline to generate the term table, see `docs/agent/glossary.md`) |
+| **EC2** (index-service host) | ARM Graviton `t4g.large` (2 vCPU / 8 GiB) default; up to `m7g.2xlarge` (8 vCPU / 32 GiB); termination protection on and IMDSv2 required (`HttpTokens=required`, re-asserted on every deploy) | 1 (shared by all projects) | Resident CodeGraph index + MCP-over-HTTP interface, per-project bot-gateway processes; holds the single local code copy; also runs the build-time glossary engine (the project selects OpenAI Agents SDK or Claude CLI for Bedrock glossary builds, see `docs/agent/glossary.md`) |
 | **Bedrock AgentCore Runtime** | Firecracker microVM; VPC mode; idle reclaim 900s, hard cap 8h (both tunable 60–28800s) | **N** (`source_truth_agent_<projectId>`, one per project) | Session-isolated agent execution environment, one microVM per session |
-| **Bedrock** (model inference) | Default `global.anthropic.claude-opus-4-8` (overridable per project) | shared | (1) LLM inference for the in-microVM agent; (2) `InvokeModel` by the index-host build-time glossary engine (the index instance role carries a scoped `bedrock-invoke` policy). Both billed via `CLAUDE_CODE_USE_BEDROCK=1` |
+| **Bedrock** (model inference) | New projects: OpenAI + `global.openai.gpt-6-astra`; legacy projects retain Claude or their explicit selection | shared | Q&A and enabled glossary builds share the project SDK selection. OpenAI uses `ConverseStream`; Claude uses `CLAUDE_CODE_USE_BEDROCK=1`. Runtime/index roles grant access to the selected models |
 
 ## 2. Storage & images (code, artifacts, images)
 
 | Service | Specs | Count | Purpose |
 |---------|-------|-------|---------|
-| **EBS** (root volume) | gp3, 30 GiB default; 50 / 100 / 200 GiB or manual entry | 1 | Stores code copy, `graph.db`, build artifacts |
+| **EBS** (root volume) | gp3, 30 GiB default; 50 / 100 / 200 GiB or manual entry; `Encrypted: true` (encryption at rest, AWS-managed key) | 1 | Stores code copy, `graph.db`, build artifacts |
 | **S3** | artifact bucket `source-truth-repo-<account>-<region>` | 1 | Deploy artifacts: codegraph binary, index/gateway tarballs, bootstrap script |
 | **ECR** | private repo `source-truth/agent`, ARM64 images | 1 | Holds the session-container image for AgentCore to pull |
 
@@ -27,28 +29,35 @@ project count); the rest are globally shared.
 
 | Service | Specs | Count | Purpose |
 |---------|-------|-------|---------|
-| **VPC** | CIDR `10.1.0.0/16`; public subnet `10.1.0.0/24` + private subnet `10.1.1.0/24` | 1 | Network isolation; index host in the private subnet |
-| **NAT Gateway** (+ Elastic IP) | in the public subnet | 1 | Private-subnet egress (pull S3 artifacts, call Bedrock) |
+| **VPC** | CIDR `10.1.0.0/16`; public subnet `10.1.0.0/24` + private subnet `10.1.1.0/24` | 1 | Network isolation. In the default two-machine topology the index host sits in the private subnet; under `--local` (single EC2) it sits in the public subnet with a public IP, and its security group opens port 22 to the operator's egress IP only |
+| **NAT Gateway** (+ Elastic IP) | in the public subnet | 1 | Private-subnet egress. After the VPC endpoints below it is no longer on the image-pull or S3 path, but it is still required for the Bedrock model call, which has no endpoint here |
+| **VPC Endpoints** | `ecr.api` + `ecr.dkr` (Interface, in the private subnet, private DNS on, own security group allowing 443 from the VPC CIDR only) and `s3` (Gateway, attached to the private route table) | 3 | Keeps container image pulls inside the VPC. Pulling across the public internet through the NAT failed intermittently and surfaced only as `HTTP 424 Runtime health check failed` — the container never started, so nothing inside it could report why. An ECR pull needs all three: `ecr.api` for auth and manifests, `ecr.dkr` for the registry protocol, and `s3` because the layers themselves are S3 objects (without it the bulk of every pull still leaves the VPC). The two interface endpoints bill per hour per AZ; set `DEPLOY_VPC_ENDPOINTS=false` to skip them and accept the NAT path |
 | **Internet Gateway** | — | 1 | Public-subnet ingress |
 | **Security Group** | inbound `8080-8099` only, restricted to same-SG members | 1 (the AgentCore Runtime ENI joins this SG too) | Restricts per-project bridge ports to in-VPC reachability only |
-| **Route 53** (private hosted zone) | private domain `source-truth.internal`, A record TTL 30s | 1 | Stable DNS name for the index host (warm-microVM cache stays valid across blue-green instance swaps) |
+| **Network ACL** | `source-truth-private-nacl`, associated with the private subnet (replacing the default). Inbound allow-list: `100` TCP 8080-8099 (VPC CIDR only), `110` TCP 443 (VPC CIDR only), `115` TCP 1024-65535 (VPC CIDR only — return traffic from the VPC endpoints below), `120/130` TCP/UDP 32768-65535 (return traffic for connections this subnet opened through the NAT; the upper bound must be 65535 because the AgentCore Runtime's ENI is an AWS-managed microVM that picks source ports above the Linux 60999 default), `140` ICMP type 3 code 4 (Path MTU discovery); outbound allow-all (NAT egress needs it); everything else falls to the implicit deny at 32767 | 1 | Second, subnet-level network control. Convergence is additive — desired rules are written first, stale ones removed after — so the subnet never passes through a deny-all state |
+| **Lambda** (optional) | `source-truth-citation-evaluator`, arm64, python3.12, 512MB, 120s, attached to the private subnet and joined to the `source-truth-index-svc` security group | 0 or 1 | Code-based evaluator for AgentCore Evaluations: re-reads every cited `file:line` from the **same** repo copy the bridge serves the agent. Created only by `./scripts/apply-evaluations.sh`; never a serving dependency |
+| **AgentCore custom evaluators** (optional) | 2: `SourceTruthCitationAccuracy` (code-based, TRACE) and `SourceTruthEvidenceDiscipline` (LLM-as-judge, TRACE) | 0 or 2 | The first does the deterministic check no built-in can (an LLM judge cannot open the repository); the second corrects a semantic inversion — `Builtin.Refusal` scores evasion as negative, whereas for this bot saying "the code does not contain this" is the CORRECT answer when the repository genuinely lacks it. Quality, relevance and tool selection all use built-ins |
+| **VPC Flow Logs** | all traffic (`ALL`), 600s aggregation interval, delivered to S3 at `s3://<artifact-bucket>/vpc-flow-logs/` | 1 | Network audit trail. A failure to create it only warns and never blocks the deploy (audit aid, not a serving dependency) |
+| **Route 53** (private hosted zone) | private domain `source-truth.internal`, A record TTL 30s | 1 | Stable DNS name for the index host (the agent side never hard-codes a private IP; the index host is updated in place, never replaced, so the name always resolves to the same running host) |
 
 ## 4. Security & ops (credentials, permissions, remote management)
 
 | Service | Specs | Count | Purpose |
 |---------|-------|-------|---------|
-| **Secrets Manager** | Feishu credentials (per project) + git read-only token + log-hashing salt | **N + 2** (`feishu-<projectId>` ×N, `git-credentials`, `log-hash-salt`) | Feishu app credentials, read-only private-repo pull token, `hashUserId` salt; fetched at runtime, never written to disk |
-| **IAM** | 2 roles + 1 instance profile + 1 service-linked role | fixed | EC2 execution role, AgentCore Runtime role, instance profile, AgentCore's VPC-ENI managed role |
+| **Secrets Manager** | Feishu credentials (per project) + git read-only token + log-hashing salt; `--local` adds one deploy-time GitHub token | **N + 2** (`feishu-<projectId>` ×N, `git-credentials`, `log-hash-salt`); **N + 3** under `--local` (plus `deploy-github-token`) | Feishu app credentials, read-only private-repo pull token, `hashUserId` salt. The `--local` `deploy-github-token` lets a freshly launched host `gh auth login` to clone a private repo, download releases, and upgrade later. Fetched at runtime, never written to disk |
+| **IAM** | 2 base roles + 1 instance profile + 1 service-linked role; monitoring adds the DAU role | depends on enabled features | EC2 execution role `source-truth-index-role`, AgentCore Runtime role `SourceTruthAgentRuntimeRole`, DAU pre-aggregation Lambda role `source-truth-dau-lambda-role`, the instance profile, and AgentCore's VPC-ENI managed role. All three roles are account-level and shared across regions, so resource ARNs in their policies must wildcard the region segment — otherwise a second-region deploy overwrites the policy and silently revokes the first region's permissions. `check-invariants.sh` scans tracked inline-policy writers in `scripts/*.sh` and `scripts/lib/*.sh`, including `create-iam.sh`. It checks region segments for `logs` / `bedrock` / `bedrock-agentcore` / `secretsmanager` / `s3` ARNs, not the full semantics of every IAM policy |
 | **Systems Manager (SSM)** | Session Manager (no SSH) | — | Manage the private-subnet EC2: activate projects, refresh gateways, clean up units |
 
 ## 5. Monitoring & alerting (health, metrics)
 
+New environments opt into extended monitoring with `--with-monitoring`. Metric, dashboard, SNS, DAU Lambda/schedule and the first four business-alarm counts below apply when enabled. Host log collection and the EC2 recovery alarm belong to base provisioning. Disabling monitoring deployment does not stop existing resources.
+
 | Service | Specs | Count | Purpose |
 |---------|-------|-------|---------|
-| **CloudWatch Logs** | log group `/source-truth/bot-gateway` | 1 (all project gateways feed in, separated by `projectId` dimension) | Gateway structured logs, the source for metrics |
+| **CloudWatch Logs** | log groups `/source-truth/bot-gateway` (gateway log files) + `/source-truth/index-bridge` (bridge journald units), both with 90-day retention | 2 (all project gateways feed the first, separated by `projectId` dimension) | Gateway structured logs (the source for metrics) plus index-bridge logs; shipped by the CloudWatch agent on the host |
 | **CloudWatch Metric Filters** | 17 KPIs + 4 alarm-backing + 8 per-project | 29 | Extract usage / latency / health / failure-rate metrics from logs |
 | **CloudWatch Dashboards** | product usage / SRE health / per-project | 3 | Dashboard visualization |
-| **CloudWatch Alarms** | ToolcallLeakDetected / FinalizeFailed / AnswerFailedBurst / LogPipelineStalled | 4 | Alarms on key health events, notified via SNS |
+| **CloudWatch Alarms** | ToolcallLeakDetected / FinalizeFailed / AnswerFailedBurst / LogPipelineStalled (thresholds in `config/alarm-thresholds.json`, notified via SNS) + `source-truth-index-auto-recover-<region>` (`StatusCheckFailed_System`, action `arn:aws:automate:<region>:ec2:recover`, not routed through SNS) | 5 | The first four alarm on key health events. The fifth triggers EC2 auto-recovery: after two consecutive system status-check failures (underlying hardware / hypervisor), the instance is recovered onto healthy hardware, keeping its instance id, private IP, and EBS volume |
 | **SNS** | topic `source-truth-alarms` | 1 | Alarm fan-out (manually subscribe email / webhook) |
 | **Lambda** | `python3.12`, 128 MB, 180s timeout | 1 | DAU pre-aggregation: a daily Logs Insights query written back as a metric |
 | **EventBridge** | rule `source-truth-dau-daily`, daily cron | 1 | Triggers the DAU pre-aggregation Lambda |
@@ -56,5 +65,5 @@ project count); the rest are globally shared.
 ## Not used (to avoid confusion)
 
 Session mapping and event dedup are **in-process in-memory** in the gateway (MVP); no DynamoDB / Redis. Session
-containers **mount no filesystem** (no EFS); all source is read through the index-service HTTP interface — no shared
+containers **mount no repository filesystem** (no EFS); all source is read through the index-service HTTP interface — no shared
 mount, no copy-sync problem.

@@ -10,6 +10,7 @@
 import { handleMessageEvent, type ImEvent } from "../src/handle-event";
 import { resetForTesting as resetDedup } from "../src/dedup";
 import { resetForTesting as resetSessions } from "../src/session-map";
+import { sdkEventToImEvent } from "../src/sdk-event";
 
 afterEach(() => {
   resetDedup();
@@ -83,6 +84,33 @@ describe("handleMessageEvent", () => {
     const out = await handleMessageEvent(evt({ message_type: "image" }));
     expect(out.handled).toBe(false);
     expect(out.reason).toBe("unsupported_type");
+  });
+
+  it.each([
+    ["ou_bot", "user", true, undefined],
+    ["ou_other", "user", false, "not_mentioned"],
+    ["", "user", false, "not_mentioned"],
+    ["ou_bot", "bot", false, "not_a_user"],
+  ])("routes post text through the existing sender and mention gates (%s / %s)", async (mention, senderType, handled, reason) => {
+    const event = sdkEventToImEvent({
+      event_id: "post_event",
+      sender: { sender_id: { open_id: "ou_asker" }, sender_type: senderType },
+      message: {
+        chat_id: "oc_post", chat_type: "group", message_id: "om_post", message_type: "post",
+        // A user-controlled at node must not bypass the authoritative mentions[] gate.
+        content: JSON.stringify({ content: [[{ tag: "at", user_id: "ou_bot" }, { tag: "text", text: "退避如何计算？" }]] }),
+        mentions: mention ? [{ key: "@_user_1", id: { open_id: mention } }] : [],
+      },
+    });
+    const out = await handleMessageEvent(event!, { botOpenId: "ou_bot" });
+    expect(out.handled).toBe(handled);
+    expect(out.reason).toBe(reason);
+    if (handled) expect(out.prompt).toBe("退避如何计算？");
+  });
+
+  it("does not invoke for a post containing only media", async () => {
+    const out = await handleMessageEvent(evt({ message_type: "post", content: "" }));
+    expect(out).toEqual({ handled: false, reason: "empty" });
   });
 
   it("ignores non-user senders (no bot-answers-bot loop)", async () => {

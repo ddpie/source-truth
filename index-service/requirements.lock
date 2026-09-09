@@ -1,0 +1,53 @@
+# requirements.lock — index-service transitive dependency lock.
+#
+# ####################################################################
+# INCOMPLETE — THIS FILE IS NOT YET A LOCK. DO NOT TREAT IT AS ONE.
+# ####################################################################
+#
+# It contains ONLY the four direct pins copied from requirements.txt. The
+# transitive closure is DELIBERATELY ABSENT: it was not resolvable from a
+# verified build at the time this file was created, and inventing versions
+# would be worse than an admitted gap — a wrong pin here silently ships
+# untested code to the index host and makes THIRD-PARTY-LICENSES state
+# licences for versions nobody ever built.
+#
+# WHY THIS MATTERS
+#   index-service/bootstrap.sh installs with
+#     pip3 install --break-system-packages --ignore-installed -r requirements.txt
+#   so today every transitive dependency floats to whatever the resolver picks
+#   on the day a host bootstraps. Two hosts bootstrapped a week apart can run
+#   different code, and THIRD-PARTY-LICENSES §4.3 cannot name what ships.
+#   Concrete example: openpyxl pulls et-xmlfile, which is installed on every
+#   index host at a version nobody has recorded.
+#
+# HOW TO COMPLETE IT (must be a REAL, VERIFIED build — not a dry-run resolve
+# on a developer laptop, whose platform and Python differ from the host):
+#   1. Bootstrap a clean index host: ARM aarch64, glibc >= 2.38, python3.12,
+#      matching index-service/README.md.
+#   2. Verify the bridge actually works there — `pip check` clean, http_bridge
+#      starts, and codegraph-server 0.18.5 answers over stdio + the
+#      streamable-HTTP bridge. An unverified freeze is not a lock.
+#   3. Freeze the resulting tree and replace this file wholesale:
+#        python3 -m pip freeze > index-service/requirements.lock
+#      (filter to the closure of the four pins if the host carries unrelated
+#      system packages — pip freeze on a --break-system-packages host will.)
+#   4. Regenerate THIRD-PARTY-LICENSES §4.3 from the new lock, reading each
+#      exact version's own metadata. Never copy a licence across versions.
+#
+# ALSO NEEDED, OUTSIDE THIS FILE (see the accompanying report):
+#   - index-service/bootstrap.sh must install from this lock, not from
+#     requirements.txt, or the lock has no effect on what ships.
+#   - scripts/check-versions.sh gates agent-container/requirements.lock only;
+#     extend it to cover index-service the same way.
+#
+# Until steps 1–4 are done, requirements.txt remains the only manifest that
+# describes reality, and index-service is NOT reproducible.
+
+# ---- direct pins (authoritative, copied verbatim from requirements.txt) ----
+mcp==1.23.3                # protocol-verified against codegraph-server 0.18.5; do not bump blind
+uvicorn==0.44.0            # ASGI server backing the streamable-http bridge
+typing_extensions==4.15.0  # explicit shim (some deps resolve against it)
+openpyxl==3.1.5            # read_table: Excel (.xlsx/.xls) config tables
+
+# ---- transitive closure: NOT PINNED ----
+# Intentionally empty. Fill from step 3 above.

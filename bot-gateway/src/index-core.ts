@@ -20,5 +20,16 @@ export function classifyWsError(err: unknown, shuttingDown: boolean): WsErrorAct
   if (shuttingDown) return "ignore";
   const msg = String(err);
   if (msg.includes("1000040350") || msg.includes("exceed_conn_limit")) return "retry";
+  // Transient TRANSPORT failures are retryable. Previously everything except the connection-limit
+  // code fell through to "exit", and because the unit is Restart=always with no StartLimitBurst
+  // (deliberately — see index-service/bootstrap.sh), a DNS hiccup or a reset socket turned into an
+  // unbounded 5-second crash loop. Each cycle also cleared the in-memory dedup map and card
+  // registry, so after recovery every reply to a pre-restart card became reply_to_unknown_card and
+  // re-delivered events could be answered twice at double cost. That amplifies a blip into a
+  // sustained outage plus lost context. "exit" is now reserved for errors that a restart cannot
+  // fix: credential, permission and revocation failures.
+  if (/ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|ENOTFOUND|EPIPE|socket hang up|network|timeout/i.test(msg)) {
+    return "retry";
+  }
   return "exit";
 }

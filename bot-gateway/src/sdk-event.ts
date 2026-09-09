@@ -11,19 +11,46 @@
 
 import type { ImEvent } from "./handle-event";
 
+function record(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+/** A post is still a text question; media nodes are not model input.
+ * Receive events normally omit the locale wrapper used when sending posts. */
+function postText(value: Record<string, unknown>): string {
+  const post = Array.isArray(value.content) ? value
+    : Object.values(value).map(record).find((entry) => Array.isArray(entry?.content));
+  if (!post || !Array.isArray(post.content)) return "";
+  const lines = post.content.filter(Array.isArray).map((line: unknown[]) => line.map((item) => {
+    const node = record(item);
+    if (!node) return "";
+    if (node.tag === "text" || node.tag === "a" || node.tag === "md" || node.tag === "code_block") {
+      return typeof node.text === "string" ? node.text : "";
+    }
+    // Mentions are authorized through the event's mentions[], never through a
+    // user-controlled node. Keep separation without leaking mention IDs.
+    return node.tag === "at" ? " " : "";
+  }).join(""));
+  return [typeof post.title === "string" ? post.title : "", ...lines]
+    .filter((line) => line.trim()).join("\n");
+}
+
 export function sdkEventToImEvent(data: unknown): ImEvent | null {
   if (typeof data !== "object" || data === null) return null;
   const d = data as Record<string, unknown>;
   const message = d.message as Record<string, unknown> | undefined;
   if (!message || typeof message.chat_id !== "string") return null;
 
-  // content is a JSON string; for text messages it's {"text":"…"}.
+  // content is a JSON string; posts contain rows of rich-text nodes.
   let text = "";
   if (typeof message.content === "string") {
     try {
-      const parsed = JSON.parse(message.content) as { text?: string };
-      if (typeof parsed.text === "string") text = parsed.text;
-    } catch { /* non-text content (image/file/post) → leave empty */ }
+      const parsed = record(JSON.parse(message.content));
+      if (parsed && message.message_type === "post") text = postText(parsed);
+      else if (typeof parsed?.text === "string") text = parsed.text;
+    } catch { /* Malformed content leaves an empty question. */ }
   }
 
   const sender = d.sender as

@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
 # provision_index_dns.sh <region> <config_file> <vpc_id> <index_private_ip>
 # Idempotent Route53 PRIVATE hosted zone + A-record giving the index-service a
-# STABLE DNS name that survives instance replacement.
+# STABLE DNS name, so the agent runtime never embeds a raw IP.
 #
 # WHY THIS EXISTS (the bug it fixes): the agent runtime's CODEGRAPH_MCP_URL used
-# the index instance's raw private IP. Every `--refresh-index` REPLACES the
-# instance → new IP → the runtime env must be updated → but AgentCore's already-
-# WARM microVMs keep the OLD CODEGRAPH_MCP_URL for 30+ min until they age out, so
-# questions hitting a warm VM pointed at the (now-terminated) old IP get a
+# the index instance's raw private IP. Any change of index IP (a redeploy after the
+# host was gone, an operator-replaced box) then required updating the runtime env —
+# but AgentCore's already-WARM microVMs keep the OLD CODEGRAPH_MCP_URL for 30+ min
+# until they age out, so questions hitting a warm VM pointed at the stale IP get a
 # connection failure → empty codegraph results → the agent correctly refuses
 # ("index not ready"), producing intermittent empty answer cards. Pinning the
-# agent to a STABLE per-region name (index.<region>.source-truth.internal) that we
-# just re-point at the new IP means the runtime env NEVER changes on a refresh, so
-# warm VMs stay valid — the empty-card class is eliminated.
+# agent to a STABLE per-region name (index.<region>.source-truth.internal) means
+# the runtime env NEVER has to change — warm VMs stay valid and the empty-card
+# class is eliminated.
 #
 # Prints INDEX_DNS_NAME=<fqdn> on stdout; persists INDEX_DNS_ZONE_ID + the name.
 set -euo pipefail
@@ -30,11 +30,10 @@ ZONE_NAME="source-truth.internal"
 # deploy can overwrite. Within a VPC, agents only ever query their own region's name, so the names
 # coexisting in one shared zone is harmless — no zone re-association needed (that stays as-is).
 RECORD="index.${REGION}.${ZONE_NAME}"
-# A-record TTL (seconds). The blue-green terminate-last drain in deploy-all.sh MUST
-# wait longer than this before killing the old instance, or a warm VM's resolver
-# cache still points at the dead IP. Persisted to config (INDEX_DNS_TTL) so the
-# drain derives from THIS value rather than a hardcoded constant in another file
-# that can silently drift out of sync.
+# A-record TTL (seconds). Kept short so that on the rare occasion the IP does change
+# (a redeploy that had to launch a new host), resolvers pick the new value up in
+# seconds instead of minutes. Persisted to config (INDEX_DNS_TTL) so the deployed
+# TTL is visible to operators without a Route53 lookup.
 DNS_TTL=30
 
 : "${INDEX_IP:?provision_index_dns: index private IP required}"
@@ -92,12 +91,13 @@ fi
 ZONE_ID="${ZONE_ID##*/}"
 
 # --- upsert the A-record → current index IP (idempotent; UPSERT replaces) -----
-# UPSERT is the whole point: on a fresh deploy it creates the record; on a
-# --refresh-index (new IP) it REPLACES the value, re-pointing the stable name at
-# the new instance WITHOUT the agent runtime env ever changing. TTL is short (30s)
-# so a re-point propagates fast and a warm VM's resolver cache doesn't hold a dead
-# IP for long. (The runtime never re-resolves mid-connection anyway, but new
-# connections pick up the new IP within the TTL.)
+# UPSERT, not CREATE: the deploy re-runs this on every pass against the SAME
+# in-place host, so the normal case is writing the value it already has — a no-op
+# that must not fail. It also means the record simply follows the IP when there is
+# no host yet and one has to be launched (first deploy, or after a teardown),
+# without the agent runtime env ever changing. TTL is short (30s) so such a change
+# propagates fast. (The runtime never re-resolves mid-connection anyway; new
+# connections pick up the current IP within the TTL.)
 CHANGE_ID="$(R change-resource-record-sets --hosted-zone-id "$ZONE_ID" --change-batch "{
   \"Changes\": [{
     \"Action\": \"UPSERT\",
