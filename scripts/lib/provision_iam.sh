@@ -50,8 +50,19 @@ aws iam put-role-policy --role-name "$INDEX_ROLE" --policy-name s3-artifacts --p
 aws iam delete-role-policy --role-name "$INDEX_ROLE" --policy-name feishu-secret >/dev/null 2>&1 || true
 aws iam put-role-policy --role-name "$INDEX_ROLE" --policy-name secrets-read --policy-document "{
   \"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",
-  \"Action\":[\"secretsmanager:GetSecretValue\"],
+  \"Action\":[\"secretsmanager:GetSecretValue\",\"secretsmanager:DescribeSecret\",
+             \"secretsmanager:CreateSecret\",\"secretsmanager:PutSecretValue\",
+             \"secretsmanager:TagResource\"],
   \"Resource\":[\"arn:aws:secretsmanager:*:${ACCOUNT}:secret:source-truth/*\"]}]}" >/dev/null
+# WHY the write verbs are here and not only in create-iam.sh's deploy-secrets: the documented
+# default is the two-machine topology, after which the operator SSHes to the index host and runs
+# install.sh to add a project. install.sh auto-enters --local on the host, so create-secret then
+# runs under THIS role — and with GetSecretValue alone it AccessDenied'd, the put-secret-value
+# fallback AccessDenied'd too, and `set -euo pipefail` aborted the installer mid-flow. Adding a
+# project on the host is the normal path, so the grant belongs on every index host, not only on
+# the ones that happened to run create-iam.sh.
+# DeleteSecret is deliberately NOT here: destroying a project's credentials is an operator action
+# (install.sh's remove-project / teardown.sh), not something a long-lived host should be able to do.
 # Inline policy: ship the co-located bot-gateway's journald logs to CloudWatch. Until now
 # only the AgentCore runtime role had logs perms; the gateway (a systemd unit ON the index
 # host since co-location) had none, so its structured metric:true lines stayed in local
@@ -77,6 +88,27 @@ aws iam put-role-policy --role-name "$INDEX_ROLE" --policy-name cloudwatch-logs 
     {\"Effect\":\"Allow\",\"Action\":[\"logs:CreateLogStream\",\"logs:PutLogEvents\",\"logs:DescribeLogStreams\",\"logs:PutRetentionPolicy\"],
      \"Resource\":[\"arn:aws:logs:*:${ACCOUNT}:log-group:/source-truth/*\",
                    \"arn:aws:logs:*:${ACCOUNT}:log-group:/source-truth/*:*\"]}]}" >/dev/null
+# Inline policy: arm the EC2 auto-recovery alarm from the host itself (C2).
+# provision_index_service.sh runs under THIS instance role in --local mode, so without
+# this the put-metric-alarm fails and the host silently never auto-heals from a system
+# status-check failure (observed 2026-08-20: AccessDenied on a live single-host deploy).
+#
+# iam:CreateServiceLinkedRole is required because the FIRST auto-recovery alarm in an
+# account creates AWSServiceRoleForCloudWatchEvents. It is scoped by the
+# iam:AWSServiceName condition so this role can create ONLY that one AWS-managed
+# service-linked role — it cannot mint an arbitrary role.
+# ⚠️ REGION WILDCARD: same shared-global-role reason as cloudwatch-logs above — this role
+# is shared by index hosts in every region, and put-role-policy OVERWRITES.
+aws iam put-role-policy --role-name "$INDEX_ROLE" --policy-name ec2-self-recovery --policy-document "{
+  \"Version\":\"2012-10-17\",\"Statement\":[
+    {\"Effect\":\"Allow\",\"Action\":[\"cloudwatch:PutMetricAlarm\",\"cloudwatch:DescribeAlarms\"],
+     \"Resource\":[\"arn:aws:cloudwatch:*:${ACCOUNT}:alarm:source-truth-*\"]},
+    {\"Effect\":\"Allow\",\"Action\":[\"ec2:ModifyInstanceAttribute\",\"ec2:ModifyInstanceMetadataOptions\"],
+     \"Resource\":\"*\"},
+    {\"Effect\":\"Allow\",\"Action\":[\"ec2:DescribeInstances\",\"ec2:DescribeVolumes\",\"ec2:DescribeInstanceAttribute\"],
+     \"Resource\":\"*\"},
+    {\"Effect\":\"Allow\",\"Action\":[\"iam:CreateServiceLinkedRole\"],\"Resource\":\"*\",
+     \"Condition\":{\"StringEquals\":{\"iam:AWSServiceName\":\"events.amazonaws.com\"}}}]}" >/dev/null
 # Inline policy: the co-located bot-gateway invokes the AgentCore Runtime. The gateway runs
 # as a systemd unit ON the index host (co-location) and therefore uses THIS instance role —
 # but the role had no bedrock-agentcore perm, so every invoke 403'd ("not authorized to
@@ -109,7 +141,11 @@ aws iam put-role-policy --role-name "$INDEX_ROLE" --policy-name bedrock-invoke -
     {\"Effect\":\"Allow\",
      \"Action\":[\"bedrock:InvokeModel\",\"bedrock:InvokeModelWithResponseStream\"],
      \"Resource\":[\"arn:aws:bedrock:*::foundation-model/anthropic.*\",
-                   \"arn:aws:bedrock:*:${ACCOUNT}:inference-profile/*anthropic.*\"]}]}" >/dev/null
+                   \"arn:aws:bedrock:*::foundation-model/openai.*\",
+                   \"arn:aws:bedrock:*:${ACCOUNT}:inference-profile/*anthropic.*\",
+                   \"arn:aws:bedrock:*:${ACCOUNT}:inference-profile/*openai.*\"]},
+    {\"Effect\":\"Allow\",\"Action\":\"bedrock:InvokeModel\",
+     \"Resource\":\"arn:aws:bedrock:*:${ACCOUNT}:project/default\"}]}" >/dev/null
 # NOTE on the foundation-model region wildcard ('*' not pinned to $REGION): a cross-region
 # inference profile (global.*/<geo>.*) routes to a REGION-LESS, ACCOUNT-LESS foundation-model ARN
 # (arn:aws:bedrock:::foundation-model/anthropic.<model>). Pinning the region was TESTED and
@@ -133,13 +169,41 @@ if ! aws iam get-role --role-name "$RUNTIME_ROLE" >/dev/null 2>&1; then
     \"Condition\":{\"StringEquals\":{\"aws:SourceAccount\":\"${ACCOUNT}\"}}}]}" >/dev/null
 fi
 # Inline policy: pull ECR image, invoke Bedrock, attach ENIs (VPC), logs. No EFS.
-aws iam put-role-policy --role-name "$RUNTIME_ROLE" --policy-name runtime-perms --policy-document '{
-  "Version":"2012-10-17","Statement":[
-    {"Effect":"Allow","Action":["bedrock:InvokeModel","bedrock:InvokeModelWithResponseStream"],"Resource":"*"},
-    {"Effect":"Allow","Action":["ecr:GetDownloadUrlForLayer","ecr:BatchGetImage","ecr:BatchCheckLayerAvailability","ecr:GetAuthorizationToken"],"Resource":"*"},
-    {"Effect":"Allow","Action":["ec2:CreateNetworkInterface","ec2:DescribeNetworkInterfaces","ec2:DeleteNetworkInterface","ec2:DescribeSecurityGroups","ec2:DescribeSubnets"],"Resource":"*"},
-    {"Effect":"Allow","Action":["logs:CreateLogGroup","logs:CreateLogStream","logs:PutLogEvents"],"Resource":"*"}
-  ]}' >/dev/null
+# SCOPED: each action is restricted to the minimum resource set:
+#   - bedrock: only anthropic foundation models + this account's inference profiles
+#   - ecr: only this project's repo (GetAuthorizationToken requires "*" per AWS docs)
+#   - ec2: ENI management (requires "*" — ENIs are created dynamically by AgentCore)
+#   - logs: only this project's log group prefix
+aws iam put-role-policy --role-name "$RUNTIME_ROLE" --policy-name runtime-perms --policy-document "{
+  \"Version\":\"2012-10-17\",\"Statement\":[
+    {\"Effect\":\"Allow\",\"Action\":[\"bedrock:InvokeModel\",\"bedrock:InvokeModelWithResponseStream\"],
+     \"Resource\":[\"arn:aws:bedrock:*::foundation-model/anthropic.*\",
+                   \"arn:aws:bedrock:*::foundation-model/openai.*\",
+                   \"arn:aws:bedrock:*:${ACCOUNT}:inference-profile/*\"]},
+    {\"Effect\":\"Allow\",\"Action\":\"bedrock:InvokeModel\",
+     \"Resource\":\"arn:aws:bedrock:*:${ACCOUNT}:project/default\"},
+    {\"Effect\":\"Allow\",\"Action\":[\"ecr:GetAuthorizationToken\"],\"Resource\":\"*\"},
+    {\"Effect\":\"Allow\",\"Action\":[\"ecr:GetDownloadUrlForLayer\",\"ecr:BatchGetImage\",\"ecr:BatchCheckLayerAvailability\"],
+     \"Resource\":[\"arn:aws:ecr:*:${ACCOUNT}:repository/source-truth/*\"]},
+    {\"Effect\":\"Allow\",\"Action\":[\"ec2:CreateNetworkInterface\",\"ec2:DescribeNetworkInterfaces\",\"ec2:DeleteNetworkInterface\",\"ec2:DescribeSecurityGroups\",\"ec2:DescribeSubnets\"],\"Resource\":\"*\"},
+    {\"Effect\":\"Allow\",\"Action\":[\"logs:CreateLogGroup\",\"logs:CreateLogStream\",\"logs:PutLogEvents\"],
+     \"Resource\":[\"arn:aws:logs:*:${ACCOUNT}:log-group:/source-truth/*\",
+                   \"arn:aws:logs:*:${ACCOUNT}:log-group:/source-truth/*:*\"]},
+    {\"Effect\":\"Allow\",\"Action\":[\"bedrock-agentcore:GetWorkloadAccessToken\",\"bedrock-agentcore:GetWorkloadAccessTokenForJWT\",\"bedrock-agentcore:GetWorkloadAccessTokenForUserId\"],
+     \"Resource\":\"*\"},
+    {\"Effect\":\"Allow\",\"Action\":[\"xray:PutTraceSegments\",\"xray:PutTelemetryRecords\",\"xray:GetSamplingRules\",\"xray:GetSamplingTargets\"],
+     \"Resource\":\"*\"},
+    {\"Effect\":\"Allow\",\"Action\":[\"cloudwatch:PutMetricData\"],\"Resource\":\"*\",
+     \"Condition\":{\"StringEquals\":{\"cloudwatch:namespace\":[\"SourceTruth/Agent\",\"SourceTruth/Gateway\",\"bedrock-agentcore\"]}}}
+  ]}" >/dev/null
+# NOTE (2026-08-20): the three statements above (workload identity / X-Ray / PutMetricData) were
+# absent here and were being supplied ONLY by a pre-existing hand-made inline policy
+# (SourceTruthAgentRuntimePolicy) that this repo does not create. On the long-lived dev account
+# that masked the gap; a FRESH-account deploy — the path a sample user takes — would have produced
+# an under-permissioned runtime role (no workload token, no traces, no custom metrics).
+# EFS grants are deliberately NOT re-added: the /mnt/repo layer was removed (9d23ec3) and the
+# session microVM mounts no filesystem, so elasticfilesystem:* is dead permission surface.
+# ⚠️ REGION WILDCARD throughout: same shared-global-role reason as the index-role policies above.
 
 # ---- 3. AgentCore SERVICE-LINKED role (fresh-account safe) ----
 # On a brand-new account, AgentCore's VPC mode needs the AWS service-linked role

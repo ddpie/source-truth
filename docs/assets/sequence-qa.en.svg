@@ -108,5 +108,5 @@
     <text x="374" y="558" text-anchor="middle" fill="#2f7a47">finished card · keep following up (pushed via Feishu)</text>
   </g>
 
-  <text x="380" y="600" text-anchor="middle" font-size="10.5" fill="#7a8493">read-only throughout, reading code to verify · session microVMs mount no filesystem · see docs/agent/architecture.md</text>
+  <text x="380" y="600" text-anchor="middle" font-size="10.5" fill="#7a8493">read-only throughout, reading code to verify · session microVMs mount no repository filesystem · see docs/agent/architecture.md</text>
 </svg>

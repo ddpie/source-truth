@@ -4,31 +4,37 @@ Guidance for AI coding agents working in this repo. This file is the single sour
 of truth for agent conventions; it links out rather than duplicating. Human onboarding
 docs live in `docs/` (中文为主，结构文档双语 `_en`/`_zh`)。
 
+根 `README.md` 合并中文与英文（中文在前、英文在后），修改时同步两部分，不另建中文 README。
+正式项目名称为 source-truth，公开仓库为 `ddpie/source-truth`。
+
 ## Project overview
 
 source-truth 是「代码为唯一依据」的飞书游戏研发代码问答助手。完整链路：策划在飞书 @机器人 →
 **bot-gateway**（TypeScript 长驻网关，长连接事件订阅，按会话路由）→ **AgentCore Runtime**
-（Firecracker microVM，会话隔离）→ microVM 内的 **agent-container**（Python，Claude Code Agent SDK，
-`CLAUDE_CODE_USE_BEDROCK=1`）→ 通过 **index-service**（常驻 CodeGraph，MCP-over-HTTP）定位代码、用只读
+（Firecracker microVM，会话隔离）→ microVM 内的 **agent-container**（Python，部署时选择 OpenAI Agents SDK
+或 Claude Agent SDK，新项目默认 OpenAI，均走 Bedrock）→ 通过 **index-service**（常驻 CodeGraph，MCP-over-HTTP）定位代码、用只读
 文件工具读取最新主分支源码与配置表（工具清单见 `docs/agent/architecture.md`；仓库副本只在 index-service
-本地磁盘，会话 microVM 不挂任何文件系统）→ **CardKit 流式卡片**回传。
+本地磁盘，会话 microVM 不挂仓库文件系统）→ **CardKit 流式卡片**回传。
 
 核心架构特征：AI 引擎在 microVM **内**自主运行（不是容器外的远程 MCP 客户端），并新增飞书 Bot 网关与
 独立 CodeGraph 索引服务两个有状态组件——后者持有唯一一份代码仓本地副本，定位代码和读文件也全部走
 HTTP 接口（不挂任何共享文件系统）。架构工作原理见 `docs/agent/architecture.md`。
 
-语言：Python（`agent-container/`）、TypeScript / Node 20（`bot-gateway/`、未来 `infra/` CDK）、
+SDK 选择统一控制问答和离线术语表；配置、旧项目兼容与切换验证见 `docs/dual-sdk_zh.md`。
+OpenAI Agents SDK 不等于 Codex SDK，后者仍在 post-MVP 边界外。
+
+语言：Python（`agent-container/`）、TypeScript / Node 24（`bot-gateway/`、未来 `infra/` CDK）、
 Bash（`scripts/`）。会话容器 ARM64-only。
 
 ## Setup & commands
 
-当前已实现（init 骨架阶段）：
+当前已实现：
 
 ```bash
-./scripts/check-invariants.sh   # 结构自检：AGENTS / CLAUDE / structure / 双语配对 / 顶层目录
+./scripts/check-invariants.sh   # 结构自检：AGENTS / structure / 双语配对 / 顶层目录
 
 # 各组件依赖见其 README（agent-container: uv；bot-gateway: npm）。
-./scripts/test.sh           # 已实现。离线默认：lint + unit + typecheck（pre-push 跑这个）
+./scripts/test.sh           # 已实现。离线默认：lint + unit + typecheck（CI 跑这个）
 ./scripts/test.sh --full    # 已实现。加 e2e（对已部署 Runtime 跑真实问答，缺部署自动 skip）+ smoke（仍占位）
 # 一键部署（已实现、全新账号/区域可跑、幂等）：artifacts→IAM→network→index-service→镜像→Runtime→gateway
 # 仓库不再走命令行，改由 .local/projects.json 配置（推荐 install.sh 交互式添加项目）
@@ -67,7 +73,8 @@ Agent）、`bot-gateway/`（TS 网关 + CardKit）、`index-service/`（CodeGrap
 
 `./scripts/test.sh`（**已实现**）是单一入口。离线默认安全（lint + unit + typecheck）；`--full` 才跑
 需要 AWS 的 e2e（`scripts/e2e-probe.py`：对已部署 Runtime 跑真实问答，缺部署自动 skip）与 smoke（仍占位）。
-pre-push 跑离线套件。结构自检 `./scripts/check-invariants.sh` 由 lint 层调用。
+CI（`.github/workflows/ci.yml`）跑离线套件；本仓库不带 git hook，本地请自行在推前运行。
+结构自检 `./scripts/check-invariants.sh` 由 lint 层调用。
 
 ## Critical constraints（详见 docs/agent/invariants.md）
 
@@ -83,17 +90,17 @@ pre-push 跑离线套件。结构自检 `./scripts/check-invariants.sh` 由 lint
 - **MVP 边界**：仅主分支、仅只读问答、不跑引擎、不写回 / 提交。越界能力（设计文档读取、多分支、
   共享记忆、审计护栏、Codex、数值模拟）一律后置。
 - **「不跑引擎」的一处明确例外——构建期引擎（术语表生成，2026-06-22）**：「不跑引擎」约束的是按用户提问
-  实时回答的引擎（必须在 microVM 内）。术语表生成是**离线构建期引擎**：在 index 主机用本地 `claude` (cc) CLI
-  扫自有代码副本产出「中文词→英文符号」对照表——无用户输入、无会话、不在请求路径上，受 cc 锁定 +
+  实时回答的引擎（必须在 microVM 内）。术语表生成是**离线构建期引擎**：在 index 主机用所选 OpenAI Agents SDK 或本地 `claude` CLI
+  扫自有代码副本产出「中文词→英文符号」对照表——无用户输入、无会话、不在请求路径上，受只读工具限制 +
   产物只读服务 + grounding 校验三重约束。完整边界与机制见 `docs/agent/invariants.md` §6 与
   `docs/agent/glossary.md`。
 
-`scripts/check-invariants.sh`（已实现；将在 p1 接入 pre-commit）强制其中可自动检查的子集。
+`scripts/check-invariants.sh`（已实现；由 `test.sh --lint` 与 CI 调用）强制其中可自动检查的子集。
 
 ## Boundaries
 
 **Never:**
-- 提交密钥 / token（gitleaks pre-commit；飞书凭证走 Secrets Manager——`install.sh` 交互式创建
+- 提交密钥 / token（飞书凭证走 Secrets Manager——`install.sh` 交互式创建
   `source-truth/feishu-<projectId>` 密钥，bot-gateway 的 `run.sh` 启动时取出注入进程环境，不落盘、不入仓库）。
 - 手改生成物。
 - 让 MVP 越过只读边界（写回代码、跑引擎、提交）。
@@ -109,7 +116,8 @@ pre-push 跑离线套件。结构自检 `./scripts/check-invariants.sh` 由 lint
 - Conventional Commits 前缀（`feat:`、`fix:`、`docs:`、`chore(deps):`）。
 - 分支命名 `<type>/<short-kebab-summary>`，与 commit 前缀一致。
 - **不要**加 `Co-Authored-By` 或任何 AI 署名 trailer。
-- pre-push 跑 `./scripts/test.sh`，通过再推。
+- 推之前跑 `./scripts/test.sh`，通过再推（没有 git hook 替你做这件事；CI 会复核）。
+- 注意 `test.sh` 结尾的 `SKIPPED:` 行：依赖缺失的套件会被跳过，此时的"全绿"并不代表跑过。
 
 ## Key resources
 
@@ -118,6 +126,6 @@ pre-push 跑离线套件。结构自检 `./scripts/check-invariants.sh` 由 lint
 - CardKit 流式答案卡调研（`bot-gateway` 核心能力）：`docs/agent/cardkit-streaming-spike.md`
 - 不变量与权威依据映射：`docs/agent/invariants.md`
 - 变更手册：`docs/agent/playbooks.md`
-- 部署 / 连飞书 / 运维 / 排错：`docs/runbook.md`
+- 部署 / 连飞书 / 运维 / 排错：`docs/runbook_zh.md`（英文：`docs/runbook_en.md`）
 - 目录结构：`docs/structure_zh.md` · `docs/structure_en.md`
 - 需求 / 架构设计权威依据：`docs/design/requirements_zh.md` · `docs/design/architecture-overview_zh.md`

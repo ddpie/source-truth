@@ -1,277 +1,300 @@
 # source-truth
 
-![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)
-![Runtime](https://img.shields.io/badge/AWS-Bedrock%20AgentCore-orange.svg)
-![Engine](https://img.shields.io/badge/Claude-Code%20Agent%20SDK-7c5cff.svg)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![AWS: Bedrock AgentCore](https://img.shields.io/badge/AWS-Bedrock_AgentCore-FF9900)](https://aws.amazon.com/bedrock/agentcore/)
+[![OpenAI Agents SDK](https://img.shields.io/badge/OpenAI-Agents_SDK-412991)](docs/dual-sdk_zh.md)
+[![Claude Agent SDK](https://img.shields.io/badge/Claude-Agent_SDK-D97757)](docs/dual-sdk_zh.md)
 
-[中文](#source-truth) | [English](#english)
+**中文** | [English](#english)
 
-> 在飞书里 @ 机器人，用业务语言回答「这个技能 / 数值 / 规则到底怎么算」。答案来自项目**最新主分支的真实代码**，并附可复核的出处。
+## 中文
 
-「这个技能的冷却怎么算」「负重上限和力量是什么关系」——答案都写在代码和配置表里，但策划查不动代码，研发被反复打断。source-truth 让策划在飞书直接问，AI 读真实代码、定位依据，再用业务语言回答。
+**在飞书 / Lark 中，以真实代码为依据进行只读问答，运行于 Amazon Bedrock AgentCore。**
 
-## 四个特点
+直接提问游戏规则、计算公式或配置如何生效。source-truth 会检索代码仓库、读取实现，再通过流式卡片回答，
+附上可复核的文件与行号，供研发、策划、QA 等需要从代码获取答案的人使用。
 
-- **答得可信，且能复核**：以真实代码为唯一依据，每条结论附 `文件:行号` 出处（折叠在「供研发复核」区）；证据不足时提示转研发，不猜不编。
-- **大代码库不拖慢定位**：常驻 CodeGraph 索引先定位、再精准读取。16 GB、7.5 万文件的工程上定位稳定在 **1–5 毫秒**，整轮问答比原生 Claude Code 快 **2.7–5.1 倍**（[数据与复现](docs/agent/perf-comparison.md)）。
-- **中文提问也能命中英文代码**：「公会战」在代码里可能叫历史代号 `LeagueWar`，直接搜中文常一无所获。术语表离线把中文业务词映射到代码里真实出现的英文符号，作为检索线索；结论仍以查看代码为准（[术语表怎么来的](docs/glossary.md)）。
-- **答案是会生长的交互卡片**：在飞书 @ 机器人即可。卡片实时显示进度、结论先行流式展开、能画图表 / 表格、出处自动折叠；点按钮或回复卡片就能带上下文追问，手机同样可用。
+[快速开始](#快速开始) · [架构](#架构) · [文档导航](#文档导航) · [参与贡献](CONTRIBUTING.md)
 
-## 一次真实问答
+### 能做什么
 
-飞书群里的真实录屏（接入一套魔兽风格 C++ 服务端代码）：策划问「默认背包有多少格子、怎么扩展」，又追问了仓库格子。卡片实时计时、结论流式展开、出处自动折叠：
+- **基于代码回答**：通过常驻 CodeGraph 索引和只读文件、配置表工具取证，答案附来源，便于核对。
+- **连续追问**：CardKit 展示实时进度和流式答案，卡片宽度随聊天窗口调整，提供折叠依据区与推荐问题。
+- **部署时选择 SDK**：新项目默认 OpenAI Agents SDK，也支持 Claude Agent SDK；都通过 Amazon Bedrock 调用模型，问答与可选术语表共用项目选择。
+- **支持多仓、多项目**：每个项目拥有自己的机器人、Runtime 配置和索引服务进程；可选术语表把中文业务词映射到代码符号。
 
-![飞书群里一次真实问答的录屏：策划 @机器人提问背包格子，卡片实时显示分析进度与计时，结论先行流式展开，底部「供研发复核」折叠区列出代码出处，可点按钮继续追问](docs/assets/demo-qa.gif)
+![飞书问答录屏：流式答案、代码出处与推荐追问](docs/assets/demo-qa.gif)
 
-> 录屏为 3 倍速；卡片标题里的计时是真实耗时（首问 45 秒、追问 1 分 4 秒）。
+录屏以 3 倍速播放，卡片计时为实际耗时；用于展示交互，不代表延迟保证。
 
-从提问到出结论，系统内部走这样一条链路——先定位（CodeGraph + 术语表线索）、再精读相关文件、结论流式回填、出处折叠、可带上下文追问：
+### 快速开始
 
-![一次问答的端到端时序图：飞书客户端、bot-gateway、AgentCore microVM、index-service、CardKit 五方泳道，从 @机器人提问到流式回填结论卡片](docs/assets/sequence-qa.svg)
+需要准备：
 
-> 逐步细节见 [`docs/agent/architecture.md`](docs/agent/architecture.md)；需求与架构权威依据见 [`docs/design/`](docs/design/)。
+- 具备部署权限的 AWS 账户、支持 AgentCore Runtime 的区域，以及所选 Bedrock 模型的访问权限。
+- 已启用机器人能力和长连接事件的飞书 / Lark 应用，参见[应用配置](docs/runbook_zh.md#三接入飞书)。
+- Linux 或 macOS 操作机，安装 **AWS CLI v2、Python 3 + 较新 boto3、Git、GNU tar，以及可构建 `linux/arm64` 镜像的 Docker**。
+- 你有权索引的目标代码仓；私有目标仓需要单独配置只读访问凭证。
 
-## 能力边界
-
-定位是**只读的代码问答**：只查主分支、只回答，不改动任何东西。明确**不做**：
-
-- 不跑游戏引擎、不做数值模拟
-- 不写回代码、不提交、不改任何文件
-- 不读设计文档、不跨多分支 / worktree、不做跨会话共享记忆
-- 不接第二引擎（Codex）、不做完整的审计防线
-
-规划中的能力见 [`docs/agent/architecture.md`](docs/agent/architecture.md) 与设计文档。
-
-## 系统全貌
-
-飞书客户端 →（经飞书开放平台长连接）网关 → 会话隔离的 microVM → index-service 上的只读代码副本，中间是三个常驻组件。每个会话在各自的 microVM 里互不可见，又都向本项目那份只读副本读代码核对。同一项目下的多仓库联合检索已支持，一台 index-service 主机可承载多个项目（各自独立进程与端口；会话各自跑在独立 microVM 上）。
-
-![source-truth 架构图，按机器分三层：飞书侧 → 一台 EC2（每个项目的 bot-gateway 与 index-bridge 同机，都在 index-service 主机上）→ AgentCore 会话 microVM；事件经长连接推给网关，网关 invoke 会话，会话再经 HTTP 向 bridge 只读访问（定位代码 / 读文件·配置表 / 查术语表）](docs/assets/architecture.svg)
-
-> **会话 microVM 不挂任何文件系统**：源码与配置表都经 index-service 的 HTTP 接口读取（只读文件工具，见 [`docs/agent/architecture.md`](docs/agent/architecture.md)），代码副本只在 index-service 本地磁盘（每项目各一份，不进 microVM、无第二处）。
-
-## 组件一览（monorepo）
-
-| 目录 | 职责 | 语言 |
-|------|------|------|
-| [`agent-container/`](agent-container/) | 会话 microVM 内运行的 Claude Code Agent：推理 + 编排 + 查代码 | Python |
-| [`bot-gateway/`](bot-gateway/) | 飞书 Bot 长连接事件网关 + CardKit 流式卡片渲染 | TypeScript |
-| [`index-service/`](index-service/) | 常驻 CodeGraph 索引服务 + MCP-over-HTTP 接口（定位 + 读文件） | Python |
-| [`infra/`](infra/) | IaC：AgentCore Runtime / 索引服务 / 网关 | boto3 + CDK（渐进） |
-| [`config/`](config/) | 集中配置：i18n 文案、告警阈值 | JSON |
-| [`scripts/`](scripts/) | 部署 / 运维 / 测试生命周期 | Bash |
-
-完整目录树见 [`docs/structure_zh.md`](docs/structure_zh.md)。
-
-## 用到的 AWS 服务
-
-部署在单一账号、单一区域（默认东京 `ap-northeast-1`）。核心是一台共用的 ARM EC2（常驻索引）、
-每项目一套 Bedrock AgentCore Runtime（会话隔离的 microVM）、Bedrock 模型推理、S3 / ECR。
-全部 21 项服务的规格 / 数量 / 用途见 [`docs/aws-services_zh.md`](docs/aws-services_zh.md)。
-
-## 部署与测试
-
-交互式一键安装（全新账号 / 区域可跑、幂等）。在已配好 AWS 凭证的机器上，一行命令拉起。
-
-仓库公开时，裸 `curl` 即可：
+依赖安装、ARM 模拟、配额和可选工具见[完整前置条件](docs/runbook_zh.md#一前置条件一次性)。
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/ddpie/source-truth/main/scripts/get.sh)
+git clone https://github.com/ddpie/source-truth.git
+cd source-truth
+./scripts/install.sh
 ```
 
-仓库私有时，本机先 `gh auth login`（一次），再用 `gh` 取引导脚本（带认证，无需公开仓库）：
+安装器默认进入**添加项目**，底座不存在时自动创建。按提示填写区域、代码仓、SDK/模型和机器人凭证，
+完成部署后会用真实代码问题验证。建议区域为东京 `ap-northeast-1`。
+租户须与应用匹配：中国版飞书用 `--feishu-domain feishu`（默认），国际版 Lark 用 `--feishu-domain lark`。
+
+新项目默认 **OpenAI Agents SDK**，通过 Bedrock `ConverseStream` 和 AWS 角色凭证调用，
+不需要 OpenAI API key。新环境的术语表与监控**按需开启**；已有项目保留原选择。
+配置和迁移步骤见[双 SDK 说明](docs/dual-sdk_zh.md)。
+
+部署完成后，在群里 @机器人提问。检查代码出处和末尾的 2–3 个推荐问题按钮，再回复卡片继续追问。
+[验收手册](docs/runbook_zh.md#五验证端到端冒烟)包含服务健康及完整飞书链路检查。
+
+配置好 `.local/projects.json` 后，也可先只查看部署计划：
 
 ```bash
-bash <(gh api repos/ddpie/source-truth/contents/scripts/get.sh --jq '.content' | base64 -d)
+./scripts/deploy-all.sh --region ap-northeast-1 --dry-run
 ```
 
-它把仓库克隆到当前目录的 `source-truth/`（私有仓自动走 `gh` 认证克隆），再进入交互式安装。`codegraph-server` 索引引擎缺失时由部署脚本自动下载，无需手动准备二进制。
+### 架构
 
-已克隆仓库则直接跑脚本即可，离线测试无需 Docker / AWS：
+![架构：飞书/Lark 连接同一 EC2 上的网关和索引服务，AgentCore 运行 Agent 并通过 HTTP 读取代码](docs/assets/architecture.svg)
+
+1. **bot-gateway** 接收消息，调用项目对应的 AgentCore Runtime。
+2. **agent-container** 运行所选 SDK，通过只读 HTTP 工具检索索引、读取源码。
+3. **index-service** 保存仓库副本和索引；网关把最终答案流式写回 CardKit。
+
+网关和索引进程共用**一台 EC2**，AgentCore 计算由 AWS 托管。发起安装的机器可以是你的电脑或 CI runner；
+另一种 [`--local` 部署方式](docs/runbook_zh.md#手动部署在单台-ec2-上就地安装--local)直接在目标 EC2 上运行安装器。
+
+每次调用创建新的 SDK 会话，只回放当前追问链；空闲 microVM 可以被串行复用。
+microVM 挂载隔离的临时存储，**不挂载仓库文件系统**，源码始终经 index-service 读取。
+Git 仓默认每 300 秒刷新一次；本地快照通过 [`push-local-repo.sh`](docs/runbook_zh.md#本地仓上传)手动更新。
+
+| 组件 | 职责 |
+| --- | --- |
+| [agent-container/](agent-container/) | Python Agent、SDK 选择、Bedrock 适配与只读工具编排 |
+| [bot-gateway/](bot-gateway/) | TypeScript / Node.js 24 网关、会话路由与流式卡片 |
+| [index-service/](index-service/) | CodeGraph、仓库刷新、文件/配置表工具及可选术语表 |
+| [scripts/](scripts/) | Bash / AWS CLI / boto3 部署、运维与测试 |
+| [infra/](infra/) · [config/](config/) | 监控模板、项目配置示例与卡片多语言文案 |
+
+当前部署使用脚本和 boto3，CDK stack 尚属规划。详见[架构说明](docs/agent/architecture.md)和[目录结构](docs/structure_zh.md)。
+
+### 范围与限制
+
+当前 MVP 提供**配置的主分支代码或上传快照上的只读问答**，不修改或提交代码、不跑游戏引擎、
+不做玩法数值模拟，也不检索外部设计文档。多分支分析、共享记忆和 Codex SDK 集成尚不在范围内。
+
+模型可能回答错误，仅靠提示词也无法消除提示注入。重要结论应核对引用源码。
+系统分别通过只读工具白名单、服务端仓库与路径检查、AWS 权限和输出脱敏限制风险，
+详见[安全不变量](docs/agent/invariants.md)。
+
+新提交须等仓库刷新和索引完成后才会反映到问答。会话路由和追问历史保存在网关内存中，
+网关重启可能中断旧卡片的上下文延续。
+
+### 成本与清理
+
+部署会创建付费资源：**EC2/EBS、NAT Gateway、ECR 接口端点、公网 IPv4、模型推理及存储/日志**。
+常驻基础设施在无人提问时仍计费。费用取决于区域、模型、流量和启用的功能，
+请结合 [AWS 服务清单](docs/aws-services_zh.md)和 [AWS Pricing Calculator](https://calculator.aws/)估算。
+
+可选术语表会产生额外模型调用，部署默认每仓最多处理 **400 个源码文件**；
+`--glossary-max-files 0` 才明确表示不限文件数量。文件数上限不是金额预算。
+构建细节与历史测量见[术语表指南](docs/glossary.md)。
+
+使用结束后，先查看删除计划，再清理部署：
 
 ```bash
-./scripts/install.sh    # 问区域 / 代码仓 / 模型 / 飞书凭证，拉起后端 + 网关
-./scripts/test.sh       # 离线套件：lint + unit + typecheck
+./scripts/teardown.sh --region ap-northeast-1 --dry-run
+./scripts/teardown.sh --region ap-northeast-1
 ```
 
-两种部署拓扑：
+检查脚本最后的保留资源清单：密钥、日志和共享资源可能仍存在。
+共享资源删除与多区域检查见[运维手册](docs/runbook_zh.md#六日常运维day-2)。
 
-- **默认（两台）**：在一台部署机上跑脚本，由它新建并配置索引主机 EC2。
-- **单台 EC2（`--local`）**：一台机器既跑部署、又常驻索引与网关，不再单开部署机。在本地跑 `./scripts/launch-host.sh`：自动建网 + 建 IAM + 创建 ARM64 EC2，把部署脚本传上机并打印一条 `ssh` 登录命令；按它登录后运行该脚本（装依赖 → 登录 GitHub → 克隆 → 进入 `install.sh` 交互填代码仓/模型/飞书凭证），执行过程逐步可见。AgentCore Runtime 仍由 AWS 托管，不占本机。
+### 文档导航
 
-完整部署流程（前置条件、`deploy-all.sh` 各阶段的命令行参数、`--local` 的角色与权限要求、连飞书、运维、排错）见
-[`docs/runbook.md`](docs/runbook.md)。飞书凭证走 Secrets Manager，不落盘、不入仓库。
+| 主题 | 中文 | English |
+| --- | --- | --- |
+| 部署、飞书/Lark 配置、验证与排错 | [部署手册](docs/runbook_zh.md) | [Runbook](docs/runbook_en.md) |
+| OpenAI / Claude 选择与迁移 | [双 SDK 配置](docs/dual-sdk_zh.md) | [SDK configuration](docs/dual-sdk_en.md) |
+| AWS 资源与计费项 | [服务清单](docs/aws-services_zh.md) | [Service inventory](docs/aws-services_en.md) |
+| 仓库目录布局 | [目录结构](docs/structure_zh.md) | [Structure](docs/structure_en.md) |
 
-## 代码怎么进入系统、怎么刷新
+[完整文档地图](docs/README.md)还包含架构、术语表、安全及调研记录。
+历史[索引性能测量](docs/agent/perf-comparison.md)使用 Claude，不能据此推断 OpenAI 的性能。
 
-每个仓库 clone 到 index-service 本地，file-watcher 增量重建索引。两种代码来源：
+### 开发与贡献
 
-- **git 仓**（默认）：systemd timer 定时 `git pull`，主分支改动分钟级内反映到问答、无需重部署、无需手动操作。
-- **本地仓**（推不到 git 远端时）：用 `scripts/push-local-repo.sh` 经 rsync 把代码直推到主机，手动刷新——改了代码就重跑一次上传命令。
-
-刷新机制与「为何必须建索引」的实测见 [`docs/agent/architecture.md`](docs/agent/architecture.md) 的「代码如何进入与刷新」一节；本地仓上传与单台 EC2 就地部署（`--local`）见 [`docs/runbook.md`](docs/runbook.md)。
-
-## 安全设计
-
-安全面有三类，且不只靠提示词约束、代码本身会强制执行：**防越权**（Agent 连写工具都不在上下文里，
-服务端只注册一组只读工具）、**防泄露**（进群的字段全部脱敏，密钥 / 内网拓扑不进群；凭证走 Secrets Manager 不入库）、
-**防注入**（工具读到的代码 / 注释一律当待分析数据，只信打包进镜像的 system prompt）。
-
-![安全设计图：防越权、防泄露、防注入三道由代码强制执行的防线，三栏并列](docs/assets/security-defense.svg)
-
-逐条「怎么强制 / 以谁为准 / 怎么自动检查 / 违反后果」见 [`docs/agent/invariants.md`](docs/agent/invariants.md)。
-
-已知局限：模型可能幻觉、可能被提问里夹带的指令带偏（约束即上面的「答得可信」与三道防线）；
-索引刷新是分钟级，刚推的提交需等一个刷新周期才反映。
-
-## 文档导航
-
-| 主题 | 链接 |
-|------|------|
-| 部署 / 连飞书 / 运维 / 排错（从零到能用） | [`docs/runbook.md`](docs/runbook.md) |
-| 一次提问如何在系统里流转 | [`docs/agent/architecture.md`](docs/agent/architecture.md) |
-| AI 协作约定 | [`AGENTS.md`](AGENTS.md) |
-| 需求 / 架构设计权威依据 | [`docs/design/`](docs/design/README.md) |
-
-完整文档地图（目录结构、术语表、不变量、变更手册、各调研记录）见 [`docs/README.md`](docs/README.md)。
-
-## 许可证
-
-[MIT](LICENSE)。
-
----
-
-<a id="english"></a>
-
-# source-truth
-
-[中文](#source-truth) | [English](#english)
-
-> @-mention the bot in Feishu and ask, in plain business language, "how is this skill / number / rule actually computed?" Answers come from the project's **real code on the latest main branch**, with verifiable sources attached.
-
-"How is this skill's cooldown computed?" "How does carry weight relate to strength?" — the answers live in the code and config tables, but designers can't read code and engineers keep getting interrupted. source-truth lets designers ask straight from Feishu: the AI reads the real code, locates the evidence, and answers in business language.
-
-## Highlights
-
-- **Trustworthy and verifiable**: real code is the only source of truth; every conclusion carries a `file:line` source (collapsed into a "for engineers to verify" panel); when evidence is insufficient it says so and defers to engineers — never guessing.
-- **Stays fast on large codebases**: a resident CodeGraph index locates first, then reads precisely. On a 16 GB, 75k-file project a locate query stays at **1–5 ms**; a full Q&A round-trip is **2.7–5.1× faster** than native Claude Code ([data & reproduction](docs/agent/perf-comparison.md)).
-- **Chinese questions hit English code**: "公会战" (guild war) may live in the code under a legacy codename like `LeagueWar`; searching in Chinese often finds nothing. An offline glossary maps Chinese business terms to the English symbols that actually appear in the code, as a search hint; the conclusion still comes from reading the code ([how the glossary is built](docs/glossary.md)).
-- **The answer is a living, interactive card**: just @-mention the bot in Feishu. The card shows live progress, streams the conclusion first, can draw charts / tables, and folds the sources away; tap a button or reply to the card to keep asking with context — works on mobile too.
-
-## One real Q&A
-
-A real screen recording from a Feishu group (connected to a WoW-style C++ server codebase): a designer asks "how many slots does the default backpack have, and how is it expanded?", then follows up about the bank. The card times itself live, streams the conclusion, and auto-folds the sources:
-
-![Screen recording of a real Q&A in a Feishu group: a designer @-mentions the bot asking about backpack slots; the card shows live analysis progress with a timer, streams the conclusion first, lists code sources in a collapsed "for engineers to verify" panel at the bottom, and offers a follow-up button](docs/assets/demo-qa.gif)
-
-> The recording is 3× speed; the timer in the card title is the real elapsed time (first question 45s, follow-up 1m4s).
-
-From question to conclusion the system runs one pipeline — locate first (CodeGraph + glossary hints), then read the relevant files precisely, stream the conclusion back, fold the sources, and carry context into follow-ups:
-
-![End-to-end sequence of one Q&A: Feishu client, bot-gateway, AgentCore microVM, index-service, CardKit across five swimlanes, from @-mention to the streamed conclusion card](docs/assets/sequence-qa.en.svg)
-
-> Step-by-step details: [`docs/agent/architecture.md`](docs/agent/architecture.md); authoritative requirements and architecture: [`docs/design/`](docs/design/).
-
-## Scope
-
-It is a **read-only code Q&A**: main branch only, answers only, changes nothing. Explicitly **not** doing:
-
-- No game engine, no numeric simulation
-- No writing back code, no commits, no file changes
-- No reading design docs, no multi-branch / worktree, no cross-session shared memory
-- No second engine (Codex), no full audit guardrails
-
-Planned capabilities: [`docs/agent/architecture.md`](docs/agent/architecture.md) and the design docs.
-
-## At a glance
-
-A question flows through three resident components: the **bot-gateway** (subscribed to Feishu events over a persistent connection), one **session-isolated microVM** per conversation, and **index-service**, which holds a read-only copy of your code. The client talks to the gateway, the gateway routes to a microVM, and the microVM reads code through index-service. Each session is invisible to the others inside its own microVM, yet all read against this project's read-only copy to check the code. A single query can search across multiple repos in one project, and one index-service host can serve several projects (each gets its own process and port, and every session still runs in its own microVM).
-
-![source-truth architecture across three tiers: Feishu side → one EC2 (each project's bot-gateway and index-bridge co-located on the index-service host) → AgentCore session microVMs; events are pushed to the gateway over a persistent connection, the gateway invokes a session, and the session reaches the bridge over HTTP read-only (locate code / read files & config tables / glossary lookup)](docs/assets/architecture.en.svg)
-
-> **Session microVMs don't mount any filesystem**: source and config tables are read through index-service's HTTP interface (read-only file tools, see [`docs/agent/architecture.md`](docs/agent/architecture.md)); the code copy lives only on index-service's local disk (one copy per project, kept off the microVM entirely — there is never a second copy).
-
-## Components (monorepo)
-
-| Directory | Responsibility | Language |
-|-----------|----------------|----------|
-| [`agent-container/`](agent-container/) | Claude Code Agent running inside the session microVM: reasoning + orchestration + reading code | Python |
-| [`bot-gateway/`](bot-gateway/) | Feishu bot persistent-connection event gateway + CardKit streaming-card rendering | TypeScript |
-| [`index-service/`](index-service/) | Resident CodeGraph index service + MCP-over-HTTP interface (locate + read files) | Python |
-| [`infra/`](infra/) | IaC: AgentCore Runtime / index service / gateway | boto3 + CDK (incremental) |
-| [`config/`](config/) | Central config: i18n copy, alarm thresholds | JSON |
-| [`scripts/`](scripts/) | Deploy / ops / test lifecycle | Bash |
-
-Full directory tree: [`docs/structure_en.md`](docs/structure_en.md).
-
-## AWS services used
-
-Deployed in a single account, single region (Tokyo `ap-northeast-1` by default). The core is one shared ARM EC2 (resident index), one Bedrock AgentCore Runtime per project (session-isolated microVMs), Bedrock model inference, and S3 / ECR. Specs / counts / purposes of all 21 services: [`docs/aws-services_en.md`](docs/aws-services_en.md).
-
-## Deploy and test
-
-Interactive one-shot install (works on a fresh account / region, idempotent). On a machine with AWS credentials configured, bring it up with one line.
-
-When the repo is public, a plain `curl` works:
+按 [CONTRIBUTING.md](CONTRIBUTING.md) 安装开发依赖后运行：
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/ddpie/source-truth/main/scripts/get.sh)
+./scripts/test.sh
 ```
 
-When the repo is private, run `gh auth login` once locally, then fetch the bootstrap script via `gh` (authenticated, no public repo needed):
+默认离线运行。留意 `SKIPPED:` 汇总，缺依赖而跳过检查不代表验证通过。
+`--full` 还会对已有 AWS 部署发起真实调用，可能产生模型费用。
+
+问题、使用疑问和功能建议请提交到 [GitHub Issues](https://github.com/ddpie/source-truth/issues)，欢迎中英文贡献。
+另见[行为准则](CODE_OF_CONDUCT.md)、[安全问题报告](SECURITY.md)和[贡献者](https://github.com/ddpie/source-truth/graphs/contributors)。
+
+### 许可证
+
+[MIT](LICENSE)。第三方许可信息见 [THIRD-PARTY-LICENSES](THIRD-PARTY-LICENSES)。
+
+## English
+
+**Read-only code Q&A in Feishu / Lark, powered by Amazon Bedrock AgentCore.**
+
+Ask how a game rule, calculation, or configuration works. source-truth searches your repositories,
+reads the implementation, and returns an answer with file and line references in a streaming chat card.
+It is designed for developers, designers, QA, and other people who need answers from code.
+
+[中文](#中文) | **English**
+
+[Quick start](#quick-start) · [Architecture](#architecture) · [Documentation](#documentation) · [Contributing](CONTRIBUTING.md)
+
+### What it does
+
+- **Grounds answers in code:** uses a resident CodeGraph index and read-only source/configuration tools; answers include references for checking the evidence.
+- **Supports contextual follow-ups:** streams progress and answers into CardKit, adapts card width to the chat window, and offers collapsible evidence and suggested questions.
+- **Lets you choose the agent SDK:** OpenAI Agents SDK is the default for new projects; Claude Agent SDK is also supported. Both use Amazon Bedrock, and the choice applies to Q&A and optional glossary generation.
+- **Connects multiple repositories and projects:** each project has its own bot, Runtime configuration, and index-service process. An optional glossary maps Chinese business terms to code symbols.
+
+![A Feishu Q&A session with a streaming answer, source references, and follow-up questions](docs/assets/demo-qa.gif)
+
+The recording is played at 3× speed; the card timer shows the actual elapsed time. It illustrates the interaction, not a latency guarantee.
+
+### Quick start
+
+You need:
+
+- An AWS account with deployment permissions, an AgentCore Runtime supported region, and access to your selected Bedrock model.
+- A Feishu or Lark app with bot capability and long-connection events configured. Follow the [app setup guide](docs/runbook_en.md#3-connecting-feishu--lark).
+- A Linux or macOS deployment machine with **AWS CLI v2, Python 3 + recent boto3, Git, GNU tar, and Docker capable of building `linux/arm64` images**.
+- A repository you are authorized to index. Private target repositories need their own read credentials.
+
+See the [detailed prerequisites](docs/runbook_en.md#1-prerequisites-one-time) for installation, ARM emulation, quotas, and optional tools.
 
 ```bash
-bash <(gh api repos/ddpie/source-truth/contents/scripts/get.sh --jq '.content' | base64 -d)
+git clone https://github.com/ddpie/source-truth.git
+cd source-truth
+./scripts/install.sh
 ```
 
-It clones the repo into `source-truth/` in the current directory (private repos clone via `gh` auth automatically), then enters the interactive install. If the `codegraph-server` index engine is missing, the deploy script downloads it automatically — no manual binary prep.
+The installer defaults to **add project** and creates the shared environment if needed. It asks for the
+region, target repositories, SDK/model, and bot credentials, then deploys and verifies a real code question.
+Tokyo (`ap-northeast-1`) is the suggested region. Choose the tenant that matches your app:
+`--feishu-domain feishu` for Feishu (default), or `--feishu-domain lark` for international Lark.
 
-With the repo already cloned, just run the scripts; offline tests need no Docker / AWS:
+New projects default to **OpenAI Agents SDK**. The OpenAI path uses Bedrock `ConverseStream` with AWS role
+credentials; no OpenAI API key is needed. Glossary generation and monitoring are **opt-in** for new
+environments. Existing projects retain their choices. See [SDK configuration and migration](docs/dual-sdk_en.md).
+
+When deployment completes, @-mention the bot with a code question. Check the source references and
+2–3 suggested follow-up buttons, then reply to the card to continue. The [verification guide](docs/runbook_en.md#5-verification-end-to-end-smoke-test)
+covers service health and the full chat flow.
+
+For a preview without creating resources, after configuring `.local/projects.json`:
 
 ```bash
-./scripts/install.sh    # asks for region / repos / model / Feishu credentials, brings up backend + gateway
-./scripts/test.sh       # offline suite: lint + unit + typecheck
+./scripts/deploy-all.sh --region ap-northeast-1 --dry-run
 ```
 
-Two deployment topologies:
+### Architecture
 
-- **Default (two machines)**: run the script on a deploy box, which creates and configures the index-host EC2.
-- **Single EC2 (`--local`)**: one machine both deploys and then resides as the index + gateway host, with no separate deploy box. Run `./scripts/launch-host.sh` locally to bring the box up (auto-builds the network + IAM + an ARM64 EC2); it uploads the deploy script and prints an `ssh` login command — log in and run the script (installs deps, logs into GitHub, clones, then the interactive `install.sh` prompts), every step visible as it runs. The AgentCore Runtime is still AWS-managed and off this host.
+![Architecture: Feishu/Lark connects to gateway and index services on one EC2 host; AgentCore runs the agent and reads code through HTTP](docs/assets/architecture.en.svg)
 
-Full deployment flow (prerequisites, `deploy-all.sh` staged options, the `--local` role/permission requirements, connecting Feishu, ops, troubleshooting): [`docs/runbook.md`](docs/runbook.md). Feishu credentials go through Secrets Manager — never written to disk, never committed.
+1. **bot-gateway** receives chat events and invokes the project's AgentCore Runtime.
+2. **agent-container** runs the chosen SDK, searches the index, and reads source through read-only HTTP tools.
+3. **index-service** holds the repository copies and indexes. The gateway streams the resulting answer back to CardKit.
 
-## How code enters the system and refreshes
+Gateway and index processes share **one EC2 host**; AgentCore compute is AWS-managed. The machine running
+the installer can be your laptop or CI runner. The alternative [`--local` deployment](docs/runbook_en.md#manual-deploy-install-in-place-on-a-single-ec2---local)
+runs the installer on the EC2 host itself.
 
-Each repo is cloned to index-service locally and a file-watcher rebuilds the index incrementally. Two code sources:
+Each invocation starts a fresh SDK session and replays only its follow-up chain. Idle microVMs may be
+reused serially. They mount isolated temporary storage, **not repository filesystems**: repository reads
+always go through index-service. Git repositories refresh on a timer (300 seconds by default); local
+snapshots are refreshed with [`push-local-repo.sh`](docs/runbook_en.md#local-repository-upload).
 
-- **git repos** (default): a systemd timer runs `git pull` periodically — freshness is minute-level, with no redeploy and no manual steps.
-- **local repos** (when there's no git remote to push to): a snapshot pushed to the host via `scripts/push-local-repo.sh` over rsync, refreshed manually — re-run the upload command after the code changes.
+| Component | Purpose |
+| --- | --- |
+| [agent-container/](agent-container/) | Python agent, SDK selection, Bedrock adapter, and read-only tool orchestration |
+| [bot-gateway/](bot-gateway/) | TypeScript / Node.js 24 gateway, conversation routing, and streaming cards |
+| [index-service/](index-service/) | CodeGraph, repository refresh, file/configuration tools, and optional glossary |
+| [scripts/](scripts/) | Bash / AWS CLI / boto3 deployment, operations, and tests |
+| [infra/](infra/) · [config/](config/) | Monitoring templates, project configuration example, and localized card text |
 
-The refresh mechanism and the measured "why an index is required" are in the "how code enters and refreshes" section of [`docs/agent/architecture.md`](docs/agent/architecture.md); local-repo upload and single-host bootstrap (`--local`) are in [`docs/runbook.md`](docs/runbook.md).
+Deployment currently uses scripts and boto3. CDK stacks are planned. See the [architecture details](docs/agent/architecture.md) (Chinese) and [directory map](docs/structure_en.md).
 
-## Security design
+### Scope and limitations
 
-Three classes of security, and not by prompt constraints alone — the code enforces them: **anti-privilege-escalation** (the agent doesn't even have write tools in context; the server registers only a read-only tool set), **anti-leak** (all fields sent into the group are de-identified, secrets / internal topology never enter the group; credentials go through Secrets Manager, never stored in the repo), **anti-injection** (any code / comment read via tools is treated as data to analyze, trusting only the system prompt baked into the image).
+The current MVP provides **read-only Q&A over configured main-branch code or uploaded snapshots**.
+It does not edit or commit code, run a game engine, simulate gameplay, or search external design documents.
+Multi-branch analysis, shared memory, and Codex SDK integration are outside the current scope.
 
-![Security design: anti-privilege-escalation, anti-leak, anti-injection — a code-enforced guard for each of three risks, three columns side by side](docs/assets/security-defense.en.svg)
+Model answers can be wrong, and prompt injection cannot be eliminated by instructions alone. Check the
+cited code for important decisions. Read-only tool allowlists, server-side repository/path checks,
+AWS permissions, and output redaction provide separate controls; see [security invariants](docs/agent/invariants.md) (Chinese).
 
-Per-item "how it's enforced / source of truth / how it's auto-checked / consequence of violation": [`docs/agent/invariants.md`](docs/agent/invariants.md).
+Fresh commits appear after repository refresh and indexing complete. Conversation routing and follow-up
+history are held in gateway memory, so a gateway restart can interrupt continuation of earlier cards.
 
-Known limits: the model can hallucinate or be swayed by instructions smuggled into a question (the guards are
-"Trustworthy and verifiable" plus the three defenses above); index refresh is minute-level, so a just-pushed
-commit takes one refresh cycle to show up.
+### Costs and cleanup
 
-## Docs
+A deployment creates billable AWS resources: **EC2/EBS, NAT Gateway, ECR interface endpoints, public IPv4,
+model inference, and storage/logging**. The resident infrastructure incurs costs while running, including
+when nobody is asking questions. Rates depend on region, model, traffic, and enabled features; use the
+[AWS service inventory](docs/aws-services_en.md) and [AWS Pricing Calculator](https://calculator.aws/) to estimate your deployment.
 
-| Topic | Link |
-|-------|------|
-| Deploy / connect Feishu / ops / troubleshooting (from zero to usable) | [`docs/runbook.md`](docs/runbook.md) |
-| How a question flows through the system | [`docs/agent/architecture.md`](docs/agent/architecture.md) |
-| AI collaboration conventions | [`AGENTS.md`](AGENTS.md) |
-| Requirements / architecture design authority | [`docs/design/`](docs/design/README.md) |
+Optional glossary generation makes additional model calls. Its deployment default is **400 source files
+per repository**; `--glossary-max-files 0` explicitly removes that file cap. File count is not a dollar budget.
+Details and historical measurements are in the [glossary guide](docs/glossary.md) (Chinese).
 
-Full docs map (directory structure, glossary, invariants, playbooks, research spikes): [`docs/README.md`](docs/README.md).
+When finished, review the deletion plan and remove the deployment:
 
-## License
+```bash
+./scripts/teardown.sh --region ap-northeast-1 --dry-run
+./scripts/teardown.sh --region ap-northeast-1
+```
 
-[MIT](LICENSE).
+Read the retained-resource summary: secrets, logs, and shared resources can remain. The
+[cleanup guide](docs/runbook_en.md#6-day-2-operations) explains shared-resource removal and multi-region checks.
+
+### Documentation
+
+| Start here for… | English | 中文 |
+| --- | --- | --- |
+| Deployment, Feishu/Lark setup, verification, and troubleshooting | [Runbook](docs/runbook_en.md) | [部署手册](docs/runbook_zh.md) |
+| OpenAI / Claude selection and migration | [SDK configuration](docs/dual-sdk_en.md) | [双 SDK 配置](docs/dual-sdk_zh.md) |
+| AWS resources and billing dimensions | [Service inventory](docs/aws-services_en.md) | [服务清单](docs/aws-services_zh.md) |
+| Repository layout | [Structure](docs/structure_en.md) | [目录结构](docs/structure_zh.md) |
+
+The [full documentation map](docs/README.md) also links architecture, glossary, security, and research notes.
+Historical [index benchmarks](docs/agent/perf-comparison.md) used Claude; they do not establish OpenAI performance.
+
+### Development and contributing
+
+Follow [CONTRIBUTING.md](CONTRIBUTING.md) to install development dependencies, then run:
+
+```bash
+./scripts/test.sh
+```
+
+The default suite is offline. Read any `SKIPPED:` summary; missing dependencies are not a successful
+verification. `--full` additionally exercises an existing AWS deployment and can incur model charges.
+
+Use [GitHub Issues](https://github.com/ddpie/source-truth/issues) for bugs, questions, and feature proposals.
+Contributions in English or Chinese are welcome. See the [Code of Conduct](CODE_OF_CONDUCT.md),
+[security reporting instructions](SECURITY.md), and [contributors](https://github.com/ddpie/source-truth/graphs/contributors).
+
+### License
+
+[MIT](LICENSE). Third-party licensing information is in [THIRD-PARTY-LICENSES](THIRD-PARTY-LICENSES).

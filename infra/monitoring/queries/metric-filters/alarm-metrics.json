@@ -53,6 +53,42 @@
       "defaultValue": 0,
       "unit": "Count",
       "purpose": "答案失败总数（不分 reason）：a-class 的 AnswerFailed 按 reason 维度拆分→稀疏，无法稳定做突增告警。这条无维度、稠密化（defaultValue:0）的总数 metric 专供 AnswerFailedBurst 告警——失败率突增时稳定触发。reason 拆分仍看 a-class 维度 metric/看板。"
+    },
+    {
+      "name": "GatewayNotReady",
+      "event": "gateway_heartbeat",
+      "filterPattern": "{ $.metric IS TRUE && $.event = \"gateway_heartbeat\" && $.wsState != \"connected\" }",
+      "metricValue": "1",
+      "defaultValue": 0,
+      "unit": "Count",
+      "purpose": "网关活着但飞书长连接不通。心跳原先与 WS 状态完全无关，于是一个 long-connection 永久断开的网关照样每 60s 发心跳、LogPipelineStalled 一直绿，而机器人一个问题都答不了。/ready 知道这件事，但它只绑 127.0.0.1 且没有任何东西轮询它。心跳现在带上 wsState，这条稠密 filter 就能把'连着但是黑的'变成可告警信号。"
+    },
+    {
+      "name": "TextFallbackTotal",
+      "event": "turn_finished",
+      "filterPattern": "{ $.metric IS TRUE && $.event = \"turn_finished\" && $.outcome = \"text_fallback\" }",
+      "metricValue": "1",
+      "defaultValue": 0,
+      "unit": "Count",
+      "purpose": "每次回答都退化成纯文本 —— CardKit 权限缺失在生产里就是这个形状。它此前没有任何告警信号：卡片路径失败后纯文本发送是成功的，所以连 answer_failed 都不会发，看板全绿而产品质量已经全线崩了。"
+    },
+    {
+      "name": "EventDroppedUnparseable",
+      "event": "event_dropped",
+      "filterPattern": "{ $.metric IS TRUE && $.event = \"event_dropped\" && $.reason = \"unparseable_event\" }",
+      "metricValue": "1",
+      "defaultValue": 0,
+      "unit": "Count",
+      "purpose": "SDK 事件信封解析不出来 = 100% 消息丢失。这在正常运行中永远不该出现一次，所以阈值取 >=1。飞书或 SDK 改了 payload 嵌套就是这个信号，而此前它只是一行日志：/ready 仍 200、心跳仍绿。"
+    },
+    {
+      "name": "EventDroppedGate",
+      "event": "event_dropped",
+      "filterPattern": "{ $.metric IS TRUE && $.event = \"event_dropped\" && $.reason != \"unparseable_event\" && $.reason != \"duplicate\" }",
+      "metricValue": "1",
+      "defaultValue": 0,
+      "unit": "Count",
+      "purpose": "消息到了却被门禁丢掉。最典型的成因是 FEISHU_BOT_OPEN_ID 填了一个格式正确但不对的值 —— 群里 100% 流量被丢，而 /ready 200、心跳绿，与'今天没人提问'完全无法区分。刻意排除 duplicate：重启后飞书重投是正常现象，不排除会让每次部署都告警。（这里曾写成 duplicate_message，那是另一条纯日志用的词，metric 路径发的是 duplicate，所以排除从未生效；同期 metrics.ts 的 reason 白名单又把所有丢弃原因改写成 unknown，两者叠加使本告警在每次部署后误报。）"
     }
   ]
 }

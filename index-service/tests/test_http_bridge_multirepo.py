@@ -235,39 +235,119 @@ def test_read_table_routes_by_repo_prefix(monkeypatch, tmp_path):
     assert out.get("kind") == "csv"
 
 
-def test_search_fanout_one_repo_error_does_not_blank_others(monkeypatch, tmp_path):
-    # One repo's search raises (e.g. disk fault); the other must still return its hits.
-    app = _build_multi_with_local(monkeypatch, tmp_path)
+@pytest.fixture(params=["search", "glob"])
+def file_fanout_call(request, monkeypatch, tmp_path):
+    """Call the registered tool over real files, injecting only repository failures."""
     import file_search
-    real = file_search.search_to_json
-
-    def flaky(pattern, *, local_root, glob=None, repo=""):
-        if repo == "alpha":
-            raise OSError("simulated disk fault on alpha")
-        return real(pattern, local_root=local_root, glob=glob, repo=repo)
-
-    monkeypatch.setattr(file_search, "search_to_json", flaky)
-    out = json.loads(asyncio.run(_fn(app, "codegraph_search_files")(pattern="marker")))
-    # beta still answers; alpha's error contributes nothing (not an error envelope to the agent)
-    assert "error" not in out, out
-    assert out["matches"], "beta's hits must survive alpha's failure"
-    assert all(m["path"].startswith("beta/") for m in out["matches"]), out
-
-
-def test_glob_fanout_one_repo_error_does_not_blank_others(monkeypatch, tmp_path):
-    app = _build_multi_with_local(monkeypatch, tmp_path)
     import file_read
-    real = file_read.glob_to_json
 
-    def flaky(pattern, *, local_root, repo=""):
-        if repo == "alpha":
-            raise OSError("simulated disk fault on alpha")
-        return real(pattern, local_root=local_root, repo=repo)
+    app = _build_multi_with_local(monkeypatch, tmp_path)
+    for name in ("alpha", "beta"):
+        (tmp_path / name / "src" / "second.cs").write_text(f"// second marker in {name}\n")
+    if request.param == "search":
+        module, method = file_search, "search_to_json"
+        tool, list_key = "codegraph_search_files", "matches"
+        match_pattern, empty_pattern = "marker", "missing_marker"
+    else:
+        module, method = file_read, "glob_to_json"
+        tool, list_key = "codegraph_glob_files", "paths"
+        match_pattern, empty_pattern = "**/*.cs", "**/*.missing"
+    real = getattr(module, method)
 
-    monkeypatch.setattr(file_read, "glob_to_json", flaky)
-    out = json.loads(asyncio.run(_fn(app, "codegraph_glob_files")(pattern="**/*.cs")))
-    assert "error" not in out, out
-    assert out["paths"] and all(p.startswith("beta/") for p in out["paths"]), out
+    def invoke(*, failed=(), empty=False, capped=False):
+        successful = {}
+        if capped:
+            if request.param == "search":
+                run_search = file_search.run_search
+                monkeypatch.setattr(
+                    file_search, "run_search",
+                    lambda pattern, **kwargs: run_search(pattern, max_matches=1, **kwargs),
+                )
+            else:
+                monkeypatch.setattr(file_read, "MAX_GLOB_RESULTS", 1)
+
+        def flaky(pattern, **kwargs):
+            repo = kwargs["repo"]
+            if repo in failed:
+                raise OSError(f"simulated disk fault at {tmp_path / repo}")
+            raw = real(pattern, **kwargs)
+            successful[repo] = json.loads(raw)
+            return raw
+
+        monkeypatch.setattr(module, method, flaky)
+        out = json.loads(asyncio.run(
+            _fn(app, tool)(pattern=empty_pattern if empty else match_pattern),
+        ))
+        assert str(tmp_path) not in json.dumps(out), "host paths must stay in service logs"
+        return out, list_key, successful
+
+    return invoke
+
+
+@pytest.mark.parametrize("failed_repo", ["alpha", "beta"])
+@pytest.mark.parametrize("empty", [False, True], ids=["hits", "no-hits"])
+def test_file_fanout_reports_partial_failure(file_fanout_call, failed_repo, empty):
+    """A failed repo plus an empty successful repo must not look like a full search."""
+    out, list_key, successful = file_fanout_call(failed=(failed_repo,), empty=empty)
+    survivor = "beta" if failed_repo == "alpha" else "alpha"
+    assert out[list_key] == successful[survivor][list_key]
+    assert bool(out[list_key]) is not empty
+    assert out["count"] == len(out[list_key])
+    assert out["partial"] is True
+    assert isinstance(out["warning"], str) and out["warning"].strip()
+    assert "error" not in out
+    assert out["truncated"] is False, "repository failure is not result truncation"
+    assert [r["repo"] for r in out["repo_results"]] == ["alpha", "beta"]
+    records = {r["repo"]: r for r in out["repo_results"]}
+    assert records[failed_repo]["status"] == "error"
+    assert records[failed_repo]["error"]
+    assert records[survivor]["status"] == "ok"
+    assert records[survivor]["metadata"]["count"] == len(out[list_key])
+    assert records[survivor]["metadata"]["truncated"] is False
+
+
+def test_file_fanout_all_repositories_failed_is_an_error(file_fanout_call):
+    out, _, successful = file_fanout_call(failed=("alpha", "beta"))
+    assert successful == {}
+    assert out["error"], "all failures must not become an empty successful search"
+    assert [r["repo"] for r in out["repo_results"]] == ["alpha", "beta"]
+    assert all(r["status"] == "error" and r["error"] for r in out["repo_results"])
+
+
+@pytest.mark.parametrize("empty", [False, True], ids=["hits", "no-hits"])
+def test_file_fanout_success_keeps_per_repository_metadata(file_fanout_call, empty):
+    out, list_key, successful = file_fanout_call(empty=empty)
+    expected = [item for repo in ("alpha", "beta") for item in successful[repo][list_key]]
+    assert out[list_key] == expected
+    assert bool(expected) is not empty
+    assert out["count"] == len(expected)
+    assert not out.get("partial") and not out.get("warning")
+    assert "error" not in out
+    assert out["truncated"] is False
+    assert [r["repo"] for r in out["repo_results"]] == ["alpha", "beta"]
+    for record in out["repo_results"]:
+        assert record["status"] == "ok"
+        assert not record.get("error")
+        assert record["metadata"]["count"] == len(successful[record["repo"]][list_key])
+        assert record["metadata"]["truncated"] is False
+    if list_key == "matches":
+        assert out["deduped"] == sum(data["deduped"] for data in successful.values())
+
+
+@pytest.mark.parametrize("failed", [(), ("alpha",)], ids=["all-ok", "partial"])
+def test_file_fanout_truncation_is_independent_of_partial_failure(file_fanout_call, failed):
+    out, list_key, successful = file_fanout_call(failed=failed, capped=True)
+    assert all(data["truncated"] is True for data in successful.values())
+    assert out["truncated"] is True
+    assert bool(out.get("partial")) is bool(failed)
+    assert "error" not in out
+    assert out["count"] == len(out[list_key]) == len(successful)
+    assert [r["repo"] for r in out["repo_results"]] == ["alpha", "beta"]
+    for record in out["repo_results"]:
+        if record["repo"] in successful:
+            assert record["status"] == "ok"
+            assert record["metadata"]["count"] == 1
+            assert record["metadata"]["truncated"] is True
 
 
 # ── main() arg pairing: repeatable --workspace / --local-workspace (CLI glue) ──

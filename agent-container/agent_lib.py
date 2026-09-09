@@ -22,6 +22,7 @@ import os
 import re
 import time
 from collections.abc import AsyncIterator
+from contextlib import aclosing
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -284,14 +285,18 @@ def build_options_dict(
         "strict_mcp_config": True,
         # ISOLATION: load NO filesystem settings. With setting_sources unset the SDK
         # defaults to loading user + project settings AND project CLAUDE.md — and our
-        # cwd is /mnt/repo, the attacker-influenceable repo mount. A CLAUDE.md or
+        # cwd would be the repo mount if one existed. A CLAUDE.md or
         # .claude/settings.json committed into the indexed game repo would otherwise
         # be loaded as TRUSTED PROJECT INSTRUCTIONS (the instruction channel, before
         # any tool call), bypassing the 信任边界/防注入 guard in system.md (which only
         # governs content read VIA tools). The agent's ONLY instructions must be the
-        # bundled system.md passed as system_prompt. [] = full isolation. (Do NOT set
-        # `skills`: a non-None skills value re-defaults setting_sources to
-        # user+project via the SDK's _apply_skills_defaults; an explicit [] is kept.)
+        # bundled system.md passed as system_prompt. [] = full isolation. The SDK
+        # re-defaults setting_sources to user+project when it is None (checked against
+        # _apply_skills_defaults in v0.2.103) — so what protects us is passing an
+        # explicit [], NOT the absence of any other option. An earlier version of this
+        # comment blamed `skills` specifically; that was wrong. Setting `skills` is
+        # harmless here, because the re-default is gated on `setting_sources is None`
+        # and ours is a list. Do not "fix" this by removing the explicit [].
         "setting_sources": [],
         "max_turns": max_turns,
         "mcp_servers": mcp_servers,
@@ -332,10 +337,22 @@ def build_options(**kwargs: Any) -> Any:
 
 
 def _default_query_fn() -> Any:
-    """Resolve the real ``claude_agent_sdk.query`` lazily (runtime only)."""
-    from claude_agent_sdk import query  # noqa: PLC0415
+    """Resolve a one-request SDK client with explicit lifetime ownership."""
+    from claude_agent_sdk import ClaudeSDKClient  # noqa: PLC0415
 
-    return query
+    async def managed_query(*, prompt, options, transport=None):
+        # SDK 0.2.103's top-level query() does not close its inner iterator
+        # when the consumer stops at a yielded message. The public client
+        # context awaits Query/Transport shutdown instead of relying on GC.
+        # A fresh client per invocation preserves stateless retries and keeps
+        # the SDK's OpenInference instrumentation on its public methods.
+        async with ClaudeSDKClient(options=options, transport=transport) as client:
+            await client.query(prompt)
+            async with aclosing(client.receive_response()) as messages:
+                async for message in messages:
+                    yield message
+
+    return managed_query
 
 
 def _env_max_turns() -> int:
@@ -455,53 +472,54 @@ async def run_agent(
         nonlocal zero_result_retrievals
         buf: list[Any] = []
         committed = not suppress_on_leak  # retry attempt streams immediately
-        async for message in qfn(prompt=p, options=options):
-            if not first_emitted:
-                first_emitted = True
-                _perf("agent_first_message", (time.perf_counter() - t0) * 1000, traceId=trace_id)
-            zero_result_retrievals += _track_tool_latency(message, pending, trace_id)
-            _maybe_log_result(message)
-            if _message_has_tool_use(message):
-                saw_tool_use = True
-            if _message_text_has_toolcall_markup(message):
-                saw_markup_text = True
-            if _message_text_names_internal_tool(message):
-                saw_bare_toolname_text = True
-            # An ERRORED terminal result (is_error=True) with no tool use is the OTHER
-            # cold-start failure: the SDK/CLI errored before producing an answer (e.g.
-            # MCP server unreachable on a cold microVM) → out=0, turns<=1. Track it so
-            # the same single retry covers it (it usually clears on a warm connection).
-            if getattr(message, "is_error", None) and getattr(message, "num_turns", None) is not None:
-                saw_error_result = True
-            nt = getattr(message, "num_turns", None)
-            if isinstance(nt, int):
-                last_num_turns = nt
-            if committed:
-                yield message
-            else:
-                buf.append(message)
-                # Flush + commit as soon as it CANNOT be the leak shape: either a real
-                # tool_use happened, OR the loop has run >1 turn (the cold-start leak
-                # is always num_turns<=1). The >1-turn guard also bounds the buffer —
-                # a long tool-free multi-turn answer no longer accumulates entirely in
-                # RAM / defeats the typewriter; it streams live once turn 2 starts.
-                if saw_tool_use or (last_num_turns is not None and last_num_turns > 1):
-                    # OBSERVABILITY: the whole buffer/retry design assumes the cold-start
-                    # leak is always num_turns<=1 (see _is_leak_shape). If we reach turn >1
-                    # with NO real tool_use but toolcall markup/bare-toolname text present,
-                    # that assumption did NOT hold this run: the markup is about to stream
-                    # live and the warm retry is skipped (the gateway's strip/zeroToolLeak
-                    # backstop still fail-closes, so no raw XML reaches the user, but the
-                    # self-heal is lost). Log it so a real occurrence is visible instead of
-                    # silent — this branch should essentially never fire in practice.
-                    if (not saw_tool_use and last_num_turns is not None and last_num_turns > 1
-                            and (saw_markup_text or saw_bare_toolname_text)):
-                        _plog("cold_start_leak_multiturn_unexpected", num_turns=last_num_turns,
-                              markup=saw_markup_text, bareToolname=saw_bare_toolname_text)
-                    committed = True
-                    for m in buf:
-                        yield m
-                    buf = []
+        async with aclosing(qfn(prompt=p, options=options)) as messages:
+            async for message in messages:
+                if not first_emitted:
+                    first_emitted = True
+                    _perf("agent_first_message", (time.perf_counter() - t0) * 1000, traceId=trace_id)
+                zero_result_retrievals += _track_tool_latency(message, pending, trace_id)
+                _maybe_log_result(message)
+                if _message_has_tool_use(message):
+                    saw_tool_use = True
+                if _message_text_has_toolcall_markup(message):
+                    saw_markup_text = True
+                if _message_text_names_internal_tool(message):
+                    saw_bare_toolname_text = True
+                # An ERRORED terminal result (is_error=True) with no tool use is the OTHER
+                # cold-start failure: the SDK/CLI errored before producing an answer (e.g.
+                # MCP server unreachable on a cold microVM) → out=0, turns<=1. Track it so
+                # the same single retry covers it (it usually clears on a warm connection).
+                if getattr(message, "is_error", None) and getattr(message, "num_turns", None) is not None:
+                    saw_error_result = True
+                nt = getattr(message, "num_turns", None)
+                if isinstance(nt, int):
+                    last_num_turns = nt
+                if committed:
+                    yield message
+                else:
+                    buf.append(message)
+                    # Flush + commit as soon as it CANNOT be the leak shape: either a real
+                    # tool_use happened, OR the loop has run >1 turn (the cold-start leak
+                    # is always num_turns<=1). The >1-turn guard also bounds the buffer —
+                    # a long tool-free multi-turn answer no longer accumulates entirely in
+                    # RAM / defeats the typewriter; it streams live once turn 2 starts.
+                    if saw_tool_use or (last_num_turns is not None and last_num_turns > 1):
+                        # OBSERVABILITY: the whole buffer/retry design assumes the cold-start
+                        # leak is always num_turns<=1 (see _is_leak_shape). If we reach turn >1
+                        # with NO real tool_use but toolcall markup/bare-toolname text present,
+                        # that assumption did NOT hold this run: the markup is about to stream
+                        # live and the warm retry is skipped (the gateway's strip/zeroToolLeak
+                        # backstop still fail-closes, so no raw XML reaches the user, but the
+                        # self-heal is lost). Log it so a real occurrence is visible instead of
+                        # silent — this branch should essentially never fire in practice.
+                        if (not saw_tool_use and last_num_turns is not None and last_num_turns > 1
+                                and (saw_markup_text or saw_bare_toolname_text)):
+                            _plog("cold_start_leak_multiturn_unexpected", num_turns=last_num_turns,
+                                  markup=saw_markup_text, bareToolname=saw_bare_toolname_text)
+                        committed = True
+                        for m in buf:
+                            yield m
+                        buf = []
         # Stream ended. If still uncommitted, the buffer holds the whole attempt: a
         # clean short answer (no markup) is flushed; a leak (markup, no tool) is
         # dropped by NOT yielding (the caller will retry).
@@ -551,9 +569,10 @@ async def run_agent(
         while True:
             retry_due_to_raise = False
             try:
-                async for message in _drive(prompt, suppress_on_leak=True):
-                    n += 1
-                    yield message
+                async with aclosing(_drive(prompt, suppress_on_leak=True)) as messages:
+                    async for message in messages:
+                        n += 1
+                        yield message
             except Exception as exc:  # noqa: BLE001
                 # A THROWN SDK/CLI exception before any output — e.g. the contradictory
                 # "Claude Code returned an error result: success" a cold microVM raises
@@ -657,7 +676,8 @@ _TOOLCALL_MARKUP_RE = re.compile(
     r"|\bcodegraph_[a-z_]+\s*\("                       # bare CALL with args
     r"|\bcodegraph_[a-z_]+\s*(?:を\s*呼|呼び)"           # name THEN Japanese call verb (…を呼びます)
     r"|^\s*\**Tool[ _]call\b"                          # "Tool call:" / "**Tool call**" label line
-    r"|\bmcp__codegraph__[a-z_]+\b",                   # the raw internal mcp__ name never appears in a real answer
+    r"|\bmcp__codegraph__[a-z_]+\b"                    # raw internal MCP names are not answer text
+    r"|<system>[^<]{0,200}(?:tool limit|no more tool calls)",  # CLI cold-start notice echoed into prose
     re.IGNORECASE | re.MULTILINE,
 )
 
@@ -767,6 +787,35 @@ def _result_block_text(block: Any) -> str:
     return ""
 
 
+def tool_result_is_error(content: Any, is_error: Any = False) -> bool:
+    """Recognize MCP/Claude failures and the bridge's top-level JSON envelope.
+
+    The bridge can return {"error": ...} as ordinary text with the SDK error
+    flag unset. Inspect only that envelope, never nested source/row content.
+    """
+    if is_error:
+        return True
+    if isinstance(content, str):
+        texts = [content]
+    elif isinstance(content, (list, tuple)):
+        texts = [
+            part.get("text") if isinstance(part, dict) else getattr(part, "text", None)
+            for part in content
+        ]
+    else:
+        return False
+    for text in texts:
+        if not isinstance(text, str):
+            continue
+        try:
+            envelope = json.loads(text)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(envelope, dict) and envelope.get("error"):
+            return True
+    return False
+
+
 # The result-container keys each retrieval tool puts its hits under (verified live against
 # codegraph-server 0.18.5, see index-service/codegraph_session.py): an EMPTY one of these = a
 # confirmed no-match. symbol_search→results, get_callers→callers, analyze_impact→impacted,
@@ -867,7 +916,9 @@ def _track_tool_latency(message: Any, pending: dict[str, tuple[str, float]], tra
                 if empty:
                     empty_retrievals += 1
                 _perf("tool_latency", (now - start) * 1000, tool=name,
-                      is_error=getattr(block, "is_error", None), empty_retrieval=empty,
+                      is_error=tool_result_is_error(
+                          getattr(block, "content", None), getattr(block, "is_error", None),
+                      ), empty_retrieval=empty,
                       toolUseId=str(result_id)[:40], traceId=trace_id)
     except Exception as exc:  # noqa: BLE001 - perf logging must never break the stream
         logger.warning(json.dumps({"event": "tool_latency_log_failed", "error": str(exc), "traceId": trace_id}))

@@ -74,6 +74,58 @@
       "severity": "critical",
       "_liveness": "LOG-PIPELINE LIVENESS BACKSTOP / dead-man's-switch (plan 阶段3). Watches GatewayHeartbeat — the gateway emits gateway_heartbeat every 60s REGARDLESS of traffic, so a healthy 5min window has Sum≈5 (≥1). CORRECT operator is LessThanThreshold 1: alive → Sum≥1 → NOT < 1 → OK; pipeline dead (CloudWatch agent down / gateway crashed / silent) → metric MISSING → treatMissingData=breaching → ALARM after 3 missing windows (~15min). ⚠️ The operator was originally GreaterThanOrEqualToThreshold 1 — INVERTED: it fired whenever heartbeats WERE present (a healthy [5,5,1] tripped it) and would have stayed OK if the pipeline died into 0/absent. A liveness alarm MUST be LessThan (page on LOW/absent), never GreaterThanOrEqual. MUST watch the heartbeat, NOT a traffic metric like QuestionsReceived — a traffic metric reads 0 on a quiet night, indistinguishable from a dead pipeline → false page.",
       "alarmDescription": "日志管道存活兜底：网关心跳（每 60s 一次，与流量无关）连续 ~15 分钟缺失 → CloudWatch agent 挂了 / 网关崩了 / 日志停流。健康类告警全靠日志管道，管道一断会静默漏报，故此兜底。空闲夜晚心跳照发，不会误报。"
+    },
+    {
+      "name": "GatewayNotReady",
+      "metricName": "GatewayNotReady",
+      "statistic": "Sum",
+      "periodSeconds": 300,
+      "evaluationPeriods": 3,
+      "datapointsToAlarm": 2,
+      "threshold": 1,
+      "comparisonOperator": "GreaterThanOrEqualToThreshold",
+      "treatMissingData": "notBreaching",
+      "severity": "critical",
+      "alarmDescription": "网关进程活着但飞书长连接不通（wsState != connected）。此前这一类故障没有任何告警：心跳与 WS 状态无关，所以 LogPipelineStalled 一直绿，而机器人一个问题都答不了。判定依据是【跨窗口的持续性】：15 分钟内有 2 个 5 分钟窗口出现断连心跳才告警。此前是单窗口 Sum>=3 并声称「约 3 分钟持续不通」，那个算术只在【单项目 + 60 秒心跳】下成立——这条 metric 没有维度，是对共享日志组上所有项目求和，所以一台主机跑 3 个以上项目时，一轮心跳里有 3 个网关在重连就立刻告警；而部署会同时重启全部网关，同步抖动是常态。单窗口计数无法区分「很多网关短暂抖动」和「一个网关持续断掉」，持续性可以，且与项目数、心跳间隔都无关。周期保持 300 秒：HEARTBEAT_SECS 上限 120，300 秒可保证每窗至少 2.5 个心跳点，而 60 秒周期在心跳 120 秒时会出现 1,0,1,0 交替，导致告警永远不触发。遗留限制：无维度求和仍无法定位是六个网关里的哪一个；结构性修法是给心跳加 by-project 维度并按项目生成告警——心跳事件已经带 projectId，缺的是消费方。"
+    },
+    {
+      "name": "TextFallbackBurst",
+      "metricName": "TextFallbackTotal",
+      "statistic": "Sum",
+      "periodSeconds": 300,
+      "evaluationPeriods": 1,
+      "datapointsToAlarm": 1,
+      "threshold": 3,
+      "comparisonOperator": "GreaterThanOrEqualToThreshold",
+      "treatMissingData": "notBreaching",
+      "severity": "critical",
+      "alarmDescription": "回答持续退化成纯文本 = CardKit 权限缺失的生产形状。注意它不会触发 answer_failed —— 纯文本发送是成功的 —— 所以在此之前整条产品质量崩溃是零信号。"
+    },
+    {
+      "name": "EventDroppedUnparseable",
+      "metricName": "EventDroppedUnparseable",
+      "statistic": "Sum",
+      "periodSeconds": 300,
+      "evaluationPeriods": 1,
+      "datapointsToAlarm": 1,
+      "threshold": 1,
+      "comparisonOperator": "GreaterThanOrEqualToThreshold",
+      "treatMissingData": "notBreaching",
+      "severity": "critical",
+      "alarmDescription": "收到的事件解析不出来 = 100% 消息丢失，正常运行中一次都不该出现，故阈值 >=1。典型成因是飞书或 SDK 改了 payload 嵌套；此前它只是一行日志，/ready 仍 200、心跳仍绿。"
+    },
+    {
+      "name": "EventDroppedGate",
+      "metricName": "EventDroppedGate",
+      "statistic": "Sum",
+      "periodSeconds": 300,
+      "evaluationPeriods": 1,
+      "datapointsToAlarm": 1,
+      "threshold": 10,
+      "comparisonOperator": "GreaterThanOrEqualToThreshold",
+      "treatMissingData": "notBreaching",
+      "severity": "warning",
+      "alarmDescription": "消息到了却被门禁丢掉，最典型成因是 FEISHU_BOT_OPEN_ID 填了格式正确但不对的值（群里 100% 流量被丢，而 /ready 200、心跳绿，与'今天没人提问'无法区分）。阈值放宽到 10：群里 @ 别人本来就会命中这条，已排除 duplicate_message。"
     }
   ]
 }

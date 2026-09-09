@@ -5,17 +5,29 @@
 > 权威顶层目录树。改动任何顶层目录，必须同步本文件与 `structure_en.md`（`scripts/check-invariants.sh` 校验）。
 
 ```
-agent-container/        会话 microVM 内运行的 Claude Code Agent（Python）
-  README.md             职责 + 对外契约（输入 goal/session、index-service MCP 端点：定位 + 读文件）
-  prompts/              系统 prompt + 高频问题清单 + 问答规范（代码为准 / 标差异 / 转研发）
+README.md               项目公开入口：中文在前、英文在后
+CONTRIBUTING.md          开发环境、检查命令与贡献流程
+SECURITY.md             安全问题报告与版本范围
+CODE_OF_CONDUCT.md      社区行为规范与报告方式
+LICENSE / NOTICE       MIT 许可证与项目署名
+.github/               CI 工作流、Issue 模板与 PR 模板
+agent-container/        会话 microVM 内运行的 OpenAI / Claude Agent（Python）
+  README.md             职责 + 对外契约（输入 prompt/traceId/repos、index-service MCP 端点：定位 + 读文件）
+  prompts/              system.md 一个文件：系统 prompt + 高频问题清单 + 问答规范（代码为准 / 标差异 / 转研发）
   Dockerfile            ARM64 基础镜像 sha256 锁定；pin Claude Agent SDK（claude-agent-sdk）；@anthropic-ai/claude-code 按运维决定跟随 @latest（不 pin）
   agent.py              @app.entrypoint 异步流式 handler，启动 Agent 循环
-  agent_lib.py          SDK-free 只读问答 Agent 主逻辑（agent.py 的可测试内核：选项构建 / 取证循环）
-  requirements.txt + requirements.lock  精确固定的 Python 依赖（lock = pip freeze 全传递）
+  agent_settings.py     项目 SDK / 模型选择与旧配置兼容
+  engine_runner.py      SDK 分派 + 规范化流式事件（版本 / runId / seq / 终态）
+  agent_lib.py          Claude 只读问答内核：选项构建 / 取证循环 / 冷启动重试
+  openai_runner.py      OpenAI Agents SDK 工具循环 + HTTP MCP 只读白名单
+  openai_backend.py     Bedrock 模型构造 / OpenInference（术语表复用）
+  bedrock_converse.py   OpenAI Agents Model → ConverseStream；SigV4 / 消息与工具 / 推理续接
+  requirements.txt + requirements.lock  精确固定的 Python 依赖（uv 生成完整传递锁）
   tests/                pytest（由 scripts/test.sh 调用）
 bot-gateway/            飞书 Bot 长连接事件网关 + CardKit 流式渲染（TypeScript 长驻服务）
   README.md             长连接 / 事件去重 / 会话→runtimeSessionId 映射 / 卡片更新频控
   src/                  事件消费入口、SigV4 调 AgentCore、会话映射、CardKit 渲染、SSE 解析、脱敏日志
+  src/health.ts         健康端点（127.0.0.1 独立端口，默认 bridge 端口 + 10000，`HEALTH_PORT` 覆盖）：`/health` 存活、`/ready` 就绪（长连接已连上且未在优雅退出才 200）
   run.sh                服务启动器：source systemd 注入的 per-project env（/etc/bot-gateway-<项目>.env）+ 从 Secrets Manager 取飞书凭证（不落盘）→ node dist
   tests/                jest 单测（由 scripts/test.sh 调用）
 index-service/          常驻 CodeGraph 索引服务 + MCP-over-HTTP 接口
@@ -30,7 +42,13 @@ index-service/          常驻 CodeGraph 索引服务 + MCP-over-HTTP 接口
   text_decode.py        容错文本解码（仅标准库）：中文游戏仓常为 GBK/GB2312、配置表可能 UTF-16，按编码探测避免乱码
   glossary.py           术语表数据层：concept 为中心的 Entry/聚合/增量合并/JSONL 读写/生成轻量索引层
   glossary_read.py      术语表只读查询（glossary_index/glossary_lookup MCP 工具；per-repo slice 聚合 + 项目隔离）
-  glossary_build.py     构建期：本地 cc 扫码产出 concept JSONL（prompt/容错解析/中文别名 grounding 校验/增量合并）
+  glossary_build.py     构建期：按项目 SDK 提取 concept JSONL（prompt/容错解析/中文别名 grounding 校验/增量合并）
+  openai_glossary.py    OpenAI 构建循环：工具仅能分页读取当前批次文件
+  glossary_config.py    SDK / 模型 / 区域 / prompt 指纹与产物摘要、配置发布锁
+  glossary_source.py   术语表候选/取证路径保护（凭据、索引内部路径、符号链接）
+  glossary_worker.sh   仓库锁内加载当前 SDK / 上限 / 解释器后启动构建
+  glossary-requirements.txt + glossary-requirements.lock  OpenAI 术语表独立依赖（agent 锁的子集）
+  setup_glossary.sh     按锁文件摘要安装不可变 venv，与常驻 bridge 环境隔离
   glossary_gen.py       术语表生成 CLI：按 git diff 增量 vs 全量、候选文件限界、原子写入（刷新 timer 调用）
   glossary_refresh.sh   刷新单元包装：git_fetch 后按 old..new 增量重建本仓术语表 slice（best-effort，不阻塞拉取）
   path_align.py         索引路径 ↔ 仓库相对路径词法对齐（拒越界）
@@ -41,7 +59,7 @@ index-service/          常驻 CodeGraph 索引服务 + MCP-over-HTTP 接口
   reindex_local_repo.sh local 仓应用暂存代码：常规推送原地同步到正在用的目录（--delay-updates 缩小中断窗口）、watcher 增量重建索引 + 按变更清单增量刷新术语表（不停 bridge）；首次推送停 bridge 全量建图、建图与术语表并行；重活交给后台 systemd 单元、ssh 断开不影响；--prepare 建暂存目录
   tests/                pytest（由 scripts/test.sh 调用）
 infra/                  基础设施即代码（MVP 先 agentcore toolkit / boto3，渐进 CDK 化）
-  README.md             IaC 分工：CDK 管稳定层 / deploy-all.sh 用 boto3 配 AgentCore Runtime
+  README.md             当前部署脚本分工与后续 CDK 迁移规划
   monitoring/           监控（CloudWatch 侧；scripts/boto3，非 CDK stack）
     queries/metric-filters/a-class-metrics.json  A 类指标口径单一事实源（计数/分位/分布 → metric-filter）
     queries/metric-filters/alarm-metrics.json    告警专用稠密 filter（每 card_health kind 一条，defaultValue:0）
@@ -52,14 +70,15 @@ infra/                  基础设施即代码（MVP 先 agentcore toolkit / boto
   (p2) lib/             runtime / codegraph(index-service) / gateway 各 stack
 config/                 配置驱动：i18n.json（卡片 / 告警 / 错误文案）、alarm-thresholds.json（告警阈值，运维可调）、projects.example.json（项目路由 schema 模板；真实配置在 .local/projects.json，部署相关、gitignore）
 scripts/                运维生命周期
-  check-invariants.sh   快速结构 lint（AGENTS / CLAUDE / 双语配对 / 顶层目录 ↔ structure 文档双向对齐）
+  check-invariants.sh   快速结构 lint（AGENTS.md + architecture.md 存在与互引 / 双语配对 / 顶层目录 ↔ structure 文档双向对齐 / design 权威依据存在 / 全局 IAM 角色策略未钉死 ${REGION} / GitHub 安装入口为 ddpie/source-truth / 文档无真实人名与竞品名）
   lib/                  common.sh（格式化 + 依赖检查）、env-utils.sh（.env / deploy-config 共享 helper）、render_metric_filters.py（指标定义→put-metric-filter 计划）、render_dashboard.py（看板模板渲染 + 禁 type:log 校验）、render_alarms.py（阈值→put-metric-alarm 计划）、render_manifest.py（多仓 REPO_MANIFEST_JSON 校验+逐仓记录，纯函数可测）
   apply-monitoring.sh   监控栈唯一入口（看板→指标 filter→告警→DAU Lambda 按序全量，幂等；--only 选单阶段；--dry-run；实现在 lib/apply-*.sh）
   test.sh               分层测试的唯一入口（离线默认 / --full）
   check-versions.sh     版本固定防漂移守卫（base digest / requirements pin / Node / claude-code npm）
+  generate-python-licenses.py  从 agent 锁对应的已安装环境生成 Python 许可证清单；--check 无写入校验
   get.sh                一行引导脚本（curl/gh 取来跑）：把仓库 clone 到 ./source-truth 再交给 install.sh；可重跑（已存在则 git pull）
   install.sh            交互式一键安装（查依赖→飞书凭证→配置→确认→调 deploy-all；重跑预填；添加项目可选 git 仓或 local 仓）
-  push-local-repo.sh    客户机侧：rsync 直推本地仓到索引主机暂存目录并触发重建（local 仓刷新入口；不经 git）
+  push-local-repo.sh    本机侧：rsync 直推本地仓到索引主机暂存目录并触发重建（local 仓刷新入口；不经 git）
   deploy-all.sh         一键部署的权威入口（artifacts→IAM→network→index-service→镜像→Runtime→gateway；幂等；--local 在本机就地部署）
   launch-host.sh        --local（单台 EC2）模式入口（运维本地跑）：选 profile → 建 IAM → 自动建净网（VPC/公私子网/IGW/NAT，复用 provision_network.sh）+ host 安全组（只放行运维 IP 的 22）→ 起公有子网 ARM64 EC2 挂好实例角色 → 打印后续步骤
   lib/create-iam.sh     建/复用 --local 模式实例角色 + instance profile，并补部署期权限（幂等；由 launch-host.sh 内部调用）
@@ -68,23 +87,33 @@ scripts/                运维生命周期
   lib/deploy_project.sh + wait_base_host.sh + delete_runtime.py  多项目编排：建底座 / 等底座就绪 / 删 per-project runtime
   lib/resolve_model.sh  查 Bedrock list-inference-profiles 选区域真实存在的推理配置（不猜前缀；geo profile 因区域而异）
   lib/activate_gateway.sh  经 SSM 写 /etc/bot-gateway-<项目>.env + 启动 bot-gateway@<项目>（gateway 与索引同主机）
-  lib/stop_gateway.sh   经 SSM 停止旧实例 gateway（蓝绿换实例 break-before-make，避免双网关抢占飞书长连接）
+  lib/stop_gateway.sh   经 SSM 停掉实例上的 bot-gateway@*（break-before-make：飞书长连接是全局单例，起新网关前先确认旧网关已退出）
   (p2) ops.sh           运维工具（status / logs / reindex）
+  apply-evaluations.sh  可选：部署两个自定义 AgentCore 评估器（打包→IAM→Lambda→注册；--only 选阶段、--dry-run；刻意不在 deploy-all 的必经路径上）
   teardown.sh           有序销毁 + 保留资源清单
   trace.sh              按 traceId 合并查询网关 + agent microVM 两个 log group 的全链路时间线（--since-hours / --raw）
   e2e-probe.py          对已部署 Runtime 跑真实端到端问答，校验只读边界 + 答案出处（test.sh --full 调用；缺部署自动 skip）
   tests/                shell 单测 test_*.sh（含 test_e2e_probe.sh：e2e-probe 纯逻辑单测）
+evaluations/            AgentCore Evaluations 的自定义评估器（**可选**，不在部署必经路径上）
+  evaluators.json       两个自定义评估器的声明式定义；每一条都写明「为什么内置的 31 个办不到」
+  citation-evaluator/   代码型（Lambda）评估器：把答案里每条 file:line 拿回真实仓库比对
+    lambda_function.py  handler，用官方 @custom_code_based_evaluator 装饰器
+    bridge_client.py    到 index-service bridge 的最小 MCP 客户端（只读，零第三方依赖）
+    requirements.txt    Lambda 直接依赖（与 agent-container 同一个 bedrock-agentcore 版本）
+    tests/              pytest（由 scripts/test.sh 调用）
 docs/
   README.md             文档总索引（按受众分类的入口地图）
   structure_zh.md       本文件（权威目录树，双语配对）
   structure_en.md       英文对照
-  runbook.md            部署 / 连飞书 / 运维 / 排错（中性名，不参与双语配对）
+  runbook_zh.md         部署 / 连飞书 / 运维 / 排错（中文，双语配对）
+  runbook_en.md         英文对照（原「中性名不参与配对」的豁免已取消，两份须同步）
+  dual-sdk_zh.md / dual-sdk_en.md  SDK 选择、旧项目迁移、术语表切换与验证（双语）
   glossary.md           术语表怎么来的：构建流程 / 产物结构 / 可信依据 / 成本运维（面向人，中性名）
   aws-services_zh.md    用到的 AWS 服务清单：干什么用 / 计费点（双语配对 aws-services_en.md）
   design/               设计权威依据（仅中文，暂不翻译）
     README.md                   目录说明 + 与架构 / 不变量文档的关系
-    requirements_zh.md          需求与方案评审纪要（导入）
-    architecture-overview_zh.md POC 架构方案（导入）
+    requirements_zh.md          需求与设计决策（MVP 边界）
+    architecture-overview_zh.md POC 架构方案
     agent-container_zh.md       agent-container 组件实现契约
     multi-repo-isolation_zh.md  多仓隔离方案（每仓独立 CodeGraph + 服务端 scope gate + fan-out）
   agent/                AI 面向文档
@@ -95,7 +124,7 @@ docs/
     *-spike.md          调研记录（cardkit 流式 / 索引性能 / 模板）
     perf-comparison.md  与原生 Claude Code 的耗时对比记录
   assets/               文档配图（手写 SVG：架构 / 代码进入与刷新 / 会话隔离 / 术语表 / 术语表构建 / 术语表置信度分层 / 安全设计 / 时序；架构 / 时序 / 安全设计另有英文版 `*.en.svg` 供英文 README 用；及一次真实问答录屏 demo-qa.gif）
-.local/                 （已 gitignore）账号特定部署状态：deploy-config、projects.json（项目路由）
+.local/                 （已 gitignore）账号特定部署状态：deploy-config、projects.json（项目配置）、deployments/（发布记录与回滚资料）
 ```
 
 标注 `(p2)` 的条目为后续阶段产出，当前仅占位或尚未创建；未标注者均已落地。

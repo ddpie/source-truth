@@ -8,9 +8,23 @@
 # deploy-all.sh downloads it from CODEGRAPH_SERVER_URL when it's neither local nor in S3, so the
 # bootstrap stays small and there's a single source of truth for that logic.
 #
-# Re-runnable: if ./source-truth already exists it is reused (git pull to refresh), not re-cloned.
-# Override the clone target with SOURCE_TRUTH_DIR, the repo with SOURCE_TRUTH_REPO, the branch
-# with SOURCE_TRUTH_REF.
+# Re-runnable: if ./source-truth already exists it is reused (fetched + fast-forwarded to the target
+# ref), not re-cloned. Overrides:
+#
+#   SOURCE_TRUTH_DIR    clone target directory (default: ./source-truth)
+#   SOURCE_TRUTH_SLUG   owner/repo for `gh repo clone` (default: ddpie/source-truth)
+#   SOURCE_TRUTH_REPO   full clone URL for plain `git clone` (default: derived from SOURCE_TRUTH_SLUG)
+#   SOURCE_TRUTH_REF    branch / tag / sha (default: main)
+#   SOURCE_TRUTH_ALLOW_STALE=1  downgrade a failed refresh from an error to a warning
+#                       (install from the tree exactly as it is)
+#
+# ⚠️ SLUG vs REPO — for a fork, set SOURCE_TRUTH_SLUG, not SOURCE_TRUTH_REPO. There are two clone
+# paths (see do_clone below): with `gh` installed AND authenticated it runs `gh repo clone "$SLUG"`,
+# otherwise plain `git clone "$REPO"`. SOURCE_TRUTH_REPO only feeds the second one, so a fork user
+# who exports just SOURCE_TRUTH_REPO still clones UPSTREAM whenever gh is logged in. SOURCE_TRUTH_SLUG
+# covers both paths (REPO defaults to a URL derived from it). Reach for SOURCE_TRUTH_REPO only for a
+# non-GitHub remote — and set SOURCE_TRUTH_SLUG alongside it, or log out of gh, so the gh path cannot
+# win.
 set -euo pipefail
 
 SLUG="${SOURCE_TRUTH_SLUG:-ddpie/source-truth}"      # owner/repo, for `gh repo clone`
@@ -46,12 +60,40 @@ do_clone() {
 }
 
 # Refresh an existing checkout, else clone fresh.
+#
+# fetch → checkout → merge --ff-only, NOT `git pull --ff-only origin "$REF"`. A bare pull
+# fast-forwards whatever is currently checked out: on a checkout parked on another branch it merged
+# origin/main INTO that branch, silently rewriting the operator's working branch and then installing
+# from a tree that is neither. Checking $REF out first makes the target explicit.
+#
+# A refresh failure is an ERROR by default. The old code warned, slept 3s "Ctrl-C now if you need the
+# latest" and continued from a possibly stale tree — but the documented entry point is
+# `bash <(curl …)`, which has no tty to interrupt, so the prompt was unreachable and a stale deploy
+# went ahead unnoticed. Set SOURCE_TRUTH_ALLOW_STALE=1 to deliberately install from the tree as-is
+# (offline / air-gapped / deliberately pinned local commits).
 if [[ -d "$DIR/.git" ]]; then
-  bold "• reusing existing checkout $DIR (git pull)"
-  if ! git -C "$DIR" pull --ff-only origin "$REF"; then
-    err "pull failed (local commits / dirty tree / detached HEAD?) — continuing with the EXISTING"
-    err "  checkout, which may be STALE. Ctrl-C now if you need the latest; else it proceeds in 3s."
-    sleep 3
+  bold "• reusing existing checkout $DIR (fetch + ff-only merge of $REF)"
+  refresh_ok=1
+  git -C "$DIR" fetch --tags origin "$REF" || refresh_ok=0
+  if [[ "$refresh_ok" == 1 ]]; then
+    git -C "$DIR" checkout "$REF" || refresh_ok=0
+  fi
+  if [[ "$refresh_ok" == 1 ]]; then
+    # A tag or a raw sha has no origin/<ref> to merge — the checkout above IS the refresh there.
+    if git -C "$DIR" rev-parse --verify --quiet "refs/remotes/origin/$REF" >/dev/null; then
+      git -C "$DIR" merge --ff-only "origin/$REF" || refresh_ok=0
+    fi
+  fi
+  if [[ "$refresh_ok" != 1 ]]; then
+    if [[ "${SOURCE_TRUTH_ALLOW_STALE:-}" == 1 ]]; then
+      err "could not refresh $DIR to $REF — SOURCE_TRUTH_ALLOW_STALE=1, continuing with the"
+      err "  EXISTING (possibly STALE) tree: $(git -C "$DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+    else
+      err "could not refresh $DIR to $REF (local commits / dirty tree / detached HEAD / no network?)."
+      err "  Fix the checkout — e.g.  git -C $DIR status  then  git -C $DIR stash  — and re-run."
+      err "  To install from the tree exactly as it is, re-run with SOURCE_TRUTH_ALLOW_STALE=1."
+      exit 1
+    fi
   fi
 elif [[ -e "$DIR" ]]; then
   err "$DIR exists but is not a git checkout — move it aside or set SOURCE_TRUTH_DIR, then re-run."

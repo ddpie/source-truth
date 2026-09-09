@@ -108,5 +108,5 @@
     <text x="374" y="558" text-anchor="middle" fill="#2f7a47">成品卡片 · 可继续追问（经飞书推送）</text>
   </g>
 
-  <text x="380" y="600" text-anchor="middle" font-size="10.5" fill="#7a8493">全程只读、读代码核对 · 会话 microVM 不挂任何文件系统 · 工作原理见 docs/agent/architecture.md</text>
+  <text x="380" y="600" text-anchor="middle" font-size="10.5" fill="#7a8493">全程只读、读代码核对 · 会话 microVM 不挂仓库文件系统 · 工作原理见 docs/agent/architecture.md</text>
 </svg>

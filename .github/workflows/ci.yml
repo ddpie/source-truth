@@ -1,0 +1,136 @@
+# The only mechanical gate in this repository.
+#
+# AGENTS.md and scripts/test.sh used to claim a pre-push hook enforced the offline suite. No such
+# hook existed — no lefthook.yml, no .pre-commit-config.yaml, and .git/hooks/pre-push was the stock
+# git-lfs one. Every guard in scripts/tests/ ran only when a human remembered to type the command,
+# and test.sh would report an unqualified pass having silently skipped whole suites whose
+# dependencies were absent. A repository that takes external pull requests cannot rely on a local
+# hook anyway, since a contributor's machine is not ours to configure.
+#
+# Deliberately NOT a lefthook adoption: CI covers the same ground, needs no per-developer install,
+# and is the only thing that can gate a fork's pull request.
+name: ci
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  offline-suite:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: bot-gateway/package-lock.json
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11" # agent-container's pinned base image
+
+      # Every dependency the suite would otherwise SKIP. Installing them is the point: a green run
+      # over skipped suites is exactly the misreport this workflow exists to prevent.
+      - name: Install gateway dependencies
+        working-directory: bot-gateway
+        run: npm ci
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --no-deps -r agent-container/requirements.lock
+          # Excel fixtures need the index host's extra dependency. Do not install its
+          # MCP/uvicorn pins here: the host and agent intentionally use separate versions.
+          sed -n '/^openpyxl==/p' index-service/requirements.txt > /tmp/index-test-deps.txt
+          python -m pip install -r /tmp/index-test-deps.txt pytest ruff==0.15.15
+          python -m pip check
+          python scripts/generate-python-licenses.py --check
+
+      # GNU tar and rsync are what the deploy itself hard-fails on; assert the runner matches the
+      # documented prerequisites so a doc/reality drift shows up here rather than mid-deploy.
+      - name: Verify deploy prerequisites are present
+        run: |
+          tar --version | head -1 | grep -q 'GNU tar' || { echo "GNU tar required"; exit 1; }
+          command -v rsync >/dev/null || { echo "rsync required"; exit 1; }
+          command -v rg >/dev/null || { sudo apt-get update -q && sudo apt-get install -y -q ripgrep; }
+      - name: Run offline suite with the agent's locked dependencies
+        env:
+          PYTEST_ADDOPTS: --junitxml=/tmp/agent-tests.xml
+        run: |
+          set -o pipefail
+          bash scripts/test.sh 2>&1 | tee /tmp/suite.log
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12" # index host
+
+      - name: Test isolated index and glossary dependencies
+        run: |
+          python -m venv /tmp/index-test-env
+          /tmp/index-test-env/bin/python -m pip install -r index-service/requirements.txt pytest
+          /tmp/index-test-env/bin/python -m pip check
+          /tmp/index-test-env/bin/python -m pytest -q -rs index-service/tests \
+            --ignore=index-service/tests/test_glossary_sdk.py --junitxml=/tmp/index-tests.xml
+
+          python -m venv /tmp/glossary-test-env
+          /tmp/glossary-test-env/bin/python -m pip install --no-deps -r index-service/glossary-requirements.lock
+          /tmp/glossary-test-env/bin/python -m pip install pytest
+          /tmp/glossary-test-env/bin/python -m pip check
+          PYTHONPATH=agent-container:index-service /tmp/glossary-test-env/bin/python -c \
+            'from agents import Agent, Runner; from bedrock_converse import BedrockConverseModel; import openai_glossary'
+          /tmp/glossary-test-env/bin/python -m pytest -q -rs \
+            index-service/tests/test_glossary_build.py index-service/tests/test_glossary_gen.py \
+            index-service/tests/test_glossary_sdk.py --junitxml=/tmp/glossary-tests.xml
+
+      - name: Reject unexpected skips by source and reason
+        run: |
+          python - <<'PY'
+          import ast
+          from pathlib import Path
+          import re
+          import xml.etree.ElementTree as ET
+
+          # The release CodeGraph binary is ARM64; these two modules cannot run on
+          # this x86 runner. No missing Python dependency is an allowed exception.
+          allowed = {
+              "index-service.tests.test_http_bridge",
+              "index-service.tests.test_http_bridge_concurrency",
+          }
+          root = Path.cwd().resolve()
+          counts = {}
+          for report in ("agent", "index", "glossary"):
+              cases = ET.parse(f"/tmp/{report}-tests.xml").findall(".//testcase")
+              assert cases, f"{report}: no tests reported"
+              skipped = 0
+              for case in cases:
+                  node = case.find("skipped")
+                  if node is None:
+                      continue
+                  name = case.get("name")
+                  assert name in allowed and not case.get("classname"), ET.tostring(case)
+                  assert node.get("message") == "collection skipped", ET.tostring(case)
+                  source, line, reason = ast.literal_eval(node.text)
+                  expected = root / (name.replace(".", "/") + ".py")
+                  assert Path(source).resolve() == expected, ET.tostring(case)
+                  assert reason == "Skipped: codegraph-server not on PATH", ET.tostring(case)
+                  skipped += 1
+                  print(f"::warning::{report}: {source}:{line}: {reason}")
+              counts[report] = skipped
+          summaries = re.findall(r"SKIPPED:\s*([^\n]+)", Path("/tmp/suite.log").read_text())
+          for summary in summaries:
+              match = re.fullmatch(r"pytest:(\d+)-tests-skipped\s*", summary)
+              assert match and int(match[1]) == counts["agent"], summary
+          assert bool(summaries) == bool(counts["agent"]), "skip summary disagrees with JUnit"
+          PY

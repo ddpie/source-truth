@@ -18,8 +18,8 @@ set -uo pipefail
 
 SUBDIR="${1:?glossary_refresh: subdir required}"
 URL="${2:-}"; REF="${3:-}"; WS="${4:?ws required}"; PROJECT="${5:?project required}"
-MODEL="${6:-global.anthropic.claude-opus-4-8}"; REGION="${7:-}"
-APP=/opt/idx/app
+MODEL="${6:-}"; REGION="${7:-}"   # empty model = glossary engine disabled (pull-only refresh)
+APP="${GLOSSARY_APP_DIR:-/opt/idx/app}"   # overridable for offline tests only
 GLOSSARY_ROOT="${GLOSSARY_ROOT:-/data/glossary}"
 OUT="$GLOSSARY_ROOT/$PROJECT/${SUBDIR}.jsonl"
 
@@ -39,8 +39,13 @@ esac
 
 # 3) (Re)build this repo's glossary slice. Best-effort: a glossary failure must NOT fail the
 #    refresh (the code pull already succeeded). Empty OLD => full build; OLD present => incremental.
+#    Glossary off (deploy-all without --with-glossary): the pull above is the whole job.
+if [ "${GLOSSARY_ENABLED:-true}" = "false" ] || [ -z "$MODEL" ]; then
+  echo "glossary_refresh: glossary disabled (no model) — pull done for $SUBDIR, slice left as-is"
+  exit 0
+fi
 mkdir -p "$GLOSSARY_ROOT/$PROJECT" 2>/dev/null || true
-ARGS=(--project "$PROJECT" --repo-root "$WS" --out "$OUT" --model "$MODEL" --region "$REGION")
+ARGS=(--project "$PROJECT" --repo-root "$WS" --out "$OUT" --model "$MODEL" --region "$REGION" --source git)
 if [ -n "$OLD" ] && [ -n "$NEW" ]; then
   ARGS+=(--old "$OLD" --new "$NEW")
 else
@@ -52,7 +57,7 @@ fi
 # the next timer tick will pick up any new commits anyway.
 LOCK="$GLOSSARY_ROOT/$PROJECT/.${SUBDIR}.lock"
 if ! ( cd "$APP" && GLOSSARY_ROOT="$GLOSSARY_ROOT" AWS_REGION="$REGION" \
-        flock -w 5 "$LOCK" python3 -m glossary_gen "${ARGS[@]}" ); then
+        flock -w 5 "$LOCK" bash "$APP/glossary_worker.sh" "${ARGS[@]}" ); then
   echo "glossary_refresh: glossary build skipped/failed for $SUBDIR (refresh still OK; glossary left as-is)" >&2
 fi
 exit 0

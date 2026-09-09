@@ -22,6 +22,7 @@ from time import perf_counter
 from typing import Any
 
 import path_align
+import served_paths
 from perf import perf_entry
 from text_decode import decode_bytes
 
@@ -87,6 +88,7 @@ def read_file(
     offset: int = 0,
     limit: int | None = None,
     repo: str = "",
+    line: int | None = None,
 ) -> dict[str, Any]:
     """Read a single file from the LOCAL repo copy.
 
@@ -102,6 +104,21 @@ def read_file(
     a bad/escaping path or a path that isn't a regular file (so the bridge can
     report a clean error rather than leak a stack trace)."""
     t0 = perf_counter()
+    # `line` is 1-BASED, matching what codegraph_search_files reports, so a citation can be handed
+    # straight back without the caller doing arithmetic. `offset` stays 0-based because the
+    # next_offset / start_line paging contract round-trips through it. The conversion lives here
+    # rather than in the tool description because the description already said "0-based" and the
+    # failure was silent: off by one reads the FOLLOWING line and presents it as the cited one, so
+    # an agent checking its own citation confirms the wrong text and reports it as verified.
+    if line is not None:
+        offset = max(0, int(line) - 1)
+    # Confinement says the path is INSIDE the repo copy; it does not say the file may be served.
+    # The deploy puts $HOME (and the RocksDB graph store) inside that copy, and an indexed repo
+    # can carry .env / .git/config / private keys. Refuse BEFORE open() so a withheld file is
+    # never even read into memory.
+    _withheld = served_paths.withheld_reason(requested)
+    if _withheld:
+        raise ValueError(_withheld)
     local_path = path_align.to_local_path(requested, local_root=local_root, repo=repo)
     if not os.path.isfile(local_path):
         raise ValueError(f"not a readable file: {requested!r}")
@@ -189,6 +206,10 @@ def read_file(
         "content": "\n".join(sliced),
         "lines": len(sliced),
         "start_line": start,
+        # 1-based twin of start_line. Emit BOTH so building a citation from this result never
+        # requires knowing which convention start_line follows — that mismatch is what made an
+        # agent following its own citation land one line off.
+        "start_line_1based": start + 1,
         # total_lines reachable in this file (within the 16 MiB read ceiling) so the agent
         # can size its paging instead of guessing whether more remains.
         "total_lines": total_lines,
@@ -219,8 +240,10 @@ def glob_files(
 
     ``pattern`` is interpreted relative to the repo root (e.g. ``**/*.cs``,
     ``Config/*.json``). Returns {"paths": [...], "truncated": bool} with
-    repo-relative paths, sorted, deduped. Hidden/.git/node_modules
-    entries are excluded to match file_search's view. Raises ValueError on an empty pattern
+    repo-relative paths, sorted, deduped. Credential and index-internal paths are
+    withheld by served_paths (the same filter read_file and file_search apply) —
+    an earlier version of this line claimed hidden entries were excluded, which was
+    not true of the code beneath it. Raises ValueError on an empty pattern
     or one that escapes the repo root.
     ``repo`` (multi-repo): with ``repo`` set, a leading ``<repo>/`` on the pattern is stripped
     before globbing this repo's copy, and returned paths are re-prefixed with ``<repo>/`` so
@@ -269,9 +292,10 @@ def glob_files(
         if real_hit != real_root and not real_hit.startswith(real_root.rstrip("/") + "/"):
             continue
         rel = os.path.relpath(real_hit, real_root)
-        # Skip VCS/vendored/hidden trees so glob agrees with file_search's view.
-        segs = rel.split(os.sep)
-        if any(s in (".git", "node_modules", ".venv") for s in segs):
+        # Shared default-deny filter — the old inline check listed only three directory names
+        # while the docstring claimed hidden entries were excluded, which was false: a dotted
+        # file was served the moment the agent named it.
+        if served_paths.is_withheld(rel.replace(os.sep, "/")):
             continue
         if not os.path.isfile(real_hit):
             continue
@@ -291,10 +315,12 @@ def glob_files(
 
 
 def read_to_json(requested: str, *, local_root: str,
-                 offset: int = 0, limit: int | None = None, repo: str = "") -> str:
+                 offset: int = 0, limit: int | None = None, repo: str = "",
+                 line: int | None = None) -> str:
     """read_file → JSON string (the MCP tool return shape)."""
     return json.dumps(
-        read_file(requested, local_root=local_root, offset=offset, limit=limit, repo=repo),
+        read_file(requested, local_root=local_root, offset=offset, limit=limit, repo=repo,
+                  line=line),
         ensure_ascii=False,
     )
 

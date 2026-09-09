@@ -163,9 +163,54 @@ def test_is_term_file_includes_docs_excludes_binary():
     # ALL text scanned (no extension allowlist); only known binary/asset extensions excluded.
     for f in ("a.cpp", "World.SQL", "conf.YAML", "README.md", "design.txt", "NOTES", "spec.rst"):
         assert glossary_gen._is_term_file(f), f
-    for f in ("logo.png", "blob.bin", "data.sqlite", "icon.ico", "lib.so", "a.dbc"):
+    for f in ("logo.png", "blob.bin", "data.sqlite", "icon.ico", "lib.so", "a.dbc",
+              "mcs.PDB", "compiled.lib", "compiled.obj"):
         assert not glossary_gen._is_term_file(f), f
 
+
+def test_text_replaced_with_binary_removes_old_terms_without_model_call(repo, tmp_path, monkeypatch):
+    out = tmp_path / "slice.jsonl"
+    out.write_text('{"concept_id":"power","kind":"symbol","value":"combatPower",'
+                   '"source":"a.cpp","line":1,"confidence":"high"}\n')
+    old = _sha(repo)
+    (repo / "a.cpp").write_bytes(b"binary\x00payload")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "replace with binary")
+    monkeypatch.setattr(glossary_build, "build", lambda *a, **k: pytest.fail("binary reached model"))
+    assert glossary_gen.main([
+        "--project", "demo", "--repo-root", str(repo), "--out", str(out),
+        "--model", "m", "--region", "r", "--old", old, "--new", _sha(repo),
+    ]) == 0
+    assert glossary.read_entries(str(out)) == []
+
+
+@pytest.mark.parametrize("full", [False, True])
+def test_read_failure_keeps_artifact_and_git_progress(repo, tmp_path, monkeypatch, full):
+    import glossary_config
+
+    out = tmp_path / "slice.jsonl"
+    args = ["--project", "demo", "--repo-root", str(repo), "--out", str(out),
+            "--model", "m", "--region", "r", "--sdk", "openai", "--max-files", "0"]
+    monkeypatch.setattr(glossary_build, "build", lambda *a, **k: [
+        glossary.Entry("power", "symbol", "combatPower", "a.cpp", 1, "high")])
+    assert glossary_gen.main(args + ["--full"]) == 0
+    previous = out.read_bytes()
+    previous_meta = Path(str(out) + ".meta").read_bytes()
+    old = _sha(repo)
+    (repo / "a.cpp").write_text("int changedPower;\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "change source")
+
+    def unreadable(*a, **k):
+        raise OSError("fixture transient I/O error")
+
+    monkeypatch.setattr(glossary_gen, "open_source", unreadable)
+    monkeypatch.setattr(glossary_build, "build", lambda *a, **k: pytest.fail("partial scan reached model"))
+    mode = ["--full"] if full else ["--old", old, "--new", _sha(repo)]
+    assert glossary_gen.main(args + mode) == 2
+    assert out.read_bytes() == previous
+    assert Path(str(out) + ".meta").read_bytes() == previous_meta
+    assert glossary_config.metadata(str(out))["source_revision"] == old
 
 def test_docs_only_commit_now_triggers_build(repo, tmp_path, monkeypatch):
     # Docs are now a term source, so a docs-only commit SHOULD run cc (over the changed .md).

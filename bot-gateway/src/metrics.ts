@@ -101,10 +101,42 @@ const CARD_HEALTH_KINDS: ReadonlySet<string> = new Set<CardHealthKind>([
   "toolcall_leak_detected", "finalize_failed", "dedup_hit", "zero_evidence_answer",
 ]);
 
+// Drop reasons for `event_dropped`. These share the `reason` FIELD NAME with the invoke-failure
+// vocabulary above but are a completely different set, and the whitelist is keyed by field name —
+// so before this set existed, every drop reason fell through to the `unknown` fallback. Two
+// separately-verified rounds collided here: the enum whitelist (added to stop a stray `value.text`
+// leaking as a metric dimension) silently coerced the drop vocabulary (added to make silent event
+// loss observable), and the result was worse than either problem.
+//
+// Two alarms were broken by that coercion, in opposite directions:
+//   * EventDroppedUnparseable matches `$.reason = "unparseable_event"` — a value that never
+//     appeared in a metric line, so the alarm built for "100% of messages are being dropped"
+//     could not fire at all.
+//   * EventDroppedGate excludes unparseable and duplicate drops; `"unknown"` satisfies both
+//     inequalities, so it matched EVERY drop — including the post-deploy Feishu redelivery burst
+//     its own purpose field says it must not alarm on.
+// Keep this in sync with ImEvent.reason in handle-event.ts plus the gateway's own drop reasons.
+export type DropReason =
+  | "unparseable_event"
+  | "duplicate"
+  | "unsupported_type"
+  | "empty"
+  | "not_mentioned"
+  | "not_a_user"
+  | "self_message"
+  | "reply_to_unknown_card";
+
+const DROP_REASONS: ReadonlySet<string> = new Set<DropReason>([
+  "unparseable_event", "duplicate", "unsupported_type", "empty",
+  "not_mentioned", "not_a_user", "self_message", "reply_to_unknown_card",
+]);
+
 // Runtime whitelist per enum field-name. A value not in the set is replaced (not logged
 // verbatim) so a stray `value.text` at an `any`-typed call site can't leak as a metric.
 const ENUM_WHITELIST: Record<string, { set: ReadonlySet<string>; fallback: string }> = {
-  reason: { set: FAIL_REASONS, fallback: "unknown" },
+  // Union of both vocabularies: the field name is shared, so gating on either set alone
+  // silently rewrites the other one's values.
+  reason: { set: new Set<string>([...FAIL_REASONS, ...DROP_REASONS]), fallback: "unknown" },
   reasonCode: { set: FEEDBACK_REASON_CODES, fallback: "other" },
   kind: { set: CARD_HEALTH_KINDS, fallback: "invalid" },
 };
@@ -127,6 +159,14 @@ export type DiagnosticEvent =
   // A traffic-driven metric (question_received) can't make that distinction — an idle
   // night and a dead agent both look like no data. See monitoring plan 阶段3 liveness.
   | "gateway_heartbeat"
+  // OUTCOME of a finished turn. outcome=text_fallback means the card path failed and the
+  // answer degraded to plain text — the signature of a missing CardKit permission, which
+  // emits no answer_failed (the fallback send succeeded) and so had no alarm at all.
+  | "turn_finished"
+  // An inbound event we did NOT answer, with the reason. Covers the two silent-loss modes:
+  // an unparseable SDK envelope (100% message loss) and a wrong bot open_id (all group
+  // traffic dropped at the mention gate) — both leave /ready at 200 and the heartbeat green.
+  | "event_dropped"
   // RUNTIME COLD START — emitted once per invoke that landed on a freshly-minted session
   // (no warm microVM behind it), carrying spinupMs = time-to-first-token (which on a cold
   // invoke folds in AgentCore microVM spin-up + routing). Lets CloudWatch chart cold-start

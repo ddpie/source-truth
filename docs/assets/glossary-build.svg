@@ -20,11 +20,11 @@
   <rect x="34" y="92" width="152" height="78" rx="9" fill="#eef3fb" stroke="#b9c9e6" stroke-width="1.2"/>
   <text x="110" y="116" text-anchor="middle" font-size="12.5" font-weight="700" fill="#1f2733">① 扫代码副本</text>
   <text x="110" y="136" text-anchor="middle" font-size="9.5" fill="#5b6573">代码 / 配置表 / 文档</text>
-  <text x="110" y="151" text-anchor="middle" font-size="9.5" fill="#5b6573">全部扫描（不限类型）</text>
+  <text x="110" y="151" text-anchor="middle" font-size="9.5" fill="#5b6573">文本候选 · 按上限扫描</text>
 
   <!-- step 2 -->
   <rect x="214" y="92" width="152" height="78" rx="9" fill="#fdf5e9" stroke="#e4c896" stroke-width="1.2"/>
-  <text x="290" y="116" text-anchor="middle" font-size="12.5" font-weight="700" fill="#1f2733">② 本地 Claude</text>
+  <text x="290" y="116" text-anchor="middle" font-size="12.5" font-weight="700" fill="#1f2733">② 所选 Agent SDK</text>
   <text x="290" y="136" text-anchor="middle" font-size="9.5" fill="#5b6573">限权只读，抽出</text>
   <text x="290" y="151" text-anchor="middle" font-size="9.5" fill="#5b6573">「中文 ↔ 英文符号」</text>
 
@@ -47,13 +47,13 @@
 
   <!-- discard branch off step 3 -->
   <line x1="470" y1="170" x2="470" y2="200" stroke="#b46a6a" stroke-width="1.3" marker-end="url(#arrowdrop)"/>
-  <text x="470" y="214" text-anchor="middle" font-size="9.5" fill="#b46a6a">拦截 Claude 凭空翻译的词条</text>
+  <text x="470" y="214" text-anchor="middle" font-size="9.5" fill="#b46a6a">拦截模型凭空翻译的词条</text>
 
   <!-- incremental loop: from step 4 back to step 1 -->
   <path d="M650 170 V236 H110 V173" fill="none" stroke="#8a93a0" stroke-width="1.3" stroke-dasharray="5,4" marker-end="url(#arrowloop)"/>
   <rect x="316" y="227" width="128" height="18" rx="9" fill="#f1f3f7" stroke="#d4dbe6" stroke-width="0.8"/>
-  <text x="380" y="240" text-anchor="middle" font-size="9.5" font-weight="600" fill="#7a8493">此后按 git 变更增量重建</text>
+  <text x="380" y="240" text-anchor="middle" font-size="9.5" font-weight="600" fill="#7a8493">配置不变：按变更增量重建</text>
 
   <!-- constraint note -->
-  <text x="380" y="270" text-anchor="middle" font-size="9.5" fill="#9aa3b0">三重约束：Claude 限权（只读 / 禁联网）· 产物仅供只读服务 · 代码全程不出这台机器</text>
+  <text x="380" y="270" text-anchor="middle" font-size="9.5" fill="#9aa3b0">模型只读工具 · 产物只读服务 · 来源核对；取证文本经 Bedrock 调用</text>
 </svg>

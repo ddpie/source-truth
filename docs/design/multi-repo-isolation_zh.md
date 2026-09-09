@@ -175,7 +175,8 @@ agent 会话（注入本项目服务地址）
   `glossary_read` 把项目目录下所有 `*.jsonl` 聚合，多仓时给 concept_id 加上 `<repo>/` 命名空间前缀、防跨仓混淆。
 - **格式**：JSONL，concept 为中心的 Entry：`{concept_id, kind(symbol|alias), value, source, line, confidence}`。
   不设自由文本「解释」列——那是注入通道，用确定性 grounding 替代。
-- **生成**：全自动、无人工。构建期在 index 主机用本地 `claude` (cc) CLI 扫代码产出。cc 锁定
+- **生成**：全自动、无人工。构建期在 index 主机按项目选择 OpenAI Agents SDK 或本地 `claude` (cc) CLI。
+  OpenAI 通过 ConverseStream 调用模型，仅提供批次内分页读取工具（见 [双 SDK 配置](../dual-sdk_zh.md)）。cc 锁定
   （`run_cc`：`--disallowed-tools` + `--setting-sources ""`）；cc 臆造的中文别名由 `extract_entries` 的
   **grounding 校验**（中文必须真实出现在 cited 源文件）丢弃。
 - **更新**：in-place 增量。刷新 timer 跑 `git_fetch` 后按 `old..new` diff 只重建变更文件的条目（`glossary_gen`），

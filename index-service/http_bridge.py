@@ -22,6 +22,7 @@ import json
 import logging
 import os
 import posixpath
+import shutil
 import sys
 from typing import Any
 
@@ -35,6 +36,35 @@ from repo_router import RepoRouter, RepoOutOfScope
 # NOTE: the bridge uses the RESIDENT CodegraphSession exclusively — spawning a
 # fresh codegraph process per query is the corruption-risk pattern the resident
 # session replaced, so it must never re-enter the production path.
+
+# APP CODE STALENESS. A re-bootstrap refreshes /opt/idx/app in place and does NOT restart the
+# resident bridges, so this process can keep executing code older than what is on disk (the lazy
+# tool imports below then load NEW module source into a process running OLD code). We snapshot the
+# app bundle's signature stamp at import time and expose a comparison on /health, so the skew is
+# observable instead of being inferred from behaviour. Reporting only — never a health gate, and a
+# no-op on a host where nothing stamps the file.
+# NOTE: this must match where the publishers stamp. bootstrap.sh writes /opt/idx/.app_sig and
+# says why in a comment: OUTSIDE $APP, so the rsync --delete-after that publishes the app tree
+# can never eat it. The default here used to be /opt/idx/app/.src_sig — a path nothing writes —
+# so _app_code_changed() was permanently False and the /health skew field was dead on arrival.
+_APP_SIG_PATH = os.environ.get("APP_SRC_SIG_PATH", "/opt/idx/.app_sig")
+
+
+def _read_app_sig() -> str:
+    try:
+        with open(_APP_SIG_PATH, encoding="utf-8", errors="replace") as fh:
+            return fh.read().strip()
+    except OSError:
+        return ""
+
+
+_APP_SIG_AT_START = _read_app_sig()
+
+
+def _app_code_changed() -> bool:
+    """True iff the on-disk app signature differs from the one this process started with."""
+    now = _read_app_sig()
+    return bool(now) and bool(_APP_SIG_AT_START) and now != _APP_SIG_AT_START
 
 # Per-WORKSPACE writer-lock fds, module-global so the GC can't collect them and
 # release the flocks mid-run. Keyed by the normalized workspace path → held fd, so a
@@ -178,13 +208,40 @@ def _align_paths(raw_json: str, tool_name: str, *, index_root: str, repo: str = 
         call_site = item.get("call_site") if isinstance(item, dict) else None
         if isinstance(call_site, dict) and "file" in call_site:
             call_site["file"] = _align_one(call_site.get("file"), index_root=index_root, repo=repo)
+            # 标注这个 line 的真实含义。实测 0.20.1 的 call_site.line 指向**调用者的声明行**，
+            # 不是调用发生的那一行。此前载荷里只有一个裸 `line`，agent 只能理解成「调用在这一行」，
+            # 于是照它写出的出处指向一个与调用无关的位置——出处看起来精确，实际错位，而且没有任何
+            # 一环报错。黄金测试集里 symbol_partial（只命中外层类型）多半就是这么来的。
+            #
+            # 不改写 line 本身：那是引擎给的事实，改了会让排查更难。加一个同义但明确的字段，
+            # 并声明它的语义，让 agent 引用时知道自己在引什么。
+            if isinstance(call_site.get("line"), int):
+                call_site["caller_declaration_line"] = call_site["line"]
+                call_site["line_semantics"] = (
+                    "declaration line of the CALLING symbol, not the line where the call occurs")
 
     if tool_name == "codegraph_symbol_search":
         for item in data.get("results", []) if isinstance(data.get("results"), list) else []:
             fix_location(item)
+        # 引擎把 results 截断在 20 条，同时用 total_matches 报告真实命中数（实测见过 67）。
+        # 此前 total_matches 在整个 bridge 里出现 0 次，于是 agent 只看到 20 条却无从知道被截断，
+        # 答案会写成「共找到 20 处」——一个具体、可信、且错的数字。
+        #
+        # 不去补拉剩余结果：那要改引擎调用契约。这里只把「你看到的不是全部」这件事讲清楚，
+        # 让答案能诚实地说「至少 N 处，已列出前 20」。
+        results = data.get("results")
+        total = data.get("total_matches", data.get("totalMatches"))
+        if isinstance(results, list) and isinstance(total, int) and total > len(results):
+            data["truncated"] = True
+            data["shown"] = len(results)
+            data["total_matches"] = total
+            data["truncation_note"] = (
+                f"showing {len(results)} of {total} matches — the rest were not returned by the "
+                f"engine, so any count in the answer must be stated as 'at least {len(results)}'")
     elif tool_name == "codegraph_get_callers":
         for item in data.get("callers", []) if isinstance(data.get("callers"), list) else []:
             fix_location(item)
+        _note_empty_call_graph(data, "callers")
     elif tool_name == "codegraph_analyze_impact":
         for key in ("impacted", "indirect_impacted", "direct_impacted"):
             seq = data.get(key)
@@ -192,7 +249,161 @@ def _align_paths(raw_json: str, tool_name: str, *, index_root: str, repo: str = 
                 for item in seq:
                     if isinstance(item, dict) and "path" in item:
                         item["path"] = _align_one(item.get("path"), index_root=index_root, repo=repo)
+        _note_empty_call_graph(data, "impact")
     return json.dumps(data, ensure_ascii=False)
+
+
+# 调用图为空时的措辞。这段注释是这个函数存在的全部理由，删掉它就没人知道为什么要加这个提示。
+#
+# 实测（daggerfall-unity，1040 个 .cs 文件）：`get_callers` 对**任何**符号都返回 `callers: []`，
+# 而 `diagnostic.node_found` 为 true——符号定位成功，只是查不到入边。`analyze_impact` 同样恒返回
+# `total_impacted: 0, risk_level: "low"`。
+#
+# 排查过程（每一步都否掉了一个更省事的假设）：
+#   * 解析失败不是主因 —— 失败率 22/1040（2%）
+#   * 图不是本轮建的   —— 日志 `Indexed 1029 files (0 parsed, 1029 skipped)`，
+#                          图来自 `Loaded persisted graph from previous session`
+#   * 强制全量重解析后 —— `1029 parsed, 0 skipped`，节点 18891→24164，引擎称
+#                          `Phase 2: resolved 1057 cross-file call edges`，
+#                          但入库边数仅 16397→16422（+25）。1057 条解析出来、25 条落库。
+#                          且重建后同一符号 node_id 从 4781 变成 24190——旧边指向的 id 已失效。
+#
+# 结论：引擎侧缺陷，不在本项目可修范围内。能做且必须做的只有一件事——**不要把「回答不了」
+# 表述成「答案是没有」**。空列表配上 `risk_level: low` 是本项目最危险的输出形态：它不是不准，
+# 而是语义上就是错的，且下游完全无从察觉。
+#
+# 这里刻意只加提示、不改成报错：符号确实可能真的没有调用者，把那种情况报成错误同样是撒谎。
+# 提示的作用是让答案能诚实地说「调用图查不到，已改用文本搜索确认」。
+_EMPTY_GRAPH_NOTE = (
+    "调用图中查不到该符号的调用关系，且引擎提示调用关系可能未被提取或索引需重建。"
+    "这**不等于**没有调用者/无影响——不要据此表述为「没有任何地方调用它」或「影响范围为零」。"
+    "请改用 search_files 做文本搜索来确认，并在答案里说明依据是文本搜索而非调用图。")
+
+
+def _note_empty_call_graph(data: dict, kind: str) -> None:
+    """当结果为空且引擎自己承认调用关系可能缺失时，附上提示。
+
+    放在 _align_paths 里而不是 merge_fanout 里：单仓路径直接返回 _align_paths 的结果，
+    根本不经过合并函数，而单仓恰恰是最常见的部署形态。同类错误本项目已犯过一次
+    （标量在多仓合并里被丢弃，而单仓正常——方向正好相反）。
+    """
+    diag = data.get("diagnostic")
+    note = str(diag.get("note") or "") if isinstance(diag, dict) else ""
+    # 引擎把「解析器不提取调用关系」「索引需重建」列为可能原因时，它自己就无法区分，我们也不能。
+    engine_admits = ("extract call relationships" in note) or ("need to be rebuilt" in note)
+
+    if kind == "callers":
+        empty = isinstance(data.get("callers"), list) and not data["callers"]
+        located = isinstance(diag, dict) and diag.get("node_found") is True
+        if empty and located and engine_admits:
+            data["call_graph_unavailable"] = True
+            data["call_graph_note"] = _EMPTY_GRAPH_NOTE
+        return
+
+    # analyze_impact 不返回 diagnostic，所以无法逐次判别。它的零影响与「图里没有边」在单次调用
+    # 里不可区分——这正是要说清的事，而不是可以沉默略过的事。
+    if data.get("symbol_id") is None:
+        return
+    zero = (data.get("total_impacted") == 0 and not (data.get("impacted") or [])
+            and not (data.get("indirect_impacted") or []))
+    if zero:
+        data["impact_zero_is_unverified"] = True
+        data["call_graph_note"] = _EMPTY_GRAPH_NOTE
+
+
+# symbol_search 的 score 下限。实测：精确匹配落在 0.75-0.97，纯语义噪声落在 0.33-0.43，
+# 0.60 在两者之间且离两端都有余量。低于此值时宁可报「没找到」——拿语义近似的符号当答案，
+# 会让后续 get_callers 返回 [] 并被读成「确认没有调用者」，产出一个看起来确定的错误结论。
+_SCORE_FLOOR = 0.60
+
+
+def _stable_pick(candidates: list[dict]) -> dict | None:
+    """在并列的候选里做**确定性**选择：按 (符号名, 文件, 行号) 排序取第一个。
+
+    引擎在同分时不保证顺序（实测同一查询 4 次，同为 1.0 的两个符号顺序来回换），所以不能依赖
+    "引擎给的第一个"——那等于抛硬币。排序键取符号自身的标识信息，同一份索引下恒定。
+    """
+    if not candidates:
+        return None
+
+    def key(item: dict) -> tuple[str, str, int]:
+        sym = item.get("symbol") if isinstance(item.get("symbol"), dict) else {}
+        loc = sym.get("location") if isinstance(sym.get("location"), dict) else {}
+        return (str(sym.get("name") or ""), str(loc.get("file") or ""),
+                int(loc.get("line")) if isinstance(loc.get("line"), int) else 0)
+
+    return sorted(candidates, key=key)[0]
+
+
+def _pick_symbol_match(results: list, query: str) -> dict | None:
+    """从 symbol_search 的结果里挑出真正对应 ``query`` 的那一条。
+
+    为什么不能取 ``results[0]``：codegraph 0.20.1 的语义回退会把非精确匹配排在前面。实测
+    ``to_container_path`` 的首条结果是 ``test_backslash_path_normalized_to_forward_slash``，
+    于是后续 ``get_callers`` 返回 ``[]``——而空列表在回答里会被当成权威结论「没有任何地方调用它」。
+    答案完全错，却没有任何一环报错。
+
+    引擎其实给了三个判别信号，此前全被丢掉：
+      * ``match_reason`` —— 精确名字匹配时为 ``SymbolName``
+      * ``score``       —— 实测精确匹配 0.75-0.97，语义噪声 0.33-0.43，区分度足够
+      * ``symbol_name`` —— 结果里对查询词的回显，可用于交叉核对
+
+    判别顺序（强到弱）：
+      1. ``match_reason == "SymbolName"`` 且 ``symbol.name`` 精确等于 query
+      2. ``symbol.name`` 精确等于 query（引擎未给 match_reason 时的退路）
+      3. ``score`` 最高且 >= _SCORE_FLOOR 的一条
+    三条都不满足时返回 None——宁可报「没找到」，也不要拿一个语义近似的符号去当答案，
+    因为后者会静默产出错误结论。
+    """
+    exact_with_reason: list[dict] = []
+    exact_only: list[dict] = []
+    scored: list[tuple[float, dict]] = []
+    # 被判别信号明确否掉的结果。单独记账，因为末尾的「只有一条就接受」兜底**不能**把它们救回来——
+    # 测试抓到过这个漏洞：回显 symbol_name 与 symbol.name 不一致的唯一一条结果，被兜底放行了。
+    disqualified = 0
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        sym = item.get("symbol")
+        name = sym.get("name") if isinstance(sym, dict) else None
+        # symbol_name 是引擎对查询词的回显；与 symbol.name 不一致说明这条结果不是在讲这个符号
+        echoed = item.get("symbol_name")
+        if isinstance(echoed, str) and echoed and echoed != name:
+            disqualified += 1
+            continue
+        reason = item.get("match_reason")
+        if name == query:
+            (exact_with_reason if reason == "SymbolName" else exact_only).append(item)
+        raw_score = item.get("score")
+        if isinstance(raw_score, (int, float)):
+            scored.append((float(raw_score), item))
+
+    if exact_with_reason:
+        return _stable_pick(exact_with_reason)
+    if exact_only:
+        return _stable_pick(exact_only)
+    if scored:
+        best_score = max(sc for sc, _ in scored)
+        if best_score >= _SCORE_FLOOR:
+            # 同分并列时必须有确定性的次级排序，否则同一查询每次挑到不同符号。
+            #
+            # 实测（同一查询连调 4 次）：codegraph 的 score 本身完全稳定——`MaxEncumbrance` 恒为
+            # 1.0、`GetMaxEncumbrance` 恒为 0.8875685334205627、total_matches 恒为 40。变的只是
+            # **同分项的相对顺序**：`MaxEncumbrance` 与 `EncumbranceMax` 同为 1.0，谁排第一每次都可
+            # 能不同；`DecreaseMagnitude`/`DecreaseMagicka`/`DecreaseFatigue` 同为 0.5603286027908325，
+            # 三者顺序随机轮换。像是底层用了无序容器或并行归并。
+            #
+            # 后果不是"排序不好看"：没有精确名匹配、只能靠最高分时，答案会跨轮指向不同符号，
+            # 于是同一个问题问两次得到不同出处。对一个宣称"代码是唯一依据"的系统，答案不可复现
+            # 是实质问题。按符号名排序打破并列，代价是可能不选引擎"本来"排第一的那个——但引擎
+            # 在同分时并没有稳定的"第一个"。
+            return _stable_pick([it for sc, it in scored if sc == best_score])
+        return None
+    # 引擎既没给 score 也没有精确匹配：只有一条结果时接受它（老版本引擎的行为），
+    # 多条时不猜——猜错会产出一个看起来确定的错误答案。被判别信号否掉过的结果不走这条兜底。
+    if disqualified:
+        return None
+    return results[0] if len(results) == 1 and isinstance(results[0], dict) else None
 
 
 def _parse_symbol_location(raw: str, query: str) -> tuple[str, int]:
@@ -211,7 +422,11 @@ def _parse_symbol_location(raw: str, query: str) -> tuple[str, int]:
     # be `{"symbol": null}` or a non-dict; `.get("symbol", {})` only defaults a
     # MISSING key, so a null VALUE would make `None.get("location")` raise
     # AttributeError → mislabelled as an internal "{tool} failed".
-    top = results[0]
+    top = _pick_symbol_match(results, query)
+    if top is None:
+        raise ValueError(
+            f"no symbol matched query {query!r} closely enough "
+            f"({len(results)} semantic-only result(s) rejected)")
     sym = top.get("symbol") if isinstance(top, dict) else None
     loc = sym.get("location") if isinstance(sym, dict) else None
     index_file = loc.get("file") if isinstance(loc, dict) else None
@@ -351,8 +566,9 @@ def build_bridge(
 
         This is the PER-(repo,query) isolation boundary: every failure mode is caught
         and turned into an error envelope JSON (never propagates), so in a fan-out one
-        repo's unhealthy/error can't blank the others — merge_fanout drops error
-        envelopes and only surfaces an error if EVERY repo errored.
+        repo's unhealthy/error can't blank the others — merge_fanout preserves
+        failures per repository and marks partial results; only an all-failed
+        query gets a top-level error.
         """
         try:
             arguments = await _build_args(repo, tool_name, query)
@@ -399,10 +615,12 @@ def build_bridge(
 
             # FAN OUT: unset repo + multiple in scope → query each concurrently, merge.
             # Each _run_on_repo isolates its own failure into an error envelope, so a
-            # gather here can't raise; merge_fanout drops errored repos and only surfaces
-            # an error if every repo errored.
+            # gather here can't raise. The merge retains failed repository identities
+            # and marks partial coverage while preserving successful results.
             per_repo = await asyncio.gather(*[_run_on_repo(r, tool_name, query) for r in repos])
-            return merge_fanout(tool_name, list(per_repo))
+            return merge_fanout(
+                tool_name, list(per_repo), repo_names=[r.name for r in repos]
+            )
 
         _tool.__name__ = tool_name
         return _tool
@@ -476,32 +694,50 @@ def build_bridge(
             resolved = router.resolve(explicit)
             return [by_name[resolved]] if resolved is not None else list(repos)
 
-        def _merge_file_fanout(list_key: str, per_repo_json: list[str]) -> str:
+        def _merge_file_fanout(list_key: str, per_repo_json: list[str], repo_names: list[str]) -> str:
             """Concatenate per-repo file-tool results (paths/matches already <repo>/-prefixed,
-            so repos stay distinguishable). Mirrors graph fan-out: a per-repo error contributes
-            nothing; if every repo errored, surface the first error (never a misleading empty)."""
+            preserving each repository's metadata and failures. Partial coverage is independent
+            of truncation; an empty successful subset cannot prove there are no matches."""
             merged: dict[str, Any] = {list_key: [], "truncated": False, "count": 0}
             if list_key == "matches":
                 merged["deduped"] = 0
-            first_error: str | None = None
+            first_error: dict[str, Any] | None = None
+            repo_results: list[dict[str, Any]] = []
             saw_ok = False
-            for raw in per_repo_json:
+            for index, (name, raw) in enumerate(zip(repo_names, per_repo_json, strict=True)):
                 try:
                     d = json.loads(raw)
                 except (ValueError, TypeError):
-                    continue
+                    d = {"error": "invalid JSON response from file tool"}
                 if not isinstance(d, dict):
-                    continue
+                    d = {"error": "file-tool response must be an object"}
+                if "error" not in d and not isinstance(d.get(list_key), list):
+                    d = {**d, "error": f"file-tool response has no valid {list_key} list"}
+                record = {
+                    "repo": name, "repo_index": index,
+                    "status": "error" if "error" in d else "ok",
+                    "metadata": {k: v for k, v in d.items() if k != list_key},
+                }
+                repo_results.append(record)
                 if "error" in d:
-                    first_error = first_error or raw
+                    record["error"] = str(d["error"])
+                    if first_error is None:
+                        first_error = d
                     continue
                 saw_ok = True
-                merged[list_key].extend(d.get(list_key, []) if isinstance(d.get(list_key), list) else [])
+                merged[list_key].extend(d[list_key])
                 merged["truncated"] = merged["truncated"] or bool(d.get("truncated"))
                 if list_key == "matches":
                     merged["deduped"] += int(d.get("deduped", 0) or 0)
             if not saw_ok and first_error is not None:
-                return first_error
+                return json.dumps({**first_error, "repo_results": repo_results}, ensure_ascii=False)
+            if first_error is not None:
+                merged["partial"] = True
+                merged["warning"] = (
+                    "Some repository file queries failed; these results cover only successful "
+                    "repositories. An empty result does not prove there are no matching files or text."
+                )
+            merged["repo_results"] = repo_results
             merged["count"] = len(merged[list_key])
             return json.dumps(merged, ensure_ascii=False)
 
@@ -533,21 +769,25 @@ def build_bridge(
                     t = targets[0]
                     return file_search.search_to_json(pattern, local_root=t.local, glob=glob, repo=t.name)
                 # FAN-OUT: each repo isolated via _safe_file_call so one repo's failure can't
-                # blank the others (merge drops error envelopes; all-errored surfaces first).
+                # blank the others; the merge records failures and marks partial coverage.
                 per_repo = [
                     _safe_file_call(
                         lambda t=t: file_search.search_to_json(pattern, local_root=t.local, glob=glob, repo=t.name),
                         t.name, "search")
                     for t in targets
                 ]
-                return _merge_file_fanout("matches", per_repo)
+                return _merge_file_fanout("matches", per_repo, [t.name for t in targets])
             return _guarded(run, bad_input="bad search pattern", failed="search failed",
                             log_event="search_error", scope_warn_tool="search_files")
 
-        async def codegraph_read_file(path: str, offset: int = 0, limit: int | None = None) -> str:
+        async def codegraph_read_file(path: str, offset: int = 0, limit: int | None = None,
+                                      line: int | None = None) -> str:
             """Read a source/config file's contents by its path (the path codegraph/search
             returns, e.g. `Assets/Scripts/Foo.cs` or `<repo>/Assets/Scripts/Foo.cs` —
-            pass it back verbatim). Optional `offset` (0-based line) + `limit` page large
+            pass it back verbatim). To re-read a line codegraph_search_files reported, pass
+            `line=<its line value>`: `line` is 1-BASED and needs no adjustment, which is
+            how you confirm a citation points at the text you are about to quote.
+            Optional `offset` (0-based line) + `limit` page large
             files; `offset` can point ANYWHERE in the file (not just the first ~256 KiB).
             The result includes `total_lines` and, when `truncated` is true, `next_offset` —
             call again with `offset=next_offset` to read the next contiguous window (repeat
@@ -556,7 +796,8 @@ def build_bridge(
             shell `cat` or builtin Read."""
             def run() -> str:
                 t = _repo_for_path(path, None)
-                return file_read.read_to_json(path, local_root=t.local, offset=offset, limit=limit, repo=t.name)
+                return file_read.read_to_json(path, local_root=t.local, offset=offset,
+                                              limit=limit, repo=t.name, line=line)
             return _guarded(run, bad_input="cannot read file", failed="read failed",
                             log_event="read_error")
 
@@ -577,7 +818,7 @@ def build_bridge(
                         t.name, "glob")
                     for t in targets
                 ]
-                return _merge_file_fanout("paths", per_repo)
+                return _merge_file_fanout("paths", per_repo, [t.name for t in targets])
             return _guarded(run, bad_input="bad glob pattern", failed="glob failed",
                             log_event="glob_error", scope_warn_tool="glob_files")
 
@@ -710,14 +951,28 @@ def build_bridge(
             import time as _t
             t0 = _t.perf_counter()
             total_entries = 0
+            empty_repos: list[str] = []
             for r in repos:
                 pr = r.local or r.workspace
                 entries = os.listdir(pr)  # 1 metadata read per repo
                 total_entries += len(entries)
                 if entries:
                     os.stat(os.path.join(pr, entries[0]))  # stat read
+                else:
+                    # An EMPTY directory used to count as a successful probe. That is exactly the
+                    # shape of "repo copy wiped" and "local repo before its first push", both of
+                    # which end with the bot answering 'not found' while /health stays green.
+                    empty_repos.append(getattr(r, "name", pr))
             disk_ms = round((_t.perf_counter() - t0) * 1000, 1)
+            if empty_repos:
+                logger.warning(json.dumps({
+                    "event": "repo_probe_empty", "repos": empty_repos,
+                    "detail": "repo copy has no files on disk — the graph will be empty and every "
+                              "answer will be an honest 'not found'. For a local-repo project this "
+                              "is expected until the first push.",
+                }))
             logger.info(json.dumps({"event": "repo_probe", "perf": True,
+                                    "empty_repos": empty_repos,
                                     "latency_ms": disk_ms, "entries": total_entries,
                                     "repos": len(repos)}))
         except Exception as exc:  # noqa: BLE001
@@ -740,8 +995,19 @@ def build_bridge(
         if repo_down:
             ok = False
             detail = f"repo copy unreadable ({fails} consecutive probe failures): {detail}"
+        # OBSERVABILITY (does NOT gate health — a 200/503 flip on either of these would be worse
+        # than the blind spot it closes):
+        #  * ripgrep: bootstrap installs `rg` with a `|| true`, so a failed install silently
+        #    degrades search_files to the grep fallback with nothing anywhere reporting it.
+        #  * code_stale: a re-bootstrap refreshes /opt/idx/app UNDER the running bridge without
+        #    restarting it, so the process can be executing code older than what is on disk. This
+        #    compares the app bundle's signature stamp now against the value read at startup. It is
+        #    a NO-OP until the bootstrap side stamps the file — reporting False either way is
+        #    correct (nothing observed changing), so it is safe to ship ahead of that.
+        rg_ok = shutil.which("rg") is not None
         return JSONResponse(
-            {"healthy": ok, "detail": detail, "repo_probe_ms": disk_ms},
+            {"healthy": ok, "detail": detail, "repo_probe_ms": disk_ms,
+             "ripgrep": rg_ok, "code_stale": _app_code_changed()},
             status_code=200 if ok else 503,
         )
 
@@ -797,7 +1063,14 @@ def main() -> int:
     # BY POSITION with a --local-workspace. Single-repo passes one of each (unchanged).
     p.add_argument("--workspace", action="append", default=[],
                    help="repo path codegraph-server indexes (repeat for multi-repo)")
-    p.add_argument("--host", default="0.0.0.0")
+    # SAFE-BY-DEFAULT BIND. There is NO authentication on this server: anything that can reach the
+    # port can read any indexed source (read_file / glob_files / search_files) and enumerate the
+    # graph, so the only control is the network. The DEFAULT is therefore loopback; the deployed
+    # unit (activate_project.sh) passes --host 0.0.0.0 explicitly because the AgentCore runtime
+    # connects over the VPC by private IP and the loopback /health probe must keep working — that
+    # exposure is a reviewed, recorded decision there, not something a caller should inherit by
+    # forgetting the flag. Adding real auth needs a matching change in the agent's MCP client.
+    p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8080)
     # DEPRECATED, accepted-but-ignored: paths are always repo-relative now (the agent
     # mounts no filesystem). The deploy script (activate_project.sh) still passes
@@ -839,6 +1112,17 @@ def main() -> int:
     logger.info(json.dumps({"event": "bridge_start",
                             "workspaces": [ws for ws, _ in pairs],
                             "host": args.host, "port": args.port}))
+    # Make the unauthenticated-exposure decision VISIBLE in the journal on every start, so it shows
+    # up in an incident timeline instead of only in a unit file comment. Not an error: the deployed
+    # configuration binds all interfaces on purpose (see --host above) and relies on the security
+    # group. A host reachable from outside the VPC with this line in its log is a finding.
+    if args.host not in ("127.0.0.1", "localhost", "::1"):
+        logger.warning(json.dumps({
+            "event": "bridge_unauthenticated_bind", "host": args.host, "port": args.port,
+            "detail": "no authentication on this server: source read access is limited only by "
+                      "network reachability (security group). Intended for in-VPC access from "
+                      "the AgentCore runtime.",
+        }))
     # build_bridge starts each repo's resident worker (warming in background).
     app = build_bridge(
         workspaces=pairs, host=args.host, port=args.port,

@@ -50,8 +50,28 @@ import { emitMetric, classifyFailure, countEvidenceCitations, type FailReason } 
 import { isDuplicate, forget } from "./dedup";
 import { STREAM_TIMEOUT_MS, DEFAULT_MAX_CONCURRENT_INVOKES } from "./tunables";
 import { loadProjectsConfig, resolveRoute, ProjectsConfigMissing, type ProjectsConfig, type ResolvedRoute } from "./project-routing";
+import { resolveTenant, wsDomainFor, type FeishuTenant } from "./feishu-domain";
+import { getHealthState } from "./health";
+import { startHealthServer, deriveHealthPort, markConnected, markReconnecting, markReconnected, markConnecting, markDisconnected, markDraining, markEventReceived } from "./health";
 
 const RUNTIME_ARN = process.env.RUNTIME_ARN ?? "";
+// Tenant: "feishu" (China, open.feishu.cn) or "lark" (international, open.larksuite.com).
+// Resolved ONCE, in src/feishu-domain.ts, which also derives the REST base — so the event
+// long-connection and the REST calls cannot target different tenants (that split produced an app
+// which authenticated and then never received an event). Unset means feishu; an unrecognised
+// value is FATAL rather than a silent fallback, for the same reason REGION and RUNTIME_ARN are
+// fatal below: the operator expressed an intent we cannot guess, and guessing wrong means the
+// gateway is 100% dark while looking healthy.
+const FEISHU_DOMAIN_RESOLVED = resolveTenant(process.env.FEISHU_DOMAIN);
+if (FEISHU_DOMAIN_RESOLVED === null) {
+  console.error(JSON.stringify({
+    ts: new Date().toISOString(), event: "feishu_domain_invalid",
+    value: (process.env.FEISHU_DOMAIN ?? "").slice(0, 32),
+    fatal: true, allowed: ["feishu", "lark"],
+  }));
+  process.exit(1);
+}
+const FEISHU_DOMAIN: FeishuTenant = FEISHU_DOMAIN_RESOLVED;
 // Region: AWS_REGION (deploy sets it) → AWS_DEFAULT_REGION → derived from the RUNTIME_ARN
 // (arn:aws:bedrock-agentcore:<region>:...). NEVER hardcode a region default — this ships to
 // customer accounts in any region, and a wrong silent default (e.g. Tokyo) would point the
@@ -125,11 +145,19 @@ let wsRef: { stop?: () => void } | undefined;
 // on a fixed interval regardless of traffic, so the log-pipeline-liveness alarm has a metric
 // that is NONZERO during idle — distinguishing "alive but idle" from "pipeline dead".
 let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
+// Held so gracefulShutdown can close it — a still-bound health port keeps answering "healthy"
+// for the whole drain window otherwise.
+let healthServer: import("node:http").Server | undefined;
 let shuttingDown = false;
 function gracefulShutdown(sig: string): void {
   if (shuttingDown) return;
   shuttingDown = true;
   if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = undefined; }
+  // /ready must go 503 the moment we start draining: both dispatcher handlers already drop
+  // every incoming event, so a rollout gated on readiness would otherwise keep sending here
+  // for the whole drain window. /health stays 200 — the process IS still alive.
+  markDraining();
+  try { healthServer?.close(); } catch { /* never listening / already closed — not load-bearing */ }
   log({ event: "shutdown_begin", signal: sig, inflight: abortControllers.size });
   try { wsRef?.stop?.(); } catch { /* no-op if absent — abort-all below is load-bearing */ }
   for (const ctrl of abortControllers.values()) {
@@ -231,7 +259,13 @@ async function streamingCardInvoke(
   // clicks (chatId target) are deliberate user actions — never dedup them, or a
   // second follow-up in the same chat would be silently dropped. Done BEFORE any
   // card/session work so a re-delivery creates no duplicate card.
-  if ("messageId" in target && isDuplicate(`msg:${target.messageId}`)) return;
+  if ("messageId" in target && isDuplicate(`msg:${target.messageId}`)) {
+    // Was a bare `return`, which contradicted "every gate drop is logged" AND let the caller go on
+    // to log `replied` for a turn that sent no card at all — the worst kind of observability lie,
+    // because a user reporting "it never answered" is contradicted by the log.
+    log({ event: "event_dropped", reason: "duplicate_message", message: hashUserId(target.messageId) });
+    return;
+  }
 
   // "排队中" shows when this turn won't start streaming immediately — either the
   // SAME session is mid-turn (serializer busy) OR the GLOBAL invoke gate is
@@ -351,7 +385,9 @@ async function sendStreamingCard(
   // Follow-up cards carry a "↳ 追问" summary marker so the chat history shows
   // where they came from. Use the CLEAN question for the preview (prompt may be
   // the replayed-context blob for a follow-up).
-  const isFollowUp = "chatId" in target;
+  // Button follow-ups send to the chat; typed replies use messageId and carry a
+  // validated parent card. Both must keep the follow-up title and telemetry.
+  const isFollowUp = "chatId" in target || !!parentMessageId;
   const summary = isFollowUp ? `${t("summary.followup.prefix")}${safeQuestion}` : safeQuestion;
   // Echo the question in the card body (esp. for follow-ups, so the card shows
   // WHAT was asked without scrolling). Pass it to createCard as the "question"
@@ -1102,6 +1138,8 @@ async function runStreamingInvoke(
     // Extract follow-ups from the RAW answer (still carries the "💡 你可能还想问"
     // trailer that stripFollowUps removed from the rendered body).
     const followUps = extractFollowUps(redactSensitive(answer));
+    tlog({ event: "followup_suggestions", card: cardId, count: followUps.length,
+      markerPresent: answer.includes("你可能还想问") });
     await writer.write((seq) => appendFooter(cardId, seq, followUps, actions));
     // 👍/👎 feedback row — only on a REAL answer (keepFooter, i.e. not a hard failure /
     // clarify / dominant-leak). Its own write after the footer so the buttons sit below
@@ -1290,9 +1328,11 @@ async function main(): Promise<void> {
           return composeFollowUpPrompt(question, chain);
         }
       : undefined;
+    let outcome: "card" | "text_fallback" = "card";
     try {
       await streamingCardInvoke(sessionId, prompt, { messageId: res.messageId }, credentials, question, parentId, res.senderId, composePrompt, res.eventId, coldStart);
     } catch (cardErr) {
+      outcome = "text_fallback";
       // streamingCardInvoke now finalizes the card itself on backend failure
       // (non-200 / stream error), so reaching here means something unexpected
       // broke (e.g. the initial card create/send). Fall back to plain text and
@@ -1320,7 +1360,15 @@ async function main(): Promise<void> {
       await sendReply({ messageId: res.messageId, answer: `${t("msg.serviceError")}${traceLine}\n\n${redactSensitive(prompt)}` })
         .catch((e) => log({ event: "fallback_error", traceId: fbTrace, error: redactSensitive(String(e)).slice(0, 300) }));
     }
-    log({ event: "replied", message: hashUserId(res.messageId), session: sessionId });
+    // Was `event: "replied"` logged unconditionally — including from the catch branch, so a turn
+    // that produced only the plain-text "service error" fallback still reported as a normal reply.
+    // outcome distinguishes them, which is what an operator needs when every answer is degrading
+    // to text (the signature of a missing CardKit permission).
+    log({ event: "turn_finished", outcome, message: hashUserId(res.messageId), session: sessionId });
+    // Also a METRIC, not only a log line: outcome=text_fallback is how a missing CardKit
+    // permission looks in production, and it is invisible to every existing alarm because the
+    // fallback send succeeds so no answer_failed is emitted either.
+    emitMetric("turn_finished", { outcome }, { sessionId, projectId: PROJECT_ID });
   };
 
   // Single Feishu SDK WSClient long-connection: IM events + card action
@@ -1349,7 +1397,20 @@ async function main(): Promise<void> {
       // (an event can already be buffered in the SDK when SIGTERM lands), so this in-handler
       // gate is the real guard (cross-review: confirmed-still-present P1).
       if (shuttingDown) return;
+      markEventReceived();
       const event = sdkEventToImEvent(data);
+      if (!event) {
+        // The silent path ABOVE the mention gate. sdkEventToImEvent returns null when the
+        // payload lacks `message` or a string chat_id, so if Feishu or the SDK ever changes the
+        // envelope nesting, 100% of messages disappear with no log line, /ready still 200 and the
+        // heartbeat still green — the exact failure shape event_dropped was added to end, one
+        // layer up. Log the shape, not the content: keys only, no values.
+        emitMetric("event_dropped", { reason: "unparseable_event" }, { projectId: PROJECT_ID });
+        log({
+          event: "event_dropped", reason: "unparseable_event",
+          keys: data && typeof data === "object" ? Object.keys(data as object).slice(0, 10) : [],
+        });
+      }
       if (event) {
         void handleMessageEvent(event, {
           botOpenId: BOT_OPEN_ID || undefined,
@@ -1366,11 +1427,21 @@ async function main(): Promise<void> {
           },
         })
           .then((res) => {
-            // A reply to a card we no longer know (gateway restart / >500 eviction)
-            // is dropped at the mention gate; log it so the silent stop is
-            // diagnosable rather than indistinguishable from a plain non-mention.
-            if (res && !res.handled && res.reason === "reply_to_unknown_card") {
-              log({ event: "reply_to_unknown_card", chat: hashUserId(event.chat_id) });
+            // Every gate drop is logged, not just the card-reply case. A wrong-but-well-formed
+            // FEISHU_BOT_OPEN_ID (a colleague's id, one from another tenant) makes the mention
+            // gate match nothing, so 100% of group traffic was discarded with NO log line, no
+            // metric and no reaction — indistinguishable from "nobody has asked anything yet",
+            // while /ready returned 200 and the heartbeat alarm stayed green. mentionCount
+            // separates "Feishu is not delivering" from "delivery works, the gate is
+            // misconfigured", which is the single most useful discriminator when a bot is silent.
+            if (res && !res.handled && res.reason) {
+              emitMetric("event_dropped", { reason: res.reason }, { projectId: PROJECT_ID });
+              log({
+                event: "event_dropped", reason: res.reason,
+                chat: hashUserId(event.chat_id),
+                mentionCount: event.mentions.length,
+                botOpenIdConfigured: !!BOT_OPEN_ID,
+              });
             }
             return replyWithCard(res);
           })
@@ -1384,6 +1455,7 @@ async function main(): Promise<void> {
       // exit). Still return a valid ack so Feishu doesn't surface a tap error to the user;
       // the tap is simply a no-op this shutdown (cross-review confirmed-still-present P1).
       if (shuttingDown) return {};
+      markEventReceived();
       try {
         const d = data as {
           header?: { event_id?: string };
@@ -1716,10 +1788,17 @@ async function main(): Promise<void> {
   const ws = new lark.WSClient({
     appId: APP_ID,
     appSecret: APP_SECRET,
+    // TENANT DOMAIN. Without this the SDK targets Feishu (China) regardless, so an
+    // international Lark app configured correctly in its own console would authenticate on
+    // REST calls (which honour FEISHU_API_BASE) and then never connect the event socket —
+    // a silent, hard-to-diagnose split. FEISHU_DOMAIN=lark selects open.larksuite.com.
+    domain: wsDomainFor(FEISHU_DOMAIN),
     loggerLevel: lark.LoggerLevel.warn,
-    onReady: () => log({ event: "sdk_wsclient_connected" }), // the REAL "receiving events" signal
-    onReconnecting: () => log({ event: "sdk_wsclient_reconnecting" }),
-    onReconnected: () => log({ event: "sdk_wsclient_reconnected" }),
+    // Name the tenant on the connect line: "which tenant is this gateway on" is the first
+    // diagnostic question when a bot is silent, and nothing used to answer it.
+    onReady: () => { markConnected(); log({ event: "sdk_wsclient_connected", domain: FEISHU_DOMAIN }); }, // the REAL "receiving events" signal
+    onReconnecting: () => { markReconnecting(); log({ event: "sdk_wsclient_reconnecting" }); },
+    onReconnected: () => { markReconnected(); log({ event: "sdk_wsclient_reconnected" }); },
     onError: (err: unknown) => {
       // Redact: a Feishu SDK auth error could carry an app_access_token / URL in its
       // message; match the redaction the answer-path error logs already do.
@@ -1741,7 +1820,17 @@ async function main(): Promise<void> {
           // crash-loop, dark throughout. Back off + re-start in-process instead.
           const backoffMs = 3000 + Math.floor(Math.random() * 4000);
           log({ event: "ws_conn_limit_retry", error: msg, backoffMs });
-          setTimeout(() => { try { ws.start({ eventDispatcher: dispatcher }); } catch (e) { log({ event: "ws_retry_failed", error: redactSensitive(String(e)).slice(0, 300) }); } }, backoffMs);
+          // The socket is down for the whole backoff window. Without these marks /ready keeps
+          // reporting "connected" while the gateway is dark — and if the re-start throws it
+          // stays dark forever with a healthy-looking readiness verdict.
+          markDisconnected();
+          setTimeout(() => {
+            markConnecting();
+            try { ws.start({ eventDispatcher: dispatcher }); } catch (e) {
+              markDisconnected();
+              log({ event: "ws_retry_failed", error: redactSensitive(String(e)).slice(0, 300) });
+            }
+          }, backoffMs);
           return;
         }
         case "exit":
@@ -1753,11 +1842,30 @@ async function main(): Promise<void> {
     },
   });
   wsRef = ws as unknown as { stop?: () => void }; // let gracefulShutdown best-effort stop intake
+  markConnecting();
   ws.start({ eventDispatcher: dispatcher });
   // NOTE: start() resolves before the connection is established; this marks only
   // "start() invoked". The real "connected + receiving events" signal is the
   // sdk_wsclient_connected log from onReady above.
   log({ event: "sdk_wsclient_started" });
+
+  // HEALTH SERVER: liveness on /health, readiness on /ready (see src/health.ts).
+  // Port resolution lives in deriveHealthPort so it is unit-testable — the previous inline
+  // regex mis-parsed IPv6 and userinfo authorities, and nothing could reach it to prove that.
+  const health = deriveHealthPort(activeRoute?.endpoint, process.env.HEALTH_PORT);
+  if (health.invalidEnv !== undefined) {
+    log({ event: "health_port_invalid", value: health.invalidEnv, fallback: health.port });
+  }
+  if (!activeRoute && health.source !== "env") {
+    // No resolved route → every co-located gateway would derive the SAME default port and all
+    // but one would silently have no health endpoint. Say so instead of pretending.
+    log({ event: "health_server_skipped", reason: "no resolved project route", hint: "set HEALTH_PORT to enable" });
+  } else {
+    healthServer = startHealthServer(health.port, { logger: log });
+    // NOTE: startHealthServer logs health_server_started from the listening callback with the
+    // real bound port, and health_server_unavailable when the bind fails. Do not log success
+    // here — the caller cannot yet know whether the bind worked.
+  }
 
   // LIVENESS HEARTBEAT: emit gateway_heartbeat every HEARTBEAT_SECS regardless of traffic.
   // The log-pipeline-liveness alarm watches the metric this produces (GatewayHeartbeat, via a
@@ -1766,11 +1874,24 @@ async function main(): Promise<void> {
   // traffic-driven metric like question_received can't make that distinction: an idle night
   // and a dead gateway both look like no data. unref() so the timer never keeps the process
   // alive on its own (shutdown clears it explicitly anyway).
-  const HEARTBEAT_SECS = Number(process.env.HEARTBEAT_SECS || 60);
-  emitMetric("gateway_heartbeat", {});   // one immediately so the metric exists from t0
+  // Clamped at BOTH ends: the dense alarm metrics (AnswerFailedTotal, CardHealth*) publish a 0
+  // only when some event reaches the log group, so on an idle night this heartbeat is the only
+  // traffic keeping them dense. Letting HEARTBEAT_SECS exceed the 5-minute alarm period would
+  // quietly turn those alarms sparse — an upper bound is part of the contract, not tidiness.
+  const HEARTBEAT_SECS = Math.min(120, Math.max(10, Number(process.env.HEARTBEAT_SECS || 60)));
+  // wsState and projectId travel WITH the heartbeat. Without wsState a gateway that is up but
+  // whose long-connection is dead keeps the liveness alarm green while answering nothing; without
+  // projectId one dead gateway on a host running six is invisible, because the alarm sums a log
+  // group shared by every project.
+  const heartbeatFields = () => ({
+    wsState: getHealthState().wsState,
+    draining: getHealthState().draining,
+  });
+  emitMetric("gateway_heartbeat", heartbeatFields(), { projectId: PROJECT_ID });   // one at t0
   heartbeatTimer = setInterval(() => {
-    try { emitMetric("gateway_heartbeat", {}); } catch { /* best-effort, never crash the gateway */ }
-  }, Math.max(10, HEARTBEAT_SECS) * 1000);
+    try { emitMetric("gateway_heartbeat", heartbeatFields(), { projectId: PROJECT_ID }); }
+    catch { /* best-effort, never crash the gateway */ }
+  }, HEARTBEAT_SECS * 1000);
   heartbeatTimer.unref?.();
 
   // (SIGTERM/SIGINT handlers were registered at the top of main(); gracefulShutdown

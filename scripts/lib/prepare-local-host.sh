@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # prepare-local-host.sh — bring a fresh EC2 up to the point where install.sh can run, for --local.
 #
-# launch-host.sh scp's this onto the instance and runs it (the repo is private, so it can't be
-# curl'd from raw.githubusercontent). It installs the deps install.sh checks for (aws / docker / git),
-# logs gh in with the token stashed in Secrets Manager (so a private clone works), clones the repo,
+# launch-host.sh copies this onto the instance with the selected repository URL and ref.
+# It installs the deps install.sh checks for (aws / docker / git), optionally authenticates gh
+# with a token from Secrets Manager for private forks, clones the repo,
 # and hands off to the interactive installer. Idempotent — safe to re-run.
 #
 #   bash /tmp/prepare-local-host.sh                 # region auto-detected from IMDS
@@ -57,7 +57,7 @@ command -v git >/dev/null && echo "• already present" || apti install -y git
 
 # --- 2a. zip (monitoring's DAU-lambda phase packages the function with `zip`) --------------------
 # apply-dau-lambda.sh require_cmd's zip and hard-fails without it; a fresh minimal image lacks it,
-# so deploy-all's Phase 7 DAU stage would fail (non-fatal, but leaves the 日活 widget empty).
+# so deploy-all's Phase 7 DAU stage would fail (non-fatal, but leaves the DAU widget empty).
 step "zip"
 command -v zip >/dev/null && echo "• already present" || apti install -y zip
 
@@ -115,7 +115,12 @@ if [ -d "$REPO_DIR/.git" ]; then
   git -C "$REPO_DIR" pull --ff-only origin "$REPO_REF"
 else
   git clone "$REPO_URL" "$REPO_DIR"
-  git -C "$REPO_DIR" checkout "$REPO_REF"
+  # Name both halves on failure: the usual cause is a ref that exists in the operator's fork while
+  # REPO_URL still points at upstream, and the raw git pathspec error names neither.
+  git -C "$REPO_DIR" checkout "$REPO_REF" || {
+    echo "ref '$REPO_REF' not found in $REPO_URL — if you are working from a fork, pass REPO_URL=<your fork> (and REPO_REF=<your branch>) to launch-host.sh" >&2
+    exit 1
+  }
 fi
 
 # --- 6. hand off to the installer in --local mode, inside the docker group -----------------------

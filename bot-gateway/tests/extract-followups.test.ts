@@ -61,6 +61,132 @@ describe("extractFollowUps", () => {
     const answer = "正文。\n💡 你可能还想问：\n- 调用方有哪些？";
     expect(extractFollowUps(answer)).toEqual(["调用方有哪些？"]);
   });
+
+  it.each([
+    ["> 💡 你可能还想问：", "> "],
+    ["**💡 你可能还想问：**", ""],
+    ["💡 **你可能还想问**：", ""],
+    ["### 你可能还想问", ""],
+    ["### **💡 你可能还想问：**", ""],
+    ["> ### 💡 **你可能还想问**：", "> "],
+  ])("extracts and strips the same decorated whole-line marker: %s", (marker, prefix) => {
+    const answer = [
+      "结论：基础伤害为 50。",
+      "",
+      `${prefix}---`,
+      marker,
+      `${prefix}- 调用方有哪些？`,
+      `${prefix}1. 调用方有哪些？`,
+      `${prefix}* 它怎么初始化？`,
+    ].join("\n");
+    expect(extractFollowUps(answer)).toEqual(["调用方有哪些？", "它怎么初始化？"]);
+    expect(stripFollowUps(answer)).toBe("结论：基础伤害为 50。");
+  });
+
+  it("normalizes quoted and unquoted list prefixes before deduplication and the cap", () => {
+    const answer = [
+      "💡 你可能还想问：",
+      "> - 调用方有哪些？",
+      "- 调用方有哪些？",
+      "> 1. 它怎么初始化？",
+      "> · 改了会影响什么？",
+      "> * 还有其他配置吗？",
+    ].join("\n");
+    expect(extractFollowUps(answer)).toEqual([
+      "调用方有哪些？", "它怎么初始化？", "改了会影响什么？",
+    ]);
+  });
+
+  it.each([
+    "你可能还想问的逻辑在 Config.cs:10 定义。",
+    "> 你可能还想问的逻辑在 Config.cs:10 定义。",
+    "> **你可能还想问的逻辑在 Config.cs:10 定义。**",
+    "### **你可能还想问：这些数值已经列在下方。**",
+    "> ### 💡 **你可能还想问**：这些数值已经列在下方。",
+    "> **你可能还想问**的逻辑在 Config.cs:10 定义。",
+  ])("does not turn a decorated ordinary sentence into a marker: %s", (prose) => {
+    const answer = [
+      "结论：以下是已有配置。",
+      prose,
+      "> - 基础伤害 50",
+      "> - 暴击倍率 1.5",
+      "这些行必须保留在答案中。",
+    ].join("\n");
+    expect(extractFollowUps(answer)).toEqual([]);
+    expect(stripFollowUps(answer)).toBe(answer);
+  });
+
+  it.each([
+    ["> 🔍 **供研发复核**", "> - Config.cs:10 基础伤害 = 50"],
+    ["> **需要你确认**", "> - 当前使用哪套配置？"],
+    ["> ```chart", '> {"type":"line","data":{"values":[]}}'],
+  ])("stops quoted suggestions at the following section: %s", (boundary, content) => {
+    const answer = [
+      "结论。",
+      "> ### **💡 你可能还想问：**",
+      "> - 调用方有哪些？",
+      boundary,
+      content,
+      "> - 后续段落不应成为推荐问题？",
+    ].join("\n");
+    expect(extractFollowUps(answer)).toEqual(["调用方有哪些？"]);
+  });
+
+  it("keeps a quoted suggestion that mentions the evidence section", () => {
+    const answer = [
+      "> 💡 **你可能还想问：**",
+      "> - 供研发复核的证据在哪里？",
+      "> - 它怎么初始化？",
+    ].join("\n");
+    expect(extractFollowUps(answer)).toEqual(["供研发复核的证据在哪里？", "它怎么初始化？"]);
+  });
+
+  it.each([
+    ["```markdown", "```", ""],
+    ["~~~markdown", "~~~", ""],
+    ["```markdown", "```", "> "],
+    ["````markdown", "````", ""],
+  ])("preserves a fenced marker before the real trailer: %s / %s / %s", (open, close, prefix) => {
+    const body = [
+      "结论：以下为模板原文。",
+      `${prefix}${open}`,
+      `${prefix}> ### **💡 你可能还想问：**`,
+      `${prefix}> - 这里是模板里的示例问题？`,
+      `${prefix}${close}`,
+      "真实说明必须保留。",
+    ].join("\n");
+    const answer = `${body}\n💡 你可能还想问：\n- 真正的推荐问题是什么？`;
+    expect(extractFollowUps(answer)).toEqual(["真正的推荐问题是什么？"]);
+    expect(stripFollowUps(answer)).toBe(body);
+  });
+
+  it.each(["```", "~~~"])("does not close a %s fence on a content line with a language suffix", (fence) => {
+    // A closing fence permits only trailing whitespace. The second line is
+    // literal code content even though it starts with the same delimiter.
+    const body = [
+      "结论：以下为模板原文。",
+      `${fence}markdown`,
+      `${fence}text`,
+      "> ### **💡 你可能还想问：**",
+      "> - 这里是模板里的示例问题？",
+      fence,
+      "真实说明必须保留。",
+    ].join("\n");
+    const answer = `${body}\n💡 你可能还想问：\n- 真正的推荐问题是什么？`;
+    expect(extractFollowUps(answer)).toEqual(["真正的推荐问题是什么？"]);
+    expect(stripFollowUps(answer)).toBe(body);
+  });
+
+  it("preserves an unfinished fenced example without inventing buttons", () => {
+    const answer = [
+      "结论：以下为尚未传完的模板。",
+      "```markdown",
+      "> ### **💡 你可能还想问：**",
+      "> - 这里是模板里的示例问题？",
+    ].join("\n");
+    expect(extractFollowUps(answer)).toEqual([]);
+    expect(stripFollowUps(answer)).toBe(answer);
+  });
 });
 
 describe("stripFollowUps", () => {
@@ -164,5 +290,26 @@ describe("stripFollowUps", () => {
       "- 另一个问题？",
     ].join("\n");
     expect(extractFollowUps(answer)).toEqual(["供研发复核的证据在哪里？", "另一个问题？"]);
+  });
+
+  it.each([
+    ["> 🔍 **供研发复核**", "> Config.cs:10 基础伤害 = 50"],
+    ["> **🔍 供研发复核**", "> Config.cs:10 基础伤害 = 50"],
+    ["> 📎 依据", "> Config.cs:10 基础伤害 = 50"],
+    ["> 🔀 需要你确认：请选择配置版本。", "> - 当前正式服配置是什么？"],
+    ["> ### **🔀 需要你确认：请选择配置版本。**", "> - 当前正式服配置是什么？"],
+    ["> ```chart", '> {"type":"line","data":{"values":[]}}\n> ```'],
+    ["> ~~~text", "> 后续代码必须保留。\n> ~~~"],
+  ])("preserves the following section while removing only suggestions: %s", (heading, content) => {
+    const section = `${heading}\n${content}`;
+    const answer = [
+      "结论：基础伤害为 50。",
+      "> ---",
+      "> ### **💡 你可能还想问：**",
+      "> - 调用方有哪些？",
+      section,
+    ].join("\n");
+    expect(stripFollowUps(answer)).toBe(`结论：基础伤害为 50。\n${section}`);
+    expect(extractFollowUps(answer)).toEqual(["调用方有哪些？"]);
   });
 });
