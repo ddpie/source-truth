@@ -174,37 +174,31 @@ else
   ok "全局共享角色策略 Resource 未钉死 \${REGION}（多区域安全）"
 fi
 
-# 8. 不得出现非 aws-samples 的 GitHub slug 作为默认值
-#    这条曾经修好又被回退（deploy-all.sh 的 CODEGRAPH_SERVER_REPO），所以改由机器守卫。
-#    文件清单改为枚举 git 跟踪的 .sh/.md，不再写死：原先硬编码到 `docs/runbook.md`，而该文件被
-#    拆成 runbook_en/_zh 之后，`2>/dev/null` 让"文件不存在"完全无声，于是这条守卫**两份 runbook
-#    都不再扫**却依旧报绿 —— 与它自己要防的"修好又回退"是同一种失效。
-#    也去掉了 Interkarma 豁免：正则只匹配 source-truth|sample-code-qa-on-agentcore 两个仓名，
-#    Interkarma/daggerfall-unity 永远不可能命中，那个豁免是死代码，留着会让人以为它是本项目产物的
-#    合法来源。
+# 8. 项目安装入口须指向正式公开仓 ddpie/source-truth。
+#    同时匹配旧项目名，以拦住历史 sample 地址回流；引擎上游另由 8b 检查。
+#    枚举所有已跟踪的 shell/Markdown 文件，避免文档更名后漏检。
 slug_files="$(tracked_files '*.sh' '*.md' | grep -v '^scripts/check-invariants\.sh$' || true)"
 slug_hits="$(printf '%s\n' "$slug_files" | tr '\n' '\0' \
   | xargs -0 -r grep -IoE '(github\.com/|githubusercontent\.com/|:-)[A-Za-z0-9_.-]+/(source-truth|sample-code-qa-on-agentcore)' 2>/dev/null \
-  | grep -vE 'aws-samples/' || true)"
+  | grep -vE 'ddpie/source-truth$' || true)"
 if [[ -n "$slug_hits" ]]; then
-  err "出现非 aws-samples 的 GitHub slug 默认值（外部用户会拉不到）："
+  err "项目安装入口未指向公开仓 ddpie/source-truth："
   printf '      %s\n' "$slug_hits" >&2
 else
-  ok "GitHub slug 默认值均为 aws-samples"
+  ok "项目 GitHub 入口均为 ddpie/source-truth"
 fi
 
 # 8b. 引擎二进制不得由本仓分发
 #     codegraph-server 是上游 Apache-2.0 项目的产物（github.com/codegraph-ai/CodeGraph）。把默认
 #     下载源指回本仓意味着两件坏事：本仓成了 Apache-2.0 二进制的再分发方（连带 NOTICE 义务），
 #     且每个外部用户的部署都依赖我们给自己的 release 挂资产——那正是此前"外部用户根本装不上"的
-#     成因。第 8 项守的是 slug 不能是非 aws-samples 的本仓名，反向回退它看不出来，所以单列一条。
+#     成因。项目入口合法不代表能把本项目当作引擎上游，所以单列一条。
 #     判定依据是 deploy-all.sh --print-engine-source 的输出，即 bash 在所有赋值执行完之后
 #     真正解析到的值——而不是某一行源码。前一版按 `^CODEGRAPH_SERVER_REPO=` grep，有三条真实的
 #     回退路径能大摇大摆走过去：只改 CODEGRAPH_SERVER_URL_DEFAULT 而不动 _REPO（curl 层读的是
 #     ${CODEGRAPH_SERVER_URL:-$CODEGRAPH_SERVER_URL_DEFAULT}，改它一处就把整条路重定向了）；
 #     在文件后面加一条**带缩进**的重新赋值（bash 取最后一次，`^` 锚点只看到第一次）；以及
-#     `aws-samples/source-truth`——第 8 项的管道以 `grep -vE 'aws-samples/'` 结尾，所以它按构造
-#     就是被放行的。让守卫读 bash 读到的东西，这五类（改名/缩进/续行/二次赋值/变量拼接）一次全关。
+#     把项目仓本身当作引擎源。让守卫读 bash 读到的东西，覆盖改名、缩进、续行、二次赋值和变量拼接。
 cg_src="$(bash scripts/deploy-all.sh --print-engine-source 2>/dev/null || true)"
 cg_repo="$(printf '%s\n' "$cg_src" | sed -n 's/^CODEGRAPH_SERVER_REPO=//p')"
 cg_url="$(printf '%s\n' "$cg_src" | sed -n 's/^CODEGRAPH_SERVER_EFFECTIVE_URL=//p')"

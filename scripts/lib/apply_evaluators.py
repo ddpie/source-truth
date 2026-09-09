@@ -6,6 +6,11 @@ ratingScale，在 shell 里拼这种 JSON 是本仓库已经踩过的坑（引�
 
 幂等做法：先按名字在 ListEvaluators 里找。CreateEvaluator 没有「已存在则复用」的语义，重复调用会
 造出一堆同名评估器，而每一个都是独立 id——那会让评估数据分散在多个 id 下，看起来像数据丢了。
+
+评委模型 id 按区域解析：evaluators.json 里只写不带地理前缀的基名（anthropic.claude-haiku-...），
+这里在**创建任何东西之前**用 ListInferenceProfiles 选出该区域真实存在的推理档（规则同
+scripts/lib/resolve_model.sh：地理档 us./eu./jp./au. 优先，其次 global.）。第一版把 jp. 前缀写死在
+定义里，换个区域第二个评估器就被拒，而第一个已经建好——半套资源、EVALUATOR_IDS 也没写回。
 """
 
 from __future__ import annotations
@@ -20,22 +25,19 @@ import boto3
 from botocore.exceptions import ClientError
 
 
-def existing_by_name(client) -> dict[str, str]:
+def existing_by_name(client, wanted_names: set[str]) -> dict[str, str]:
     out: dict[str, str] = {}
-    token = None
-    while True:
-        kw = {"maxResults": 50}
-        if token:
-            kw["nextToken"] = token
-        resp = client.list_evaluators(**kw)
+    for resp in client.get_paginator("list_evaluators").paginate():
         for e in resp.get("evaluatorSummaries") or resp.get("evaluators") or []:
             name = e.get("evaluatorName") or e.get("name")
             eid = e.get("evaluatorId") or e.get("id")
-            if name and eid:
+            # Other applications may have duplicate names in this account. Only
+            # ambiguity in this deployment's requested identities blocks reuse.
+            if name in wanted_names and eid:
+                if name in out and out[name] != eid:
+                    raise ValueError(f"多个已有评估器同名 {name!r}，无法安全选择")
                 out[name] = eid
-        token = resp.get("nextToken")
-        if not token:
-            return out
+    return out
 
 
 # LLM-as-judge 的 instructions 必须含至少一个占位符，服务端会把它替换成真实的 trace 信息。
@@ -68,7 +70,48 @@ def check_placeholders(spec: dict, instructions: str) -> str | None:
     return None
 
 
-def build_config(spec: dict, lambda_arn: str) -> dict:
+# ---- 评委模型的区域解析（纯函数部分不做 I/O，便于单测） ----
+# 只认已知的推理档前缀：任意 2–6 个字母会把 amazon. / meta. 这类厂商名也当成地理前缀剥掉。
+_GEO_PREFIX_RE = re.compile(r"^(global|us|eu|jp|au|apac|us-gov)\.")
+
+
+def judge_model_basename(model_id: str) -> str:
+    """去掉地理/global 前缀：jp.anthropic.claude-haiku-4-5-... -> anthropic.claude-haiku-4-5-..."""
+    return _GEO_PREFIX_RE.sub("", model_id.strip(), count=1)
+
+
+def rank_judge_profiles(basename: str, profile_ids: list[str]) -> str | None:
+    """在候选推理档里选与 basename 同一模型的最佳档：地理档优先于 global.，都没有返回 None。"""
+    geo = glob = None
+    for pid in profile_ids:
+        if judge_model_basename(pid) != basename:
+            continue
+        if pid.startswith("global."):
+            glob = glob or pid
+        elif geo is None:
+            geo = pid
+    return geo or glob
+
+
+def list_system_profiles(bedrock) -> list[str]:
+    ids: list[str] = []
+    for resp in bedrock.get_paginator("list_inference_profiles").paginate(typeEquals="SYSTEM_DEFINED"):
+        ids.extend(x.get("inferenceProfileId", "") for x in resp.get("inferenceProfileSummaries") or [])
+    return [i for i in ids if i]
+
+
+def resolve_judge_model(bedrock, model_id: str) -> tuple[str | None, list[str]]:
+    """返回 (区域内可用的推理档 id 或 None, 同系列候选列表——用于报错时给出可选项)。"""
+    base = judge_model_basename(model_id)
+    profiles = list_system_profiles(bedrock)
+    best = rank_judge_profiles(base, profiles)
+    # 报错时列出同一模型家族（如所有 haiku 档），比只说「找不到」更能直接告诉操作者该填什么。
+    family = re.sub(r"-\d.*$", "", base.rsplit(".", 1)[-1])   # claude-haiku
+    similar = sorted(p for p in profiles if family in p)
+    return best, similar
+
+
+def build_config(spec: dict, lambda_arn: str, judge_model: str | None = None) -> dict:
     kind = spec["kind"]
     if kind == "codeBased":
         return {"codeBased": {"lambdaConfig": {
@@ -95,7 +138,7 @@ def build_config(spec: dict, lambda_arn: str) -> dict:
         return {"llmAsAJudge": {
             "instructions": instructions,
             "ratingScale": rating,
-            "modelConfig": {"bedrockEvaluatorModelConfig": {"modelId": spec["modelId"]}},
+            "modelConfig": {"bedrockEvaluatorModelConfig": {"modelId": judge_model or spec["modelId"]}},
         }}
     raise ValueError(f"未知的评估器类型: {kind}")
 
@@ -105,6 +148,8 @@ def main() -> int:
     ap.add_argument("--region", required=True)
     ap.add_argument("--defs", required=True)
     ap.add_argument("--lambda-arn", required=True)
+    ap.add_argument("--judge-model", default="",
+                    help="评委模型的完整推理档 id；留空则按区域从 ListInferenceProfiles 解析")
     args = ap.parse_args()
 
     defs = json.loads(pathlib.Path(args.defs).read_text(encoding="utf-8"))
@@ -113,21 +158,57 @@ def main() -> int:
         print("evaluators.json 里没有评估器定义", file=sys.stderr)
         return 1
 
+    # Names/keys are deployment identities. Ambiguity must fail before the first
+    # create, not produce duplicate evaluators whose IDs change on each rerun.
+    for field in ("key", "evaluatorName"):
+        values = [s.get(field) for s in specs]
+        if any(not isinstance(v, str) or not v.strip() for v in values) or len(set(values)) != len(values):
+            print(f"定义不完整/不合法: {field} 必须非空且唯一", file=sys.stderr)
+            return 1
     client = boto3.client("bedrock-agentcore-control", region_name=args.region)
-    have = existing_by_name(client)
-    rc = 0
+    try:
+        have = existing_by_name(client, {s["evaluatorName"] for s in specs})
+    except (ClientError, ValueError) as e:
+        print(f"无法读取唯一的已有评估器，未创建任何资源: {e}", file=sys.stderr)
+        return 1
+    todo = [s for s in specs if s["evaluatorName"] not in have]
 
+    # 评委模型：只在确实要新建 LLM-as-judge 评估器时解析，且在任何 CreateEvaluator 之前。
+    override = args.judge_model.strip() or None
+    profiles = None
+
+    # 先把全部定义构造完再创建：任一定义不合法就整体不动，避免建出半套。
+    configs: list[tuple[dict, dict]] = []
+    for spec in todo:
+        try:
+            judge_model = override
+            if spec.get("kind") == "llmAsAJudge" and judge_model is None:
+                wanted = spec.get("modelId")
+                if not isinstance(wanted, str) or not wanted.strip():
+                    raise ValueError("llmAsAJudge 缺少 modelId")
+                if profiles is None:
+                    bedrock = boto3.client("bedrock", region_name=args.region)
+                    profiles = list_system_profiles(bedrock)
+                judge_model = rank_judge_profiles(judge_model_basename(wanted), profiles)
+                if judge_model is None:
+                    raise ValueError(f"{args.region} 没有 {wanted} 的推理档；"
+                                     "用 --judge-model / EVAL_JUDGE_MODEL 指定")
+                print(f"评委模型 {spec['evaluatorName']}: {judge_model}")
+            if spec.get("level") not in _PLACEHOLDERS:
+                raise ValueError(f"未知的 level: {spec.get('level')!r}")
+            configs.append((spec, build_config(spec, args.lambda_arn, judge_model)))
+        except (KeyError, ValueError, TypeError, ClientError) as e:
+            print(f"{spec.get('evaluatorName')}: 定义不完整/不合法: {e}", file=sys.stderr)
+            return 1
+
+    rc = 0
     for spec in specs:
         name = spec["evaluatorName"]
         if name in have:
+            # 重跑时按名复用，所以上一轮建成一半也不会重复建第一个。
             print(f"EVALUATOR_ID {spec['key']} {have[name]}   (已存在，复用)")
-            continue
-        try:
-            cfg = build_config(spec, args.lambda_arn)
-        except (KeyError, ValueError) as e:
-            print(f"✗ {name}: 定义不完整/不合法: {e}", file=sys.stderr)
-            rc = 1
-            continue
+    for spec, cfg in configs:
+        name = spec["evaluatorName"]
         try:
             resp = client.create_evaluator(
                 evaluatorName=name,

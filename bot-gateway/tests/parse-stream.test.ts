@@ -13,6 +13,125 @@ import { parseAgentStream, newStreamState, applyEvent } from "../src/parse-strea
 
 const FIXTURE = readFileSync(join(__dirname, "fixtures/agent-stream-sample.txt"), "utf8");
 
+describe("versioned SDK stream", () => {
+  const event = (seq: number, fields: Record<string, unknown>) => ({
+    protocol: "source-truth", version: 1, runId: "run-1", seq, ...fields,
+  });
+
+  it("separates narration and answer and replaces the terminal snapshot", () => {
+    const state = newStreamState();
+    [
+      { type: "text_delta", messageId: "n", text: "looking" },
+      { type: "tool_started", toolId: "t", name: "codegraph_read_file" },
+      { type: "tool_finished", toolId: "t", isError: true },
+      { type: "text_delta", messageId: "a", text: "ans" },
+      { type: "text_delta", messageId: "a", text: "wer" },
+      { type: "run_completed", text: "answer", numTurns: 2 },
+    ].forEach((fields, i) => applyEvent(state, event(i + 1, fields)));
+    expect(state.texts).toEqual(["looking", "answer"]);
+    expect(state.sawResult).toBe(true);
+    expect(state.error).toBeNull();
+    expect(state.toolCalls).toBe(1);
+    expect(state.toolErrors).toBe(1);
+    expect(state.numTurns).toBe(2);
+  });
+
+  it("does not consider text or a tool round completion a finished run", () => {
+    const state = newStreamState();
+    applyEvent(state, event(1, { type: "text_delta", messageId: "a", text: "partial" }));
+    expect(state.sawResult).toBe(false);
+    applyEvent(state, event(2, { type: "run_failed", error: "error_max_turns" }));
+    expect(state.error).toBe("error_max_turns");
+  });
+
+  it("fails on a missing event or unknown version", () => {
+    const state = newStreamState();
+    applyEvent(state, event(2, { type: "run_completed", text: "answer" }));
+    expect(state.error).toContain("sequence");
+    const unsupported = newStreamState();
+    applyEvent(unsupported, { ...event(1, {}), version: 2 });
+    expect(unsupported.error).toContain("protocol");
+  });
+
+  it.each(["", "   ", undefined])("rejects an empty terminal snapshot (%p)", (text) => {
+    const state = newStreamState();
+    applyEvent(state, event(1, { type: "text_delta", messageId: "a", text: "unfinished" }));
+    applyEvent(state, event(2, { type: "run_completed", text }));
+    expect(state.error).toBeTruthy();
+  });
+
+  it("gives run_failed a nonempty error even when its error field is empty", () => {
+    const state = newStreamState();
+    applyEvent(state, event(1, { type: "run_failed", error: "" }));
+    expect(state.error).toBeTruthy();
+  });
+
+  it("does not accept a legacy terminal event in a normalized run", () => {
+    const state = newStreamState();
+    applyEvent(state, event(1, { type: "text_delta", messageId: "a", text: "unfinished" }));
+    applyEvent(state, { is_error: false, num_turns: 1, result: "legacy" });
+    expect(state.sawResult).toBe(false);
+    expect(state.error).toContain("protocol");
+    expect(state.texts).toEqual(["unfinished"]);
+  });
+
+  it("does not accept a normalized run after legacy content", () => {
+    const state = newStreamState();
+    applyEvent(state, { content: [{ text: "legacy" }] });
+    applyEvent(state, event(1, { type: "run_completed", text: "other run" }));
+    expect(state.error).toContain("protocol");
+  });
+
+  it("surfaces protocol-free transport errors before or after the terminal event", () => {
+    for (const completed of [false, true]) {
+      const state = newStreamState();
+      applyEvent(state, event(1, { type: "text_delta", messageId: "a", text: "answer" }));
+      if (completed) applyEvent(state, event(2, { type: "run_completed", text: "answer" }));
+      applyEvent(state, { error: "connection reset", error_type: "RuntimeError" });
+      expect(state.error).toBe("RuntimeError: connection reset");
+    }
+  });
+
+  it("rejects text after terminal and keeps the terminal answer unchanged", () => {
+    const state = newStreamState();
+    applyEvent(state, event(1, { type: "run_completed", text: "answer" }));
+    applyEvent(state, { content: [{ text: "late" }] });
+    expect(state.error).toBeTruthy();
+    expect(state.texts).toEqual(["answer"]);
+  });
+
+  it("rejects stale message deltas instead of corrupting narration order", () => {
+    const state = newStreamState();
+    applyEvent(state, event(1, { type: "text_delta", messageId: "n", text: "looking" }));
+    applyEvent(state, event(2, { type: "tool_started", toolId: "t", name: "read_file" }));
+    applyEvent(state, event(3, { type: "tool_finished", toolId: "t", isError: false }));
+    applyEvent(state, event(4, { type: "text_delta", messageId: "a", text: "answer" }));
+    applyEvent(state, event(5, { type: "text_delta", messageId: "n", text: "late" }));
+    expect(state.error).toBeTruthy();
+    expect(state.texts).toEqual(["looking", "answer"]);
+  });
+
+  it.each([
+    [{ type: "tool_finished", toolId: "never-started", isError: false }],
+    [{ type: "tool_started", toolId: "t" }],
+    [{ type: "tool_started", toolId: "t", name: "read_file" },
+      { type: "tool_started", toolId: "t", name: "read_file" }],
+    [{ type: "tool_started", toolId: "t", name: "read_file" },
+      { type: "tool_finished", toolId: "t", isError: "false" }],
+    [{ type: "tool_started", toolId: "t", name: "read_file" },
+      { type: "run_completed", text: "still executing a tool" }],
+  ])("rejects malformed tool lifecycle %#", (...events) => {
+    const state = newStreamState();
+    events.forEach((fields, i) => applyEvent(state, event(i + 1, fields)));
+    expect(state.error).toBeTruthy();
+  });
+
+  it("whole-string parser also rejects a normalized stream without terminal", () => {
+    const raw = "data: " + JSON.stringify(event(1, { type: "text_delta", messageId: "a", text: "partial" }));
+    expect(parseAgentStream(raw).error).toContain("truncated");
+  });
+});
+
 describe("parseAgentStream", () => {
   const { narrations, conclusion } = parseAgentStream(FIXTURE);
 

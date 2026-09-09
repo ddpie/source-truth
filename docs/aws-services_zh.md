@@ -11,9 +11,9 @@
 
 | 服务 | 规格 | 数量 | 用途 |
 |------|------|------|------|
-| **EC2**（index-service 主机） | ARM Graviton `t4g.large`（2 vCPU / 8 GiB）默认；可选到 `m7g.2xlarge`（8 vCPU / 32 GiB）；开启终止保护与 IMDSv2 强制（`HttpTokens=required`，每轮部署都重新校准） | 1（所有项目共用一台） | 常驻 CodeGraph 索引 + MCP-over-HTTP 接口、各项目 bot-gateway 进程；持有唯一一份代码本地副本；并跑构建期术语表引擎（本地 `claude` CLI 离线扫码生成术语表，见 `docs/agent/glossary.md`） |
+| **EC2**（index-service 主机） | ARM Graviton `t4g.large`（2 vCPU / 8 GiB）默认；可选到 `m7g.2xlarge`（8 vCPU / 32 GiB）；开启终止保护与 IMDSv2 强制（`HttpTokens=required`，每轮部署都重新校准） | 1（所有项目共用一台） | 常驻 CodeGraph 索引 + MCP-over-HTTP 接口、各项目 bot-gateway 进程；持有唯一一份代码本地副本；并跑构建期术语表引擎（按项目选择 OpenAI Agents SDK / Claude CLI，通过 Bedrock 构建术语表，见 `docs/agent/glossary.md`） |
 | **Bedrock AgentCore Runtime** | Firecracker microVM；VPC 模式；空闲回收 900s、硬上限 8h（均可调 60–28800s） | **N**（`source_truth_agent_<projectId>`，每项目一套） | 会话隔离的 Agent 执行环境，按会话独立 microVM |
-| **Bedrock**（模型推理） | 默认 `global.anthropic.claude-opus-4-8`（可按项目覆盖） | 共享 | ① 会话 microVM 内 Agent 的 LLM 推理；② index 主机构建期术语表引擎的 `InvokeModel`（index 实例角色带受限 `bedrock-invoke` 策略）。均 `CLAUDE_CODE_USE_BEDROCK=1` 计费 |
+| **Bedrock**（模型推理） | 新项目默认 OpenAI + `global.openai.gpt-6-astra`；旧项目保留 Claude 或明确配置 | 共享 | 问答和启用后的术语表共用项目 SDK 选择；OpenAI 使用 `ConverseStream`，Claude 使用 `CLAUDE_CODE_USE_BEDROCK=1`。Runtime / index 角色授予相应模型权限 |
 
 ## 2. 存储与镜像（放代码、产物、镜像）
 
@@ -43,10 +43,12 @@
 | 服务 | 规格 | 数量 | 用途 |
 |------|------|------|------|
 | **Secrets Manager** | 飞书凭证（每项目）+ git 只读令牌 + 日志脱敏盐；`--local` 另加一条部署用 GitHub 令牌 | **N + 2**（`feishu-<projectId>` ×N、`git-credentials`、`log-hash-salt`）；`--local` 为 **N + 3**（另加 `deploy-github-token`） | 飞书 App 凭证、私有仓只读拉取令牌、`hashUserId` 脱敏盐；`--local` 的 `deploy-github-token` 供新机 `gh auth login`（克隆私有仓、下载 Release、后续升级）。运行时取出不落盘 |
-| **IAM** | 3 角色 + 1 实例配置 + 1 服务关联角色 | 固定 | EC2 执行角色 `source-truth-index-role`、AgentCore Runtime 角色 `SourceTruthAgentRuntimeRole`、DAU 预聚合 Lambda 角色 `source-truth-dau-lambda-role`、实例配置、AgentCore 的 VPC ENI 托管角色。前三个角色都是账号级全局角色（多区域共用），其策略里资源型 ARN 的 region 段必须用 `*`，否则第二个区域部署会覆盖写、静默撤销第一个区域的权限。`check-invariants.sh` 的守卫是**部分覆盖**：只 grep `scripts/lib/provision_iam.sh` 与 `scripts/lib/apply-dau-lambda.sh`，且只查 `logs` / `bedrock` / `bedrock-agentcore` / `secretsmanager` / `s3` 这几个服务面的 ARN。`scripts/lib/create-iam.sh`——`--local` 路径上往同一个账号级 `source-truth-index-role` 写内联策略的脚本——**不在扫描范围内**，在那里新写一个钉死 region 的 ARN 能通过 CI |
+| **IAM** | 基础 2 角色 + 1 实例配置 + 1 服务关联角色；监控另加 DAU 角色 | 按启用能力 | EC2 执行角色 `source-truth-index-role`、AgentCore Runtime 角色 `SourceTruthAgentRuntimeRole`、DAU 预聚合 Lambda 角色 `source-truth-dau-lambda-role`、实例配置、AgentCore 的 VPC ENI 托管角色。前三个角色都是账号级全局角色（多区域共用），其策略里资源型 ARN 的 region 段必须用 `*`，否则第二个区域部署会覆盖写、静默撤销第一个区域的权限。`check-invariants.sh` 枚举 `scripts/*.sh` 与 `scripts/lib/*.sh` 中写 IAM 内联策略的已跟踪脚本，包含 `create-iam.sh`；静态守卫检查 `logs` / `bedrock` / `bedrock-agentcore` / `secretsmanager` / `s3` 资源 ARN 的区域段，不等同完整 IAM 策略审计 |
 | **Systems Manager（SSM）** | Session Manager（无 SSH） | — | 管理私有子网 EC2：上线项目、刷新网关、清理单元 |
 
 ## 5. 监控与告警（看健康、出指标）
+
+新环境的扩展监控由 `--with-monitoring` 开启。下表的指标、看板、SNS、DAU Lambda / 定时器及前四条业务告警是开启后的数量；主机日志采集和 EC2 自动恢复告警由基础部署配置。关闭监控部署开关不会停用已有资源。
 
 | 服务 | 规格 | 数量 | 用途 |
 |------|------|------|------|
@@ -60,5 +62,5 @@
 
 ## 未使用的服务（避免误解）
 
-会话映射与事件去重为网关**进程内内存**实现（MVP），未使用 DynamoDB / Redis；会话容器**不挂任何文件系统**
+会话映射与事件去重为网关**进程内内存**实现（MVP），未使用 DynamoDB / Redis；会话容器**不挂仓库文件系统**
 （无 EFS），源码全经 index-service 的 HTTP 接口读取，没有共享挂载、没有副本同步问题。

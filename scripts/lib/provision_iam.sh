@@ -141,7 +141,11 @@ aws iam put-role-policy --role-name "$INDEX_ROLE" --policy-name bedrock-invoke -
     {\"Effect\":\"Allow\",
      \"Action\":[\"bedrock:InvokeModel\",\"bedrock:InvokeModelWithResponseStream\"],
      \"Resource\":[\"arn:aws:bedrock:*::foundation-model/anthropic.*\",
-                   \"arn:aws:bedrock:*:${ACCOUNT}:inference-profile/*anthropic.*\"]}]}" >/dev/null
+                   \"arn:aws:bedrock:*::foundation-model/openai.*\",
+                   \"arn:aws:bedrock:*:${ACCOUNT}:inference-profile/*anthropic.*\",
+                   \"arn:aws:bedrock:*:${ACCOUNT}:inference-profile/*openai.*\"]},
+    {\"Effect\":\"Allow\",\"Action\":\"bedrock:InvokeModel\",
+     \"Resource\":\"arn:aws:bedrock:*:${ACCOUNT}:project/default\"}]}" >/dev/null
 # NOTE on the foundation-model region wildcard ('*' not pinned to $REGION): a cross-region
 # inference profile (global.*/<geo>.*) routes to a REGION-LESS, ACCOUNT-LESS foundation-model ARN
 # (arn:aws:bedrock:::foundation-model/anthropic.<model>). Pinning the region was TESTED and
@@ -174,7 +178,10 @@ aws iam put-role-policy --role-name "$RUNTIME_ROLE" --policy-name runtime-perms 
   \"Version\":\"2012-10-17\",\"Statement\":[
     {\"Effect\":\"Allow\",\"Action\":[\"bedrock:InvokeModel\",\"bedrock:InvokeModelWithResponseStream\"],
      \"Resource\":[\"arn:aws:bedrock:*::foundation-model/anthropic.*\",
+                   \"arn:aws:bedrock:*::foundation-model/openai.*\",
                    \"arn:aws:bedrock:*:${ACCOUNT}:inference-profile/*\"]},
+    {\"Effect\":\"Allow\",\"Action\":\"bedrock:InvokeModel\",
+     \"Resource\":\"arn:aws:bedrock:*:${ACCOUNT}:project/default\"},
     {\"Effect\":\"Allow\",\"Action\":[\"ecr:GetAuthorizationToken\"],\"Resource\":\"*\"},
     {\"Effect\":\"Allow\",\"Action\":[\"ecr:GetDownloadUrlForLayer\",\"ecr:BatchGetImage\",\"ecr:BatchCheckLayerAvailability\"],
      \"Resource\":[\"arn:aws:ecr:*:${ACCOUNT}:repository/source-truth/*\"]},

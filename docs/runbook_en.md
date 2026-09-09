@@ -7,6 +7,16 @@ The system has two parts, both brought up by the deploy scripts: the **backend**
 
 There are two entry points: `install.sh` (interactive, recommended) and `deploy-all.sh` (command-line flags, suited to CI). The install can be driven remotely from a separate operator machine, or run step by step on the target host itself (`--local`). "Quick start" gives the command for each; see [section 2](#2-one-command-install-interactive-recommended) for how to choose. Every deploy is **idempotent**: re-run after an interruption and it continues from where it stopped.
 
+**SDK selection:** new projects default to OpenAI Agents SDK. Existing projects retain their
+selection during a code upgrade. `agent.sdk` controls both Q&A and glossary generation;
+see [dual SDK configuration](dual-sdk_en.md) for configuration and migration steps.
+
+**Region and deployment records:** the installer suggests Tokyo (`ap-northeast-1`); choose a region
+with AgentCore Runtime and access to your selected Bedrock models. Keep account-specific resource IDs,
+project inventories, release records and rollback material under the ignored `.local/` directory.
+Check host logs and artifact metadata for background glossary rebuild progress; Runtime READY does
+not establish that the glossary is rebuilt.
+
 ## Quick start
 
 The shortest path to a deployment; the details are in the sections that follow. Assumes the `aws` CLI is installed and credentialed on this machine, and that the Feishu/Lark app has been created per [section 3](#3-connecting-feishu--lark) so you hold the `App ID` and `App Secret`. (The bot's `open_id` is derived automatically by the installer — the console does not display one.)
@@ -18,7 +28,7 @@ Pick one of the two — **one-command deploy** (the default: installed remotely 
 On the operator machine (your laptop or CI):
 
 ```bash
-git clone https://github.com/aws-samples/sample-code-qa-on-agentcore.git && cd sample-code-qa-on-agentcore
+git clone https://github.com/ddpie/source-truth.git && cd source-truth
 ./scripts/install.sh          # Answer the prompts: region / repositories / Feishu credentials — backend and gateway in one pass
 ```
 Details in [section 2](#2-one-command-install-interactive-recommended); when it finishes, verify per [section 5](#5-verification-end-to-end-smoke-test).
@@ -30,7 +40,7 @@ Three steps: **create the host → deploy the services → push the code**.
 **Step 1 · Create the host** (run locally): creates the EC2 instance; the script prints an `ssh` command at the end for use in the next step.
 
 ```bash
-git clone https://github.com/aws-samples/sample-code-qa-on-agentcore.git && cd sample-code-qa-on-agentcore
+git clone https://github.com/ddpie/source-truth.git && cd source-truth
 ./scripts/launch-host.sh
 ```
 
@@ -38,7 +48,7 @@ git clone https://github.com/aws-samples/sample-code-qa-on-agentcore.git && cd s
 
 ```bash
 # Run the command launch-host.sh PRINTED — it carries your own repo URL and branch.
-# A bare `bash /tmp/prepare-local-host.sh` defaults to upstream aws-samples/main, so on a
+# A bare `bash /tmp/prepare-local-host.sh` defaults to upstream main, so on a
 # fork or a feature branch it silently deploys code that is not yours.
 REPO_URL=<your repo URL> REPO_REF=<your branch> bash /tmp/prepare-local-host.sh
 ```
@@ -76,13 +86,14 @@ For the details of each step (SSH private key, private-repository credentials, t
 ## 1. Prerequisites (one-time)
 
 1. **AWS account + target region**: the region must support AgentCore (for example `ap-northeast-1`, Tokyo). Configure deploy-capable AWS credentials on this machine.
-2. **Deploy machine (Linux or macOS)**: this is the list the deploy **actually checks and hard-fails on**
-   (identical to the Prerequisites in [`../README.md`](../README.md) / [`../README_zh.md`](../README_zh.md)):
+2. **Deploy machine (Linux or macOS)**: the detailed requirements below expand the
+   quick-start checklist in [`../README.md`](../README.md).
 
    - **`aws` CLI v2** — v1 is not supported.
    - **`python3`** with a **boto3 new enough to carry `bedrock-agentcore-control`** (used to configure the
-     Runtime). Upgrade with `python3 -m pip install -U boto3`; on a PEP-668 system (recent macOS /
-     Ubuntu) use a virtualenv or add `--break-system-packages`, or the upgrade silently does nothing.
+     Runtime). Use a virtual environment on systems with an externally managed Python installation:
+     `python3 -m venv .venv-deploy`, `source .venv-deploy/bin/activate`, then
+     `python -m pip install --upgrade boto3`. Keep that environment active while deploying.
    - **Docker with a running daemon**, able to build **linux/arm64** (the agent container is ARM64-only;
      phase 4 builds the image, and installing Docker without starting it is caught by the dependency
      check, which tells you to verify with `docker info`). On an x86 host, install the emulator first:
@@ -90,7 +101,7 @@ For the details of each step (SSH private key, private-repository credentials, t
    - **GNU tar** — stock macOS ships BSD tar, which cannot produce reproducible archives. Without it the
      index host reads the artifacts as changed on every deploy and re-bootstraps in place, interrupting
      every bot on that machine. `brew install gnu-tar` provides `gtar`, which is picked up automatically.
-   - **[Session Manager plugin](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html)** — verification and every day-2 operation goes into the instance (`aws ssm start-session`); it does not ship with the AWS CLI.
+   - **[Session Manager plugin](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html)** — needed for interactive host access (`aws ssm start-session`); it does not ship with the AWS CLI. Automated deployment uses SSM commands and only warns if this plugin is absent.
    - **`git`**; a private-repository deploy also needs **`gh`** with `gh auth login` already done (used to clone the repository and to fetch `codegraph-server`).
    - **An EC2 key pair plus its local `.pem`** — only for `--local` (you SSH into the host it creates).
    - **`rsync`** — only if the code arrives as a local-repository snapshot push instead of a git clone.
@@ -98,14 +109,17 @@ For the details of each step (SSH private key, private-repository credentials, t
      the rest of monitoring are unaffected, the "daily active" widget is simply empty (`--local`
      installs it automatically).
 
-   Node.js and Python toolchains are **not** needed locally: the gateway is built on the index host and
+   Node.js and native build toolchains are **not** needed locally; Python 3 with boto3 is required above. The gateway is built on the index host and
    the agent runs in a container. The `codegraph-server` binary needs no manual preparation either — when
-   it is absent both locally and in S3, the deploy downloads it from this repository's Release
-   (through `gh` for a private repository, over a direct link for a public one).
-3. **Bedrock model access**: make sure the deploying identity has `bedrock:InvokeModel` (AWS no longer requires per-model enablement under "Model access" in the console).
-   The inference profile is resolved automatically per `--region`, so there is nothing to fill in — the deploy calls `bedrock list-inference-profiles` to see which profiles the region actually offers and
-   picks the best one (geo profiles `us.`/`eu.`/`jp.`/`au.` first, falling back to `global.`; the default model resolves to `jp.…` in Tokyo and stays `global.…` in Singapore, for example).
-   Only when no matching profile can be found does preflight WARN and list the profiles available in that region.
+   it is absent both locally and in S3, the deploy downloads it from the engine's upstream Release and verifies its published checksum
+   (this repository does not redistribute the binary; see `index-service/README.md`).
+3. **Bedrock model access**: the deployer probes selected models through Converse. A denial for that identity is advisory; post-deploy smoke checks the runtime identity. Runtime/index roles need
+   `bedrock:InvokeModel` / `bedrock:InvokeModelWithResponseStream` for the selected models.
+   The IAM phase configures execution roles. OpenAI Q&A and glossary builds use `ConverseStream`.
+   Deployment lists system inference profiles for `--region` and resolves the same model's available
+   prefix without substituting another model. Claude may resolve to `jp.…` in Tokyo; OpenAI uses the
+   corresponding `global.openai.…` profile. An ACTIVE profile or successful preflight is not proof
+   of a complete real invocation.
 4. **Target repositories**: the code to be answered about, from two kinds of source (mixable within one project):
    - **git repository** (recommended; written as `source: "git"` in the config, which is the default): `https://github.com/org/repo.git`, `https://gitlab.com/org/repo.git`, `git@host:org/repo.git`, with an optional branch / tag / commit. index-service clones it locally and `git pull`s on a timer, so a change on the main branch shows up in answers within minutes. A private repository needs one read-only credential (stored in Secrets Manager and read by the index host).
    - **local repository** (written as `source: "local"`; for code that exists only locally and cannot be pushed to any git remote): after deploying, push it straight to the index host over rsync with `scripts/push-local-repo.sh` (see [the end of section 9, "Local-repository upload"](#local-repository-upload)). What you push is a point-in-time snapshot and does not follow later code changes — run the upload command again after every change.
@@ -120,15 +134,18 @@ Prepare the Feishu / Lark app first (section 3) and have the `App ID` and `App S
 The install command is in [Quick start](#quick-start); if you have not cloned the repository yet, a single command bootstraps it (clones into `./source-truth/`, then enters the interactive install):
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/aws-samples/sample-code-qa-on-agentcore/main/scripts/get.sh)   # public repository
-bash <(gh api repos/aws-samples/sample-code-qa-on-agentcore/contents/scripts/get.sh --jq '.content' | base64 -d)   # private repository; run gh auth login first
+bash <(curl -fsSL https://raw.githubusercontent.com/ddpie/source-truth/main/scripts/get.sh)
 ```
 
+The public repository does not require a GitHub login. For a private fork, authenticate with `gh auth login`
+and set `SOURCE_TRUTH_SLUG=owner/repo`; see the bootstrap overrides in [`scripts/README.md`](../scripts/README.md).
+
 `install.sh` is an interactive menu (arrow keys to select, Enter to confirm); its four flows are described in [section 7, Multiple projects](#7-multiple-projects-several-bots-on-one-host).
+The default action is "add project"; separate environment initialization is optional. Glossary and monitoring default off for a new environment; existing environments retain their choices.
 The typical order for a first deploy:
 
 1. **Dependency check**: `aws` / `python3` / `docker` (daemon running) / `git`, optionally `gh` (needed for a private-repository deploy), and a check that the AWS credentials work;
-2. **Choose "add project"** (the shared base is created first if it does not exist): enter the projectId → add repositories one by one (**git URL** + subdirectory + branch) → the index-service port (the port this project's `index-bridge-<project>` process listens on; the script suggests one) → the Feishu app credentials (written automatically to `source-truth/feishu-<project>`) → on the first run, one more read-only git credential (written to the global `source-truth/git-credentials` and reused by later projects);
+2. **Choose "add project"** (the shared base is created first if it does not exist): enter the projectId → add repositories one by one (**git URL** + subdirectory + branch) → the index-service port (the port this project's `index-bridge-<project>` process listens on; the script suggests one) → the Agent SDK (OpenAI by default) and answer model (also used by the glossary) → the Feishu app credentials (written automatically to `source-truth/feishu-<project>`) → on the first run, one more read-only git credential (written to the global `source-truth/git-credentials` and reused by later projects);
 3. Write `.local/projects.json` and deploy that project (shared base + that project's bridge + runtime + gateway).
 
 > To stand up the AWS environment first and configure git later, choose "**initialize environment (no project)**": it brings up only the shared base. Instance types and disk sizes are in the table below.
@@ -146,17 +163,27 @@ The codegraph index is memory-hungry and grows with repository size, so pick the
 
 The disk defaults to 30 GiB, with 50 / 100 / 200 GiB or a custom size available.
 
-**Glossary build cap** (initializing the environment asks once for the "glossary build file cap"): the glossary maps business terms in Chinese to the English symbols that actually appear in the code, so a designer writing in Chinese still hits English code. It is built offline in the background on the index host (which installs a local `claude` CLI (referred to as `cc` in log event names) as the build engine on first start) and is not on the Q&A path. The cap bounds how many files each build scans:
+**Optional capabilities:** enable glossary and monitoring when adding a project, or pass `--with-glossary` / `--with-monitoring`.
+An enabled glossary defaults to **400 files per repository**; only `--glossary-max-files 0` removes the cap.
+Q&A and glossary share the SDK and, on first install, the answer model. Advanced configuration can override `agent.glossaryModel`.
+Disabling glossary generation keeps git refresh running and leaves existing valid entries readable.
 
-| Option | When | Cost order of magnitude (one-off) |
-|---|---|---|
-| `0` (unlimited, **default**) | Full coverage, highest recall | Grows linearly with repository size; **hundreds of dollars on a large repository** (measured: ~$372 for 14k files) |
-| `4000` / `1000` | Deep coverage on a large repository / broader coverage | Grows linearly with file count |
-| `400` | Cost control (may miss Chinese-dense files) | Around $10 |
+| Cap | Use |
+|---|---|
+| `400` (default when enabled) | Initial evaluation with bounded model calls |
+| `1000` / `4000` | Broader coverage |
+| `0` (explicit) | All candidate files; cost grows with repository size |
 
-The first full build is a one-off; later builds only scan the changed increment, which is cheap. **When onboarding a large repository under a cost constraint, set a positive cap first.** English-only projects with no Chinese need not care — the glossary simply comes out empty, at zero cost, with no effect on Q&A. To change the cap afterwards, see section 6, "Changing the glossary build cap" (re-initializing the host is **not** required); routine operations never need to touch it.
+Unchanged configuration normally builds incrementally; switching SDK or model causes a full rebuild.
+English-only files may still incur model charges. `--with-glossary=false` stops glossary generation.
+`--with-monitoring=false` skips future monitoring deployment; existing alarms, schedules and other resources remain active.
+Later runs retain the saved choice. Legacy deployments without these keys preserve their previous enabled behavior.
 
-> The glossary is built **asynchronously in the background**: Q&A works as soon as the deploy finishes. A first full build on a large repository can take tens of minutes; Q&A is unaffected during that time, only rare Chinese terms may not be mapped yet. Progress and results are recorded in the host logs (`journalctl`, look for `glossary_gen_done` / `glossary_gen_cc_failed`). A failed build (for example the `cc` CLI not installing) only leaves the glossary temporarily empty; Q&A keeps working.
+> Glossary builds run **asynchronously**. Q&A can retrieve code while a large first build takes
+> tens of minutes. Check `glossary_gen_done` / `glossary_gen_cc_failed` in host logs; the latter
+> also covers OpenAI failures. A failed rebuild preserves the old glossary; a failed first build
+> leaves no glossary yet. After an SDK switch, also verify that artifact metadata matches the new
+> configuration; see [glossary switching](dual-sdk_en.md#glossary-switching).
 
 On success you should see:
 
@@ -164,7 +191,17 @@ On success you should see:
 - State written to `.local/deploy-config` (including per-project `RUNTIME_ARN_<project>`, `INDEX_SERVICE_IP`, …);
 - That you can go straight to section 5 to verify (each project's gateway is already resident on the index host as `bot-gateway@<project>.service`).
 
-> Unattended / CI: `./scripts/install.sh --yes` accepts every pre-filled value (a first run still requires the Feishu secret to exist).
+Use an explicit action and project for unattended redeployment:
+
+```bash
+./scripts/install.sh --yes --action redeploy --project <projectId> --region ap-northeast-1
+```
+
+First-time interactive setup collects credentials. For scripted first deployment, prepare the manifest and secrets per Appendix A, then run `deploy-all.sh`.
+Each `.local/deploy-config` belongs to one region; mismatches fail early. Use a separate checkout for another region.
+Deployment automatically runs one generic code question (model charges apply). Exit `3` means deployed but unverified,
+including a probe that cannot run and returns `2`;
+`--no-probe` skips it. Projects containing only local repositories skip until code is uploaded.
 > Tenant and language can also be given as flags to skip those prompts:
 > `./scripts/install.sh --feishu-domain lark --locale en` (without the former, the interactive flow asks for the tenant; without `--locale`, `lark` defaults to `en` and `feishu` to `zh`).
 
@@ -193,7 +230,7 @@ A first deploy takes roughly 10–20 minutes (bootstrap and the image build both
 - **GitHub credentials (required reading for private repositories)**: this EC2 instance clones the repository itself, downloads the codegraph binary (a private Release), and `git pull`s for later upgrades, so it needs GitHub access. `launch-host.sh` takes the local `gh` login token (or, if there is none, prompts you to paste a read-only PAT that needs only the repo:read scope) and stores it in Secrets Manager; `prepare-local-host.sh`, running on the instance, retrieves it through the instance role and persists it with `gh auth login` on the instance (stored in that machine's `~/.config/gh`, mode 600). Later upgrades and Release downloads carry the credential automatically, with nothing to pass again. **Public repositories can skip this** (leave the token blank when prompted). Revoke the token promptly when you replace or retire the instance.
 - **Machine spec**: must be ARM64 (aarch64) on Ubuntu 24.04 (both the image and codegraph-server are ARM; x86 is rejected); the deploying user needs passwordless sudo. launch-host already sets IMDSv2 and hop-limit 1.
 - **Broad permissions — dedicate the machine**: under `--local`, AWS calls use **this machine's instance role** (not your local profile, which is no longer available once you are on the EC2 instance). It needs both resource-creation and runtime permissions, so its **scope is fairly broad and this machine should not be shared with other workloads**. The role name `source-truth-index-role` is shared with the default deploy (IAM roles are account-level, not per-region): `create-iam.sh` reuses it idempotently, only adding permissions and never recreating it. Note, though, that **if a default deploy in the same account already uses that role, adding the deploy-time permissions grants them to that machine as well** — to keep the default deploy least-privilege, run `--local` in a different account.
-- **NAT is not optional**: the instance sits in a public subnet (with a public IP for SSH), but the AgentCore Runtime sits in a private subnet and reaches Bedrock through **NAT** — the Runtime's network interface is AWS-managed and has no public IP, so it cannot reach the internet through the IGW. NAT is therefore mandatory (a fixed cost from about $32/month). The deploy also creates VPC endpoints for ECR and S3, which take image pulls off that path — but not the Bedrock call, so they reduce what depends on NAT without removing the need for it. The bridge ports (8080-8099) are open only to members of the same security group and are unreachable from outside.
+- **Keep NAT in the current deployment topology**: the instance sits in a public subnet (with a public IP for SSH), while AgentCore Runtime uses a private subnet and reaches Bedrock through NAT. Its network interface has no public IP, so an IGW route alone does not provide internet access. The scripts create ECR and S3 VPC endpoints for image pulls; they do not configure a Bedrock Runtime endpoint. NAT, public IPv4, and interface endpoints have region-dependent charges; see the [service inventory](aws-services_en.md). The bridge ports (8080-8099) are open only to members of the same security group.
 
 **Upgrading**: log into **the same instance** (all deploy state lives in its `.local/`) and run `cd source-truth && git pull && ./scripts/deploy-all.sh --region <r> --local`. The deploy updates this machine in place: it re-runs bootstrap to land the new base code, rebuilds the image, updates the runtime, and restarts the gateway and index service. The instance ID, private IP and the already-built graph.db are all preserved; no new instance is created. Service is interrupted while bootstrap re-runs and the services restart (about as long as a first deploy), so prefer an off-peak window.
 
@@ -275,6 +312,12 @@ aws ssm start-session --region <r> --target <INDEX_SERVICE_INSTANCE>
 
 For running the gateway locally (development), see [Appendix B](#appendix-b-running-the-gateway-locally-development).
 
+**Retire a gateway in an old region**: on the old host run
+`sudo systemctl disable --now bot-gateway@<project>.service`, then inspect
+`sudo systemctl show bot-gateway@<project>.service -p ActiveState -p UnitFileState -p MainPID`.
+Require inactive, disabled and MainPID=0. EC2 and Runtime resources remain. Do not run a subsequent
+deployment that enables or restarts the retired project.
+
 ---
 
 ## 5. Verification (end-to-end smoke test)
@@ -296,7 +339,9 @@ Run the machine-checkable step (1) first, then the two health endpoints from ins
    The probe takes **exactly the same invoke path as the gateway** (boto3 `InvokeAgentRuntime` with an
    identically shaped payload) and checks: the stream is non-empty and an answer can be parsed out,
    `permission_denials` is empty (the read-only boundary was not breached), and the answer carries a
-   `file:line` citation. Treat `2` as a skip rather than a failure — `--full` is not blocked by it on an
+   `file:line` citation. Deployment `--smoke` also requires a successful `codegraph_read_file` /
+   `codegraph_read_table` completion event; refusal or a filename alone is insufficient. Unknown/mixed
+   normalized streams, missing terminal events and reported errors fail. Treat `2` as a skip rather than a failure — `--full` is not blocked by it on an
    offline or not-yet-deployed machine.
 
 2. **Backend health** (checked from inside the index-service instance; `8080` is the first project's port, other projects use their `port` from `projects.json`):
@@ -330,7 +375,7 @@ Run the machine-checkable step (1) first, then the two health endpoints from ins
 4. **@-mention the bot in a group** and ask something (e.g. "how is equipment durability calculated?"). Expected:
    - a card appears within seconds, its title carrying a live timer (thinking → analysing → done);
    - the conclusion comes first, in business language, with a collapsed "for engineering review" section at the bottom listing `file:line` sources;
-   - you can click "follow up" or simply reply to the card to keep asking with the previous context carried over.
+   - a successful answer grounded in code ends with a follow-up heading and 2–3 question buttons, including short answers. A reply-only hint does not pass this check. Clicking a question or replying to the card should carry the previous context into the next answer.
    - the first cold start (a new microVM) is slower (it includes MCP registration); that is normal.
 
 > The only mechanical gate in this repository is CI: [`.github/workflows/ci.yml`](../.github/workflows/ci.yml)
@@ -360,18 +405,17 @@ nothing extra. Changing the instance type is out of the deploy's scope (it never
 it yourself with `stop` → `modify-instance-attribute --instance-type` → `start`. Re-deploying with
 `--instance-type` only warns when the type does not match.
 
-**Changing the glossary build cap (`GLOSSARY_MAX_FILES`)** — this is the single authoritative statement in this
-document about that cap: the value ends up in `/etc/index-service.env` on the instance, and the only thing
-that writes that file is bootstrap. Passing `deploy-all.sh --glossary-max-files <n>` (`0` = unlimited, see
-[Appendix A](#appendix-a-deploy-allsh-by-hand)) **only reaches the instance when this round's base-code
-artifact signature changed and therefore triggered an in-place bootstrap re-run**; when the signature is
-unchanged the deploy takes the fast reuse path, does not re-run bootstrap, and the flag is a no-op.
-So: on an unchanged tree, edit `GLOSSARY_MAX_FILES` in `/etc/index-service.env` on the instance by hand, and
-the next refresh build uses the new value. Re-initializing the host is **not** required, and neither is a new
-instance. Routine operations never need this.
+**Changing the glossary switch or cap:** use `install.sh --action redeploy --project <project> --with-glossary --glossary-max-files <n>`.
+Both settings participate in the deployment signature, so they reach the host even without source changes, and other projects on that host receive the updated configuration.
+The installer persists unsuccessful project updates in `DEPLOY_GLOSSARY_PENDING_PROJECTS` inside
+`.local/deploy-config` and retries them on the next run. A project returning `3` after its configuration
+was applied is not redeployed solely because its Q&A probe failed.
+Applied values are persisted only after success, so a failed run remains retryable. The current implementation re-runs bootstrap in place, causing a few minutes of gateway downtime while preserving the instance, repositories and index.
+There is no need to edit `/etc/index-service.env` manually.
 
 **Redeploying only the runtime** (after changing the agent image / system prompt): re-run `deploy-all.sh` (the image and runtime phases are idempotent).
-Note that microVMs still alive keep using the old image for about 15 minutes, until they are reclaimed.
+Existing microVMs retain their image until reclaimed. The gateway restart clears cached session IDs,
+so subsequent questions start new sessions with the updated Runtime; a running request may still use the previous image.
 
 **Tuning microVM lifetime (follow-up hit rate vs cost)**: `deploy-all.sh --idle-timeout <seconds>` (default 900,
 i.e. 15 minutes; range 60–28800). The flag sets both AgentCore's `idleRuntimeSessionTimeout` and the gateway's
@@ -392,6 +436,7 @@ aws ssm start-session --region <r> --target <INDEX_SERVICE_INSTANCE>
 
 Key events (gateway side): `invoke_start` (runtime invocation began), `card_sent` (card sent),
 `card_closed` (one Q&A finished), `reply_context_replayed` (a follow-up carried prior context),
+`followup_suggestions` (`count` is the extracted question count; `markerPresent` distinguishes a missing heading from extraction failure, without logging question text),
 `card_write_dropped` / `finalize_error` (card write failed), `invoke_http_error` (non-200 from the backend).
 Key events (agent microVM side, same traceId): `agent_run_start` (run began; records promptChars / repos / model),
 `tool_call` (a tool call started), `tool_latency` (duration of each tool call).
@@ -403,7 +448,7 @@ both sides and merges them — all you supply is the traceId (region, both log g
 ordering are handled for you):
 
 ```bash
-./scripts/trace.sh st-00000000000000000000000000000000   # example value — replace it with the real traceId from the card footer or an answer_* log line
+./scripts/trace.sh st-0123456789abcdef0123456789abcdef   # example value — replace it with the real traceId from the card footer or an answer_* log line
 #   --since-hours N (default 6) widens the look-back window; --raw skips the merge and prints both sides as-is
 #   --runtime <id> names the AgentCore runtime id (by default derived from RUNTIME_ARN_* in .local/deploy-config;
 #     with several projects it takes the first and says so, so pass this flag to query another one)
@@ -425,7 +470,7 @@ aws ssm start-session --region <r> --target <INDEX_SERVICE_INSTANCE>
 Feishu credentials, re-running `install.sh` (or the deploy's gateway phase) rewrites
 `/etc/bot-gateway-<project>.env` and restarts the service.
 
-**Monitoring: metrics / dashboards / alarms** — phase 7 of `deploy-all.sh` already deploys the whole set
+**Monitoring: metrics / dashboards / alarms** — when `--with-monitoring` is enabled, phase 7 of `deploy-all.sh` deploys the whole set
 (CloudWatch metric filters, a three-page dashboard, alarms + SNS, the DAU pre-aggregation Lambda), and
 **normally needs no manual intervention**. The exception is the **first deploy**: while the gateway has not
 written a log yet and the log group does not exist, the metric filters and alarms cannot be created (the
@@ -440,8 +485,8 @@ never closed properly and is stuck at "analysing"), `AnswerFailedBurst` (answer 
 fires when the heartbeat stops — a broken log pipeline or a sick gateway; the heartbeat continues through idle
 nights, so it does not false-alarm).
 
-**Tearing everything down (stop the bill)**: when you are done trialling, or a deploy failed midway and left
-billable resources behind (NAT ~$32/month, EIP, EC2, and the two ECR interface endpoints, which bill hourly), one command cleans up in reverse-dependency order:
+**Removing deployment resources**: when you are done trialling, or a deploy failed midway and left
+billable resources behind (NAT, public IPv4, EC2, and the two ECR interface endpoints), one command cleans up in reverse-dependency order:
 
 ```bash
 ./scripts/teardown.sh --region <r> --dry-run     # review what would be deleted; touches nothing
@@ -466,7 +511,9 @@ for mutually trusting projects in one team; projects that do not trust each othe
 `port` (that project's bridge port, unique on the host), `feishuSecretId` (generated by "add project" —
 **do not fill it in by hand**), `repos` (per repository `{subdir, source?, git, ref?, refreshIntervalSec?}`,
 where `source` defaults to `git` and a local repository uses `local`). The top-level `refreshIntervalSec` is
-the global default refresh interval.
+the global default refresh interval. The project's `agent` object selects the SDK, answer model
+and glossary model; see [SDK configuration and migration](dual-sdk_en.md). Before redeploying a
+shared host, reconcile the complete project inventory with `/etc/source-truth-projects.json`.
 
 Everything is driven from the arrow-key menu of `./scripts/install.sh`:
 
@@ -498,17 +545,17 @@ Troubleshooting a specific project: on the host every unit name carries the proj
 
 | Symptom | Likely cause | Action |
 |------|----------|------|
-| The deploy reports success, but every question comes back with no content (empty answer / "not found") | **The runtime-to-bridge leg is blocked** — the deploy's health check only probes the index host's loopback and cannot see this layer | Check these three in order: ① does the security group the runtime uses allow **8080-8099** to the index host; ② does a route from the private subnet to **NAT** exist (the Runtime's ENI is AWS-managed with no public IP, so it must go through NAT); ③ does the private domain resolve — run `dig +short index.<r>.source-truth.internal` on the instance; an empty answer points at the private hosted zone / VPC DNS attributes (see [Appendix C](#appendix-c-on-host-checklist-after-the-first-deploy)) |
+| The deploy reports success, but every question comes back with no content (empty answer / "not found") | **The runtime-to-bridge leg may be blocked** — check the deployment smoke result; `--no-probe` or a skipped local-repository probe leaves this path unverified | Check these three in order: ① does the security group the runtime uses allow **8080-8099** to the index host; ② does a route from the private subnet to **NAT** exist (the Runtime's ENI is AWS-managed with no public IP, so it must go through NAT); ③ does the private domain resolve — run `dig +short index.<r>.source-truth.internal` on the instance; an empty answer points at the private hosted zone / VPC DNS attributes (see [Appendix C](#appendix-c-on-host-checklist-after-the-first-deploy)) |
 | The card stays at "analysing…" and never finishes | The backend stream was interrupted / finalize threw | Look for `finalize_error` / `card_closed failed:true` in the gateway log; if occasional, ask again, and if persistent check runtime / index health |
 | Stray `<invoke>` code markers appear in the card | On that cold-start question the underlying code-retrieval tools were not ready yet and the agent answered too early | The gateway retries once automatically and it stops happening once warm. Check `num_turns`/`cache_read` in the log to confirm it was a cold start |
 | The bot is **completely unresponsive** in the group | Gateway not started / the bot was not actually @-mentioned / two gateways for the same app fighting over events / **wrong tenant** (the app lives in international Lark but was deployed as China Feishu, or vice versa) | On the instance start with `curl -s -w '%{http_code}\n' 127.0.0.1:<HEALTH_PORT>/ready` (the port is in `/etc/bot-gateway-<project>.env`): 503 means the long connection is not up; then `systemctl status 'bot-gateway@*'` to confirm active plus `sdk_wsclient_connected` in the log; confirm the account @-mentioned is `FEISHU_BOT_OPEN_ID`; stop the extra gateways and keep exactly one. If authentication succeeded (a token was obtained) yet no message event ever arrives, check the tenant: `grep -E 'FEISHU_API_BASE\|LOCALE' /etc/bot-gateway-<project>.env`, compare with the console the app was created in, and redeploy with the correct `--feishu-domain` if they disagree (see [section 3](#3-connecting-feishu--lark)) |
 | The gateway did not start, reporting `condition failed` | `/etc/bot-gateway-<project>.env` has not been written yet (runtime not ready / the gateway phase was skipped) | Re-run `install.sh` or `deploy-all.sh` (without skipping gateway); confirm `FEISHU_SECRET_ID` is set |
-| The card answers "query failed" / the log shows `AccessDenied` | The deploying identity lacks `bedrock:InvokeModel`, or that model has no usable inference profile in this region | Grant `bedrock:InvokeModel` to the deploying identity; the profile is resolved automatically per region, and when none is found preflight lists the ones available there (see prerequisite 3) |
+| The card answers "query failed" / the log shows `AccessDenied` | The calling Runtime/index role lacks model access, or the profile is unavailable in this region | Identify the failing role and grant the selected profile/model invocation permissions; deployer access does not prove Runtime access. See prerequisite 3 and [SDK configuration](dual-sdk_en.md) |
 | The deploy times out in the index-service phase | NAT routing has not converged in a brand-new account / the instance is still cold-starting and building the index | Wait one more round (bootstrap retries network operations); check `/var/log/` and `journalctl -u 'index-build@*'` |
 | `/health` is non-200 for a long time | Corrupted index / empty graph.db / a worker restarting repeatedly | On the instance read the index-bridge-<project> log; if the base code is behind, re-run `deploy-all.sh` (it re-runs bootstrap in place, leaving the instance and graph.db alone); if the graph really is corrupted, run `sudo systemctl start index-build@<repo-subdir>` on the instance to rebuild that repository's graph in full. Note: before its first `push-local-repo.sh`, a local repository legitimately has an empty graph and a non-200 `/health` — normal, and resolved once the code is pushed |
 | Every question returns `HTTP 424 Runtime health check failed`, failing in about 3 seconds, while `/health`, the bridge and the gateway's long-lived connection are all green | **The container never started** — the image pull failed. This looks more like an application fault than anything else, but no layer of the application ran. Two causes have been seen: (1) the NACL's ephemeral return range topped out too low (the AgentCore microVM picks source ports above 60999); (2) the NAT-to-internet path to ECR timing out intermittently | Read the runtime's own log group first — a pull failure is stated explicitly there: look for `Failed to pull image` and `i/o timeout` in `aws logs filter-log-events --log-group-name /aws/bedrock-agentcore/runtimes/<runtime-id>-DEFAULT --start-time <ms>`. Then check the VPC endpoints are all present and available: `aws ec2 describe-vpc-endpoints --filters Name=tag:Name,Values=source-truth-vpce-* --query 'VpcEndpoints[].[VpcEndpointId,ServiceName,State,PrivateDnsEnabled]'` — all three must exist, and `PrivateDnsEnabled` must be `true` on the interface ones (otherwise the endpoint bills without intercepting anything). Re-running the deploy's network phase converges it. From inside the subnet you can confirm resolution lands on the endpoint's private IP: `getent hosts api.ecr.<region>.amazonaws.com` should return `10.1.1.x` |
 | Behaviour is still the old version after redeploying | microVMs still alive keep using the old image (about 15 minutes) / the gateway was not restarted | Wait for that microVM to be reclaimed; restart the gateway to be sure it runs the new code |
-| Chinese questions do not pick up project-specific naming / the glossary looks empty | The background glossary build has not finished or failed (`cc` failed to install / Bedrock unreachable or unauthorized) | On the instance read `journalctl` and `/var/log/glossary-build-*`, looking for `glossary_gen_done` (success) / `glossary_gen_cc_failed` (build failed); Q&A is unaffected and falls back to ordinary retrieval |
+| Chinese questions do not pick up project-specific naming / the glossary looks empty | The background glossary build has not finished or failed (selected SDK dependencies missing / Bedrock unreachable or unauthorized) | On the instance read `journalctl` and `/var/log/glossary-build-*`, looking for `glossary_gen_done` (success) / `glossary_gen_cc_failed` (build failed); Q&A is unaffected and falls back to ordinary retrieval |
 
 > Exclusive-write constraint: only one process may write index-service's graph.db at a time; concurrent writes
 > corrupt it down to 0 nodes. The service layer guards this with flock + an in-process lock + an orphan reaper;
@@ -598,7 +645,10 @@ The remaining flags (all combinable with the above):
 | `--feishu-domain <feishu\|lark>` | `feishu` | Feishu tenant: `feishu` = China (`open.feishu.cn`), `lark` = international (`open.larksuite.com`). **Must match the console the app was created in**; it drives both the event long connection and the REST base URL, and getting only one of them right yields a bot that authenticates and then never receives events. Get it right at the first deploy (see [section 3](#3-connecting-feishu--lark)) |
 | `--locale <zh\|en>` | Follows the tenant: `en` with `--feishu-domain lark`, otherwise `zh` | Language of cards and prompts. Written as `LOCALE` in `/etc/bot-gateway-<project>.env` |
 | `--max-files <n>` | 10000 | Cap on files codegraph indexes per repository |
-| `--glossary-max-files <n>` | `0` (unlimited) | Cap on files the glossary build scans per repository. **This is the main cost knob**: unlimited, one full build on a large repository can reach hundreds of dollars (measured ~$372 for 14000 files). Note it only reaches the instance when this round triggers an in-place bootstrap re-run; otherwise edit `/etc/index-service.env` on the instance — see section 6, "Changing the glossary build cap" |
+| `--with-glossary[=true\|false]` | Off for new environments | Enable or disable background glossary generation; legacy choices are preserved |
+| `--glossary-max-files <n>` | `400` | Per-repository cap when glossary is enabled; `0` is unlimited. Changes are automatically applied |
+| `--with-monitoring[=true\|false]` | Off for new environments | Enable monitoring deployment; disabling does not delete existing resources |
+| `--no-probe` | Not skipped | Skip the real post-deployment code question |
 | `--idle-timeout <seconds>` | 900 | microVM idle-reclaim time (60–28800); also aligns the gateway's session-reuse TTL |
 | `--max-lifetime <seconds>` | 28800 (8h) | Hard ceiling before a microVM is force-reclaimed (60–28800); semantics in [`agent/architecture.md`](agent/architecture.md) (Chinese only) |
 | `--force` | off | Skip phase 0's hard-blocking preflight (an insufficient vCPU quota, say), treating the operator as having confirmed. Use only when the increase is already granted, or you know the check result is stale |
@@ -671,14 +721,13 @@ in `.local/deploy-config`).
 > **The two things most likely to bite on a real machine — confirm both yourself before handover**: first,
 > "the deploy reported success but questions come back with no content" — the cause is almost always the
 > runtime-to-bridge leg (security group not allowing 8080-8099 / no route from the private subnet to NAT /
-> private-domain resolution failing), which the deploy itself cannot detect and is the hardest to find on your
-> own; second, the wrong egress IP allowed on port 22, which locks you out of the machine you just created.
+> private-domain resolution failing). The default Runtime smoke tests this path; skipped probes leave it unverified; second, the wrong egress IP allowed on port 22, which locks you out of the machine you just created.
 
 ---
 
 ## Appendix D: refreshing monitoring by hand
 
-Phase 7 of `deploy-all.sh` already deploys the whole monitoring set; the commands here are only for refreshing
+With `--with-monitoring` enabled, phase 7 of `deploy-all.sh` deploys the whole monitoring set; the commands here also support enabling it explicitly or refreshing
 a dashboard/threshold on its own, or catching up after deploying with `--skip monitoring`. The deploy-time
 identity needs `logs:PutMetricFilter`, `cloudwatch:PutDashboard`, `cloudwatch:PutMetricAlarm` and
 `sns:CreateTopic` (not the runtime role). Idempotent and repeatable; change `--region` for another region.
@@ -719,7 +768,7 @@ Both are applied by one idempotent stage:
 ./scripts/apply-monitoring.sh --region <region> --only observability
 ```
 
-It also runs as part of `deploy-all.sh` Phase 7. Every step reads its result back rather
+It also runs as part of `deploy-all.sh` Phase 7 when monitoring is enabled. Every step reads its result back rather
 than trusting an exit code, because all the failure modes here look identical from the
 outside: everything configured, no data.
 
@@ -732,10 +781,10 @@ aws logs filter-log-events --region <region> --log-group-name aws/spans \
   --start-time $(( ($(date +%s) - 1800) * 1000 )) --limit 20
 ```
 
-On a healthy deploy the runtime's own log group carries span records whose `scope.name`
-includes `amazon.opentelemetry.distro.instrumentation.mcp` (the evidence channel to the
-index service is instrumented), `claude_agent_sdk._internal.transport.subprocess_cli` and
-`bedrock_agentcore.app`.
+Inspect the configured trace destination. The SDK-specific `scope.name` is
+`openinference.instrumentation.openai_agents` for OpenAI or
+`openinference.instrumentation.claude_agent_sdk` for Claude. Transport and runtime spans
+may also appear; Claude subprocess spans are not expected from an OpenAI project.
 
 **Session correlation works and is worth checking after any change.** A span's
 `attributes.session.id` matches the `sessionId` the gateway logs on `invoke_start`, so a
@@ -747,8 +796,8 @@ deliver to their own `/aws/bedrock-agentcore/runtimes/<id>-<endpoint>` group, wh
 this layout — one host, several projects, each already with its own group, so access
 control and encryption scope per project. That needs ADOT >= 0.18.0 (pinned at 0.19.0, so
 satisfied), `UNIFIED_TRACES_DESTINATION_ENABLED=true` on the runtime, and
-`logs:PutResourcePolicy` for the execution role. Not configured here: these runtimes
-predate the unified destination and keep the shared group.
+`logs:PutResourcePolicy` for the execution role. The scripts do not enable this Runtime
+environment variable; inspect the deployed environment before choosing the log group.
 
 **Cost and one caveat.** Transaction Search indexes spans and is billed for that; sample
 below 100% with `aws xray update-indexing-rule` if that matters. And ADOT's
@@ -762,7 +811,7 @@ cold-start `HTTP 424 Runtime health check failed` ever appears, look here first.
 ## Appendix F: Evaluations (AgentCore Evaluations)
 
 Evaluations are **optional** and deliberately not on the deploy path: the bot does not need them to
-answer questions, and they cost a different kind of money (a resident Lambda, plus model tokens per
+answer questions, and they cost a different kind of money (Lambda invocations and execution time, plus model tokens per
 LLM-as-judge verdict). They also only mean anything once real traffic has produced telemetry — creating
 them during a first deploy buys you nothing but an empty run.
 
@@ -775,19 +824,22 @@ else outright:
 ValidationException: Provided input has no spans with supported scope.
 ```
 
-This project satisfies that through `openinference-instrumentation-claude-agent-sdk` (see
-`agent-container/requirements.txt`). It is activated by the `[opentelemetry_instrumentor]` entry point it
-declares, so `opentelemetry-instrument` discovers it and **no agent code calls it**. Confirm it is live:
+The selected SDK determines the scope. Claude uses automatically discovered
+`openinference-instrumentation-claude-agent-sdk`; OpenAI explicitly installs the exclusive processor
+in `openai_backend.instrument()` from `openinference-instrumentation-openai-agents`. Both export
+through ADOT. Check the configured span destination (`aws/spans` by default; a Runtime log group
+when unified trace destinations are enabled):
 
 ```bash
 aws logs filter-log-events --region <r> \
-  --log-group-name /aws/bedrock-agentcore/runtimes/<runtime-id>-DEFAULT \
+  --log-group-name aws/spans \
   --start-time $(( ($(date +%s) - 3600) * 1000 )) --limit 500 \
-  | grep -c openinference.instrumentation.claude_agent_sdk
+  | grep -Ec 'openinference.instrumentation.(claude_agent_sdk|openai_agents)'
 ```
 
-If that prints 0, stop here: every evaluator will fail with `no spans with supported scope`, and that is
-not the evaluator's fault.
+If no matching span appears, verify the time window, span destination and instrumentation for the
+selected SDK before configuring evaluation. A zero count in the wrong log group is not proof that
+instrumentation failed.
 
 ### Use the built-in evaluators first
 
@@ -812,15 +864,32 @@ context.
 ./scripts/apply-evaluations.sh --region <r>              # all stages
 ./scripts/apply-evaluations.sh --region <r> --dry-run    # print the plan only
 ./scripts/apply-evaluations.sh --region <r> --only evaluators
+./scripts/apply-evaluations.sh --region <r> --project <pid> --only lambda
 ```
 
-Stages run `package` → `iam` → `lambda` → `evaluators`, each idempotent. Three things worth knowing:
+Stages run `package` → `iam` → `lambda` → `evaluators` → `online`, each idempotent. `--dry-run` makes no AWS calls.
+Lambda updates preserve additional environment variables.
+New online configurations start disabled with 100% sampling; `--enable --sampling 20` enables the requested rate.
+Existing status and sampling remain unchanged when omitted; `--disable` explicitly disables evaluation.
+Reruns reconcile execution status, sampling, evaluators, session timeout and execution role.
+Failure to read an existing configuration fails the operation. Judge models are resolved for the current
+region, or overridden with `EVAL_JUDGE_MODEL=<full inference profile ID>`; this choice is independent of
+the Q&A/glossary SDK. Newly created role propagation errors have bounded retries; permission errors still
+fail. The region must match the local deployment configuration.
+
+**The code-based evaluator currently reads one project's bridge.** `--project` selects it. A new Lambda defaults to
+the first configured project; an update retains the project mapped to its existing bridge, failing
+if it cannot be identified uniquely. Repository prefixes come from that project and are passed as JSON.
+The `online` stage still creates configurations for each regional Runtime, so scores produced by this
+same code-based evaluator for other projects are not valid. Automatic routing across projects is not implemented.
+
+Three things worth knowing:
 
 - **Packaging must happen in a container.** `pydantic` carries the `pydantic-core` binary wheel, so a
   package built with the local pip may simply fail to import on Lambda — and that failure only surfaces
   during a real evaluation, where it appears as an evaluator fault in your evaluation data. The script
-  installs inside the official Lambda base image and imports the result there before uploading; a failed
-  import refuses the upload.
+  builds and checks imports inside the official Lambda base image with `linux/arm64`. An x86 deployment
+  machine must support ARM64 emulation.
 - **The Lambda sits in the private subnet and joins `source-truth-index-svc`.** That is not an extra hole:
   the bridge's inbound rule is "8080-8099 from members of the same security group", so the evaluator is
   bound by the same boundary as the runtime.

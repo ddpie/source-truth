@@ -4,8 +4,12 @@
 当代码 / 实现文档与这里冲突时，按 [`AGENTS.md`](../../AGENTS.md) 的「代码为唯一依据」——以代码为准并标注差异；
 但**做什么、为什么这么做、MVP 边界在哪里**，以本目录为准。
 
+> **更新说明（2026-09-09）**：本文目录保留早期 Claude POC 的设计依据。当前 MVP 已支持
+> OpenAI Agents SDK 与 Claude Agent SDK，问答和术语表统一选择；具体接入以
+> [双 SDK 文档](../dual-sdk_zh.md) 和 [AGENTS.md](../../AGENTS.md) 为准。Codex 仍属 post-MVP。
+
 > **语言：仅中文，暂不翻译。** 本目录文档不参与 `docs/` 的 `_zh`/`_en` 双语配对
-> （配对校验只作用于顶层 `docs/*_{zh,en}.md`，见 [`../agent/invariants.md`](../agent/invariants.md) §4）。
+> （本目录由脚本白名单显式豁免；其余 `docs/` 递归校验，见 [`../agent/invariants.md`](../agent/invariants.md) §4）。
 
 ## 文档一览
 

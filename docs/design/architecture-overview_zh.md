@@ -1,5 +1,8 @@
 # 游戏研发智能助手 POC 方案
 
+> 更新说明（2026-09-09）：本文保留早期 Claude POC 设计。当前问答与术语表已支持统一选择
+> OpenAI Agents SDK / Claude Agent SDK，具体配置和 API 见 [双 SDK 文档](../dual-sdk_zh.md)。
+
 > 架构权威依据：POC 架构方案。MVP 边界与验收基准见 [`requirements_zh.md`](requirements_zh.md)；
 > 面向 AI 的实现工作原理见 [`../agent/architecture.md`](../agent/architecture.md)。
 >
@@ -9,7 +12,7 @@
 > - MVP 是**单引擎 Claude Code**（Codex 后置），**仅主分支**（无 worktree 多分支）；代码来源以 git 仓为主，并支持本地仓（`source:"local"`，rsync 手动推送的快照，详见 [`../runbook_zh.md`](../runbook_zh.md)）；
 > - 不读设计文档、不做数值模拟；完整审计护栏后置（MVP 安全仅保留 prompt/response 日志防滥用）；
 > - §1.1「支持的场景」里的**数值模拟**与**配置/文案生成**是 POC 阶段的判断，**MVP 明确不做**（前者要跑引擎、后者要写回文件）——权威边界见 README 的「能力边界 / Scope」与 [`requirements_zh.md`](requirements_zh.md)；
-> - 取证经 SDK 原生 HTTP MCP 连接，**无需 stdio→HTTP 转换层**（mcp-proxy）；代码只在索引服务本地磁盘，会话容器不挂任何文件系统。
+> - 取证经 SDK 原生 HTTP MCP 连接，**无需 stdio→HTTP 转换层**（mcp-proxy）；代码只在索引服务本地磁盘，会话容器不挂仓库文件系统。
 
 策划日常有大量咨询性需求（理解代码逻辑、确认数值配置、评估修改影响），这些需求本身不复杂，却常常卡在研发
 排期上。本方案在飞书中部署 AI 编程助手（Claude Code / Codex），让业务人员直接获得代码级别的问答和数值
@@ -132,7 +135,7 @@ AI 输出格式不固定（有时纯文字、有时带代码块、有时有表�
 
 **为什么这么设计**：代码和索引是项目级资源，所有人查询的是同一个项目，复制 N 份既浪费存储，又会造成更新
 不同步。对话和临时文件是个人工作状态，必须隔离。落地方式：共享代码与索引放在索引服务本地磁盘，经其
-MCP-over-HTTP 接口（定位 + 读文件工具）提供给所有会话容器，会话容器本身不挂任何文件系统。每会话独占的临时
+MCP-over-HTTP 接口（定位 + 读文件工具）提供给所有会话容器，会话容器本身不挂仓库文件系统。每会话独占的临时
 文件则用 AgentCore Session Storage（`/mnt/workspace`，按会话自动分配独占空间），无需额外开发。
 
 |  | 共享存储 | 会话存储 |
@@ -182,7 +185,7 @@ MCP-over-HTTP 接口（定位 + 读文件工具）提供给所有会话容器，
 
 | 依赖 | 状态 | 备注 |
 |-|-|-|
-| AgentCore Runtime | GA | Firecracker 隔离，VPC 模式（经 HTTP 访问索引服务；不挂任何文件系统） |
+| AgentCore Runtime | GA | Firecracker 隔离，VPC 模式（经 HTTP 访问索引服务；不挂仓库文件系统） |
 | AgentCore Session Storage | Preview | 会话级独占存储，14 天空闲过期；Preview 阶段，正式商用前需复核可用性 |
 | Claude Code Agent SDK | GA | 官方容器化方案 |
 | Codex CLI | GA | headless 模式 |

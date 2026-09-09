@@ -8,4 +8,8 @@
   你可能还想问 / 需要你确认）——这些 marker 由 agent 写在答案文本里、再由网关解析，属于
   `agent-container/prompts/system.md` 的契约，翻译它们会破坏网关对 marker 的解析。
 - `alarm-thresholds.json`：CloudWatch 告警阈值，运维可调。改阈值后重跑 `scripts/apply-monitoring.sh --only alarms` 即生效，无需改代码（渲染逻辑见 `scripts/lib/render_alarms.py`）。
-- `projects.example.json`：多项目路由清单（`port` / `feishuSecretId` / `repos`）的 schema 示例；真实配置写在 `.local/projects.json`（不入库，由 `install.sh` 的「添加项目」生成）。字段说明见文件内 `_doc`。
+- `projects.example.json`：项目路由与 SDK 选择（`port` / `feishuSecretId` / `repos` / `agent`）的 schema 示例；
+  真实配置写在 `.local/projects.json`（不入库，由 `install.sh` 的「添加项目」生成）。
+  `agent.sdk` 同时控制问答和术语表，`agent.model` / `agent.glossaryModel` 分别指定模型。
+  新项目默认 OpenAI；旧配置保留 Claude，不能只加 `schemaVersion: 2` 就视为无影响升级。
+  字段说明见文件内 `_doc`，迁移步骤见 [`双 SDK 配置`](../docs/dual-sdk_zh.md)。

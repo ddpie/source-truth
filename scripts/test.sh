@@ -113,7 +113,7 @@ run_unit() {
       # MCP session, including the singleton-writer-lock concurrency behaviour, under a fully green
       # unqualified verdict — exactly the misreport this accumulator exists to prevent.
       local _py_out _py_skipped
-      _py_out="$(pytest -q "${py_dirs[@]}" 2>&1)" || rc=1
+      _py_out="$(pytest -q -rs "${py_dirs[@]}" 2>&1)" || rc=1
       printf '%s\n' "$_py_out"
       _py_skipped="$(printf '%s' "$_py_out" | grep -oE '[0-9]+ skipped' | tail -1 | grep -oE '^[0-9]+' || true)"
       [[ -n "$_py_skipped" && "$_py_skipped" -gt 0 ]] && SKIPPED+=("pytest:${_py_skipped}-tests-skipped")

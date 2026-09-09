@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-# agent-container — source-truth Claude Code Agent (ARM64-only, per AGENTS.md).
+# agent-container — source-truth OpenAI / Claude Agent (ARM64-only, per AGENTS.md).
 # Reference: amazon-bedrock-agentcore-samples claude-agent/claude-sdk/Dockerfile.
 #
 # Build (ARM64): docker build --platform linux/arm64 -t <ecr>/source-truth-agent:latest .
@@ -24,7 +24,8 @@ ENV UV_SYSTEM_PYTHON=1 \
     UV_NO_PROGRESS=1 \
     PYTHONUNBUFFERED=1 \
     DOCKER_CONTAINER=1 \
-    CLAUDE_CODE_USE_BEDROCK=1
+    CLAUDE_CODE_USE_BEDROCK=1 \
+    OTEL_PYTHON_DISABLED_INSTRUMENTATIONS=aws_openai_agents,openai_agents
 
 # Python deps: install from the FULL transitive lock (requirements.lock) so every build installs
 # the same VERSIONS. requirements.txt is the human-readable direct-dep intent; requirements.lock

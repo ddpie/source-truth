@@ -28,10 +28,12 @@
       "description": "Scores whether the agent stayed inside the evidence: source-grounded specifics, or an explicit 'the code does not contain this' — and penalises plausible domain knowledge presented as if read from the repo.",
       "level": "TRACE",
       "kind": "llmAsAJudge",
-      "modelId": "jp.anthropic.claude-haiku-4-5-20251001-v1:0",
+      "modelId": "anthropic.claude-haiku-4-5-20251001-v1:0",
       "_modelId_note": [
-        "评委模型走 Bedrock Runtime，必须是该区域真实存在的完整推理档 id——版本后缀不能省：",
-        "`jp.anthropic.claude-sonnet-4-5` 会被拒为 'The provided model identifier is invalid'。",
+        "这里只写**不带地理前缀**的基名。apply_evaluators.py 在创建前用 ListInferenceProfiles 解析成该区域",
+        "真实存在的推理档（jp./us./eu. 优先，其次 global.）；也可用 --judge-model / EVAL_JUDGE_MODEL 显式指定。",
+        "第一版写死 jp. 前缀，换区域时第二个评估器被拒而第一个已建成——半套资源。",
+        "版本后缀不能省：`claude-sonnet-4-5` 会被拒为 'The provided model identifier is invalid'。",
         "用 haiku 而不是 sonnet：判据是一条明确的二元规则（答案是否留在证据之内），不需要更强的模型，",
         "而评估会对每个 trace 各跑一次，成本差异是线性放大的。区域内可用档用",
         "`aws bedrock list-inference-profiles` 查。"

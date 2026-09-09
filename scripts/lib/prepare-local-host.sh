@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # prepare-local-host.sh — bring a fresh EC2 up to the point where install.sh can run, for --local.
 #
-# launch-host.sh scp's this onto the instance and runs it (the repo is private, so it can't be
-# curl'd from raw.githubusercontent). It installs the deps install.sh checks for (aws / docker / git),
-# logs gh in with the token stashed in Secrets Manager (so a private clone works), clones the repo,
+# launch-host.sh copies this onto the instance with the selected repository URL and ref.
+# It installs the deps install.sh checks for (aws / docker / git), optionally authenticates gh
+# with a token from Secrets Manager for private forks, clones the repo,
 # and hands off to the interactive installer. Idempotent — safe to re-run.
 #
 #   bash /tmp/prepare-local-host.sh                 # region auto-detected from IMDS
@@ -24,7 +24,7 @@ if [ -z "$REGION" ]; then
   REGION="$(curl -fsS ${_tok:+-H "X-aws-ec2-metadata-token: $_tok"} "http://169.254.169.254/latest/meta-data/placement/region" 2>/dev/null || true)"
 fi
 [ -n "$REGION" ] || { echo "✗ could not detect region from IMDS — pass REGION=<r> explicitly." >&2; exit 2; }
-REPO_URL="${REPO_URL:-https://github.com/aws-samples/sample-code-qa-on-agentcore.git}"
+REPO_URL="${REPO_URL:-https://github.com/ddpie/source-truth.git}"
 REPO_REF="${REPO_REF:-main}"
 TOKEN_SECRET="${TOKEN_SECRET:-source-truth/deploy-github-token}"
 REPO_DIR="${REPO_DIR:-source-truth}"

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# check-versions.sh — 无网络版本钉死防漂移守卫（pre-commit / test.sh --lint 调用）。
+# check-versions.sh — 无网络版本钉死防漂移守卫（test.sh --lint / CI 调用）。
 # 校验 AGENTS.md「基础镜像 + 依赖 EXACT-pin」硬约束中可机检的部分：
 #   - agent-container 基础镜像必须按 sha256 digest 钉死（非浮动 tag）；
 #   - requirements.txt 每个非注释依赖必须 ==<version> 精确钉死；
@@ -125,7 +125,7 @@ if [[ -f "$IDX_LOCK" ]] && grep -q 'INCOMPLETE' "$IDX_LOCK"; then
   _lockrefs=""
   for _f in "$IDX_BOOT" scripts/lib/deploy_project.sh scripts/deploy-all.sh scripts/lib/provision_index_service.sh; do
     [[ -f "$_f" ]] || continue
-    if grep -q 'requirements\.lock' "$_f"; then
+    if grep -qE '(^|[^[:alnum:]_-])requirements\.lock' "$_f"; then
       _lockrefs="${_lockrefs}${_f} "
     fi
   done
@@ -134,6 +134,53 @@ if [[ -f "$IDX_LOCK" ]] && grep -q 'INCOMPLETE' "$IDX_LOCK"; then
   else
     ok "index-service/requirements.lock 标记为 INCOMPLETE 且未被安装路径引用（符合预期）"
   fi
+fi
+
+# 7. The isolated glossary worker has its own lock. Guard both the intent pins and
+#    their exact versions; validating only the agent lock misses a broken worker
+#    install even when the agent's CI environment has all the missing dependencies.
+if python3 - "$ROOT" <<'PY'
+import pathlib
+import re
+import sys
+
+root = pathlib.Path(sys.argv[1])
+def pins(path, *, extras=False):
+    result = {}
+    for number, raw in enumerate(path.read_text().splitlines(), 1):
+        line = raw.split("#", 1)[0].strip()
+        if not line:
+            continue
+        pattern = r"([\w.-]+)(?:\[[\w,.-]+\])?==([A-Za-z0-9.!+_-]+)" if extras else r"([\w.-]+)==([A-Za-z0-9.!+_-]+)"
+        match = re.fullmatch(pattern, line)
+        if not match or "*" in line:
+            raise ValueError(f"{path}:{number}: expected an exact name==version pin")
+        name = re.sub(r"[-_.]+", "-", match[1]).lower()
+        if name in result:
+            raise ValueError(f"{path}:{number}: duplicate package {name}")
+        result[name] = match[2]
+    if not result:
+        raise ValueError(f"{path}: empty dependency list")
+    return result
+
+try:
+    direct = pins(root / "index-service/glossary-requirements.txt", extras=True)
+    worker = pins(root / "index-service/glossary-requirements.lock")
+    agent = pins(root / "agent-container/requirements.lock")
+    for name, version in direct.items():
+        if worker.get(name) != version:
+            raise ValueError(f"glossary lock does not match direct pin {name}=={version}")
+    for name, version in worker.items():
+        if agent.get(name) != version:
+            raise ValueError(f"glossary pin {name}=={version} is not in the agent lock / license inventory")
+except (OSError, ValueError) as exc:
+    print(exc, file=sys.stderr)
+    sys.exit(1)
+PY
+then
+  ok "glossary 直接依赖精确固定，独立 lock 与许可清单版本一致"
+else
+  err "glossary 依赖 / lock 不一致"
 fi
 
 echo ""

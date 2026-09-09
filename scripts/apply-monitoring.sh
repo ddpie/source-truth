@@ -27,6 +27,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source-path=SCRIPTDIR source=lib/common.sh
 source "$ROOT/scripts/lib/common.sh"
+source "$ROOT/scripts/lib/env-utils.sh"
 
 LIB="$ROOT/scripts/lib"
 BYPROJ_DEFS="$ROOT/infra/monitoring/queries/metric-filters/by-project-metrics.json"
@@ -61,12 +62,18 @@ while [[ $# -gt 0 ]]; do
         *) say err "unknown --only stage: '${2:-}' (want filters|dashboards|alarms|dau|observability)"; exit 2 ;;
       esac
       shift 2 ;;
-    --region) REGION="$2"; shift 2 ;;
+    --region)
+      [[ $# -ge 2 && -n "$2" && "$2" != --* ]] || { say err "--region requires a value"; exit 2; }
+      REGION="$2"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) EXTRA+=("$1"); shift ;;
   esac
 done
+
+safe_source_env "$ROOT/.local/deploy-config"
+REGION="${REGION:-${DEPLOY_REGION:-}}"
+[[ -n "$REGION" ]] || { say err "provide --region or DEPLOY_REGION in deploy-config"; exit 2; }
 
 # Which stages run? Default = all, in the deploy-all Phase 7 order.
 run_stage() { # run_stage <name> : true if <name> was selected (or no --only given)
@@ -84,6 +91,9 @@ if [[ ${#EXTRA[@]} -gt 0 ]]; then
   if [[ ${#_distinct[@]} -ne 1 ]]; then
     say err "stage-specific flags (${EXTRA[*]}) need exactly one --only stage"
     usage >&2; exit 2
+  fi
+  if [[ "${_distinct[0]}" == observability ]]; then
+    say err "observability does not accept stage-specific flags: ${EXTRA[*]}"; exit 2
   fi
 fi
 
@@ -126,11 +136,13 @@ fi
 # — everything configured, no data — so this stage read-backs each step instead of trusting rc=0.
 if run_stage observability; then
   say step "monitoring: observability (Transaction Search + per-runtime delivery)"
-  bash "$LIB/apply-observability.sh" "$REGION" || warn_fail apply-observability observability
+  OBS_FLAGS=(); [[ "$DRY_RUN" -eq 1 ]] && OBS_FLAGS+=(--dry-run)
+  bash "$LIB/apply-observability.sh" "$REGION" "${OBS_FLAGS[@]}" || warn_fail apply-observability observability
 fi
 
 if [[ "$rc" -eq 0 ]]; then
-  say ok "monitoring applied"
+  if [[ "$DRY_RUN" -eq 1 ]]; then say info "[dry-run] monitoring plan complete"
+  else say ok "monitoring applied"; fi
 else
   say err "some monitoring stages failed (see warnings above)"
 fi

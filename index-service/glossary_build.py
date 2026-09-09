@@ -43,9 +43,11 @@ import re
 import subprocess
 import time
 from dataclasses import replace
+from pathlib import Path
 from typing import Callable
 
 import glossary
+from glossary_source import BinarySourceError, open_source, source_path
 
 logger = logging.getLogger("glossary-build")
 
@@ -57,6 +59,11 @@ DEFAULT_TIMEOUT_S = 1200  # one cc batch; a full scan loops MANY batches under t
 # long"). build() chunks `files` into batches of this size, one cc call each, and concatenates the
 # outputs — keeping every argv well under the limit and bounding each call's runtime/cost.
 CC_BATCH_FILES = 300
+# OpenAI's tool reads one file/page per call and disables parallel tool calls.
+# Normal batches keep a conservative read budget. The 400-turn worker limit
+# also accommodates oversized single files that cannot be split by file count.
+# Claude's existing CLI batch size remains unchanged.
+OPENAI_BATCH_FILES = 20
 
 # THREAT MODEL (read this before relaxing anything below)
 # =======================================================
@@ -259,6 +266,8 @@ def build_prompt(files: list[str], *, project: str) -> str:
     return (
         f"Build a term glossary for game project '{project}'. {scope}\n"
         "Output ONLY JSONL — one JSON object per line, NO prose, NO markdown fences.\n"
+        "If these files contain no grounded terminology, output [] on one line; "
+        "do not return an empty response.\n"
         'Each line: {"concept_id":"<lower_slug>","kind":"symbol"|"alias","value":"<x>",'
         '"source":"<repo-relative path>","line":<int>,"confidence":"high"|"med"|"low"}\n'
         "kind=symbol: a code identifier/column/key that ACTUALLY appears in the file. "
@@ -302,7 +311,8 @@ _CJK_RE = re.compile(
     r"[㐀-䶿一-鿿぀-ヿᄀ-ᇿ가-힯\U00020000-\U0002a6df]+")
 
 
-def extract_entries(raw: str, *, reader: Callable[[str], str] | None = None) -> list[glossary.Entry]:
+def extract_entries(raw: str, *, reader: Callable[[str], str] | None = None,
+                    source_normalizer: Callable[[str], str | None] | None = None) -> list[glossary.Entry]:
     """Salvage glossary Entries from cc's raw stdout. Tolerant by design: cc prepends
     prose and wraps output in ``` fences even when told not to, so we scan line by line,
     keep only lines that parse as a JSON OBJECT with the required entry fields, and run
@@ -335,6 +345,11 @@ def extract_entries(raw: str, *, reader: Callable[[str], str] | None = None) -> 
             e = glossary.Entry.from_dict(obj)
         except (KeyError, TypeError, ValueError):
             continue
+        if source_normalizer is not None:
+            source = source_normalizer(e.source)
+            if source is None:
+                continue
+            e = replace(e, source=source)
         if e.kind not in glossary.VALID_KINDS:
             continue
         if not glossary.is_valid_concept_id(e.concept_id):
@@ -516,12 +531,41 @@ def _max_retries() -> int:
     return _env_int("GLOSSARY_BUILD_MAX_RETRIES", _DEFAULT_MAX_RETRIES)
 
 
+def _openai_batches(files: list[str], root: str) -> list[list[str]]:
+    """Reserve turns for pagination as well as the final extraction."""
+    # Raising the worker limit must not also enlarge ordinary model contexts.
+    page_budget = min(59, max(1, (_env_int("GLOSSARY_MAX_TURNS", 400) - 1) // 2))
+    batches, batch, pages = [], [], 0
+    for path in files:
+        line_count, chars, last = 0, 0, ""
+        try:
+            with open_source(Path(root), path) as source:
+                while chunk := source.read(65536):
+                    line_count += chunk.count("\n")
+                    chars += len(chunk)
+                    last = chunk[-1]
+        except (OSError, ValueError, RuntimeError):
+            pass  # the tool call reports a missing/unreadable source to the worker
+        line_count += int(bool(last) and last != "\n")
+        estimate = max(1, (line_count + 199) // 200, (chars + 39999) // 40000)
+        if batch and (len(batch) >= OPENAI_BATCH_FILES or pages + estimate > page_budget):
+            batches.append(batch)
+            batch, pages = [], 0
+        batch.append(path)
+        pages += estimate
+    if batch:
+        batches.append(batch)
+    return batches
+
+
 def _is_throttle_error(exc: BaseException) -> bool:
     """True iff exc is a retriable throttle/timeout. Timeouts count (a batch that timed
     out is usually the endpoint being slow under load). A CalledProcessError counts only
     when its stderr carries a throttle marker — a hard error (bad flag, AccessDenied) does
     NOT, so it bubbles up immediately without burning retries."""
-    if isinstance(exc, subprocess.TimeoutExpired):
+    from openai_glossary import RetryableBatchError
+
+    if isinstance(exc, (subprocess.TimeoutExpired, RetryableBatchError)):
         return True
     if isinstance(exc, subprocess.CalledProcessError):
         stderr = exc.stderr or ""
@@ -556,8 +600,17 @@ def _run_with_retry(run: Callable[..., str], *, prompt: str, cwd: str, model: st
             attempt += 1
 
 
+class BuildEntries(list[glossary.Entry]):
+    """Entries plus an explicit no-terms result, distinct from unusable output."""
+
+    def __init__(self, entries: list[glossary.Entry], *, explicit_empty: bool = False):
+        super().__init__(entries)
+        self.explicit_empty = explicit_empty
+
+
 def build(files: list[str], *, project: str, cwd: str, model: str, region: str,
-          runner: Callable[..., str] | None = None, timeout: int = DEFAULT_TIMEOUT_S) -> list[glossary.Entry]:
+          runner: Callable[..., str] | None = None, timeout: int = DEFAULT_TIMEOUT_S,
+          sdk: str = "claude") -> list[glossary.Entry]:
     """Run cc over the given files and parse its output into entries. The caller always
     hands a concrete list (full scan = the whole candidate set; incremental = the changed
     files). Returns [] if cc produced nothing parseable (caller decides how to treat an
@@ -569,6 +622,8 @@ def build(files: list[str], *, project: str, cwd: str, model: str, region: str,
     Passes a source ``reader`` confined to ``cwd`` to extract_entries, so every Chinese alias
     is grounding-checked against the real file (drops cc's invented translations)."""
     import os
+    if sdk not in ("openai", "claude"):
+        raise ValueError("sdk must be openai or claude")
     run = runner if runner is not None else run_cc
     root = os.path.realpath(cwd)
 
@@ -582,22 +637,28 @@ def build(files: list[str], *, project: str, cwd: str, model: str, region: str,
     # because the prompt hands cc a concrete list and no absolute read outside cwd is legitimate.
     safe_files = []
     escaped = 0
+    binary = 0
     for f in files:
-        target = f if os.path.isabs(f) else os.path.join(root, f)
-        real = os.path.realpath(target)
-        if real == root or real.startswith(root + os.sep):
+        try:
+            with open_source(Path(root), f):
+                pass
             safe_files.append(f)
-        else:
+        except BinarySourceError:
+            binary += 1
+        except (ValueError, RuntimeError):
             escaped += 1
     if escaped:
         logger.warning(json.dumps({"event": "glossary_symlink_escape_dropped",
                                    "dropped": escaped, "root": root}))
+    if binary:
+        logger.info(json.dumps({"event": "glossary_binary_source_dropped", "dropped": binary}))
     files = safe_files
 
     # Run cc in batches: the file list rides in the ARGV of `claude -p`, so passing thousands of
     # paths at once overflows the OS arg limit. A full scan (files is the whole candidate set) thus
     # loops many cc calls; a small incremental set is a single batch.
-    batches = [files[i:i + CC_BATCH_FILES] for i in range(0, len(files), CC_BATCH_FILES)]
+    batches = (_openai_batches(files, root) if sdk == "openai" else
+               [files[i:i + CC_BATCH_FILES] for i in range(0, len(files), CC_BATCH_FILES)])
     # Progress visibility: a full scan loops dozens of cc batches over 2-3 hours with NO output
     # until the very end (the slice is written atomically once, on completion). Without a per-batch
     # heartbeat there is no way to tell "still working" from "hung" except reverse-engineering the
@@ -609,7 +670,13 @@ def build(files: list[str], *, project: str, cwd: str, model: str, region: str,
         logger.info(json.dumps({"event": "glossary_build_batch", "project": project,
                                  "batch": idx, "batches": total, "files": len(batch)}))
         prompt = build_prompt(batch, project=project)
-        return _run_with_retry(run, prompt=prompt, cwd=cwd, model=model, region=region,
+        batch_runner = run
+        if runner is None and sdk == "openai":
+            from functools import partial
+
+            from openai_glossary import run_batch
+            batch_runner = partial(run_batch, files=batch)
+        return _run_with_retry(batch_runner, prompt=prompt, cwd=cwd, model=model, region=region,
                                timeout=timeout, batch_idx=idx)
 
     # Concurrency capped at the batch count (no idle threads for a small incremental set).
@@ -657,14 +724,34 @@ def build(files: list[str], *, project: str, cwd: str, model: str, region: str,
         # Read a source file for alias grounding, confined under cwd. Tries normalized candidates;
         # a path that escapes the repo (after all normalizations) is refused → aliases fail closed.
         for cand in _candidate_rels(rel):
-            p = os.path.realpath(os.path.join(root, cand))
-            if p != root and not p.startswith(root + os.sep):
-                continue
             try:
-                with open(p, encoding="utf-8", errors="ignore") as fh:
+                with open_source(Path(root), cand) as fh:
                     return fh.read()
-            except OSError:
+            except (OSError, ValueError, RuntimeError):
                 continue
         return ""
 
-    return extract_entries(raw, reader=reader)
+    allowed = set(files)
+
+    def normalize_source(rel: str) -> str | None:
+        fallback = None
+        for cand in _candidate_rels(rel):
+            try:
+                target = source_path(Path(root), cand)
+            except (OSError, ValueError, RuntimeError):
+                continue
+            canonical = os.path.normpath(cand)
+            if sdk == "openai" and canonical not in allowed:
+                continue
+            if canonical in allowed or target.is_file():
+                return canonical
+            # Claude's existing extraction accepts missing symbol sources as
+            # search seeds; preserve that behavior while canonicalizing paths.
+            if sdk == "claude" and fallback is None:
+                fallback = canonical
+        return fallback
+
+    return BuildEntries(
+        extract_entries(raw, reader=reader, source_normalizer=normalize_source),
+        explicit_empty=bool(raw_by_idx) and all(value.strip() == "[]" for value in raw_by_idx.values()),
+    )

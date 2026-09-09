@@ -4,25 +4,31 @@ Guidance for AI coding agents working in this repo. This file is the single sour
 of truth for agent conventions; it links out rather than duplicating. Human onboarding
 docs live in `docs/` (中文为主，结构文档双语 `_en`/`_zh`)。
 
+根 `README.md` 合并中文与英文（中文在前、英文在后），修改时同步两部分，不另建中文 README。
+正式项目名称为 source-truth，公开仓库为 `ddpie/source-truth`。
+
 ## Project overview
 
 source-truth 是「代码为唯一依据」的飞书游戏研发代码问答助手。完整链路：策划在飞书 @机器人 →
 **bot-gateway**（TypeScript 长驻网关，长连接事件订阅，按会话路由）→ **AgentCore Runtime**
-（Firecracker microVM，会话隔离）→ microVM 内的 **agent-container**（Python，Claude Code Agent SDK，
-`CLAUDE_CODE_USE_BEDROCK=1`）→ 通过 **index-service**（常驻 CodeGraph，MCP-over-HTTP）定位代码、用只读
+（Firecracker microVM，会话隔离）→ microVM 内的 **agent-container**（Python，部署时选择 OpenAI Agents SDK
+或 Claude Agent SDK，新项目默认 OpenAI，均走 Bedrock）→ 通过 **index-service**（常驻 CodeGraph，MCP-over-HTTP）定位代码、用只读
 文件工具读取最新主分支源码与配置表（工具清单见 `docs/agent/architecture.md`；仓库副本只在 index-service
-本地磁盘，会话 microVM 不挂任何文件系统）→ **CardKit 流式卡片**回传。
+本地磁盘，会话 microVM 不挂仓库文件系统）→ **CardKit 流式卡片**回传。
 
 核心架构特征：AI 引擎在 microVM **内**自主运行（不是容器外的远程 MCP 客户端），并新增飞书 Bot 网关与
 独立 CodeGraph 索引服务两个有状态组件——后者持有唯一一份代码仓本地副本，定位代码和读文件也全部走
 HTTP 接口（不挂任何共享文件系统）。架构工作原理见 `docs/agent/architecture.md`。
+
+SDK 选择统一控制问答和离线术语表；配置、旧项目兼容与切换验证见 `docs/dual-sdk_zh.md`。
+OpenAI Agents SDK 不等于 Codex SDK，后者仍在 post-MVP 边界外。
 
 语言：Python（`agent-container/`）、TypeScript / Node 24（`bot-gateway/`、未来 `infra/` CDK）、
 Bash（`scripts/`）。会话容器 ARM64-only。
 
 ## Setup & commands
 
-当前已实现（init 骨架阶段）：
+当前已实现：
 
 ```bash
 ./scripts/check-invariants.sh   # 结构自检：AGENTS / structure / 双语配对 / 顶层目录
@@ -84,8 +90,8 @@ CI（`.github/workflows/ci.yml`）跑离线套件；本仓库不带 git hook，�
 - **MVP 边界**：仅主分支、仅只读问答、不跑引擎、不写回 / 提交。越界能力（设计文档读取、多分支、
   共享记忆、审计护栏、Codex、数值模拟）一律后置。
 - **「不跑引擎」的一处明确例外——构建期引擎（术语表生成，2026-06-22）**：「不跑引擎」约束的是按用户提问
-  实时回答的引擎（必须在 microVM 内）。术语表生成是**离线构建期引擎**：在 index 主机用本地 `claude` (cc) CLI
-  扫自有代码副本产出「中文词→英文符号」对照表——无用户输入、无会话、不在请求路径上，受 cc 锁定 +
+  实时回答的引擎（必须在 microVM 内）。术语表生成是**离线构建期引擎**：在 index 主机用所选 OpenAI Agents SDK 或本地 `claude` CLI
+  扫自有代码副本产出「中文词→英文符号」对照表——无用户输入、无会话、不在请求路径上，受只读工具限制 +
   产物只读服务 + grounding 校验三重约束。完整边界与机制见 `docs/agent/invariants.md` §6 与
   `docs/agent/glossary.md`。
 

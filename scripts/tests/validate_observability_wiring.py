@@ -84,5 +84,10 @@ check(
     " 'no spans with supported scope'。",
 )
 
-print(f"\n  ran={5} failed={fail}")
+check("OpenAI 使用 OpenInference scope 且禁用重复自动插桩",
+      "openinference-instrumentation-openai-agents==" in reqs_text
+      and "OTEL_PYTHON_DISABLED_INSTRUMENTATIONS=aws_openai_agents,openai_agents" in text
+      and "exclusive_processor=True" in (ROOT / "agent-container/openai_backend.py").read_text())
+
+print(f"\n  ran={6} failed={fail}")
 sys.exit(1 if fail else 0)

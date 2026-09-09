@@ -15,50 +15,58 @@
  *  can't drift to different caps. */
 export const MAX_FOLLOW_UPS = 3;
 
-// The marker must LEAD A LINE (optionally after a "💡" and whitespace, and an
-// optional preceding "---/***/___" divider line). A bare indexOf("你可能还想问")
-// matches the phrase in ORDINARY prose — e.g. an answer that says "这些数值你可能
-// 还想问的我都列了：" followed by data bullets — which would (1) truncate the real
-// answer at the marker mid-stream and (2) turn the data rows into fake follow-up
-// buttons. Anchoring to line-start closes that hole, mirroring extract-clarify.ts.
-// `MARKER_RE` finds the marker line; `STRIP_RE` (anchored to end-of-string) backs
-// up over the marker line + an optional preceding divider for stripping.
-// Leading-whitespace class includes U+3000 (full-width space): a model formatting
-// a CJK list often indents with 　 rather than ASCII space, and without it the
-// marker wouldn't match → buttons silently lost AND the raw trailer leaks into the
-// body. \t and ASCII space cover the rest.
-// The marker must be (essentially) the WHOLE line — the phrase, an optional
-// trailing "："/"…"/whitespace, then line-end. Line-START anchoring alone is NOT
-// enough: a real answer line that merely BEGINS with the phrase ("你可能还想问的
-// 逻辑在 Config.cs:10 定义") would otherwise truncate the answer + turn real prose
-// into fake buttons (cross-review HIGH). The line-END lookahead closes that —
-// mirroring extract-evidence.ts. A heading line "💡 你可能还想问：" still matches.
-const MARKER_TAIL = "[ \\t　]*[：:…。\\.]*[ \\t　]*(?=\\n|$)";
-const MARKER_RE = new RegExp(`(?:^|\\n)[ \\t　]*(?:💡[ \\t　]*)?你可能还想问${MARKER_TAIL}`);
-const STRIP_RE = new RegExp(`(?:\\n[ \\t　]*(?:-{3,}|\\*{3,}|_{3,})[ \\t　]*)?\\n?[ \\t　]*(?:💡[ \\t　]*)?你可能还想问${MARKER_TAIL}[\\s\\S]*$`);
+function unquote(line: string): string {
+  return line.replace(/^[ \t　]*(?:>[ \t　]*)*/, "").trim();
+}
+
+// Normalize only Markdown decoration, then require the WHOLE marker line.
+// Extraction sees raw quoted evidence while sanitizeAnswerText sees unquoted
+// evidence; both must recognize the same trailer or questions disappear from
+// the body without becoming buttons. Ordinary prose containing the phrase must
+// remain untouched.
+function isMarker(line: string): boolean {
+  const plain = unquote(line).replace(/^#{1,6}[ \t　]+/, "").replace(/\*\*|__/g, "");
+  return /^(?:💡[ \t　]*)?你可能还想问[ \t　]*[：:…。\\.]*[ \t　]*$/.test(plain);
+}
+
+function findMarker(lines: string[]): number {
+  let fence: string | undefined;
+  for (let i = 0; i < lines.length; i++) {
+    const code = /^(`{3,}|~{3,})(.*)$/.exec(unquote(lines[i]));
+    if (code) {
+      if (!fence) fence = code[1];
+      else if (code[1][0] === fence[0] && code[1].length >= fence.length && !code[2].trim()) fence = undefined;
+      continue;
+    }
+    if (!fence && isMarker(lines[i])) return i;
+  }
+  return -1;
+}
 
 export function extractFollowUps(answer: string): string[] {
-  // Find the marker only when it LEADS A LINE (not in mid-prose).
-  const m = MARKER_RE.exec(answer);
-  if (!m || m.index === undefined) return [];
-  // Slice from the marker so _extractAfter scans the trailer's list lines.
-  return _extractAfter(answer.slice(m.index + m[0].length));
+  const lines = answer.split("\n");
+  const marker = findMarker(lines);
+  return marker < 0 ? [] : _extractAfter(lines.slice(marker + 1));
 }
 
 /**
  * Strip the follow-up trailer from the answer body so the questions render ONLY
  * as footer buttons, not also as duplicated prose inside the card. Cuts from the
  * "💡 你可能还想问" marker (and any immediately-preceding `---` divider line,
- * which the system prompt uses exclusively for this separator) to end of string.
+ * which the system prompt uses exclusively for this separator) up to the next
+ * section or end of string.
  * Returns the answer unchanged if there's no trailer.
  */
 export function stripFollowUps(answer: string): string {
-  // Only strip when the marker LEADS A LINE (same guard as extractFollowUps), so a
-  // mid-prose mention of "你可能还想问" never truncates a real answer. STRIP_RE
-  // anchors to end-of-string and eats the optional preceding divider + the marker
-  // line + everything after, leaving the body clean (no dangling rule).
-  if (!MARKER_RE.test(answer)) return answer;
-  return answer.replace(STRIP_RE, "").trimEnd();
+  const lines = answer.split("\n");
+  const marker = findMarker(lines);
+  if (marker < 0) return answer;
+  let start = marker;
+  while (start > 0 && !unquote(lines[start - 1])) start--;
+  if (start > 0 && /^(?:-{3,}|\*{3,}|_{3,})$/.test(unquote(lines[start - 1]))) start--;
+  let end = marker + 1;
+  while (end < lines.length && !isSectionBoundary(lines[end])) end++;
+  return [...lines.slice(0, start), ...lines.slice(end)].join("\n").trimEnd();
 }
 
 // A line that opens a DIFFERENT section — if the follow-up list is followed by (or,
@@ -71,18 +79,20 @@ export function stripFollowUps(answer: string): string {
 // 供研发复核/需要你确认 只按「标题行」匹配（行首 + 可选 >/🔍/** 装饰），不做无锚定子串：
 // 一条 follow-up 建议本身提及这个词（"- 供研发复核的证据在哪里？"）不该被当成边界，
 // 否则它和后面所有合法按钮一起丢失。列表项的 "- " 前缀不满足标题锚定，故不受影响。
-const SECTION_BOUNDARY_RE = /^[ \t　]*(?:>[ \t]*)?(?:🔍[ \t]*)?\*{0,2}(?:供研发复核|需要你确认)|^[ \t　]*(?:>?[ \t]*\**)?```/;
+function isSectionBoundary(line: string): boolean {
+  const plain = unquote(line).replace(/^#{1,6}[ \t　]+/, "").replace(/\*\*|__/g, "");
+  return /^(?:(?:🔍|📎|🔀)[ \t　]*)?(?:供研发复核|需要你确认)|^(?:(?:🔍|📎)[ \t　]*)?依据[ \t　：:]*$|^(?:`{3,}|~{3,})/.test(plain);
+}
 
-function _extractAfter(afterMarker: string): string[] {
+function _extractAfter(lines: string[]): string[] {
   // Extract lines starting with "- " or "· " or numbered "1. " etc.
-  const lines = afterMarker.split("\n");
   const questions: string[] = [];
   for (const line of lines) {
     // STOP at the start of another section (evidence/clarify/chart/code fence): its
     // lines are NOT follow-ups. break (not continue) so nothing past the boundary is
     // collected even if a later line happens to look list-shaped.
-    if (SECTION_BOUNDARY_RE.test(line)) break;
-    const trimmed = line.replace(/^[\s\-·•*\d.]+/, "").trim();
+    if (isSectionBoundary(line)) break;
+    const trimmed = unquote(line).replace(/^[\s\-·•*\d.]+/, "").trim();
     // Dedup: a model that repeats a suggestion would otherwise render twin buttons
     // with identical captions but distinct element_ids — clicking one disables only
     // it, leaving the duplicate live (confusing UX; cross-review MED).

@@ -1,5 +1,8 @@
 # 游戏研发助手｜需求与设计决策（MVP 边界）
 
+> 更新说明（2026-09-09）：本文保留早期 Claude POC 设计。当前问答与术语表已支持统一选择
+> OpenAI Agents SDK / Claude Agent SDK，具体配置和 API 见 [双 SDK 文档](../dual-sdk_zh.md)。
+
 > 需求权威依据：记录 MVP 边界与验收基准。架构方案见 [`architecture-overview_zh.md`](architecture-overview_zh.md)。
 
 ## 背景
@@ -19,7 +22,7 @@
 | 事实源 | 以代码为唯一依据 | 文档常滞后；配置与源数据基本在工程内 |
 | 范围 | MVP 仅查主分支 | 诉求是了解已上线功能；多分支后置 |
 | 运行环境 | AgentCore Runtime 会话隔离 | 每会话独立容器，秒级冷启、空闲约 15 分钟回收；Session Storage 约 14 天过期 |
-| 存储 | index-service 本地磁盘持唯一代码副本 + HTTP 接口（会话 microVM 不挂任何文件系统） | 关注读延迟；本地盘检索快，瓶颈出现再换更快介质 |
+| 存储 | index-service 本地磁盘持唯一代码副本 + HTTP 接口（会话 microVM 不挂仓库文件系统） | 关注读延迟；本地盘检索快，瓶颈出现再换更快介质 |
 | 索引 | 项目级索引，自动生成 | 后端多仓，需先定位查哪个工程；工程内检索交给 Claude Code |
 | 模型 | MVP 用 Claude Code | 先走 API 计费，后续评估订阅 |
 | 机器人 | 每个游戏项目一个机器人 | 机器人内按会话隔离 |

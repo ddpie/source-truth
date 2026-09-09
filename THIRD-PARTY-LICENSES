@@ -2,7 +2,7 @@
 
 This product includes or depends on the third-party software listed below.
 
-`sample-code-qa-on-agentcore` itself is licensed under MIT-0 (see `LICENSE`).
+`source-truth` itself is licensed under MIT (see `LICENSE`).
 Nothing in this file relicenses a third-party component: each entry keeps its
 own terms, and the Apache-2.0 and BSD components below carry attribution and
 notice obligations that redistributing this project does not discharge on your
@@ -17,7 +17,8 @@ each shipped set:
 
 | Component | What ships | Authoritative manifest | Shipped packages |
 | --- | --- | --- | --- |
-| `agent-container` | container image (`docker build --platform linux/arm64`) | `agent-container/requirements.lock` | 117 (fully listed in §4.1) |
+| `agent-container` | container image (`docker build --platform linux/arm64`) | `agent-container/requirements.lock` | 125 (fully listed in §4.1) |
+| OpenAI glossary worker | isolated Python environment on the index host | `index-service/glossary-requirements.lock` | subset of §4.1, checked by the license generator |
 | `bot-gateway` | Node tarball built and pruned on the index host: `npm ci && npm run build && npm prune --omit=dev` (`index-service/bootstrap.sh`) | `bot-gateway/package-lock.json` | 105 of 481 locked entries (fully listed in §4.2) |
 | `index-service` | Python tree installed on the EC2 host by `index-service/bootstrap.sh` | `index-service/requirements.txt` (4 direct pins; **transitives unpinned**) | not determinable from the repo — see §4.3 |
 
@@ -40,13 +41,24 @@ a "why we depend on this" note). The full listings in §4.1 and §4.2 are
 **generated** — do not hand-edit them; regenerate with the commands below when
 a lock file changes.
 
-Every version in this file is traceable to a lock file. Every license string is
+Every version in the generated tables is traceable to a lock file. Every license string is
 reproduced verbatim from package metadata that was actually read, never inferred
 from a package's name, its siblings, or a neighbouring version. Strings that are
 not valid SPDX identifiers are left as the upstream metadata wrote them; see the
 Appendix.
 
 ### How the generated sections were produced
+
+From the repository root, use an environment with the exact agent lock installed:
+
+```bash
+python3.11 -m venv /tmp/source-truth-licenses
+/tmp/source-truth-licenses/bin/python -m pip install --no-deps -r agent-container/requirements.lock
+/tmp/source-truth-licenses/bin/python -m pip check
+/tmp/source-truth-licenses/bin/python scripts/generate-python-licenses.py
+# CI verifies the same source-to-output mapping without writing:
+/tmp/source-truth-licenses/bin/python scripts/generate-python-licenses.py --check
+```
 
     # bot-gateway: every package NOT flagged "dev": true in the lockfile,
     # i.e. exactly the tree left after `npm prune --omit=dev`. `license` is the value
@@ -65,8 +77,7 @@ Appendix.
     curl -s "<wheel-url>.metadata"                         # read its METADATA
 
 A licence was never carried over from a different version of the same package,
-and never guessed from a package name. Of the 117 rows in §4.1, 28 came from
-source (a) and 89 from source (b).
+and never guessed from a package name. The current 125 rows in §4.1 were regenerated from source (a).
 
 The two bot-gateway sources were cross-checked against each other: 105 shipped
 entries from the lockfile, the same 105 from `license-checker` (its 106th entry
@@ -74,11 +85,10 @@ is the root project), and zero license disagreements.
 
 ---
 
-## 1. Proprietary / not open-source — action required before use
+## 1. Separately obtained components
 
-**Two components below are NOT open-source. You must obtain them yourself and
-accept their terms. Neither is covered by this repository's MIT-0 licence, and
-neither can be redistributed under it.**
+**The index engine is Apache-2.0; the Claude Code CLI is proprietary. Both are
+obtained separately and retain their own terms, independently of this repository's MIT licence.**
 
 ---
 
@@ -125,14 +135,16 @@ outside any lock file.
 - Not open-source. Use is governed by Anthropic's Commercial Terms of Service,
   which **you** must read and accept: <https://www.anthropic.com/legal/commercial-terms>
 - Package: <https://www.npmjs.com/package/@anthropic-ai/claude-code>
-- Installed in TWO places, both unpinned: the agent image
-  (`agent-container/Dockerfile`) and the EC2 index host, where the glossary build
-  invokes it (`index-service/bootstrap.sh`). Proprietary software under Anthropic's
-  Commercial Terms therefore runs on the index host as well, not only in the microVM.
+- Always installed in the agent image (`agent-container/Dockerfile`), including
+  images used with OpenAI. The EC2 bootstrap also installs it when glossary is
+  enabled; Claude glossary builds invoke it. Disabling glossary skips that host
+  installation step and does not uninstall an existing CLI.
 - **`latest` is not a version.** Because it is unpinned, this manifest cannot
   state what shipped, builds are not reproducible, and the terms in force at
-  install time are whatever npm resolved that day. Pin it (see the report
-  accompanying this change) before treating any build as releasable.
+  install time are whatever npm resolved that day. `@latest` is an explicit
+  operator exception in `AGENTS.md`; record the resolved CLI version and image
+  digest for each release. This inventory cannot establish the terms of an
+  unrecorded future CLI release.
 
 ---
 
@@ -155,6 +167,32 @@ Version: 0.2.103
 License: MIT
 URL: https://github.com/anthropics/claude-agent-sdk-python
 Agent reasoning loop (query / ClaudeAgentOptions); HTTP MCP native.
+
+---
+
+openai-agents
+Version: 0.22.1
+License: MIT
+URL: https://github.com/openai/openai-agents-python
+OpenAI agent loop for Q&A and the isolated glossary worker.
+
+---
+
+openai
+Version: 3.10.0
+License: Apache-2.0
+URL: https://github.com/openai/openai-python
+Types used by the Agents SDK and the custom Bedrock Converse adapter.
+Declared with the `bedrock` extra; this application does not call the OpenAI-hosted API.
+
+---
+
+openinference-instrumentation-openai-agents
+Version: 2.2.0
+License: Apache-2.0
+URL: https://github.com/Arize-ai/openinference
+OpenAI Agents spans for AgentCore observability. Explicitly installed as the
+exclusive trace processor by `agent-container/openai_backend.py`.
 
 ---
 
@@ -321,15 +359,14 @@ and 0.49.0 (agent-container, transitive).
 
 ## 4. Full shipped (transitive) listings
 
-### 4.1 agent-container — 117 packages
+### 4.1 agent-container — 125 packages
 
-Generated from `agent-container/requirements.lock`, which is itself
-`pip freeze` output from a verified ARM64 build and is the file the Dockerfile
-installs from. Licenses were read from each exact version's core metadata,
-read inside that build (91 from PEP 639
-`License-Expression`, 24 from the legacy `License` field,
-2 from `License ::` classifiers);
-0 packages are unverified.
+Generated from `agent-container/requirements.lock` and the exact installed
+distribution metadata with `scripts/generate-python-licenses.py`.
+License-Expression takes precedence over License; classifier labels are used
+when License is absent or contains the full license body. No unverified packages.
+The isolated glossary worker ships a subset of these same versions
+(`index-service/glossary-requirements.lock`).
 
 | Package | Version | License (verbatim from metadata) |
 | --- | --- | --- |
@@ -350,18 +387,25 @@ read inside that build (91 from PEP 639
 | `click` | 8.4.1 | BSD-3-Clause |
 | `cryptography` | 49.0.0 | Apache-2.0 OR BSD-3-Clause |
 | `googleapis-common-protos` | 1.75.0 | Apache 2.0 |
+| `griffelib` | 2.3.0 | ISC |
 | `grpcio` | 1.81.1 | Apache-2.0 |
 | `h11` | 0.16.0 | MIT |
 | `httpcore` | 1.0.9 | BSD-3-Clause |
+| `httpcore2` | 2.12.0 | BSD-3-Clause |
 | `httpx` | 0.28.1 | BSD-3-Clause |
 | `httpx-sse` | 0.4.3 | MIT |
+| `httpx2` | 2.12.0 | BSD-3-Clause |
 | `idna` | 3.18 | BSD-3-Clause |
+| `jiter` | 0.16.0 | MIT |
 | `jmespath` | 1.1.0 | MIT |
 | `jsonschema` | 4.26.0 | MIT |
 | `jsonschema-specifications` | 2025.9.1 | MIT |
 | `mcp` | 1.28.0 | MIT |
+| `openai` | 3.10.0 | Apache-2.0 |
+| `openai-agents` | 0.22.1 | MIT |
 | `openinference-instrumentation` | 0.1.59 | Apache-2.0 |
 | `openinference-instrumentation-claude-agent-sdk` | 0.1.13 | Apache-2.0 |
+| `openinference-instrumentation-openai-agents` | 2.2.0 | Apache-2.0 |
 | `openinference-semantic-conventions` | 0.1.33 | Apache-2.0 |
 | `opentelemetry-api` | 1.44.0 | Apache-2.0 |
 | `opentelemetry-distro` | 0.65b0 | Apache-2.0 |
@@ -429,13 +473,13 @@ read inside that build (91 from PEP 639
 | `psutil` | 7.2.2 | BSD-3-Clause |
 | `pycparser` | 3.0 | BSD-3-Clause |
 | `pydantic` | 2.13.4 | MIT |
-| `pydantic_core` | 2.46.4 | MIT |
+| `pydantic-core` | 2.46.4 | MIT |
 | `pydantic-settings` | 2.14.1 | MIT |
-| `PyJWT` | 2.13.0 | MIT |
+| `pyjwt` | 2.13.0 | MIT |
 | `python-dateutil` | 2.9.0.post0 | Dual License |
 | `python-dotenv` | 1.2.2 | BSD-3-Clause |
 | `python-multipart` | 0.0.32 | Apache-2.0 |
-| `PyYAML` | 6.0.3 | MIT |
+| `pyyaml` | 6.0.3 | MIT |
 | `referencing` | 0.37.0 | MIT |
 | `requests` | 2.34.2 | Apache-2.0 |
 | `rpds-py` | 2026.5.1 | MIT |
@@ -444,7 +488,8 @@ read inside that build (91 from PEP 639
 | `sniffio` | 1.3.1 | MIT OR Apache-2.0 |
 | `sse-starlette` | 3.4.4 | BSD-3-Clause |
 | `starlette` | 1.3.1 | BSD-3-Clause |
-| `typing_extensions` | 4.15.0 | PSF-2.0 |
+| `truststore` | 0.10.4 | MIT |
+| `typing-extensions` | 4.15.0 | PSF-2.0 |
 | `typing-inspection` | 0.4.2 | MIT |
 | `urllib3` | 2.7.0 | MIT |
 | `uvicorn` | 0.49.0 | BSD-3-Clause |
@@ -639,7 +684,7 @@ it — and treat that output the way `agent-container/requirements.lock` is trea
 ## Appendix: license strings reproduced verbatim
 
 The listings above print what upstream metadata says, character for character.
-Six strings in §4.1 are not valid SPDX identifiers. They are left alone rather
+Seven strings in §4.1 are not valid SPDX identifiers. They are left alone rather
 than "corrected", so that a reviewer normalising this file can see the raw
 value. None of these is ambiguous enough to block a release, but none should be
 machine-parsed as SPDX either:
@@ -647,13 +692,14 @@ machine-parsed as SPDX either:
 | Package | Metadata string | Note |
 | --- | --- | --- |
 | `annotated-types` 0.7.0 | `MIT License` | From a `License ::` classifier, not an SPDX expression. |
+| `bytecode` 0.19.0 | `MIT License` | From a `License ::` classifier, not an SPDX expression. |
 | `s3transfer` 0.19.0 | `Apache License 2.0` | Free-text spelling of Apache-2.0. |
 | `googleapis-common-protos` 1.75.0 | `Apache 2.0` | Free-text spelling of Apache-2.0. |
 | `protobuf` 6.33.5 | `3-Clause BSD License` | Free-text spelling of BSD-3-Clause. |
 | `wrapt` 1.17.3 | `BSD` | Unqualified; its only license classifier is `OSI Approved :: BSD License`. Which BSD variant is not stated in metadata. |
 | `python-dateutil` 2.9.0.post0 | `Dual License` | Names no licence at all. Its classifiers are `OSI Approved :: Apache Software License` and `OSI Approved :: BSD License`; the actual terms are in the dist's own LICENSE file. |
 
-Two entries in §4.1 are genuine SPDX **OR** expressions — a choice you must
+Three entries in §4.1 are SPDX **OR** expressions — a choice you must
 make, not a single licence: `cryptography` 49.0.0
 (`Apache-2.0 OR BSD-3-Clause`) and `packaging` 26.2
 (`Apache-2.0 OR BSD-2-Clause`). `sniffio` 1.3.1 declares
@@ -662,6 +708,6 @@ make, not a single licence: `cryptography` 49.0.0
 `certifi` 2026.6.17 is **MPL-2.0** — the only copyleft licence among the Python
 and npm packages listed in §4.1 and §4.2. It is NOT the only copyleft licence in
 the shipped image: the OS layer described in §0 carries glibc (LGPL-2.1+) and
-bash / coreutils (GPL-3.0+), which are out of scope for this file. MPL-2.0 is file-level copyleft and is satisfied by redistributing it
-unmodified, which is what happens here, but it is called out because it is the
-one entry whose obligations differ in kind from the permissive rest.
+bash / coreutils (GPL-3.0+), which are out of scope for this file. MPL-2.0 is file-level copyleft. Redistributing an unmodified package still requires
+retaining applicable notices and meeting its source-availability requirements;
+this inventory alone does not fulfill those obligations.

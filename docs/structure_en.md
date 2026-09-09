@@ -5,13 +5,24 @@
 > Authoritative top-level directory tree. Changing any top-level directory means updating both this file and `structure_zh.md` (enforced by `scripts/check-invariants.sh`).
 
 ```
-agent-container/        Claude Code Agent running inside the session microVM (Python)
-  README.md             Responsibility + external contract (goal/session input, index-service MCP endpoint: locate + read files)
+README.md               Public project entry: Chinese first, English second
+CONTRIBUTING.md          Development setup, checks, and contribution workflow
+SECURITY.md             Vulnerability reporting and version scope
+CODE_OF_CONDUCT.md      Community conduct and reporting guidance
+LICENSE / NOTICE       MIT license and project attribution
+.github/               CI workflow, issue templates, and pull request template
+agent-container/        OpenAI / Claude Agent running inside the session microVM (Python)
+  README.md             Responsibility + external contract (prompt/traceId/repos input, index-service MCP endpoint: locate + read files)
   prompts/              A single file, system.md: system prompt + FAQ list + answer rules (code-as-truth / flag divergence / escalate)
   Dockerfile            ARM64 base image pinned by sha256; pins Claude Agent SDK (claude-agent-sdk); @anthropic-ai/claude-code tracks @latest by operator choice (NOT pinned)
   agent.py              @app.entrypoint async streaming handler that drives the agent loop
-  agent_lib.py          SDK-free read-only Q&A agent core (agent.py's testable kernel: option build / evidence loop)
-  requirements.txt + requirements.lock  Pinned Python deps (lock = full-transitive pip freeze)
+  agent_settings.py     Project SDK/model selection and legacy configuration compatibility
+  engine_runner.py      SDK dispatch + normalized stream events (version / runId / seq / terminal result)
+  agent_lib.py          Claude read-only Q&A core: option building / evidence loop / cold-start retries
+  openai_runner.py      OpenAI Agents SDK loop + read-only HTTP MCP allow-list
+  openai_backend.py     Bedrock model construction / OpenInference (reused by glossary workers)
+  bedrock_converse.py   OpenAI Agents Model → ConverseStream; SigV4 / messages and tools / reasoning replay
+  requirements.txt + requirements.lock  Pinned Python dependencies (full transitive lock generated with uv)
   tests/                pytest (invoked by scripts/test.sh)
 bot-gateway/            Feishu Bot long-connection event gateway + CardKit streaming (TypeScript long-running service)
   README.md             Long-connection / event dedup / session→runtimeSessionId map / card update throttling
@@ -31,7 +42,13 @@ index-service/          Standalone CodeGraph index service + MCP-over-HTTP bridg
   text_decode.py        Robust text decoding (stdlib-only): Chinese game repos are often GBK/GB2312, config tables may be UTF-16; detects encoding to avoid mojibake
   glossary.py           Glossary data layer: concept-centric Entry/aggregate/incremental primitives/JSONL IO/lightweight projection
   glossary_read.py      Glossary read-only queries (glossary_index/glossary_lookup MCP tools; per-repo slice aggregation + project isolation)
-  glossary_build.py     Build-time: local cc scans code → concept JSONL (prompt/tolerant parse/Chinese-alias grounding guard/incremental merge)
+  glossary_build.py     Build-time: selected SDK extracts concept JSONL (prompt/tolerant parse/Chinese-alias grounding guard/incremental merge)
+  openai_glossary.py    OpenAI build loop: paginated file reads restricted to the current batch
+  glossary_config.py    SDK/model/region/prompt fingerprint, artifact digest and configuration publication lock
+  glossary_source.py   Safe glossary candidate/evidence paths: credentials, index internals, symlinks
+  glossary_worker.sh   Reload current SDK/cap/interpreter under the repository lock before building
+  glossary-requirements.txt + glossary-requirements.lock  Isolated OpenAI glossary dependencies (subset of the agent lock)
+  setup_glossary.sh     Install an immutable venv per lock digest, separate from the resident bridge
   glossary_gen.py       Glossary generator CLI: git-diff incremental vs full, candidate-file bounding, atomic write (called by the refresh timer)
   glossary_refresh.sh   Refresh-unit wrapper: after git_fetch, incrementally rebuild this repo's glossary slice over old..new (best-effort, never blocks the pull)
   path_align.py         Index path ↔ repo-relative lexical alignment (rejects escapes)
@@ -42,7 +59,7 @@ index-service/          Standalone CodeGraph index service + MCP-over-HTTP bridg
   reindex_local_repo.sh Apply a local repo's staged code: normal push syncs in place onto live (--delay-updates shrinks the interrupt window), the watcher re-indexes incrementally + the glossary is refreshed incrementally from the change list (no bridge stop); first push stops the bridge for a full build, with the graph build and glossary running in parallel; the heavy work runs in a background systemd unit so an ssh disconnect doesn't interrupt it; --prepare makes the staging dir
   tests/                pytest (invoked by scripts/test.sh)
 infra/                  Infrastructure as code (MVP starts with agentcore toolkit / boto3, CDK-ified incrementally)
-  README.md             IaC split: CDK owns the stable layer / deploy-all.sh provisions AgentCore Runtime via boto3
+  README.md             Current provisioning scripts and planned CDK migration
   monitoring/           Monitoring (CloudWatch side; scripts/boto3, not a CDK stack)
     queries/metric-filters/a-class-metrics.json  Single source of A-class metric intent (counts/percentiles/distributions → metric-filter)
     queries/metric-filters/alarm-metrics.json    Dedicated dense alarm filters (one per card_health kind, defaultValue:0)
@@ -53,11 +70,12 @@ infra/                  Infrastructure as code (MVP starts with agentcore toolki
   (p2) lib/             runtime / codegraph(index-service) / gateway stacks
 config/                 Config-driven: i18n.json (card / alarm / error copy), alarm-thresholds.json (alarm thresholds, operator-tunable), projects.example.json (project-routing schema template; the real config lives at .local/projects.json — deployment-specific, gitignored)
 scripts/                Operational lifecycle
-  check-invariants.sh   Fast structural lint (AGENTS.md + architecture.md present and cross-referenced / bilingual pairing / top-level dirs ↔ structure doc two-way diff / design docs present / global IAM role policies do not pin ${REGION} / GitHub slug defaults are aws-samples / docs carry no real personnel or competitor names)
+  check-invariants.sh   Fast structural lint (AGENTS.md + architecture.md present and cross-referenced / bilingual pairing / top-level dirs ↔ structure doc two-way diff / design docs present / global IAM role policies do not pin ${REGION} / GitHub installation URLs point to ddpie/source-truth / docs carry no real personnel or competitor names)
   lib/                  common.sh (formatting + dep checks), env-utils.sh (.env / deploy-config shared helper), render_metric_filters.py (metric defs → put-metric-filter plan), render_dashboard.py (dashboard template render + no-type:log guard), render_alarms.py (thresholds → put-metric-alarm plan), render_manifest.py (multi-repo REPO_MANIFEST_JSON validate + per-repo records, pure & testable)
   apply-monitoring.sh   Single entry for the monitoring stack (dashboards→metric filters→alarms→DAU Lambda in order, idempotent; --only picks one stage; --dry-run; implementations in lib/apply-*.sh)
   test.sh               Single tiered test entrypoint (offline default / --full)
   check-versions.sh     Pinned-version drift guard (base digest / requirements pin / Node / claude-code npm)
+  generate-python-licenses.py  Generate Python licenses from the installed agent lock; --check verifies without writing
   get.sh                One-line bootstrap (fetch via curl/gh and run): clones the repo into ./source-truth then hands off to install.sh; re-runnable (git pull if it already exists)
   install.sh            Interactive one-click install (check deps→Feishu creds→config→confirm→deploy-all; pre-fills on re-run; add-project picks git or local repo source)
   push-local-repo.sh    Operator-side: rsync a local repo to the index host's staging dir and trigger a rebuild (local-repo refresh entry; no git)
@@ -89,6 +107,7 @@ docs/
   structure_en.md       This file (English counterpart)
   runbook_zh.md         Deploy / connect-Feishu / ops / troubleshooting (Chinese, bilingual pair)
   runbook_en.md         English counterpart (the neutral-name exemption was removed — the two must stay in step)
+  dual-sdk_zh.md / dual-sdk_en.md  SDK selection, legacy migration, glossary switching and verification (bilingual)
   glossary.md           How the term bridge is built: build flow / output structure / trust basis / cost & ops (human-facing, neutral name)
   aws-services_zh.md    AWS services in use: what for / billing points (bilingual pair aws-services_en.md)
   design/               Design source of truth (Chinese only, not yet translated)
@@ -105,7 +124,7 @@ docs/
     *-spike.md          Research notes (cardkit streaming / indexing perf / template)
     perf-comparison.md  Latency comparison against native Claude Code
   assets/               Doc diagrams (hand-authored SVG: architecture / data-plane / session-isolation / glossary / glossary-build / glossary-confidence / security-defense / sequence; architecture / sequence / security-defense also have English `*.en.svg` for the English README; plus demo-qa.gif, a real Q&A screen recording)
-.local/                 (gitignored) account-specific deploy state: deploy-config, projects.json (project routing)
+.local/                 (gitignored) account-specific state: deploy-config, projects.json (project configuration), deployments/ (release and rollback records)
 ```
 
 Entries tagged `(p2)` are later-phase outputs; currently placeholders or not yet created. Untagged entries are all in place.

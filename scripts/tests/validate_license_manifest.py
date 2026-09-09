@@ -6,11 +6,9 @@ traced to a lock file and every licence read from real package metadata. Nothing
 referenced it afterwards, so the next `npm install` or `pip freeze` would have silently made it
 wrong, which is exactly how a licence manifest ends up stating a version that never shipped.
 
-Scope is deliberate: this checks SET MEMBERSHIP and VERSIONS, which are decidable offline from the
-lock files. It does NOT check licence strings — those need each package's metadata and therefore
-the network, so they stay a release-time task (the manifest's own Appendix records how they were
-obtained). A drifted set is the failure that actually happens; a silently changed upstream licence
-for a pinned version is rare and cannot be caught without fetching.
+This checks set membership and versions without installed dependencies. CI also runs
+generate-python-licenses.py --check against the exact installed agent lock to verify
+Python license metadata and generated content.
 """
 from __future__ import annotations
 
@@ -22,6 +20,7 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 MANIFEST = ROOT / "THIRD-PARTY-LICENSES"
 PY_LOCK = ROOT / "agent-container" / "requirements.lock"
+GLOSSARY_LOCK = ROOT / "index-service" / "glossary-requirements.lock"
 NPM_LOCK = ROOT / "bot-gateway" / "package-lock.json"
 
 # Rows look like `| name | version | licence | ... |` inside the generated sections.
@@ -43,16 +42,32 @@ def manifest_rows(section_marker: str, stop_marker: str) -> set[tuple[str, str]]
     return out
 
 
-def python_lock() -> set[tuple[str, str]]:
+def python_lock(path: pathlib.Path = PY_LOCK) -> set[tuple[str, str]]:
     out: set[tuple[str, str]] = set()
-    for raw in PY_LOCK.read_text(encoding="utf-8").splitlines():
+    names: set[str] = set()
+    for number, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
         line = raw.split("#", 1)[0].strip()
-        if not line or line.startswith("-"):
+        if not line:
             continue
-        if "==" in line:
-            name, _, ver = line.partition("==")
-            out.add((name.strip(), ver.strip().split(";")[0].strip()))
+        match = re.fullmatch(r"([\w.-]+)==([A-Za-z0-9.!+_-]+)", line)
+        if not match:
+            raise ValueError(f"{path}:{number}: expected an exact name==version pin")
+        name = re.sub(r"[-_.]+", "-", match[1]).lower()
+        if name in names:
+            raise ValueError(f"{path}:{number}: duplicate package {name}")
+        names.add(name)
+        out.add((name, match[2]))
+    if not out:
+        raise ValueError(f"{path}: empty lock")
     return out
+
+
+def verify_glossary_subset() -> int:
+    pins = python_lock(GLOSSARY_LOCK)
+    extra = pins - python_lock()
+    if extra:
+        print(f"license-manifest: glossary packages missing from Python listing: {sorted(extra)}", file=sys.stderr)
+    return int(bool(extra))
 
 
 def npm_production() -> set[tuple[str, str]]:
@@ -93,11 +108,12 @@ def compare(label: str, manifest: set[tuple[str, str]], lock: set[tuple[str, str
 
 
 def main() -> int:
-    for f in (MANIFEST, PY_LOCK, NPM_LOCK):
+    for f in (MANIFEST, PY_LOCK, GLOSSARY_LOCK, NPM_LOCK):
         if not f.exists():
             print(f"license-manifest: missing {f}", file=sys.stderr)
             return 1
     rc = 0
+    rc |= verify_glossary_subset()
     rc |= compare("agent-container", manifest_rows("### 4.1 agent-container", "### 4.2 bot-gateway"), python_lock())
     rc |= compare("bot-gateway", manifest_rows("### 4.2 bot-gateway", "### 4.3 index-service"), npm_production())
     return rc

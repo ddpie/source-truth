@@ -1,14 +1,17 @@
 # 文档地图
 
 source-truth 的文档按**受众**分层：每类读者从自己的入口进，不必通读全部。
-项目整体介绍与高频入口见根 [`README.md`](../README.md)；本页是完整索引。
+项目整体介绍与高频入口见根 [`README.md`](../README.md)（中文在前，[英文在后](../README.md#english)）；本页是完整索引。
 
 ## 给所有人（先读这些）
 
 | 文档 | 什么时候读 |
 |------|-----------|
 | [`../README.md`](../README.md) | 第一次了解项目：它是什么、一次问答如何发生、能力边界 |
+| [`../CONTRIBUTING.md`](../CONTRIBUTING.md) | 准备贡献：开发环境、检查命令、Issue 与 PR 规范 |
+| [`../SECURITY.md`](../SECURITY.md) · [`../CODE_OF_CONDUCT.md`](../CODE_OF_CONDUCT.md) | 报告安全问题、了解社区行为规范 |
 | [`runbook_zh.md`](runbook_zh.md) · [`runbook_en.md`](runbook_en.md) | 要部署并验证系统：前置 → 一键部署 → 连飞书 → 起网关 → 验证 → 运维 → 排错（双语配对） |
+| [`dual-sdk_zh.md`](dual-sdk_zh.md) · [`dual-sdk_en.md`](dual-sdk_en.md) | 选择或切换 OpenAI / Claude：问答与术语表联动、新项目默认值、旧项目兼容及验证范围 |
 | [`structure_zh.md`](structure_zh.md) · [`structure_en.md`](structure_en.md) | 想知道某个模块在哪：权威目录树（双语） |
 | [`aws-services_zh.md`](aws-services_zh.md) · [`aws-services_en.md`](aws-services_en.md) | 想知道用到哪些 AWS 服务、规格 / 数量 / 用途（成本与容量规划，双语） |
 | [`glossary.md`](glossary.md) | 想搞懂术语表怎么来的：构建流程、产物结构、凭什么可信、成本与运维 |

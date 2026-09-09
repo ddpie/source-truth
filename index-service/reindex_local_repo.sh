@@ -132,16 +132,20 @@ refresh_glossary() {
   ( # subshell: a glossary hiccup must never change reindex's exit code
     # shellcheck disable=SC1091
     . /etc/index-service.env 2>/dev/null || true   # MODEL, REGION, GLOSSARY_MAX_FILES
+    . "/etc/index-project-${PID}.env" 2>/dev/null || true
     local groot="${GLOSSARY_ROOT:-/data/glossary}"
+    [ "${GLOSSARY_ENABLED:-true}" != "false" ] || { echo "reindex: glossary disabled — skipping refresh"; return 0; }
     [ -n "${MODEL:-}" ] || { echo "reindex: MODEL empty — skipping glossary refresh"; return 0; }
-    aws bedrock-runtime converse --region "${REGION:-}" --model-id "$MODEL" \
+    if [[ "${AGENT_SDK:-claude}" == "claude" ]]; then
+      aws bedrock-runtime converse --region "${REGION:-}" --model-id "$MODEL" \
       --messages '[{"role":"user","content":[{"text":"ok"}]}]' \
       --cli-connect-timeout 8 --cli-read-timeout 20 >/dev/null 2>&1 \
       || { echo "reindex: Bedrock not invokable — skipping glossary refresh (slice left as-is)"; return 0; }
+    fi
     mkdir -p "$groot/${PID}"
     local glog="/var/log/glossary-build-${PID}-${SUBDIR}.log"
     local slice="$groot/${PID}/${SUBDIR}.jsonl"
-    local args=(--project "$PID" --repo-root "$WS" --out "$slice" --model "$MODEL" --region "${REGION:-}")
+    local args=(--project "$PID" --repo-root "$WS" --out "$slice" --model "$MODEL" --region "${REGION:-}" --source local)
     if [ "$mode" = "incremental" ]; then
       # Copy the change lists to stable temp names: the detached build reads them asynchronously,
       # so they must outlive this script's EXIT-trap cleanup of CHANGED_LIST/DELETED_LIST. These
@@ -159,19 +163,23 @@ refresh_glossary() {
     # on the full cc scan. systemd-run hands the build to PID 1 (own session/cgroup/fds) and returns
     # at once. --collect reaps the unit on completion so a later refresh reuses the same unit name.
     # ${GLOSSARY_MAX_FILES:+--setenv=…} simply vanishes when unset (no empty arg).
-    systemctl reset-failed "glossary-build-${PID}-${SUBDIR}.service" 2>/dev/null || true
+    # Queue each push under its own unit. Reusing one name rejects a later push
+    # while the old worker holds the slice lock, permanently losing that delta.
+    local glossary_unit="glossary-build-${PID}-${SUBDIR}-$(date +%s%N)"
     # MemoryMax: same reasoning as activate_project.sh — up to GLOSSARY_BUILD_CONCURRENCY (8)
     # concurrent `claude` processes here are the largest consumer on the host, and an UNCAPPED OOM
     # becomes a host-wide OOM that can kill another project's codegraph writer. Killed build =
     # glossary_gen SKIP = the existing slice survives, so the failure mode is a stale glossary.
-    systemd-run --collect --unit="glossary-build-${PID}-${SUBDIR}" \
+    systemd-run --collect --unit="$glossary_unit" \
         -p WorkingDirectory="$APP" \
         -p MemoryMax=3G -p OOMPolicy=stop \
         -p "StandardOutput=append:$glog" -p "StandardError=append:$glog" \
         --setenv=GLOSSARY_ROOT="$groot" --setenv=AWS_REGION="${REGION:-}" \
+        --setenv=AGENT_SDK="${AGENT_SDK:-claude}" \
+        ${GLOSSARY_CONFIG_FILE:+--setenv=GLOSSARY_CONFIG_FILE="$GLOSSARY_CONFIG_FILE"} \
         ${GLOSSARY_MAX_FILES:+--setenv=GLOSSARY_MAX_FILES="$GLOSSARY_MAX_FILES"} \
         flock "$groot/${PID}/.${SUBDIR}.lock" \
-        python3 -m glossary_gen "${args[@]}" \
+        bash "$APP/glossary_worker.sh" "${args[@]}" \
       || echo "reindex: systemd-run launch failed for $SUBDIR (non-fatal — slice left as-is)"
     echo "reindex: glossary slice refresh launched (detached via systemd-run, $mode) for $SUBDIR"
   ) || true

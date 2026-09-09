@@ -33,12 +33,12 @@ source "$HERE/lib/env-utils.sh"
 REPO_REF="$(git -C "$HERE" rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)"
 [ -n "$REPO_REF" ] && [ "$REPO_REF" != HEAD ] || REPO_REF=main
 # The URL must travel WITH the ref. We used to send only REPO_REF, so the instance cloned the
-# upstream aws-samples URL and then checked out a branch that exists only in the operator's fork —
+# upstream project URL and then checked out a branch that exists only in the operator's fork —
 # a bare `error: pathspec ... did not match` under set -e. The README explicitly anticipates forks,
 # so this was the common case, not an edge one. Derive origin from the very checkout that produced
 # the ref; fall back to upstream only when there is no origin at all (a tarball download).
 REPO_URL="${REPO_URL:-$(git -C "$HERE" remote get-url origin 2>/dev/null || true)}"
-[ -n "$REPO_URL" ] || REPO_URL=https://github.com/aws-samples/sample-code-qa-on-agentcore.git
+[ -n "$REPO_URL" ] || REPO_URL=https://github.com/ddpie/source-truth.git
 # Normalise an SSH remote to https. Deriving the URL from the operator's own checkout fixed the
 # fork case, but it BROKE the SSH-clone case that used to work: an ssh remote
 # (git@github.com:owner/repo.git) was handed to an instance with no GitHub SSH key, and the

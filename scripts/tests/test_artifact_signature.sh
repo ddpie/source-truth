@@ -12,6 +12,7 @@
 #
 # The functions are extracted rather than invoked through the script (which would need AWS), the
 # same idiom test_provision_local_mode.sh uses.
+# shellcheck disable=SC2034  # GLOSSARY_ENABLED/GLOSSARY_MAX_FILES/CURRENT_SIG feed the eval'd functions
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SRC="$ROOT/scripts/lib/provision_index_service.sh"
@@ -26,6 +27,8 @@ check() { if [[ "$2" == "$3" ]]; then ok "$1"; else bad "$1 — got [$2] want [$
 log() { :; }
 eval "$(sed -n '/^_sig_component() {/,/^}$/p' "$SRC")"
 eval "$(sed -n '/^effective_sig() {/,/^}$/p' "$SRC")"
+eval "$(sed -n '/^artifact_signature() {/,/^}$/p' "$SRC")"
+eval "$(sed -n '/^sig_field() {/,/^}$/p' "$SRC")"
 
 echo "test_artifact_signature:"
 
@@ -56,7 +59,7 @@ check "no booted tag yet → current signature stands" "$(effective_sig '')" "A|
 # --- the signature builder must include every channel that reaches a live host -------------------
 # The host is never replaced, so a bootstrap run is the ONLY way these reach an existing box.
 # Each of these was missing once, and each miss meant a change that silently never landed.
-for key in 'index-service.tar.gz' 'bot-gateway.tar.gz' 'bootstrap.sh' 'bin/codegraph-server'; do
+for key in 'index-service.tar.gz' 'bot-gateway.tar.gz' 'bootstrap.sh' 'bin/codegraph-server' 'GLOSSARY_ENABLED' 'GLOSSARY_MAX_FILES'; do
   if sed -n '/^artifact_signature() {/,/^}$/p' "$SRC" | grep -qF "$key"; then
     ok "signature covers $key"
   else
@@ -71,6 +74,26 @@ if sed -n '/^artifact_signature() {/,/^}$/p' "$SRC" | grep -q 'return 1'; then
 else
   bad "artifact_signature has no failure path"
 fi
+
+# --- the glossary switch is part of the signature: flipping it must re-bootstrap, nothing else may -----
+# (before: enabling the glossary on an existing host never installed the claude CLI nor rewrote
+# /etc/index-service.env, because the reuse path never saw a change)
+T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
+mkdir -p "$T/index-service"; printf 'x\n' > "$T/index-service/bootstrap.sh"
+ROOT="$T"; head_object_etag() { printf 'etag-%s' "$1"; }
+GLOSSARY_ENABLED=false GLOSSARY_MAX_FILES=400
+s1="$(artifact_signature)"; s2="$(artifact_signature)"
+check "signature is stable while nothing changed" "$s1" "$s2"
+check "signature carries the glossary switch and cap" "${s1##*|glossary=}" "false|gmf=400"
+GLOSSARY_ENABLED=true; s3="$(artifact_signature)"
+[[ "$s3" != "$s1" ]] && ok "enabling the glossary changes the signature (→ in-place re-bootstrap installs the CLI + rewrites the env)" || bad "glossary switch does not change the signature"
+GLOSSARY_MAX_FILES=0; s4="$(artifact_signature)"
+[[ "$s4" != "$s3" ]] && ok "changing the glossary cap changes the signature" || bad "glossary cap does not change the signature"
+check "sig_field reads a named component" "$(sig_field "$s3" glossary)" "true"
+check "sig_field on an old (untagged) signature is empty" "$(sig_field 'A|B|C|D' glossary)" ""
+CURRENT_SIG="$s3"
+check "effective_sig passes the glossary components through untouched" "$(effective_sig 'A|B|C|D')" "$s3"
+grep -q '_gl_old" != "$_gl_new" ]]; then' "$SRC" && grep -q 're-bootstraps in place' "$SRC"; [[ $? -eq 0 ]] && ok "operator is told a glossary flip re-bootstraps the host (downtime)" || bad "no info line about the glossary flip re-bootstrap"
 
 echo "  ran=$ran failed=$failed"
 [[ "$failed" -eq 0 ]]

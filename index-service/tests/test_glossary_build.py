@@ -323,7 +323,14 @@ def test_code_source_classification():
 
 
 # --- batching: large file sets are chunked into multiple cc calls (arg-limit fix) ---
-def test_build_batches_large_file_set(monkeypatch):
+def _write_source_fixtures(root: Path, files: list[str]) -> None:
+    for name in files:
+        path = root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("int power;\n")
+
+
+def test_build_batches_large_file_set(monkeypatch, tmp_path):
     # 750 files with CC_BATCH_FILES=300 → 3 cc calls; outputs concatenated, all entries returned.
     monkeypatch.setattr(glossary_build, "CC_BATCH_FILES", 300)
     calls = {"n": 0, "sizes": []}
@@ -333,30 +340,33 @@ def test_build_batches_large_file_set(monkeypatch):
         return f'{{"concept_id":"c{calls["n"]}","kind":"symbol","value":"sym{calls["n"]}","source":"f.cpp","line":1,"confidence":"high"}}'
     monkeypatch.setattr(glossary_build, "run_cc", fake_run)
     files = [f"f{i}.cpp" for i in range(750)]
-    entries = glossary_build.build(files, project="p", cwd="/tmp", model="m", region="r")
+    _write_source_fixtures(tmp_path, files)
+    entries = glossary_build.build(files, project="p", cwd=str(tmp_path), model="m", region="r")
     assert calls["n"] == 3                       # 750 / 300 → 3 batches
     assert len(entries) == 3                      # one entry per batch, concatenated
     assert {e.value for e in entries} == {"sym1", "sym2", "sym3"}
 
 
-def test_build_single_batch_when_small(monkeypatch):
+def test_build_single_batch_when_small(monkeypatch, tmp_path):
     monkeypatch.setattr(glossary_build, "CC_BATCH_FILES", 300)
     calls = {"n": 0}
     monkeypatch.setattr(glossary_build, "run_cc",
                         lambda *a, **k: calls.__setitem__("n", calls["n"] + 1) or "")
-    glossary_build.build(["a.cpp", "b.cpp"], project="p", cwd="/tmp", model="m", region="r")
+    _write_source_fixtures(tmp_path, ["a.cpp", "b.cpp"])
+    glossary_build.build(["a.cpp", "b.cpp"], project="p", cwd=str(tmp_path), model="m", region="r")
     assert calls["n"] == 1                        # under batch size → one call
 
 
-def test_build_emits_per_batch_progress(monkeypatch, caplog):
+def test_build_emits_per_batch_progress(monkeypatch, caplog, tmp_path):
     # A full scan loops dozens of batches with no slice write until the end; a per-batch
     # heartbeat is the only way to tell "working" from "hung". Assert one log line per batch,
     # carrying batch/batches so progress is computable from the log alone.
     monkeypatch.setattr(glossary_build, "CC_BATCH_FILES", 300)
     monkeypatch.setattr(glossary_build, "run_cc", lambda *a, **k: "")
     files = [f"f{i}.cpp" for i in range(750)]      # → 3 batches
+    _write_source_fixtures(tmp_path, files)
     with caplog.at_level("INFO", logger="glossary-build"):
-        glossary_build.build(files, project="p", cwd="/tmp", model="m", region="r")
+        glossary_build.build(files, project="p", cwd=str(tmp_path), model="m", region="r")
     events = [json.loads(r.message) for r in caplog.records
               if r.name == "glossary-build" and "glossary_build_batch" in r.message]
     # Batches run concurrently now, so the log ORDER isn't deterministic; assert the SET of
@@ -458,6 +468,7 @@ def test_build_batches_preserve_order_under_concurrency(tmp_path, monkeypatch):
     # thread finishes first. Each emits one valid symbol entry with a batch-ordinal concept.
     monkeypatch.setenv("GLOSSARY_BUILD_CONCURRENCY", "4")
     files = [f"src/f{i}.cs" for i in range(700)]
+    _write_source_fixtures(tmp_path, files)
 
     def run(prompt, *, cwd, model, region, timeout):
         # the prompt lists the batch's files; find which batch by its first file index
@@ -480,6 +491,7 @@ def test_build_propagates_batch_failure_as_overall(monkeypatch, tmp_path):
     monkeypatch.setenv("GLOSSARY_BUILD_RETRY_BASE_S", "1")
     monkeypatch.setattr(glossary_build.time, "sleep", lambda s: None)
     files = [f"src/f{i}.cs" for i in range(400)]  # 2 batches
+    _write_source_fixtures(tmp_path, files)
 
     def run(prompt, *, cwd, model, region, timeout):
         if "src/f300.cs" in prompt:  # the second batch always throttles

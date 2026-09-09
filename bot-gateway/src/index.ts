@@ -385,7 +385,9 @@ async function sendStreamingCard(
   // Follow-up cards carry a "↳ 追问" summary marker so the chat history shows
   // where they came from. Use the CLEAN question for the preview (prompt may be
   // the replayed-context blob for a follow-up).
-  const isFollowUp = "chatId" in target;
+  // Button follow-ups send to the chat; typed replies use messageId and carry a
+  // validated parent card. Both must keep the follow-up title and telemetry.
+  const isFollowUp = "chatId" in target || !!parentMessageId;
   const summary = isFollowUp ? `${t("summary.followup.prefix")}${safeQuestion}` : safeQuestion;
   // Echo the question in the card body (esp. for follow-ups, so the card shows
   // WHAT was asked without scrolling). Pass it to createCard as the "question"
@@ -1136,6 +1138,8 @@ async function runStreamingInvoke(
     // Extract follow-ups from the RAW answer (still carries the "💡 你可能还想问"
     // trailer that stripFollowUps removed from the rendered body).
     const followUps = extractFollowUps(redactSensitive(answer));
+    tlog({ event: "followup_suggestions", card: cardId, count: followUps.length,
+      markerPresent: answer.includes("你可能还想问") });
     await writer.write((seq) => appendFooter(cardId, seq, followUps, actions));
     // 👍/👎 feedback row — only on a REAL answer (keepFooter, i.e. not a hard failure /
     // clarify / dominant-leak). Its own write after the footer so the buttons sit below

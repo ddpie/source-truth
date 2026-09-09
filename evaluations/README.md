@@ -1,10 +1,15 @@
 # evaluations — 自定义 AgentCore 评估器
 
-本目录是**可选**的，不在部署必经路径上。机器人回答问题不需要它；它花的是另一类钱（一个常驻 Lambda，
+本目录是**可选**的，不在部署必经路径上。机器人回答问题不需要它；它花的是另一类钱（Lambda 调用与运行时长，
 加上 LLM-as-judge 每次判定的模型 token）；而且它需要一份已经跑过真实问答的遥测才有意义。
 
 部署与排错的完整步骤见 runbook 附录 F（[中文](../docs/runbook_zh.md) / [English](../docs/runbook_en.md)）。
 这里只讲**设计决定**。
+
+`apply-evaluations.sh` 默认新建禁用的在线评估配置；重跑未指定启停或采样参数时保留已有值，
+用 `--enable` / `--disable` 或 `--sampling` 显式调整。评委模型按区域解析。
+`--project` 只选择代码型 Lambda 的回查项目，当前一个 Lambda 只连接一个 bridge，不能替所有项目评分。
+详细命令、参数和这一限制见 runbook 附录 F。
 
 ## 先用内置的
 
@@ -60,7 +65,8 @@ label `EvaluatorError`，不返回 `Fail`。一次基础设施中断若被记成
 
 **打包必须在容器里做。** `pydantic` 带 `pydantic-core` 二进制轮子，本机 pip 装出来的包在 Lambda 上
 可能直接 import 失败，而那种失败只在真正评估时暴露、并以「评估器故障」的形式污染评估数据。
-`apply-evaluations.sh` 用 Lambda 官方基础镜像安装，装完立刻在镜像内 import 一次，import 不过就拒绝上传。
+`apply-evaluations.sh` 用 Lambda 官方基础镜像按 `linux/arm64` 构建并验证 import，
+x86 部署机需要 ARM64 仿真；import 不过就拒绝上传。
 
 ## 本地跑判据
 

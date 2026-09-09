@@ -45,7 +45,8 @@ printf '%s' "$_local_block" | grep -qv 'macs/.*security-group-ids'
 check "local-mode 分支内不刮 IMDS mac sg 路径" $?
 # local mode must wrap bootstrap with a timeout; --foreground keeps it in our process group so
 # tty access (tee streaming) doesn't get the tree stopped by SIGTTIN/SIGTTOU
-grep -qE 'timeout (--foreground )?[0-9].* bash .*bootstrap.sh|run_timeout .* bootstrap.sh' "$F"; check "bootstrap wrapped in a timeout" $?
+grep -q 'timeout --foreground 1800 sudo -E env SOURCE_TRUTH_BOOTSTRAP=' "$F" && grep -q 'bash -c "$(rebootstrap_payload)"' "$F"
+check "local bootstrap uses the shared transaction inside a timeout" $?
 grep -q 'timeout --foreground' "$F"; check "timeout runs bootstrap in the foreground process group" $?
 # A2 fail-loud precheck: read the instance's IAM profile, abort if none, abort if S3 artifact unreadable
 grep -q 'IamInstanceProfile.Arn' "$F"; check "local mode reads the instance's IAM profile" $?

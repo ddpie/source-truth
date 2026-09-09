@@ -23,7 +23,7 @@
 #                   gets its bridge (activate_project.sh), AgentCore runtime, and
 #                   bot-gateway unit (co-located on the index host, via SSM)
 #   7  monitoring : apply-monitoring.sh — CloudWatch metric-filters + dashboards +
-#                   alarms + DAU lambda (best-effort, after the gateway logs)
+#                   alarms + DAU lambda (opt-in via --with-monitoring; best-effort)
 #
 # NO EFS: the agent microVM mounts no filesystem; it reads all source code over
 # the index-service HTTP bridge (read_file/glob_files/search_files/codegraph_*).
@@ -41,6 +41,7 @@ source "$SCRIPT_DIR/lib/resolve_model.sh"
 
 CONFIG_DIR="$ROOT/.local"
 CONFIG_FILE="$CONFIG_DIR/deploy-config"
+PROJECTS_CFG="$CONFIG_DIR/projects.json"
 # Deliberately pre-scan "$@" instead of testing $DRY_RUN: the arg loop runs ~90 lines below, so at
 # this point DRY_RUN is still unset and any gate on it passes unconditionally — which is why
 # --dry-run still created this directory after being "fixed" once. --help promises "make no
@@ -68,7 +69,12 @@ IDLE_TIMEOUT=""          # AgentCore session idle timeout (s); gateway session T
 MAX_LIFETIME=""          # AgentCore microVM hard max age (s) before forced recycle
 DEFAULT_INSTANCE_TYPE="t4g.large"
 DEFAULT_MAX_FILES="10000"
-DEFAULT_GLOSSARY_MAX_FILES="0"   # 0 = no cap (scan whole repo — full Chinese→symbol coverage); set >0 to cap cost
+DEFAULT_GLOSSARY_MAX_FILES="400" # bounded first-deploy cost; 0 (= uncapped, whole repo) only when passed explicitly
+# Opt-in extras. Empty = "not given on the CLI"; resolved flag > persisted > default (false) below,
+# so a later flagless run keeps the operator's earlier choice (same contract as the knobs above).
+WITH_MONITORING=""       # --with-monitoring: Phase 7 (CloudWatch dashboards/alarms/DAU lambda)
+WITH_GLOSSARY=""         # --with-glossary: build-time 中文→symbol glossary (cc engine on the host, model cost)
+NO_PROBE="${NO_PROBE:-false}"  # --no-probe (or inherited NO_PROBE=1): skip deploy_project.sh's real-question smoke
 DEFAULT_MODEL="global.anthropic.claude-opus-4-8"
 DEFAULT_ROOT_VOLUME_GB="30"
 # Idle timeout default = AWS's own default (900s/15min). The gateway derives its
@@ -100,7 +106,7 @@ LOCAL_MODE=false          # --local: this EC2 IS the index host; bootstrap in pl
 # check-invariants 8b consumes this instead of grepping for an assignment line. Grepping source
 # could not see three real reversions: repointing CODEGRAPH_SERVER_URL_DEFAULT rather than _REPO,
 # a second INDENTED re-assignment further down (bash takes the last one, a `^`-anchored grep sees
-# the first), and `aws-samples/source-truth`, which the older slug check exempts by construction.
+# the first), and the project repository itself, which needs a separate engine-source check.
 # Reading the resolved value makes the guard and the runtime agree by definition.
 if [[ "${1:-}" == "--print-engine-source" ]]; then
   printf 'CODEGRAPH_SERVER_REPO=%s\n' "$CODEGRAPH_SERVER_REPO"
@@ -130,7 +136,22 @@ Options:
                       project (init-env). Add projects later via ./scripts/install.sh.
   --instance-type <t> index host EC2 type, ARM (default: t4g.large)
   --max-files <n>     codegraph max files to index per repo (default: 10000)
-  --glossary-max-files <n>  term-glossary build file cap per repo (default: 0 = no cap; set >0 to cap cost)
+  --with-glossary[=true|false]
+                      Build the 中文→code-symbol glossary on the index host (default: OFF). Costs
+                      model calls (one full scan + incremental refreshes); persisted for later runs.
+                      --with-glossary=false turns it off explicitly (also persisted). Flipping the
+                      switch re-bootstraps an existing host in place (minutes of bot downtime).
+  --glossary-max-files <n>  glossary build file cap per repo when --with-glossary (default: 400;
+                      0 = no cap, whole repo — can cost hundreds of USD on a large repo)
+  --with-monitoring[=true|false]
+                      Run Phase 7 (CloudWatch metric-filters + dashboards + alarms + DAU lambda;
+                      default: OFF). Persisted, so later runs without the flag keep it on;
+                      --with-monitoring=false turns it off explicitly (also persisted).
+                      Standalone: ./scripts/apply-monitoring.sh --region <r>
+                      A deploy-config with a host but WITHOUT the DEPLOY_WITH_* keys predates these
+                      switches: both default to ON there (warned once) — pass =false to turn off.
+  --no-probe          Skip the post-deploy smoke (1 code question through the runtime;
+                      model cost). Also: E2E_PROBE=0.
   --root-volume-gb <n> index host root EBS size in GiB (default: 30). Grow for large repos:
                       it holds every project's repo clones + graph.db.
   --model <id>        default Bedrock model id (a project may override it in projects.json)
@@ -161,7 +182,9 @@ PREREQUISITES (not auto-provisioned — the deploy hard-fails / WARNs if missing
     this repo never redistributes it) — so a fresh machine works. Build it yourself instead:
     see index-service/README.md "Obtaining codegraph-server".
   • A host that can build linux/arm64 images (arm64 host, or x86 + binfmt).
-  • Bedrock model access for the model, and AgentCore available in --region (probed, WARN).
+  • Bedrock Converse access for the selected project models (invalid model/profile hard-fails
+    unless --force; deployment-role AccessDenied is advisory). Runtime access is verified after deploy.
+  • session-manager-plugin for interactive `aws ssm start-session` (optional for automated deploy).
   • A read-only git credential in Secrets Manager (source-truth/git-credentials) for cloning
     private repos — install.sh's "add a project" creates it; or create it by hand.
   • Per-project Feishu app secrets (source-truth/feishu-<projectId>) — install.sh creates these.
@@ -195,6 +218,13 @@ _val_int() {  # _val_int <flag> <value> <argc> [min] [max]
   if [[ -n "${4:-}" ]] && (( v < $4 )); then say err "$1 must be >= $4, got $v"; exit 2; fi
   if [[ -n "${5:-}" ]] && (( v > $5 )); then say err "$1 must be <= $5, got $v"; exit 2; fi
   printf '%s' "$v"
+}
+_val_bool() {  # _val_bool <flag> <value>  -> true|false (the =value form of an opt-in switch)
+  case "$2" in
+    true|yes|on|1) printf 'true' ;;
+    false|no|off|0) printf 'false' ;;
+    *) say err "$1 must be true or false, got '$2'"; exit 2 ;;
+  esac
 }
 _val_arm_instance() {
   local v; v="$(_val "$1" "$2" "$3")"
@@ -235,7 +265,7 @@ while [[ $# -gt 0 ]]; do
       esac
       shift 2 ;;
     --idle-timeout) IDLE_TIMEOUT="$(_val_int --idle-timeout "${2:-}" $# 60 28800)"; shift 2 ;;
-    --max-lifetime) MAX_LIFETIME="$(_val_int --max-lifetime "${2:-}" $# 60 86400)"; shift 2 ;;
+    --max-lifetime) MAX_LIFETIME="$(_val_int --max-lifetime "${2:-}" $# 60 28800)"; shift 2 ;;
     --skip)
       case "${2:-}" in
         # 'runtime'/'gateway' used to be separate phases; they merged into the per-project
@@ -247,6 +277,11 @@ while [[ $# -gt 0 ]]; do
       esac
       shift 2 ;;
     --local) LOCAL_MODE=true; shift ;;
+    --with-monitoring) WITH_MONITORING=true; shift ;;
+    --with-monitoring=*) WITH_MONITORING="$(_val_bool --with-monitoring "${1#*=}")"; shift ;;
+    --with-glossary) WITH_GLOSSARY=true; shift ;;
+    --with-glossary=*) WITH_GLOSSARY="$(_val_bool --with-glossary "${1#*=}")"; shift ;;
+    --no-probe) NO_PROBE=true; shift ;;
     --dry-run) DRY_RUN=true; shift ;;
     --force) FORCE=true; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -275,6 +310,15 @@ require_cmd python3 || exit 1
 safe_source_env "$CONFIG_FILE"
 REGION="${REGION:-${DEPLOY_REGION:-}}"
 [[ -n "$REGION" ]] || { say err "--region required"; exit 2; }
+# One .local/deploy-config describes ONE region's deployment (instance ids, subnets, image URIs are
+# all regional). Re-pointing it at another region would "reuse" resources that do not exist there
+# and wire the new project to the old region's image and index host.
+if [[ -n "${DEPLOY_REGION:-}" && "$DEPLOY_REGION" != "$REGION" ]]; then
+  say err ".local/deploy-config 记录的是 ${DEPLOY_REGION} 的部署，与 --region ${REGION} 不一致 / deploy-config belongs to ${DEPLOY_REGION}, not ${REGION}."
+  say err "  → 另一个区域请用另一份检出（或先把 .local/ 移走）；同一区域请去掉 --region 或改回 ${DEPLOY_REGION}。"
+  say err "    use a separate checkout per region (or move .local/ aside); for this region drop --region or pass ${DEPLOY_REGION}."
+  exit 2
+fi
 # Does this region actually exist and is it enabled for the account? A well-formed but non-existent
 # code (xx-bogus-9) passes any regex and used to surface as an opaque endpoint error mid-deploy.
 # --output text separates with TABS. Normalise BEFORE matching, not only for the message —
@@ -332,7 +376,9 @@ export LOCALE
 # then WARNs). Skipped in dry-run (it makes an AWS call). See lib/resolve_model.sh.
 MODEL_DECLARED="$MODEL"
 if [[ "$DRY_RUN" != true ]]; then
-  MODEL="$(resolve_model_for_region "$MODEL" "$REGION")"
+  _MODEL_RC=0
+  MODEL="$(resolve_model_for_region "$MODEL" "$REGION")" || _MODEL_RC=$?
+  [[ "$_MODEL_RC" == 0 ]] || say warn "default model profile remains unverified: $MODEL"
   [[ "$MODEL" == "$MODEL_DECLARED" ]] || say info "resolved model for $REGION: $MODEL_DECLARED → $MODEL"
 fi
 INSTANCE_TYPE="${INSTANCE_TYPE:-${DEPLOY_INSTANCE_TYPE:-$DEFAULT_INSTANCE_TYPE}}"
@@ -341,63 +387,83 @@ INSTANCE_TYPE="${INSTANCE_TYPE:-${DEPLOY_INSTANCE_TYPE:-$DEFAULT_INSTANCE_TYPE}}
 export DEPLOY_INSTANCE_TYPE="$INSTANCE_TYPE"
 MAX_FILES="${MAX_FILES:-${DEPLOY_MAX_FILES:-$DEFAULT_MAX_FILES}}"
 GLOSSARY_MAX_FILES="${GLOSSARY_MAX_FILES:-${DEPLOY_GLOSSARY_MAX_FILES:-$DEFAULT_GLOSSARY_MAX_FILES}}"
+# Upgrade path: a deploy-config that already has a host but NO DEPLOY_WITH_* key predates the
+# opt-in switches, when glossary + monitoring were always on. Defaulting to false there would turn
+# a working feature OFF on the next flagless run (and re-bootstrap the host to do it). Keep ON,
+# warn once, and persist below; --with-<x>=false is the explicit way to turn it off.
+resolve_optin() {  # resolve_optin <flag-value> <persisted-value> <name> -> true|false
+  if [[ -n "$1" ]]; then printf '%s' "$1"; return; fi
+  if [[ -n "$2" ]]; then printf '%s' "$2"; return; fi
+  if [[ -n "${INDEX_SERVICE_INSTANCE:-}" ]]; then
+    say warn "现有部署早于开关 / existing deployment predates the opt-in switches — keeping $3 ON;"
+    say warn "  pass --with-$3=false (or edit .local/deploy-config DEPLOY_WITH_$(printf '%s' "$3" | tr '[:lower:]' '[:upper:]')=false) to turn it off"
+    printf 'true'; return
+  fi
+  printf 'false'
+}
+WITH_MONITORING="$(resolve_optin "$WITH_MONITORING" "${DEPLOY_WITH_MONITORING:-}" monitoring)"
+WITH_GLOSSARY="$(resolve_optin "$WITH_GLOSSARY" "${DEPLOY_WITH_GLOSSARY:-}" glossary)"
+GLOSSARY_SETTINGS_CHANGED=false
+if [[ -n "${INDEX_SERVICE_INSTANCE:-}" ]] && \
+   [[ "$WITH_GLOSSARY" != "${DEPLOY_WITH_GLOSSARY:-true}" || \
+      "$GLOSSARY_MAX_FILES" != "${DEPLOY_GLOSSARY_MAX_FILES:-400}" ]]; then
+  GLOSSARY_SETTINGS_CHANGED=true
+  if skip index-svc; then
+    say err "glossary switch/cap changed: cannot use --skip index-svc; the host must apply these settings first"
+    exit 2
+  fi
+fi
+# Glossary OFF ⇒ the host gets an EMPTY glossary model: activate_project.sh treats "MODEL empty"
+# as "engine disabled" (no initial build), the refresh timer becomes pull-only, and bootstrap.sh
+# skips the claude CLI install (GLOSSARY_ENABLED=false in /etc/index-service.env).
+GLOSSARY_MODEL=""
+[[ "$WITH_GLOSSARY" == true ]] && GLOSSARY_MODEL="$MODEL"
 ROOT_VOLUME_GB="${ROOT_VOLUME_GB:-${DEPLOY_ROOT_VOLUME_GB:-$DEFAULT_ROOT_VOLUME_GB}}"
 IDLE_TIMEOUT="${IDLE_TIMEOUT:-${DEPLOY_IDLE_TIMEOUT:-$DEFAULT_IDLE_TIMEOUT}}"
 MAX_LIFETIME="${MAX_LIFETIME:-${DEPLOY_MAX_LIFETIME:-$DEFAULT_MAX_LIFETIME}}"
+# Persisted options need the same validation as explicit CLI values.
+IDLE_TIMEOUT="$(_val_int --idle-timeout "$IDLE_TIMEOUT" 2 60 28800)"
+MAX_LIFETIME="$(_val_int --max-lifetime "$MAX_LIFETIME" 2 60 28800)"
 ACCOUNT="$(aws sts get-caller-identity --query Account --output text)"
 
 # Repos are NOT a CLI concern any more — they live in .local/projects.json and are git-cloned on
 # the index host by activate_project.sh (Phase 5). The deploy stages only the codegraph binary +
 # index-service/bot-gateway code to S3 (Phase 1); no repo tarballs.
 BUCKET="source-truth-repo-${ACCOUNT}-$(echo "$REGION" | tr -d '-')"
-say info "account=$ACCOUNT region=$REGION bucket=$BUCKET model=$MODEL skip_projects=$SKIP_PROJECTS"
+say info "account=$ACCOUNT region=$REGION bucket=$BUCKET model=$MODEL skip_projects=$SKIP_PROJECTS glossary=$WITH_GLOSSARY monitoring=$WITH_MONITORING"
 
-# Bedrock invoke preflight. AWS no longer requires per-model "Model access" enablement,
-# so a denial here is NOT a console toggle — it's a real config problem: the deploy
-# identity lacks bedrock:InvokeModel, or the model-id / inference-profile form isn't
-# offered in this region. Deploy still goes READY without invoking the model, so the
-# first real question would fail; we probe with a minimal invoke and WARN actionably on
-# denial — non-blocking (the probe can fail for unrelated/transient reasons and must never
-# block an otherwise-working deploy). Skipped on dry-run.
+# Converse accepts both supported model families. A deploy identity may have
+# different permissions from the runtime role, so its AccessDenied is advisory;
+# the post-deploy smoke verifies the actual runtime identity and code tools.
 preflight_model_access() {
   command -v aws >/dev/null || return 0
-  local body resp err rc
-  body='{"anthropic_version":"bedrock-2023-05-31","max_tokens":1,"messages":[{"role":"user","content":"ping"}]}'
-  resp="$(mktemp)"
-  # HARD timeout so a slow/blocked invoke-model can never stall the whole deploy
-  # (observed: this call can hang for minutes in some networks). A timeout falls
-  # through to the inconclusive→continue branch, never blocks. `timeout` exits 124
-  # on expiry; aws cli connect/read timeouts add a second belt. Probe stays best-
-  # effort: only a clear AccessDenied WARNs; everything else just continues.
-  if err="$(run_timeout 30 aws bedrock-runtime invoke-model --region "$REGION" --model-id "$MODEL" \
+  local probe_model="${1:?model required}" err rc
+  if [[ "$DRY_RUN" == true ]]; then
+    say info "[dry-run] Bedrock Converse model probe: $probe_model (no inference)"
+    return 0
+  fi
+  if err="$(run_timeout 30 aws bedrock-runtime converse --region "$REGION" --model-id "$probe_model" \
         --cli-connect-timeout 8 --cli-read-timeout 20 \
-        --body "$body" --content-type application/json --accept application/json \
-        "$resp" 2>&1)"; then
-    say ok "bedrock model access OK ($MODEL)"
+        --messages '[{"role":"user","content":[{"text":"Reply OK."}]}]' \
+        --inference-config '{"maxTokens":16}' 2>&1)"; then
+    say ok "Bedrock Converse model access OK ($probe_model)"
   else
     rc=$?
+    # AWS CLI errors start with a blank line. Keep the first useful line in the
+    # diagnostic instead of printing an empty reason.
+    while [[ "$err" == $'\n'* || "$err" == $'\r'* ]]; do err="${err:1}"; done
     case "$err" in
-      *AccessDenied*|*"don't have access"*|*"not authorized"*|*not\ enabled*|*ValidationException*|*"not found"*|*"inference profile"*)
-        say warn "Bedrock model '$MODEL' couldn't be invoked in $REGION (an IAM/region/"
-        say warn "  inference-profile-form issue — note: AWS no longer requires per-model"
-        say warn "  'Model access' enablement, so this is a config problem, not a console toggle)."
-        # Suggest a profile that actually exists in THIS region, derived live from
-        # Bedrock (not a hardcoded prefix — the geo prefixes are us./eu./jp./au., and
-        # many regions only carry global.). resolve_model_for_region already ran before
-        # this probe, so if MODEL still doesn't work, surface the region's real options.
-        # `|| true`: grep exits 1 on no-match, which under set -e + pipefail would
-        # otherwise abort the deploy right where this HELPFUL hint should print.
-        avail="$(list_region_profiles "$REGION" 2>/dev/null | grep -F "$(model_basename "$MODEL")" | paste -sd' ' - || true)"
-        if [[ -n "$avail" ]]; then
-          say warn "  → inference profiles for this model that ARE offered in $REGION:"
-          say warn "    $avail"
-          say warn "    pass one via --model <id> (or check the deploy identity's bedrock:InvokeModel perms)."
+      *AccessDenied*|*"don't have access"*|*"not authorized"*)
+        say warn "部署身份无法调用 / deploy identity cannot invoke $probe_model in $REGION."
+        say warn "  Runtime 角色权限可能不同；部署后真实问答验收会核对 / the runtime role is checked by post-deploy smoke." ;;
+      *ValidationException*|*ResourceNotFoundException*|*not\ enabled*)
+        say err "模型/区域配置无效 / invalid model or region for $probe_model: ${err%%$'\n'*}"
+        if [[ "$FORCE" == true ]]; then
+          say warn "  --force: continuing despite the failed model probe."
         else
-          say warn "  → no inference profile for '$(model_basename "$MODEL")' is offered in $REGION;"
-          say warn "    pick a supported region, or verify the model/IAM in this one."
-        fi
-        say warn "  (Deploy continues; the runtime reaches READY but answers fail with"
-        say warn "   AccessDenied/ValidationException until the model is available.)" ;;
+          say err "  → fix the model/profile in projects.json, or re-run with --force."
+          exit 1
+        fi ;;
       *)
         if [[ "$rc" == 124 ]]; then
           say info "model-access probe timed out (>30s); skipping check and continuing"
@@ -406,7 +472,42 @@ preflight_model_access() {
         fi ;;
     esac
   fi
-  rm -f "$resp"
+}
+
+preflight_project_models() {
+  local models declared resolved resolve_rc
+  models="$(PYTHONPATH="$ROOT/agent-container" python3 - "$PROJECTS_CFG" "$MODEL_DECLARED" "$WITH_GLOSSARY" <<'PY'
+import json
+from pathlib import Path
+import sys
+from agent_settings import deployment_models
+path = Path(sys.argv[1])
+config = json.loads(path.read_text()) if path.exists() else {}
+print("\n".join(deployment_models(config, legacy_model=sys.argv[2], glossary=sys.argv[3] == "true")))
+PY
+)" || { say err "invalid project model configuration"; exit 2; }
+  if [[ -z "$models" ]]; then
+    say info "No project model selected yet; model checks run when adding a project."
+    return 0
+  fi
+  while IFS= read -r declared; do
+    [[ -n "$declared" ]] || continue
+    resolved="$declared"
+    if [[ "$DRY_RUN" != true ]]; then
+      resolve_rc=0
+      resolved="$(resolve_model_for_region "$declared" "$REGION")" || resolve_rc=$?
+      [[ "$resolve_rc" == 0 ]] || say warn "model profile remains unverified: $resolved"
+    fi
+    preflight_model_access "$resolved"
+  done <<< "$models"
+}
+
+# Validate the complete declaration before any infrastructure is changed. The
+# per-project builder catches malformed repos, but only a global pass can catch
+# two projects sharing the same bridge port or on-host repo/writer lock.
+preflight_project_config() {
+  [[ -f "$PROJECTS_CFG" ]] || return 0
+  validate_projects_config "$PROJECTS_CFG" "$SCRIPT_DIR/lib"
 }
 # AgentCore is a newer service available only in a SUBSET of regions, and on a
 # fresh account first use can need a service-linked role / activation. If it isn't
@@ -574,6 +675,15 @@ preflight_gnu_tar() {
   fi
 }
 preflight_gnu_tar
+# Interactive SSM sessions need this plugin; deployment uses SendCommand and
+# GetCommandInvocation, which work without it.
+preflight_ssm_plugin() {
+  command -v session-manager-plugin >/dev/null 2>&1 && return 0
+  say warn "缺少 session-manager-plugin；自动部署可继续，交互登录主机前需安装。"
+  say warn "  Interactive SSM sessions need: https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html"
+  return 0
+}
+preflight_ssm_plugin
 # These are READ-ONLY probes (Bedrock model listing, AgentCore reachability), so they run in
 # --dry-run as well. Withholding them made `--dry-run` answer "what would be built" while staying
 # silent on "can this machine and account actually do it" — which is the question the operator was
@@ -591,14 +701,15 @@ preflight_observability() {
     say ok "CloudWatch Transaction Search 已开（span 可查询）"
   else
     say warn "CloudWatch Transaction Search 未开（region $REGION）——agent 会产出 span，但无处可查。"
-    say warn "  开启（一次性，按区域）："
-    say warn "    aws xray update-trace-segment-destination --region $REGION --destination CloudWatchLogs"
-    say warn "  还需给 X-Ray 加 logs 资源策略，见 docs/runbook_en.md \"Observability\"。"
+    say warn "  开启（一次性，按区域；Transaction Search + 每个 runtime 的 span 投递，Evaluations 依赖它）："
+    say warn "    ./scripts/apply-monitoring.sh --region $REGION --only observability"
+    say warn "  详见 docs/runbook_en.md \"Observability\"。"
     say warn "  不影响本次部署，也不影响机器人回答问题。"
   fi
 }
 
-preflight_model_access; preflight_agentcore; preflight_observability
+preflight_project_config || exit 2
+preflight_project_models; preflight_agentcore; preflight_observability
 if [[ "$DRY_RUN" != true ]]; then
   # preflight_quota checks EIP/VPC/vCPU headroom — all for resources we're about to CREATE. --local
   # creates none of them (reuses this host's VPC/subnet, doesn't run-instances or allocate an EIP),
@@ -618,7 +729,19 @@ if [[ "$DRY_RUN" != true ]]; then
   update_env "$CONFIG_FILE" DEPLOY_MODEL "$MODEL_DECLARED"
   update_env "$CONFIG_FILE" DEPLOY_INSTANCE_TYPE "$INSTANCE_TYPE"
   update_env "$CONFIG_FILE" DEPLOY_MAX_FILES "$MAX_FILES"
-  update_env "$CONFIG_FILE" DEPLOY_GLOSSARY_MAX_FILES "$GLOSSARY_MAX_FILES"
+  # Monitoring controls Phase 7; it has no index-host configuration to apply.
+  # Persist the choice even when --skip index-svc leaves the host unchanged.
+  update_env "$CONFIG_FILE" DEPLOY_WITH_MONITORING "$WITH_MONITORING"
+  # DEPLOY_WITH_GLOSSARY / DEPLOY_GLOSSARY_MAX_FILES: on a FIRST deploy
+  # (no host yet, no key yet) persist them now, otherwise a Phase 3 failure leaves "host exists,
+  # key missing" behind and the next run's legacy default flips an explicitly disabled switch back
+  # on. On an EXISTING host they are persisted only after Phase 3 succeeds (see below), because
+  # install.sh's redeploy decides whether the host needs a re-bootstrap by comparing the flag with
+  # the persisted value, so a failed run must not record the new value.
+  if [[ -z "${INDEX_SERVICE_INSTANCE:-}" ]]; then
+    [[ -n "${DEPLOY_WITH_GLOSSARY:-}" ]]   || update_env "$CONFIG_FILE" DEPLOY_WITH_GLOSSARY "$WITH_GLOSSARY"
+    [[ -n "${DEPLOY_GLOSSARY_MAX_FILES:-}" ]] || update_env "$CONFIG_FILE" DEPLOY_GLOSSARY_MAX_FILES "$GLOSSARY_MAX_FILES"
+  fi
   update_env "$CONFIG_FILE" DEPLOY_FEISHU_DOMAIN "$FEISHU_DOMAIN"
   update_env "$CONFIG_FILE" DEPLOY_LOCALE "$LOCALE"
   update_env "$CONFIG_FILE" DEPLOY_ROOT_VOLUME_GB "$ROOT_VOLUME_GB"
@@ -629,6 +752,10 @@ if [[ "$DRY_RUN" != true ]]; then
   update_env "$CONFIG_FILE" DEPLOY_MAX_LIFETIME "$MAX_LIFETIME"
 fi
 export DEPLOY_IDLE_TIMEOUT="$IDLE_TIMEOUT" DEPLOY_MAX_LIFETIME="$MAX_LIFETIME"
+# deploy_project.sh reads these: glossary on/off decides the model it hands activate_project.sh;
+# NO_PROBE=1 skips its post-deploy smoke.
+export DEPLOY_WITH_GLOSSARY="$WITH_GLOSSARY"
+case "$NO_PROBE" in true|1) export NO_PROBE=1 ;; *) unset NO_PROBE ;; esac
 
 run() { if [[ "$DRY_RUN" == true ]]; then say info "[dry-run] $*"; else "$@"; fi; }
 
@@ -910,7 +1037,8 @@ else
   # a subdir and are excluded by the top-level-only copy.
   cp "$ROOT"/index-service/*.py "$ROOT"/index-service/*.sh "$ROOT"/index-service/requirements.txt "$IDX_STAGE"/
   cp "$ROOT"/scripts/lib/render_manifest.py "$IDX_STAGE"/
-  ( cd "$IDX_STAGE" && det_tar ./*.py ./*.sh requirements.txt | gzip -n > "$TMP_IDX" )
+  cp "$ROOT"/agent-container/openai_backend.py "$ROOT"/agent-container/bedrock_converse.py "$ROOT"/index-service/glossary-requirements.lock "$IDX_STAGE"/
+  ( cd "$IDX_STAGE" && det_tar ./*.py ./*.sh requirements.txt glossary-requirements.lock | gzip -n > "$TMP_IDX" )
   rm -rf "$IDX_STAGE"
   run aws s3 cp "$TMP_IDX" "s3://$BUCKET/index-service.tar.gz" --region "$REGION"
 
@@ -1005,7 +1133,7 @@ if skip index-svc; then say warn "skip index-svc"; elif [[ "$DRY_RUN" == true ]]
     say info "[dry-run]     re-run bootstrap.sh on it over SSM: rewrites /etc/index-service.env,"
     say info "[dry-run]     /opt/idx/app and /opt/bot-gateway on a RUNNING host (mutating)"
     say info "[dry-run]   • if they match → no host-side change at all"
-    say info "[dry-run]   nothing is stopped or terminated by this phase"
+    say info "[dry-run]   a re-bootstrap stops and restarts active gateways and bridges (minutes of downtime)"
   else
     say info "[dry-run] LAUNCH a new base host (no INDEX_SERVICE_INSTANCE recorded yet) + bootstrap"
     say info "[dry-run]   via user-data, then wait for the BOOTSTRAP_DONE marker over SSM"
@@ -1019,13 +1147,17 @@ if skip index-svc; then say warn "skip index-svc"; elif [[ "$DRY_RUN" == true ]]
   # the signature gains a component (e.g. bootstrap.sh's own ETag).
 else
   say step "Phase 3: index-service EC2 (BASE host — no project bound)"
+  if [[ "$GLOSSARY_SETTINGS_CHANGED" == true && -f "$PROJECTS_CFG" ]]; then
+    _pending_projects="$(python3 -c 'import json,sys; print(" ".join(json.load(open(sys.argv[1]))["projects"]))' "$PROJECTS_CFG")"
+    update_env "$CONFIG_FILE" DEPLOY_GLOSSARY_PENDING_PROJECTS "$_pending_projects"
+  fi
   # Remember whether a base host already existed BEFORE this run: the provisioner reuses and updates
   # it in place, and only writes a different INDEX_SERVICE_INSTANCE when it genuinely launched one.
   # That comparison is the only signal deploy-all needs, and it needs no cooperation from
   # provision_index_service.sh (whose stdout stays the IP alone).
   INDEX_IID_BEFORE="${INDEX_SERVICE_INSTANCE:-}"
-  INDEX_IP="$(ST_LOCAL_MODE="$LOCAL_MODE" "$SCRIPT_DIR/lib/provision_index_service.sh" \
-    "$REGION" "$CONFIG_FILE" "$BUCKET" "$MAX_FILES" "$INSTANCE_TYPE" "$ROOT_VOLUME_GB" "$MODEL" "$GLOSSARY_MAX_FILES")"
+  INDEX_IP="$(ST_LOCAL_MODE="$LOCAL_MODE" ST_GLOSSARY_ENABLED="$WITH_GLOSSARY" "$SCRIPT_DIR/lib/provision_index_service.sh" \
+    "$REGION" "$CONFIG_FILE" "$BUCKET" "$MAX_FILES" "$INSTANCE_TYPE" "$ROOT_VOLUME_GB" "$GLOSSARY_MODEL" "$GLOSSARY_MAX_FILES")"
   update_env "$CONFIG_FILE" INDEX_SERVICE_IP "$INDEX_IP"
   safe_source_env "$CONFIG_FILE"
   REUSED_INDEX_HOST=false
@@ -1074,6 +1206,14 @@ else
     safe_source_env "$CONFIG_FILE"
   fi
   say ok "index-service at $INDEX_IP:8080 (stable name: ${INDEX_DNS_NAME:-pending})"
+fi
+# The host now carries the glossary state these switches describe — persist them here,
+# not before provisioning, so a failed Phase 3 leaves the previous values in deploy-config. Not when
+# Phase 3 was skipped either: the host did not change, and recording the new value would make
+# install.sh's redeploy think no re-bootstrap is needed.
+if [[ "$DRY_RUN" != true ]] && ! skip index-svc; then
+  update_env "$CONFIG_FILE" DEPLOY_GLOSSARY_MAX_FILES "$GLOSSARY_MAX_FILES"
+  update_env "$CONFIG_FILE" DEPLOY_WITH_GLOSSARY "$WITH_GLOSSARY"
 fi
 
 # ============================================================
@@ -1140,12 +1280,18 @@ fi
 # graphs, start its bridge on its port), deploys a per-project AgentCore runtime pointed at that
 # bridge port, and activates a per-project gateway (its own Feishu app). Idempotent + isolated:
 # one project's failure doesn't abort the others.
-PROJECTS_CFG="$ROOT/.local/projects.json"
-PROJECTS_DEPLOYED=false   # set true once ≥1 project's gateway is active (gates monitoring + footer)
+PROJECTS_DEPLOYED=false   # true only if this run deployed ≥1 project (not a service health check)
+_PROBE_FAILED=()          # projects that deployed but failed the smoke probe (deploy_project.sh rc 3)
+probe_failed_summary() {  # one line per rc-3 project; printed before BOTH the exit-1 and exit-3 paths
+  [[ ${#_PROBE_FAILED[@]} -gt 0 ]] || return 0
+  local _p
+  for _p in "${_PROBE_FAILED[@]}"; do
+    say warn "项目 $_p 已部署，但真实问答验收未通过 / project $_p deployed but did not answer the smoke questions — see runbook §5/§8 (docs/runbook_zh.md §五/§八)"
+  done
+}
 if [[ "$SKIP_PROJECTS" == true ]]; then
   say step "Phase 5: per-project deploy"
-  say info "--skip-projects: shared BASE host is provisioned; attaching NO project (init-env)."
-  say info "  → run ./scripts/install.sh → 'add a project' to bring a bot online."
+  say info "--skip-projects: 本次跳过项目部署 / project deployment skipped in this run."
 elif skip projects; then
   say warn "skip per-project phase (--skip projects)"
 elif [[ "$DRY_RUN" == true ]]; then
@@ -1160,9 +1306,7 @@ elif [[ "$DRY_RUN" == true ]]; then
   fi
 elif [[ ! -f "$PROJECTS_CFG" ]]; then
   say step "Phase 5: per-project deploy"
-  say warn "no .local/projects.json — shared base is up, but NO project deployed yet."
-  say warn "  → run ./scripts/install.sh → 'add a project' (creates the Feishu/git secrets + the"
-  say warn "    projects.json entry), or copy config/projects.example.json to .local/projects.json."
+  say info "no .local/projects.json — project deployment skipped in this run."
 else
   say step "Phase 5: per-project deploy"
   # (LOG_HASH_SALT is ensured inside deploy_project.sh — identical describe-or-create there,
@@ -1186,30 +1330,44 @@ if not isinstance(p, dict):
   # Loop every declared project. deploy_project.sh is idempotent; collect failures but keep going
   # (one project's broken git/Feishu must not block the others), then report at the end.
   # bash 3.2 (stock macOS) has no mapfile — while-read keeps the deploy box portable.
-  _PIDS=(); while IFS= read -r _line; do _PIDS+=("$_line"); done \
+  _PIDS=(); while IFS= read -r _line; do
+    if [[ -n "$_line" ]]; then _PIDS+=("$_line"); fi
+  done \
     < <(python3 -c 'import json,sys; print("\n".join(json.load(open(sys.argv[1]))["projects"]))' "$PROJECTS_CFG")
   _failed=()
   # Count-guard the bare expansion below: on bash 3.2 (stock macOS) `"${arr[@]}"` on an
-  # EMPTY array under `set -u` is an unbound-variable error. Today _PIDS is never empty
-  # (python print() emits a trailing newline even for {} → one blank element), but that's
-  # an implicit invariant; guard so a future writer switching to sys.stdout.write can't
-  # make this blow up ONLY on macOS.
+  # EMPTY array under `set -u` is an unbound-variable error. An empty project declaration
+  # produces no IDs; ignore Python's trailing blank line instead of counting it as a project.
   if [[ ${#_PIDS[@]} -gt 0 ]]; then
   for _pid in "${_PIDS[@]}"; do
     [[ -n "$_pid" ]] || continue
-    if ! bash "$SCRIPT_DIR/lib/deploy_project.sh" "$REGION" "$_pid"; then
-      say warn "project '$_pid' deploy failed — continuing with the rest; re-run after fixing"
-      _failed+=("$_pid")
-    fi
+    _prc=0; bash "$SCRIPT_DIR/lib/deploy_project.sh" "$REGION" "$_pid" || _prc=$?
+    case "$_prc" in
+      0) ;;
+      # rc 3 = deployed (bridge + runtime + gateway up) but the smoke probe did not pass. Not a
+      # deploy failure: keep going, run Phase 7, and report it accurately at the very end.
+      3) say warn "project '$_pid' deployed but did not answer the smoke questions — continuing; see the summary at the end"
+         _PROBE_FAILED+=("$_pid") ;;
+      *) say warn "project '$_pid' deploy failed (rc $_prc) — continuing with the rest; re-run after fixing"
+         _failed+=("$_pid") ;;
+    esac
   done
   fi
   if [[ ${#_failed[@]} -gt 0 ]]; then
     say err "per-project deploy: ${#_failed[@]} project(s) failed: ${_failed[*]}"
     say err "  the others are up; fix the cause and re-run ./scripts/deploy-all.sh (idempotent)"
+    probe_failed_summary   # a hard failure elsewhere must not hide the rc-3 projects
     exit 1
   fi
-  say ok "all ${#_PIDS[@]} project(s) deployed (bridge + runtime + gateway each)"
-  PROJECTS_DEPLOYED=true
+  if [[ ${#_PIDS[@]} -gt 0 ]]; then
+    if [[ ${#_PROBE_FAILED[@]} -gt 0 ]]; then
+      say warn "all ${#_PIDS[@]} project(s) deployed (bridge + runtime + gateway each); smoke failed for: ${_PROBE_FAILED[*]}"
+    else
+      say ok "all ${#_PIDS[@]} project(s) deployed (bridge + runtime + gateway each)"
+    fi
+    PROJECTS_DEPLOYED=true
+  fi
+  update_env "$CONFIG_FILE" DEPLOY_GLOSSARY_PENDING_PROJECTS ""
 fi
 
 # ============================================================
@@ -1219,8 +1377,8 @@ fi
 # — the metric-filters target that group. BEST-EFFORT: the backend + gateway are already up by
 # here, so a monitoring hiccup must WARN, never fail the deploy. apply-monitoring.sh runs all
 # stages idempotently and is itself per-stage best-effort; re-running the deploy reconciles.
-# Skipped on --dry-run, --skip monitoring, and when the gateway wasn't activated this run
-# (no project deployed → no log group yet).
+# Skipped on --dry-run, --skip monitoring, and when no project was deployed this run.
+# Existing gateways and log groups may still be active when the project phase is skipped.
 #
 # EXACT fresh-deploy behavior when the gateway hasn't written its FIRST log line yet (so the
 # log group doesn't exist): dashboards PUT FINE (no data dependency); the metric-filters stage
@@ -1233,13 +1391,18 @@ fi
 # path (./scripts/apply-monitoring.sh) is the same reconcile.
 if skip monitoring; then
   say warn "skip monitoring"
+elif [[ "$WITH_MONITORING" != true ]]; then
+  say info "monitoring off (opt-in): pass --with-monitoring, or later run ./scripts/apply-monitoring.sh --region $REGION"
 elif [[ "$DRY_RUN" == true ]]; then
   say step "Phase 7: monitoring"
   say info "[dry-run] apply-monitoring.sh: metric-filters + dashboards + alarms + DAU lambda (CloudWatch, best-effort)"
+elif [[ "$SKIP_PROJECTS" == true ]]; then
+  # install.sh calls us with --skip-projects, then deploys the project and applies monitoring itself.
+  say info "monitoring is applied after the project deploy (install.sh does this; or run ./scripts/apply-monitoring.sh --region $REGION)"
 elif [[ "$PROJECTS_DEPLOYED" != true ]]; then
-  # No gateway activated this run → /source-truth/bot-gateway likely doesn't exist yet.
-  # Dashboards/alarms would build on an empty/absent group; defer to a post-gateway re-run.
-  say warn "skip monitoring (no gateway active yet — add a project, then monitoring applies on re-run; see runbook)"
+  # Automatic monitoring follows project deployment in this run; existing service health
+  # and log-group availability are not inferred from this flag.
+  say info "skip monitoring (no project deployed in this run); run ./scripts/apply-monitoring.sh --region $REGION to apply it separately."
 else
   say step "Phase 7: monitoring (best-effort)"
   bash "$SCRIPT_DIR/apply-monitoring.sh" --region "$REGION" \
@@ -1252,8 +1415,8 @@ fi
 # its backing metric-filters fail while the log group does not yet exist. Both paths previously
 # ended with `deploy-all complete` and a warn line the operator was expected to notice — which is
 # how a whole class of first-time deploys ended up with NO alarms at all while reporting success.
-# Ask CloudWatch what actually exists instead.
-if [[ "$DRY_RUN" != true ]]; then
+# Ask CloudWatch what actually exists instead. Only meaningful when monitoring is on.
+if [[ "$DRY_RUN" != true && "$WITH_MONITORING" == true && "$PROJECTS_DEPLOYED" == true ]]; then
   _want_alarms="$(python3 -c 'import json;print(len(json.load(open("config/alarm-thresholds.json"))["alarms"]))' 2>/dev/null || echo 0)"
   _have_alarms="$(aws cloudwatch describe-alarms --region "$REGION" \
     --alarm-name-prefix source-truth --query 'length(MetricAlarms)' --output text 2>/dev/null || echo 0)"
@@ -1270,9 +1433,30 @@ fi
 
 say ok "deploy-all complete"
 
+# Exit codes: 0 = everything up and the smoke probe passed (or was skipped); 3 = every project is
+# deployed but ≥1 did not answer the smoke questions (same code deploy_project.sh uses); 1 = a deploy
+# step failed (exited above); 2 = usage.
+if [[ ${#_PROBE_FAILED[@]} -gt 0 ]]; then
+  probe_failed_summary
+  exit 3
+fi
+
 if [[ "$DRY_RUN" != true && "$PROJECTS_DEPLOYED" != true ]]; then
-  say warn "NEXT STEPS — shared base READY, but NO project/bot is active yet:"
-  say warn "  • Run ./scripts/install.sh → 'add a project' to create its Feishu + git secrets and"
-  say warn "    its projects.json entry, then it deploys that project's bridge + runtime + gateway."
-  say warn "  • Until then, @机器人提问 / @-mentioning the bot in Feishu → answer will NOT work even though the base host is healthy."
+  say info "本次未部署项目 / No projects were deployed in this run."
+  _configured_projects="$(python3 - "$PROJECTS_CFG" <<'PY'
+import json
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+print(" ".join(json.loads(path.read_text())["projects"]) if path.is_file() else "")
+PY
+)"
+  if [[ -n "$_configured_projects" ]]; then
+    say info "已配置项目 / Configured projects: $_configured_projects"
+    say info "  运行状态需在 index 主机检查 / verify service health on the index host:"
+    say info "  bridge /health、gateway /ready；端口与步骤见 docs/runbook_zh.md §五 / docs/runbook_en.md §5."
+  else
+    say info "本地清单没有配置项目 / No projects configured in .local/projects.json."
+    say info "  Run ./scripts/install.sh → 'add a project' to configure and deploy a project."
+  fi
 fi

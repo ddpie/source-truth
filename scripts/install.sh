@@ -5,9 +5,10 @@
 # check it shows an arrow-key MENU of four flows:
 #   • 初始化环境 / init environment only — provision the shared base host, no project
 #       (deploy-all.sh --skip-projects). Lets you stand up AWS first, configure git later.
-#   • 添加项目 / add a project — collect projectId + git repos + bridge port + a Feishu app,
-#       auto-create its Secrets Manager secrets (feishu-<id>, and the global git credential on
-#       first run), write the .local/projects.json entry, then deploy that project.
+#   • 添加项目 / add a project (DEFAULT) — collect projectId + git repos + bridge port + a Feishu
+#       app, auto-create its Secrets Manager secrets (feishu-<id>, and the global git credential on
+#       first run), write the .local/projects.json entry, create the base if missing, then deploy
+#       that project and smoke-test it with real questions. Glossary + monitoring are opt-in (asked).
 #   • 重新部署现有项目 / redeploy — pick a declared project and re-run deploy_project.sh.
 #   • 删除项目 / remove a project — destructive, double-confirmed; tears down its units/runtime/
 #       repo copies + removes it from projects.json (keeps secrets by default; never the global
@@ -34,7 +35,12 @@ LOCAL_FLAG=()   # forwarded to deploy-all.sh: (--local) in single-host mode, els
 DOMAIN_FLAG=()  # forwarded to deploy-all.sh: (--feishu-domain lark) for an international tenant
 LOCALE_FLAG=()  # forwarded to deploy-all.sh: (--locale en) for English cards
 GMF_FLAG=()     # forwarded to deploy-all.sh: (--glossary-max-files N) cost cap
+GLOS_FLAG=()    # (--with-glossary) — skips the "enable glossary?" question
+MON_FLAG=()     # (--with-monitoring) — skips the "enable monitoring?" question
+PROBE_FLAG=()   # (--no-probe) — also exported as NO_PROBE=1 for the direct deploy_project.sh execs
 REGION_PREFILL="" # pre-fills the region prompt instead of being silently dropped
+ACTION=""         # --action init|add|redeploy|remove : pick the flow without the menu (unattended re-runs)
+PROJECT_PREFILL="" # --project <pid> : the project for redeploy/remove (else --yes takes the sole one)
 
 # _imds_region / _is_index_host : is THIS machine the source-truth index host? (IMDSv2). Used to
 # auto-enter single-host mode — see the LOCAL_MODE auto-detect below.
@@ -91,6 +97,24 @@ _norm_region() {
   [[ "$1" =~ ^[a-z]{2}(-[a-z]+)+-[0-9]+$ ]] || { printf -- "--region '%s' is not an AWS region code\n" "$1" >&2; exit 2; }
   printf '%s' "$1"
 }
+_norm_bool() {  # _norm_bool <value> <flag> -> true|false
+  case "$1" in
+    true|yes|on|1) printf 'true' ;;
+    false|no|off|0) printf 'false' ;;
+    *) printf '%s must be true or false, got %s\n' "$2" "$1" >&2; exit 2 ;;
+  esac
+}
+_norm_action() {  # --action <init|add|redeploy|remove>
+  _reject_flaglike "$1" --action
+  local v; v="$(printf '%s' "$1" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
+  case "$v" in init|add|redeploy|remove) printf '%s' "$v" ;;
+    *) printf -- "--action must be one of init|add|redeploy|remove, got '%s'\n" "$1" >&2; exit 2 ;; esac
+}
+_norm_pid() {  # --project <projectId> (same charset as add-project)
+  _reject_flaglike "$1" --project
+  [[ "$1" =~ ^[a-z0-9][a-z0-9-]*$ ]] || { printf -- "--project '%s' is not a valid projectId\n" "$1" >&2; exit 2; }
+  printf '%s' "$1"
+}
 _norm_count() {
   _reject_flaglike "$1" --glossary-max-files
   [[ "$1" =~ ^[0-9]+$ ]] || { printf -- "--glossary-max-files must be a non-negative integer (0 = uncapped), got '%s'\n" "$1" >&2; exit 2; }
@@ -110,18 +134,41 @@ while [[ $# -gt 0 ]]; do
     --region=*)            REGION_PREFILL="$(_norm_region "${a#*=}")" ;;
     --glossary-max-files)  _need_val "$a" $#; GMF_FLAG=(--glossary-max-files "$(_norm_count "$2")"); shift ;;
     --glossary-max-files=*) GMF_FLAG=(--glossary-max-files "$(_norm_count "${a#*=}")") ;;
+    --with-glossary)       GLOS_FLAG=(--with-glossary) ;;
+    --with-glossary=*)     GLOS_FLAG=(--with-glossary="$(_norm_bool "${a#*=}" --with-glossary)") ;;
+    --with-monitoring)     MON_FLAG=(--with-monitoring) ;;
+    --with-monitoring=*)   MON_FLAG=(--with-monitoring="$(_norm_bool "${a#*=}" --with-monitoring)") ;;
+    --no-probe)            PROBE_FLAG=(--no-probe); export NO_PROBE=1 ;;
+    --action)              _need_val "$a" $#; ACTION="$(_norm_action "$2")"; shift ;;
+    --action=*)            ACTION="$(_norm_action "${a#*=}")" ;;
+    --project)             _need_val "$a" $#; PROJECT_PREFILL="$(_norm_pid "$2")"; shift ;;
+    --project=*)           PROJECT_PREFILL="$(_norm_pid "${a#*=}")" ;;
     -h|--help)
       cat <<EOF
-Usage: ./scripts/install.sh [--yes] [--local] [--feishu-domain <feishu|lark>]
+Usage: ./scripts/install.sh [--yes] [--action <init|add|redeploy|remove>] [--project <pid>]
+                            [--local] [--feishu-domain <feishu|lark>]
                             [--locale <zh|en>] [--region <aws-region>]
-                            [--glossary-max-files <n>]
+                            [--with-glossary[=true|false]] [--glossary-max-files <n>]
+                            [--with-monitoring[=true|false]] [--no-probe]
 
 Interactive installer. Shows an arrow-key menu: init environment / add a project /
 redeploy a project / remove a project. Code repos (git or local source) live in
 .local/projects.json; per-project Feishu + the shared git credential are created in
 Secrets Manager. Re-runs pre-fill region/spec from .local/deploy-config.
 
-  --yes     Accept all pre-filled/default answers without prompting (headless).
+  --yes     Accept all pre-filled/default answers without prompting (headless). A FIRST
+            "add a project" needs a projectId + secrets nobody can default, so it stops
+            early with exit 2 — use the scripted path (runbook appendix A) instead.
+            Once a base host exists, --yes needs --action to say which flow to run
+            (the menu default "add a project" cannot run unattended) — else exit 2.
+  --action <init|add|redeploy|remove>
+            Run that flow directly, no menu (also --action=<name>). Unattended re-runs:
+              --yes --action redeploy [--project <pid>]   (redeploy; sole project auto-picked)
+              --yes --action init --region <r>            (base host only)
+            'remove' still asks you to type the projectId, so it is interactive-only.
+  --project <pid>
+            The project for redeploy / remove. Under --yes with several projects it is
+            required; with exactly one project it may be omitted.
   --local   Single-host mode: deploy onto THIS EC2 (reuse its VPC/role), don't
             create a separate index host. Forwarded to deploy-all.sh. Auto-enabled
             when run ON the index host, so re-runs (add-project / redeploy) don't
@@ -137,9 +184,22 @@ Secrets Manager. Re-runs pre-fill region/spec from .local/deploy-config.
             'lark', otherwise 'zh'. Forwarded to deploy-all.sh.
   --region <aws-region>
             Pre-fills the region prompt (still confirmable when interactive).
+  --with-glossary[=true|false]
+            Enable the 中文→code-symbol glossary (default OFF; the flows ask
+            otherwise, default no). Its build costs model calls. Forwarded;
+            =false turns it off explicitly (redeploy persists it too). Flipping the
+            switch re-bootstraps the index host in place (minutes of bot downtime).
   --glossary-max-files <n>
-            Cap the one-off glossary build. 0 = uncapped; on a very large repo
-            an uncapped build can cost hundreds of dollars. Forwarded.
+            Cap the glossary build when it is enabled (default 400). 0 = uncapped;
+            on a very large repo that can cost hundreds of dollars. Forwarded.
+  --with-monitoring[=true|false]
+            Enable CloudWatch monitoring (default OFF; the flows ask otherwise,
+            default no). Forwarded; deploy-all persists the choice; add-project /
+            redeploy apply it after the project is up. =false turns it off.
+            An existing deploy-config WITHOUT the DEPLOY_WITH_* keys predates
+            these switches: glossary/monitoring default to ON there (warned).
+  --no-probe
+            Skip the post-deploy smoke (1 code question through the runtime).
 EOF
       exit 0 ;;
     *) printf 'unknown flag: %s (see --help)\n' "$a" >&2; exit 2 ;;
@@ -225,6 +285,20 @@ confirm() {
   local __reply
   read -rp "$(printf '%s [y/N]: ' "$1")" __reply || true
   [[ "$__reply" =~ ^[Yy] ]]
+}
+
+# ask_yn <prompt> <default y|n> : y/n with an explicit default (shown as [Y/n] or [y/N]); empty
+# input takes the default. --yes takes the default too (unlike confirm, which auto-accepts).
+ask_yn() {
+  local __d="${2:-n}" __reply
+  [[ "$ASSUME_YES" == true ]] && { [[ "$__d" == y ]]; return; }
+  if [[ "$__d" == y ]]; then
+    read -rp "$(printf '%s [Y/n]: ' "$1")" __reply || true
+    [[ ! "$__reply" =~ ^[Nn] ]]
+  else
+    read -rp "$(printf '%s [y/N]: ' "$1")" __reply || true
+    [[ "$__reply" =~ ^[Yy] ]]
+  fi
 }
 
 # Sentinel for the last menu entry: fall through to a free-text prompt for a value
@@ -337,6 +411,14 @@ MODEL_OPTIONS=(
   "global.anthropic.claude-sonnet-4-6   Sonnet 4.6"
   "$MANUAL_SENTINEL"
 )
+OPENAI_MODEL_OPTIONS=(
+  "global.openai.gpt-6-astra   GPT-6 Astra · 默认"
+  "$MANUAL_SENTINEL"
+)
+SDK_OPTIONS=(
+  "openai   OpenAI Agents SDK · 默认 / default"
+  "claude   Claude Agent SDK"
+)
 # index-service host (ARM Graviton). codegraph indexing is memory-bound and scales
 # with repo size; t4g = burstable/cheap, m7g = sustained memory-optimized for big repos.
 INSTANCE_OPTIONS=(
@@ -366,6 +448,153 @@ GLOSSARY_OPTIONS=(
   "$MANUAL_SENTINEL"
 )
 
+# ask_extras <base|project> : the opt-in extras. A flag wins (--with-x / --with-x=false);
+# otherwise ask, with the default = the persisted choice from the last run. No persisted choice but
+# a host already exists ⇒ the deploy predates the switches (they were always on) ⇒ default yes.
+# Fills EXTRA_FLAGS for deploy-all.sh (which persists DEPLOY_WITH_GLOSSARY / DEPLOY_WITH_MONITORING)
+# — the OFF answer is forwarded explicitly (=false) so deploy-all cannot re-apply the legacy default
+# over it. Mode base (init-env) asks only the glossary: monitoring builds on a gateway's logs, so it
+# is applied by add-project once a project exists. Also sets GLOSSARY_ON / MONITORING_ON.
+EXTRA_FLAGS=(); GLOSSARY_ON=false; MONITORING_ON=false
+optin_default() {  # optin_default <persisted-value> -> y|n
+  if [[ "$1" == true ]]; then printf 'y'
+  elif [[ -z "$1" && -n "${INDEX_SERVICE_INSTANCE:-}" ]]; then printf 'y'   # legacy: predates the switch
+  else printf 'n'; fi
+}
+flag_value() {  # flag_value <flag-array-first-elem> -> true|false|"" (unset)
+  case "${1:-}" in "") printf '' ;; *=false) printf 'false' ;; *) printf 'true' ;; esac
+}
+# glossary_changed <switch true|false|""> <cap|""> : rc 0 when a GIVEN glossary flag differs from the
+# persisted choice. The index host bakes glossary=<on/off>|gmf=<cap> into its artifact signature
+# (provision_index_service.sh), so a change must go through deploy-all to re-bootstrap the host;
+# deploy_project.sh alone never touches it. Absent key + host ⇒ legacy ON; absent cap ⇒ 400.
+glossary_changed() {
+  local want="$1" cap="$2" prev="${DEPLOY_WITH_GLOSSARY:-}"
+  [[ -z "$prev" && -n "${INDEX_SERVICE_INSTANCE:-}" ]] && prev=true
+  [[ -n "$want" && "$want" != "${prev:-false}" ]] && return 0
+  [[ -n "$cap" && "$cap" != "${DEPLOY_GLOSSARY_MAX_FILES:-400}" ]] && return 0
+  return 1
+}
+# Record the unfinished host-wide rollout before provisioning changes global
+# state. A failed/interrupted fan-out must remain retryable even after the new
+# switch/cap has been persisted by deploy-all.
+mark_glossary_pending() {
+  local pending
+  pending="$(project_ids)" || return 1
+  pending="${pending//$'\n'/ }"
+  update_env "$CONFIG_FILE" DEPLOY_GLOSSARY_PENDING_PROJECTS "$pending"
+}
+
+# Reconcile only pending projects; keep failed ones durable across installer
+# invocations. rc 3 still means configuration was applied, so it is not retried.
+reconcile_glossary_pending() {
+  local selected="$1" region="$2" selected_rc="$3" p prc current
+  local -a others=() failed=()
+  safe_source_env "$CONFIG_FILE"
+  current="$(project_ids)" || return 1
+  current=" ${current//$'\n'/ } "
+  for p in ${DEPLOY_GLOSSARY_PENDING_PROJECTS:-}; do
+    # The declaration is authoritative: a removed project has no rollout left
+    # to complete and must not poison every later redeploy.
+    [[ "$current" == *" $p "* ]] || continue
+    if [[ "$p" == "$selected" ]]; then
+      [[ "$selected_rc" == 0 || "$selected_rc" == 3 ]] || failed+=("$p")
+    else
+      others+=("$p")
+    fi
+  done
+  if [[ ${#others[@]} -gt 0 ]]; then
+    say info "术语表开关是主机级的，其余 ${#others[@]} 个项目也重新下发 / glossary switch is host-wide; redeploying the other ${#others[@]} projects: ${others[*]}"
+    for p in "${others[@]}"; do
+      say step "重新下发项目 / redeploying project $p (no smoke probe)"
+      prc=0
+      env NO_PROBE=1 ${DOMAIN_FLAG[1]:+FEISHU_DOMAIN="${DOMAIN_FLAG[1]}"} ${LOCALE_FLAG[1]:+LOCALE="${LOCALE_FLAG[1]}"} \
+        bash "$SCRIPT_DIR/lib/deploy_project.sh" "$region" "$p" || prc=$?
+      if [[ "$prc" != 0 && "$prc" != 3 ]]; then
+        failed+=("$p")
+        say warn "项目 $p 重新下发失败 / redeploy of $p failed — re-run: ./scripts/install.sh --action redeploy --project $p"
+      fi
+    done
+  fi
+  update_env "$CONFIG_FILE" DEPLOY_GLOSSARY_PENDING_PROJECTS "${failed[*]}" || return 1
+  if [[ ${#failed[@]} -gt 0 ]]; then
+    say err "其余项目重新下发失败 / the other projects failed to redeploy: ${failed[*]}"
+    return 1
+  fi
+}
+ask_extras() {
+  local mode="${1:-project}" def fv GLOSSARY_MAX_FILES
+  EXTRA_FLAGS=(); GLOSSARY_ON=false; MONITORING_ON=false
+  GLOSSARY_CAP="${DEPLOY_GLOSSARY_MAX_FILES:-400}"
+  def="$(optin_default "${DEPLOY_WITH_GLOSSARY:-}")"
+  fv="$(flag_value "${GLOS_FLAG[0]:-}")"
+  # the legacy-default warning is about the DEFAULT — an explicit flag makes it moot, so keep quiet then
+  [[ "$def" == y && -z "${DEPLOY_WITH_GLOSSARY:-}" && -z "$fv" ]] && say warn "现有部署早于开关，术语表默认保持开启 / existing deployment predates the switches — glossary defaults to ON (answer n or pass --with-glossary=false to turn off)"
+  if [[ -n "$fv" ]]; then
+    GLOSSARY_ON="$fv"; say info "术语表 / glossary: $([[ "$fv" == true ]] && echo 启用 || echo 关闭)（来自 ${GLOS_FLAG[0]}）"
+  elif ask_yn "启用术语表（中文术语→代码符号映射；构建有模型费用）？/ enable the glossary (build costs model calls)?" "$def"; then
+    GLOSSARY_ON=true
+  fi
+  if [[ "$GLOSSARY_ON" == true ]]; then
+    EXTRA_FLAGS+=(--with-glossary)
+    if [[ ${#GMF_FLAG[@]} -gt 0 ]]; then
+      GLOSSARY_MAX_FILES="${GMF_FLAG[1]}"
+      say info "术语表构建文件上限 / glossary build cap: ${GLOSSARY_MAX_FILES}（来自 --glossary-max-files）"
+    else
+      pick_field GLOSSARY_MAX_FILES "术语表构建文件上限 (0=不限，可能数百美元) / glossary build cap (0 = uncapped, may cost hundreds of USD)" \
+        "${DEPLOY_GLOSSARY_MAX_FILES:-400}" "文件数 (0=不限) / file cap (0 = uncapped)" "${GLOSSARY_OPTIONS[@]}"
+      while ! [[ "$GLOSSARY_MAX_FILES" =~ ^[0-9]+$ ]]; do
+        [[ "$ASSUME_YES" == true ]] && { say err "术语表上限无效 / invalid glossary cap '$GLOSSARY_MAX_FILES'"; exit 1; }
+        say warn "需为非负整数 (0=不限) / must be a non-negative integer (0 = no cap)."
+        ask GLOSSARY_MAX_FILES "文件数 (0=不限)" "400"
+      done
+    fi
+    EXTRA_FLAGS+=(--glossary-max-files "$GLOSSARY_MAX_FILES")
+    GLOSSARY_CAP="$GLOSSARY_MAX_FILES"
+  else
+    EXTRA_FLAGS+=(--with-glossary=false)
+    say info "术语表 / glossary: 关闭（稍后可用 deploy-all.sh --with-glossary 开启）"
+  fi
+  if [[ "$mode" == base ]]; then
+    # init-env: no project → nothing to monitor yet; only forward an explicit flag (persisted).
+    [[ ${#MON_FLAG[@]} -gt 0 ]] && { EXTRA_FLAGS+=("${MON_FLAG[0]}"); MONITORING_ON="$(flag_value "${MON_FLAG[0]}")"; }
+    return 0
+  fi
+  def="$(optin_default "${DEPLOY_WITH_MONITORING:-}")"
+  fv="$(flag_value "${MON_FLAG[0]:-}")"
+  [[ "$def" == y && -z "${DEPLOY_WITH_MONITORING:-}" && -z "$fv" ]] && say warn "现有部署早于开关，监控默认保持开启 / existing deployment predates the switches — monitoring defaults to ON (answer n or pass --with-monitoring=false to turn off)"
+  if [[ -n "$fv" ]]; then
+    MONITORING_ON="$fv"; say info "监控 / monitoring: $([[ "$fv" == true ]] && echo 启用 || echo 关闭)（来自 ${MON_FLAG[0]}）"
+  elif ask_yn "启用 CloudWatch 监控（仪表盘/告警/日活）？/ enable CloudWatch monitoring (dashboards, alarms, DAU)?" "$def"; then
+    MONITORING_ON=true
+  fi
+  if [[ "$MONITORING_ON" == true ]]; then
+    EXTRA_FLAGS+=(--with-monitoring)
+  else
+    EXTRA_FLAGS+=(--with-monitoring=false)
+    say info "监控 / monitoring: 关闭（稍后可跑 ./scripts/apply-monitoring.sh --region <r>）"
+  fi
+}
+
+# finish_project_deploy <rc> <pid> <region> <apply-monitoring true|false> : shared tail of the
+# add-project / redeploy flows. deploy_project.sh exit codes: 0 = up and the smoke probe passed
+# (or skipped); 3 = up, but the probe failed — the project IS deployed, so monitoring still applies
+# and we say exactly that; anything else = deploy failed. Exits with deploy_project's rc.
+finish_project_deploy() {
+  local rc="$1" pid="$2" region="$3" mon="$4"
+  if [[ ( "$rc" -eq 0 || "$rc" -eq 3 ) && "$mon" == true ]]; then
+    say step "应用监控 / applying CloudWatch monitoring (best-effort)"
+    bash "$SCRIPT_DIR/apply-monitoring.sh" --region "$region" \
+      || say warn "监控部分阶段失败（不影响机器人）/ some monitoring stages failed — re-run ./scripts/apply-monitoring.sh --region $region"
+  fi
+  case "$rc" in
+    0) ;;
+    3) say warn "项目 $pid 已部署，但真实问答验收未通过 / project $pid deployed but did not answer the smoke questions — see runbook §5/§8 (docs/runbook_zh.md §五/§八)" ;;
+    *) say err "项目 $pid 部署失败 (rc $rc) / project $pid deploy failed — fix the cause above and re-run" ;;
+  esac
+  exit "$rc"
+}
+
 echo
 say step "source-truth installer"
 echo "  把项目最新主分支的真实代码，变成飞书里能问的 AI 助手。"
@@ -373,7 +602,7 @@ echo "  This installer deploys the full backend + Feishu gateway into your AWS a
 echo
 
 # ---- 1. dependency check -------------------------------------------------------
-say step "1/5 检查依赖 / Checking dependencies"
+say step "检查依赖 / Checking dependencies"
 DEPS_OK=true
 for c in aws python3 docker git; do
   if have_cmd "$c"; then
@@ -427,6 +656,7 @@ ask_region() {
   # a region on the command line, and silently deploying somewhere else is worse than being wrong
   # loudly. (Before, --region was swallowed entirely by the arg loop.)
   if [[ -n "$REGION_PREFILL" ]]; then
+    require_deploy_region "${DEPLOY_REGION:-}" "$REGION_PREFILL" || exit 2
     printf -v "$1" '%s' "$REGION_PREFILL"
     say info "区域 / region: $REGION_PREFILL（来自 --region）"
     return
@@ -434,6 +664,7 @@ ask_region() {
   if [[ "$LOCAL_MODE" == true ]]; then
     local imds_region; imds_region="$(_imds_region)"
     if [[ -n "$imds_region" ]]; then
+      require_deploy_region "${DEPLOY_REGION:-}" "$imds_region" || exit 2
       printf -v "$1" '%s' "$imds_region"
       say info "区域 / region: $imds_region（本机所在区域，自动检测）"
       return
@@ -442,6 +673,7 @@ ask_region() {
   fi
   pick_field "$1" "AWS 区域 / region (↑/↓ 选择，回车确认)" \
     "${DEPLOY_REGION:-ap-northeast-1}" "AWS 区域代码 / region code" "${REGION_OPTIONS[@]}"
+  require_deploy_region "${DEPLOY_REGION:-}" "${!1}" || exit 2
 }
 
 # project_ids : print existing projectIds from .local/projects.json, one per line (empty if none).
@@ -457,12 +689,29 @@ except Exception as e:
     sys.exit(1)' "$PROJECTS_CFG"
 }
 
+# choose_project <var> <pid...> : which project to redeploy/remove. --project wins (must be in the
+# list); under --yes with exactly one project take it, with several stop (exit 2) instead of
+# silently picking index 0; otherwise the arrow-key menu.
+choose_project() {
+  local __var="$1"; shift
+  local p
+  if [[ -n "$PROJECT_PREFILL" ]]; then
+    for p in "$@"; do [[ "$p" == "$PROJECT_PREFILL" ]] && { printf -v "$__var" '%s' "$p"; say info "项目 / project: $p（来自 --project）"; return 0; }; done
+    say err "--project '$PROJECT_PREFILL' 不在清单中 / not in projects.json (有 / have: $*)"; exit 2
+  fi
+  if [[ "$ASSUME_YES" == true ]]; then
+    if [[ $# -eq 1 ]]; then printf -v "$__var" '%s' "$1"; say info "项目 / project: $1（清单中唯一项目 / the only project）"; return 0; fi
+    say err "--yes 下清单有 $# 个项目，请用 --project <pid> 指定 / --yes with $# projects needs --project <pid>: $*"; exit 2
+  fi
+  pick "$__var" 0 "$@"
+}
+
 # ============================================================
 # FLOW: 初始化环境 / init environment only (shared base host, no project)
 # ============================================================
 flow_init_env() {
   echo; say step "初始化环境（不挂项目）/ init environment only"
-  local REGION INSTANCE_TYPE ROOT_VOLUME_GB GLOSSARY_MAX_FILES
+  local REGION INSTANCE_TYPE ROOT_VOLUME_GB
   local HW_FLAGS=()   # --instance-type/--root-volume-gb — only meaningful when WE create the host
   ask_region REGION
   if [[ "$LOCAL_MODE" == true ]]; then
@@ -481,33 +730,12 @@ flow_init_env() {
     done
     HW_FLAGS=(--instance-type "$INSTANCE_TYPE" --root-volume-gb "$ROOT_VOLUME_GB")
   fi
-  # Glossary cap is a build-COST knob, so it is asked in both topologies. It used to be skipped
-  # under --local on the reasoning that applies to machine specs (instance type, disk) — but that
-  # reasoning does not transfer: nothing about a cost ceiling is machine-specific, and the advice
-  # printed in its place ("re-run install without --local, or set GLOSSARY_MAX_FILES") was dead in
-  # both halves — _is_index_host force-enables --local on the index host, and deploy-all.sh opens
-  # by assigning GLOSSARY_MAX_FILES="" which clobbers any exported value. An uncapped build on a
-  # large repo is a several-hundred-dollar one-off, so a silent default is the wrong call.
-  if [[ ${#GMF_FLAG[@]} -gt 0 ]]; then
-    GLOSSARY_MAX_FILES="${GMF_FLAG[1]}"
-    say info "术语表构建文件上限 / glossary build cap: ${GLOSSARY_MAX_FILES}（来自 --glossary-max-files）"
-  else
-  # Pre-select 400, not 0. The option list is only half the decision — this argument is what the
-  # cursor lands on, so leaving it at 0 kept "unbounded" as the Enter-key answer no matter how the
-  # list was reordered. An operator who has already chosen a cap keeps their choice.
-  pick_field GLOSSARY_MAX_FILES "术语表构建文件上限 (中文→代码符号；0=不限，可能数百美元) / glossary build cap (0 = uncapped, may cost hundreds of USD)" \
-    "${DEPLOY_GLOSSARY_MAX_FILES:-400}" "文件数 (0=不限) / file cap (0 = uncapped)" "${GLOSSARY_OPTIONS[@]}"
-  while ! [[ "$GLOSSARY_MAX_FILES" =~ ^[0-9]+$ ]]; do
-    [[ "$ASSUME_YES" == true ]] && { say err "术语表上限无效 / invalid glossary cap '$GLOSSARY_MAX_FILES'"; exit 1; }
-    say warn "需为非负整数 (0=不限) / must be a non-negative integer (0 = no cap)."
-    ask GLOSSARY_MAX_FILES "文件数 (0=不限)" "0"
-  done
-  fi
+  ask_extras base   # glossary (+cap) only: monitoring needs a project's gateway first
   echo; say info "将只起共享底座（VPC/NAT/EC2/镜像），不挂任何项目。之后用「添加项目」上线机器人。"
   confirm "开始初始化环境？/ Initialize the base environment now?" || { say info "已取消"; exit 0; }
   say step "部署底座 / Deploying base host (several minutes)"
   exec "$SCRIPT_DIR/deploy-all.sh" --region "$REGION" "${HW_FLAGS[@]}" \
-    --glossary-max-files "$GLOSSARY_MAX_FILES" --skip-projects "${LOCAL_FLAG[@]}" \
+    "${EXTRA_FLAGS[@]}" "${PROBE_FLAG[@]}" --skip-projects "${LOCAL_FLAG[@]}" \
     "${DOMAIN_FLAG[@]}" "${LOCALE_FLAG[@]}"
 }
 
@@ -521,6 +749,12 @@ flow_add_project() {
   [[ -f "$PROJECTS_CFG" ]] || echo '{"refreshIntervalSec":300,"projects":{}}' > "$PROJECTS_CFG"
 
   local PID EXISTING_PIDS
+  # --yes cannot invent a projectId (no default exists), so it used to die later with
+  # "projectId 非法". Stop early, and point at the path that works without a terminal.
+  if [[ "$ASSUME_YES" == true ]]; then
+    say err "非交互首次添加项目请走脚本化路径（预建密钥 + .local/projects.json + deploy-all.sh，见 runbook 附录 A）/ non-interactive first add-project is not supported; use the scripted path (pre-create the secrets + .local/projects.json, then deploy-all.sh — runbook appendix A)"
+    exit 2
+  fi
   ask PID "项目 ID（小写字母数字与连字符）/ projectId (^[a-z0-9-]+$)" ""
   [[ "$PID" =~ ^[a-z0-9][a-z0-9-]*$ ]] || { say err "projectId 非法 / invalid projectId '$PID'"; exit 1; }
   # project_ids fails loud on a broken projects.json (its stderr has the reason) — abort,
@@ -621,9 +855,24 @@ if clash:
   fi
 
   # Model for this project's runtime (stored in projects.json; empty = global default at deploy).
-  local MODEL
-  pick_field MODEL "回答模型 / answer model (↑/↓ 选择，回车确认)" \
-    "global.anthropic.claude-opus-4-8" "Bedrock 模型 id / model id" "${MODEL_OPTIONS[@]}"
+  local MODEL AGENT_SDK GLOSSARY_MODEL
+  pick_field AGENT_SDK "问答与术语表 SDK / SDK for Q&A and glossary" \
+    "openai" "SDK" "${SDK_OPTIONS[@]}"
+  if [[ "$AGENT_SDK" == "openai" ]]; then
+    pick_field MODEL "回答模型 / answer model" \
+      "global.openai.gpt-6-astra" "Bedrock profile id" "${OPENAI_MODEL_OPTIONS[@]}"
+  else
+    pick_field MODEL "回答模型 / answer model" \
+      "global.anthropic.claude-opus-4-8" "Bedrock profile id" "${MODEL_OPTIONS[@]}"
+  fi
+  # Keep the first install short: glossary follows the answer model. Advanced
+  # deployments can override agent.glossaryModel in projects.json.
+  GLOSSARY_MODEL="$MODEL"
+  PYTHONPATH="$ROOT/agent-container" python3 - "$AGENT_SDK" "$MODEL" "$GLOSSARY_MODEL" <<'PY'
+import sys
+from agent_settings import AgentSettings
+AgentSettings(*sys.argv[1:])
+PY
 
   # Feishu app credentials → source-truth/feishu-<pid> (auto secret id).
   # Validate at the prompt (re-ask the bad field only) so a typo'd App ID / secret
@@ -742,9 +991,10 @@ PY
   local SJSON
   SJSON="$(_AID="$FEISHU_APP_ID" _AS="$FEISHU_APP_SECRET" _BO="${FEISHU_BOT_OPEN_ID:-}" python3 -c '
 import os,json; print(json.dumps({"app_id":os.environ["_AID"],"app_secret":os.environ["_AS"],"bot_open_id":os.environ.get("_BO","")}))')"
-  aws secretsmanager create-secret --name "$SECRET_ID" --secret-string "$SJSON" --region "$REGION" \
+  # Secret goes in via stdin, never argv: argv is visible in `ps` and shell history.
+  printf '%s' "$SJSON" | aws secretsmanager create-secret --name "$SECRET_ID" --secret-string file:///dev/stdin --region "$REGION" \
       --description "source-truth Feishu app creds for project $PID" >/dev/null 2>&1 \
-    || aws secretsmanager put-secret-value --secret-id "$SECRET_ID" --secret-string "$SJSON" --region "$REGION" >/dev/null
+    || printf '%s' "$SJSON" | aws secretsmanager put-secret-value --secret-id "$SECRET_ID" --secret-string file:///dev/stdin --region "$REGION" >/dev/null
   FEISHU_APP_SECRET=""; unset SJSON
   say ok "飞书凭证已写入 / stored: $SECRET_ID"
 
@@ -784,7 +1034,7 @@ for r in json.load(sys.stdin): print(r.get("git",""))' 2>/dev/null)
         [[ -n "$GIT_TOKEN" ]] && break
         say warn "检测到私有仓，令牌必填（公开仓才能留空）/ private repo detected — token required (only public repos may be blank)"
       done
-      aws secretsmanager create-secret --name source-truth/git-credentials --secret-string "$GIT_TOKEN" --region "$REGION" \
+      printf '%s' "$GIT_TOKEN" | aws secretsmanager create-secret --name source-truth/git-credentials --secret-string file:///dev/stdin --region "$REGION" \
         --description "source-truth read-only git credential (R-cred-1)" >/dev/null \
         && { say ok "git 凭证已写入 / stored: source-truth/git-credentials"; HAVE_CRED=true; }
       unset GIT_TOKEN
@@ -795,38 +1045,36 @@ for r in json.load(sys.stdin): print(r.get("git",""))' 2>/dev/null)
 
   # Write the project entry into projects.json. `model` is recorded so the choice persists
   # (deploy_project resolves it per region); a redeploy without re-running install keeps it.
-  PID="$PID" PORT="$PORT" SECRET_ID="$SECRET_ID" REPOS_JSON="$REPOS_JSON" MODEL="$MODEL" python3 -c '
+  PID="$PID" PORT="$PORT" SECRET_ID="$SECRET_ID" REPOS_JSON="$REPOS_JSON" MODEL="$MODEL" AGENT_SDK="$AGENT_SDK" GLOSSARY_MODEL="$GLOSSARY_MODEL" python3 -c '
 import json,os,sys
 cfg=json.load(open(sys.argv[1]))
 entry={"port":int(os.environ["PORT"]),"feishuSecretId":os.environ["SECRET_ID"],"repos":json.loads(os.environ["REPOS_JSON"])}
-if os.environ.get("MODEL"): entry["model"]=os.environ["MODEL"]
+entry["agent"]={"sdk":os.environ["AGENT_SDK"],"provider":"bedrock","endpoint":"runtime",
+                "model":os.environ["MODEL"],"glossaryModel":os.environ["GLOSSARY_MODEL"]}
 cfg.setdefault("projects",{})[os.environ["PID"]]=entry
 json.dump(cfg,open(sys.argv[1],"w"),ensure_ascii=False,indent=2)' "$PROJECTS_CFG"
   say ok "已写入清单 / wrote projects.json: $PID (port=$PORT, secret=$SECRET_ID, model=${MODEL:-默认/default})"
 
   echo; confirm "现在部署项目 ${PID}？/ Deploy project $PID now?" || { say info "清单已保存，稍后可用「重新部署」/ saved; deploy later via redeploy"; exit 0; }
-  # GLOSSARY COST GATE: when the base host doesn't exist yet, the deploy-all below auto-initializes
-  # it — and the glossary build then runs with the DEFAULT cap (GLOSSARY_MAX_FILES=0 = whole repo).
-  # On a large repo that one-time cc scan can cost hundreds of USD. Surface it and confirm once;
-  # the "init environment" flow is where a cap can be chosen. (--local skips: init took the default
-  # knowingly there; confirm() auto-accepts under --yes.)
-  if [[ -z "${INDEX_SERVICE_INSTANCE:-}" && "$LOCAL_MODE" != true ]]; then
-    say warn "底座尚未初始化，将自动创建 / the shared base does not exist yet and will be created."
-    say warn "术语表将全量构建（GLOSSARY_MAX_FILES=0，扫全仓），大仓一次性成本可达数百美元。"
-    say warn "COST WARNING: the glossary build is UNCAPPED (scans every file in the repo)."
-    say warn "  This is a ONE-OFF model cost, measured at ~\$372 on a 14k-file repository."
-    say warn "  To bound it: cancel now, run 'initialize environment' and pick a file cap"
-    say warn "  (400 is the recommended first-deploy value), then come back and add the project."
-    confirm "接受不限量的术语表构建（可能数百美元）并继续？/ proceed with an UNCAPPED glossary build (may cost hundreds of USD)?" \
-      || { say info "已取消。清单已保存；先跑「初始化环境」设上限，再用「重新部署」/ cancelled — run init-env to set a cap, then redeploy"; exit 0; }
+  [[ -n "${INDEX_SERVICE_INSTANCE:-}" ]] || say info "底座尚未初始化，将自动创建 / the shared base does not exist yet and will be created."
+  ask_extras project   # glossary (+cap) and monitoring: opt-in
+  # Adding a project can also change the global switch. Existing projects need
+  # the same reconciliation as the redeploy flow.
+  if [[ -n "${INDEX_SERVICE_INSTANCE:-}" ]] && glossary_changed "$GLOSSARY_ON" "$GLOSSARY_CAP"; then
+    mark_glossary_pending
   fi
   # Ensure the shared base exists (idempotent no-op if already up), then deploy this project.
   say step "确保底座就绪 / ensuring shared base (idempotent)"
   "$SCRIPT_DIR/deploy-all.sh" --region "$REGION" --skip-projects "${LOCAL_FLAG[@]}" \
-    "${DOMAIN_FLAG[@]}" "${LOCALE_FLAG[@]}" \
+    "${EXTRA_FLAGS[@]}" "${PROBE_FLAG[@]}" "${DOMAIN_FLAG[@]}" "${LOCALE_FLAG[@]}" \
     || { say err "底座部署失败 / base deploy failed — fix and re-run"; exit 1; }
   say step "部署项目 / deploying project $PID"
-  exec bash "$SCRIPT_DIR/lib/deploy_project.sh" "$REGION" "$PID"
+  # deploy-all --skip-projects never reaches its monitoring phase (no project yet), so monitoring is
+  # applied HERE, after the project's gateway exists — a plain call, not exec, so we get the rc back.
+  local rc=0
+  bash "$SCRIPT_DIR/lib/deploy_project.sh" "$REGION" "$PID" || rc=$?
+  reconcile_glossary_pending "$PID" "$REGION" "$rc" || { [[ "$rc" != 0 ]] || rc=1; }
+  finish_project_deploy "$rc" "$PID" "$REGION" "$MONITORING_ON"
 }
 
 # ============================================================
@@ -843,13 +1091,49 @@ flow_redeploy() {
   local _line; PIDS=(); while IFS= read -r _line; do PIDS+=("$_line"); done \
     < <(printf '%s\n' "$_plist" | grep -v '^$' || true)
   [[ ${#PIDS[@]} -gt 0 ]] || { say err "清单无项目 / no projects in projects.json — use 'add a project' first"; exit 1; }
-  local SEL; pick SEL 0 "${PIDS[@]}"
+  local SEL; choose_project SEL "${PIDS[@]}"
   # Forward the tenant/locale here too. deploy_project.sh already reads FEISHU_DOMAIN and
   # LOCALE from the environment; without this, `install.sh --feishu-domain lark` plus
   # "redeploy" was accepted and silently changed nothing — the same discarded-flag defect the
   # arg loop was rewritten to eliminate, still alive in one of the four flows.
-  exec env ${DOMAIN_FLAG[1]:+FEISHU_DOMAIN="${DOMAIN_FLAG[1]}"} ${LOCALE_FLAG[1]:+LOCALE="${LOCALE_FLAG[1]}"} \
-    bash "$SCRIPT_DIR/lib/deploy_project.sh" "$REGION" "$SEL"
+  # The opt-in flags are documented as forwarded. Redeploy normally skips deploy-all (fast path:
+  # deploy_project.sh reads DEPLOY_WITH_GLOSSARY / DEPLOY_GLOSSARY_MAX_FILES from deploy-config), so
+  # persist them here. BUT the glossary switch/cap live on the index host too (artifact signature):
+  # when either CHANGED vs the persisted value, run deploy-all --skip-projects first — that is the
+  # only path that re-bootstraps the host. Absent flags leave the persisted choice untouched.
+  # Persist ONLY on the fast path: on the re-bootstrap path deploy-all persists the value itself. If
+  # we wrote it first and deploy-all then failed, a retry would see glossary_changed()=false and take
+  # the fast path — the host would never be re-bootstrapped.
+  local fv gmf="" mon_apply=false rebootstrap=false
+  fv="$(flag_value "${GLOS_FLAG[0]:-}")"
+  [[ ${#GMF_FLAG[@]} -gt 0 ]] && gmf="${GMF_FLAG[1]}"
+  glossary_changed "$fv" "$gmf" && rebootstrap=true
+  local mfv; mfv="$(flag_value "${MON_FLAG[0]:-}")"
+  [[ -n "$mfv" ]] && { update_env "$CONFIG_FILE" DEPLOY_WITH_MONITORING "$mfv"; mon_apply="$mfv"; say info "监控 / monitoring: $mfv（来自 ${MON_FLAG[0]}，已持久化）"; }
+  if [[ "$rebootstrap" == true ]]; then
+    mark_glossary_pending
+    say info "术语表开关/上限有变，先经 deploy-all 重新引导底座主机（机器人停机数分钟）/ glossary switch or cap changed vs the persisted value — re-bootstrapping the index host via deploy-all first (minutes of bot downtime)"
+    [[ -n "$fv" ]] && say info "术语表 / glossary: $fv（来自 ${GLOS_FLAG[0]}，deploy-all 成功后持久化 / persisted by deploy-all on success）"
+    [[ -n "$gmf" ]] && say info "术语表上限 / glossary cap: $gmf（deploy-all 成功后持久化 / persisted by deploy-all on success）"
+    "$SCRIPT_DIR/deploy-all.sh" --region "$REGION" --skip-projects "${LOCAL_FLAG[@]}" \
+      "${GLOS_FLAG[@]}" "${GMF_FLAG[@]}" "${MON_FLAG[@]}" "${PROBE_FLAG[@]}" "${DOMAIN_FLAG[@]}" "${LOCALE_FLAG[@]}" \
+      || { say err "底座重引导失败 / base re-bootstrap failed — fix and re-run"; exit 1; }
+  elif [[ -n "$fv" || -n "$gmf" ]]; then
+    [[ -n "$fv" ]] && { update_env "$CONFIG_FILE" DEPLOY_WITH_GLOSSARY "$fv"; say info "术语表 / glossary: $fv（来自 ${GLOS_FLAG[0]}，已持久化）"; }
+    [[ -n "$gmf" ]] && { update_env "$CONFIG_FILE" DEPLOY_GLOSSARY_MAX_FILES "$gmf"; say info "术语表上限 / glossary cap: $gmf（已持久化）"; }
+    say info "术语表设置与已持久化值一致，跳过底座重引导 / glossary settings unchanged — skipping the base re-bootstrap (fast path)"
+  fi
+  local rc=0
+  env ${DOMAIN_FLAG[1]:+FEISHU_DOMAIN="${DOMAIN_FLAG[1]}"} ${LOCALE_FLAG[1]:+LOCALE="${LOCALE_FLAG[1]}"} \
+    bash "$SCRIPT_DIR/lib/deploy_project.sh" "$REGION" "$SEL" || rc=$?
+  if ! reconcile_glossary_pending "$SEL" "$REGION" "$rc"; then
+    # run the shared tail (monitoring + verdict for $SEL) but never exit 0 with projects left stale
+    ( finish_project_deploy "$rc" "$SEL" "$REGION" "$mon_apply" ) || rc=$?
+    [[ "$rc" -ne 0 ]] || rc=1
+    exit "$rc"
+  fi
+  # monitoring is (re)applied on redeploy only when asked for explicitly — it is idempotent but slow.
+  finish_project_deploy "$rc" "$SEL" "$REGION" "$mon_apply"
 }
 
 # ============================================================
@@ -865,7 +1149,7 @@ flow_remove_project() {
   local _line; PIDS=(); while IFS= read -r _line; do PIDS+=("$_line"); done \
     < <(printf '%s\n' "$_plist" | grep -v '^$' || true)
   [[ ${#PIDS[@]} -gt 0 ]] || { say err "清单无项目 / no projects to remove"; exit 1; }
-  local SEL; pick SEL 0 "${PIDS[@]}"
+  local SEL; choose_project SEL "${PIDS[@]}"
   say warn "删除项目 '$SEL' 是破坏性操作：停 bridge@/gateway@、删 runtime、删其代码副本、从清单移除。"
   local CONFIRM
   ask CONFIRM "请输入项目 ID 以确认 / type the projectId to confirm" ""
@@ -952,9 +1236,27 @@ MENU_OPTIONS=(
   "重新部署现有项目 / redeploy an existing project"
   "删除项目      / remove a project"
 )
-# Default the cursor to "add a project" once a base host exists, else "init environment".
-MENU_DEFAULT=0
-[[ -n "${INDEX_SERVICE_INSTANCE:-}" ]] && MENU_DEFAULT=1
+# Default the cursor to "add a project": with no base host yet, that flow creates the base AND the
+# project in one run (zero → answering bot without a detour through "init environment").
+MENU_DEFAULT=1
+if [[ -n "$ACTION" ]]; then
+  # --action: no menu. The flow exits the script itself (finish_project_deploy / exec / exit).
+  say info "操作 / action: $ACTION（来自 --action）"
+  case "$ACTION" in
+    init)     flow_init_env ;;
+    add)      flow_add_project ;;
+    redeploy) flow_redeploy ;;
+    remove)   flow_remove_project ;;
+  esac
+  exit 0
+fi
+if [[ "$ASSUME_YES" == true && -n "${INDEX_SERVICE_INSTANCE:-}" ]]; then
+  # A base host exists, so this is a re-run — but --yes alone would land on the menu default "add a
+  # project", which cannot run unattended (exit 2 either way). Say which flag picks the flow.
+  say err "--yes 需要 --action 指定操作（主机已存在，菜单默认项「添加项目」无法无人值守）/ --yes needs --action <init|add|redeploy|remove> to pick the flow (a base host exists; the menu default 'add a project' cannot run unattended)"
+  say info "  例如 / e.g.: ./scripts/install.sh --yes --action redeploy [--project <pid>] --region <r>"
+  exit 2
+fi
 say step "选择操作 / choose an action (↑/↓，回车)"
 pick MENU_CHOICE "$MENU_DEFAULT" "${MENU_OPTIONS[@]}"
 case "$MENU_CHOICE" in

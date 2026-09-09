@@ -17,8 +17,29 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/common.sh"
 
-REGION="${1:?usage: apply-observability.sh <region> [account-id]}"
-ACCOUNT="${2:-$(aws sts get-caller-identity --query Account --output text)}"
+# usage: apply-observability.sh <region> [account-id] [--dry-run]
+DRY_RUN=false; POS=()
+for a in "$@"; do
+  case "$a" in
+    --dry-run) DRY_RUN=true ;;
+    --*) say err "unknown option: $a"; exit 2 ;;
+    *) POS+=("$a") ;;
+  esac
+done
+[[ ${#POS[@]} -ge 1 && ${#POS[@]} -le 2 ]] || {
+  say err "usage: apply-observability.sh <region> [account-id] [--dry-run]"; exit 2; }
+REGION="${POS[0]:?usage: apply-observability.sh <region> [account-id] [--dry-run]}"
+if [[ "$DRY_RUN" == true ]]; then
+  # No AWS call at all under --dry-run (apply-monitoring.sh's test suite runs this without credentials).
+  say info "[dry-run] apply-observability.sh $REGION: Transaction Search (X-Ray logs resource policy + trace destination), then TRACES and APPLICATION_LOGS delivery for every source_truth_agent* runtime"
+  exit 0
+fi
+ACCOUNT="${POS[1]:-$(aws sts get-caller-identity --query Account --output text)}"
+rc=0
+# Process substitution hides a failing producer's exit status. Discover first,
+# before changing account-level settings, and fail closed if listing is denied.
+RUNTIMES="$(aws bedrock-agentcore-control list-agent-runtimes --region "$REGION" \
+  --query 'agentRuntimes[].[agentRuntimeName,agentRuntimeArn]' --output text)"
 
 # ---- 1. Transaction Search（账号 + 区域级，一次性）--------------------------------------
 # 策略内联书写（而非用 heredoc 变量传入），是为了让 scripts/tests/validate_iam_policies.py 能解析
@@ -38,6 +59,7 @@ if aws logs put-resource-policy --region "$REGION" --policy-name "$POLICY_NAME" 
   say ok "X-Ray → CloudWatch Logs 资源策略已就位（$POLICY_NAME）"
 else
   say warn "资源策略写入失败——缺 logs:PutResourcePolicy？span 将无法投递。"
+  rc=1
 fi
 
 DEST="$(aws xray get-trace-segment-destination --region "$REGION" \
@@ -45,7 +67,7 @@ DEST="$(aws xray get-trace-segment-destination --region "$REGION" \
 if [[ "$DEST" != "CloudWatchLogs" ]]; then
   aws xray update-trace-segment-destination --region "$REGION" \
     --destination CloudWatchLogs >/dev/null 2>&1 \
-    || say warn "update-trace-segment-destination 失败（缺 xray 写权限？）"
+    || { say warn "update-trace-segment-destination 失败（缺 xray 写权限？）"; rc=1; }
 fi
 # 回读：这一步是异步的，PENDING 也算已受理，但要如实告知而不是宣布成功。
 DEST_NOW="$(aws xray get-trace-segment-destination --region "$REGION" \
@@ -58,6 +80,7 @@ elif [[ "$DEST_NOW" == "CloudWatchLogs" ]]; then
   say info "Transaction Search: CloudWatchLogs / $STATUS_NOW（生效需几分钟，可稍后重跑本 stage 复核）"
 else
   say warn "Transaction Search 仍为 $DEST_NOW / $STATUS_NOW —— span 不会进 CloudWatch Logs。"
+  rc=1
 fi
 
 # ---- 2/3. 每个 runtime 的 TRACES + APPLICATION_LOGS 投递 --------------------------------
@@ -65,7 +88,7 @@ fi
 configured=0; skipped=0
 while read -r rt_name rt_arn; do
   [[ -n "$rt_name" ]] || continue
-  case "$rt_name" in source_truth_agent*) ;; *) continue ;; esac
+  case "$rt_name" in source_truth_agent|source_truth_agent_*) ;; *) continue ;; esac
   for log_type in TRACES APPLICATION_LOGS; do
     src="${rt_name}-$(printf '%s' "$log_type" | tr 'A-Z_' 'a-z-')-source"
     if aws logs put-delivery-source --region "$REGION" --name "$src" \
@@ -78,16 +101,24 @@ while read -r rt_name rt_arn; do
 
     if [[ "$log_type" == "TRACES" ]]; then
       dest_name="${rt_name}-traces-destination"
-      aws logs put-delivery-destination --region "$REGION" --name "$dest_name" \
-        --delivery-destination-type XRAY >/dev/null 2>&1 || true
+      if ! aws logs put-delivery-destination --region "$REGION" --name "$dest_name" \
+        --delivery-destination-type XRAY >/dev/null 2>&1; then
+        say warn "put-delivery-destination 失败: $dest_name"; skipped=$((skipped + 1)); continue
+      fi
     else
       dest_name="${rt_name}-logs-destination"
       lg="/aws/bedrock-agentcore/runtimes/$(printf '%s' "$rt_arn" | sed 's|.*/||')-DEFAULT"
-      aws logs create-log-group --region "$REGION" --log-group-name "$lg" >/dev/null 2>&1 || true
-      aws logs put-delivery-destination --region "$REGION" --name "$dest_name" \
+      if ! lg_error="$(aws logs create-log-group --region "$REGION" --log-group-name "$lg" 2>&1)"; then
+        if [[ "$lg_error" != *"(ResourceAlreadyExistsException)"* ]]; then
+          say warn "create-log-group 失败: $lg"; skipped=$((skipped + 1)); continue
+        fi
+      fi
+      if ! aws logs put-delivery-destination --region "$REGION" --name "$dest_name" \
         --delivery-destination-type CWL \
         --delivery-destination-configuration "destinationResourceArn=arn:aws:logs:${REGION}:${ACCOUNT}:log-group:${lg}" \
-        >/dev/null 2>&1 || true
+        >/dev/null 2>&1; then
+        say warn "put-delivery-destination 失败: $dest_name"; skipped=$((skipped + 1)); continue
+      fi
     fi
 
     dest_arn="$(aws logs get-delivery-destination --region "$REGION" --name "$dest_name" \
@@ -101,7 +132,7 @@ while read -r rt_name rt_arn; do
     else
       # 已存在即视为成功；其余情况才是真失败。
       if aws logs describe-deliveries --region "$REGION" \
-           --query "deliveries[?deliverySourceName=='$src'] | length(@)" --output text 2>/dev/null \
+           --query "deliveries[?deliverySourceName=='$src' && deliveryDestinationArn=='$dest_arn'] | length(@)" --output text 2>/dev/null \
            | grep -qE '^[1-9]'; then
         configured=$((configured + 1))
       else
@@ -109,14 +140,16 @@ while read -r rt_name rt_arn; do
       fi
     fi
   done
-done < <(aws bedrock-agentcore-control list-agent-runtimes --region "$REGION" \
-           --query 'agentRuntimes[].[agentRuntimeName,agentRuntimeArn]' --output text 2>/dev/null || true)
+done <<< "$RUNTIMES"
 
 # 回读，而不是以调用成功为准。
 live="$(aws logs describe-deliveries --region "$REGION" \
   --query 'deliveries | length(@)' --output text 2>/dev/null || echo 0)"
-if [[ "$live" =~ ^[1-9] ]]; then
+if [[ "$configured" -gt 0 && "$live" =~ ^[1-9] ]]; then
   say ok "runtime 投递已配置：$configured 条（账号内现存 deliveries: $live）"
 else
   say warn "未查到任何 delivery —— 应用日志与 trace 都不会流动（configured=$configured skipped=$skipped）"
+  rc=1
 fi
+[[ "$skipped" -eq 0 ]] || rc=1
+exit "$rc"

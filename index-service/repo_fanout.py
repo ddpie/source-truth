@@ -5,17 +5,15 @@ repos, the bridge runs the query against EACH repo's resident session and merges
 results here. This module is the PURE merge core (no I/O, no sessions) so the corruption-
 critical serving path stays thin and the merge logic is unit-testable in isolation.
 
-Design constraints (verified against codegraph-server 0.18.5 envelopes):
+Engine envelopes:
   - symbol_search  → {"results":  [...]}
   - get_callers    → {"callers":  [...]}
-  - analyze_impact → {"impacted": [...], "indirect_impacted": [...], "direct_impacted": [...]}
-  - Result items carry NO score/rank field, so there is NO meaningful cross-repo relevance
-    key to interleave on. We therefore preserve REPO-DECLARATION ORDER (the order the bridge
-    passes repos in) and, within each repo, codegraph's own ranking. Each item's file path
-    is already <repo>/-prefixed by path_align upstream, so the agent can tell repos apart.
-  - An errored per-repo envelope ({"error": ...}) contributes NOTHING to the merge (one
-    repo's transient failure must not blank the others). If EVERY repo errored, the merged
-    envelope surfaces the first error so the agent doesn't read silence as "no matches".
+  - analyze_impact → {"impacted": [...], "indirect_impacted": [...], "direct_impacted": int}
+
+Results retain repository order and the engine's ranking within each repository.
+Failures and metadata retain their repository identity, even when another repository
+succeeds. Aggregate counts never claim completeness when a query failed or omitted
+its total. Paths have already been aligned by the bridge.
 """
 from __future__ import annotations
 
@@ -58,8 +56,8 @@ def _payload_error(data: dict) -> str | None:
     除了显式的 `error` 键，还识别「isError=false 但 message 说定位失败」这种形态——
     见 _LOCATE_FAILURE_MARKERS 的说明。
 
-    **刻意不在这里判「调用图为空」**：merge_fanout 会丢弃报错的仓库，而「该符号确实没有调用者」
-    是完全合法的结果，把它当错误会让多仓路径静默丢掉整个仓库的结果。调用图缺失是在
+    **刻意不在这里判「调用图为空」**：报错仓库不会参与结果合并，而「该符号确实没有调用者」
+    是完全合法的结果，把它当错误会排除这个仓库的有效结果。调用图缺失是在
     http_bridge._note_empty_call_graph 里**附加提示**处理的，不是转成错误——两者的区别是
     「让答案说得诚实」和「让结果消失」。
     """
@@ -73,17 +71,55 @@ def _payload_error(data: dict) -> str | None:
     return None
 
 
-def merge_fanout(tool_name: str, per_repo_raw: list[str]) -> str:
+def _search_counts(out: dict, payloads: list[dict], failures: bool) -> None:
+    """Summarize search counts without turning missing totals into exact counts."""
+    if not any(
+        any(key in data for key in ("total_matches", "totalMatches", "truncated"))
+        for data in payloads
+    ):
+        return
+    shown = len(out["results"])
+    total = 0
+    complete = not failures
+    truncated = False
+    for data in payloads:
+        count = len(data["results"])
+        reported = data.get("total_matches", data.get("totalMatches"))
+        known = (
+            isinstance(reported, int)
+            and not isinstance(reported, bool)
+            and reported >= count
+        )
+        total += reported if known else count
+        complete = complete and known
+        truncated = truncated or data.get("truncated") is True or (
+            known and reported > count
+        )
+    out["shown"] = shown
+    out["truncated"] = truncated
+    out["total_matches_complete"] = complete
+    if complete:
+        out["total_matches"] = total
+    else:
+        out["total_matches_lower_bound"] = total
+    if truncated or not complete:
+        count_note = str(total) if complete else f"at least {total}"
+        out["truncation_note"] = (
+            f"showing {shown} of {count_note} matches across repositories; "
+            "these results must not be described as a complete list"
+        )
+
+
+def merge_fanout(
+    tool_name: str, per_repo_raw: list[str], *, repo_names: list[str] | None = None
+) -> str:
     """Merge a list of per-repo result JSON strings into ONE envelope for `tool_name`.
 
     `per_repo_raw` is in repo-declaration order; each entry is the (already path-aligned)
     JSON string that repo's session returned. Returns a single JSON envelope string with
-    each list key concatenated across repos. Unknown tools / unparseable inputs fall back
-    to the first entry unchanged (never corrupt what we don't understand).
-
-    标量键（`warning`、`embedding_status` 之类）会被保留。此前只重建列表键，于是**所有标量
-    一律丢失**——包括引擎在索引未建好时用来告知的 `warning`。后果是单仓能把这句警告透传出来，
-    多仓反而吞掉，而仓库越多、某个仓没建好索引的概率越大，正是更需要这句警告的场合。
+    each list key concatenated across repos. Unknown tools retain their first payload.
+    ``repo_results`` holds each repository's metadata and failures without duplicating
+    its result lists. Conflicting metadata is not promoted to a misleading global value.
     """
     keys = _LIST_KEYS.get(tool_name)
     sum_keys = _SUM_KEYS.get(tool_name, ())
@@ -91,52 +127,102 @@ def merge_fanout(tool_name: str, per_repo_raw: list[str]) -> str:
         # Unknown tool: we don't know its shape — return the first non-empty raw verbatim.
         return per_repo_raw[0] if per_repo_raw else json.dumps({"error": "no results"})
     keys = keys or ()
+    if repo_names is not None and len(repo_names) != len(per_repo_raw):
+        raise ValueError("repo_names must identify every repository response")
 
-    merged: dict[str, list[Any]] = {k: [] for k in keys}
+    out: dict[str, Any] = {k: [] for k in keys}
     sums: dict[str, int | float] = {}
-    scalars: dict[str, Any] = {}
-    first_error: str | None = None
-    saw_ok = False
+    metadata_values: dict[str, list[Any]] = {}
+    repo_results: list[dict[str, Any]] = []
+    payloads: list[dict] = []
+    failures: list[dict] = []
+    warnings: list[str] = []
+    managed = set(keys) | set(sum_keys) | {
+        "warning", "embedding_status", "embeddingStatus", "partial", "repo_results",
+        "truncated", "shown", "total_matches", "totalMatches", "truncation_note",
+        "total_matches_complete", "total_matches_lower_bound",
+    }
+    embedding_states: list[Any] = []
 
-    for raw in per_repo_raw:
+    for index, raw in enumerate(per_repo_raw):
         try:
             data = json.loads(raw)
         except (ValueError, TypeError):
-            continue  # a malformed per-repo payload is dropped, not allowed to crash the merge
+            data = {"error": "invalid JSON response from index"}
         if not isinstance(data, dict):
+            data = {"error": "index response must be an object"}
+        error = _payload_error(data)
+        if error is None and not isinstance(data.get(keys[0]), list):
+            error = f"index response has no valid {keys[0]} list"
+        metadata = {k: v for k, v in data.items() if k not in keys}
+        record: dict[str, Any] = {
+            "repo_index": index,
+            "status": "error" if error is not None else "ok",
+            "metadata": metadata,
+        }
+        if repo_names is not None:
+            record["repo"] = repo_names[index]
+        if error is not None:
+            record["error"] = error
+            failures.append({**data, "error": error})
+        repo_results.append(record)
+
+        warning = data.get("warning")
+        if warning:
+            items = warning if isinstance(warning, list) else [warning]
+            for item in items:
+                text = item if isinstance(item, str) else json.dumps(item, ensure_ascii=False)
+                if text and text not in warnings:
+                    warnings.append(text)
+        state = data.get("embedding_status", data.get("embeddingStatus"))
+        if state is not None and state != "" and state not in embedding_states:
+            embedding_states.append(state)
+
+        if error is not None:
             continue
-        if _payload_error(data) is not None:
-            # Remember the first error but keep scanning — another repo may have real hits.
-            if first_error is None:
-                first_error = raw
-            continue
-        saw_ok = True
+        payloads.append(data)
         for k in keys:
             seq = data.get(k)
             if isinstance(seq, list):
-                merged[k].extend(seq)
+                out[k].extend(seq)
         for k in sum_keys:
             v = data.get(k)
             if isinstance(v, (int, float)) and not isinstance(v, bool):
                 sums[k] = sums.get(k, 0) + v
-        # 其余标量键：保留第一个非空值。多仓下取第一个而不是拼接，因为像 warning 这样的
-        # 提示语拼接起来只会变噪声；关键是它不能消失。
         for k, v in data.items():
-            if k in merged or k in sum_keys or k in scalars:
+            if k in managed or v is None or v == "":
                 continue
-            if isinstance(v, (list, dict)):
-                continue
-            if v is None or v == "":
-                continue
-            scalars[k] = v
+            values = metadata_values.setdefault(k, [])
+            if v not in values:
+                values.append(v)
 
-    if not saw_ok and first_error is not None:
-        # Every repo errored → surface the first error rather than an empty (misleading) list.
-        return first_error
+    if not payloads and failures:
+        return json.dumps(
+            {**failures[0], "repo_results": repo_results}, ensure_ascii=False
+        )
 
-    out: dict[str, Any] = dict(merged)
     out.update(sums)
-    # 标量放在最后合并，且不覆盖列表/数值键
-    for k, v in scalars.items():
-        out.setdefault(k, v)
+    for key, values in metadata_values.items():
+        if key in ("call_graph_unavailable", "impact_zero_is_unverified"):
+            out[key] = any(value is True for value in values)
+        elif len(payloads) == 1 and not failures:
+            out[key] = values[0]
+    if failures:
+        out["partial"] = True
+        warnings.append(
+            "Some repository queries failed; these results cover only successful repositories. "
+            "An empty result does not prove there are no callers or impacts."
+        )
+    if embedding_states:
+        out["embedding_status"] = (
+            embedding_states[0] if len(embedding_states) == 1 else "mixed"
+        )
+        if len(embedding_states) > 1:
+            warnings.append("Repository embedding states differ; see repo_results.")
+    if warnings:
+        out["warning"] = "\n".join(warnings)
+    if tool_name == "codegraph_symbol_search":
+        _search_counts(out, payloads, bool(failures))
+    if failures or any(record["metadata"] for record in repo_results):
+        out["repo_results"] = repo_results
     return json.dumps(out, ensure_ascii=False)

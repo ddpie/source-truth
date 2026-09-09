@@ -5,13 +5,24 @@
 > 权威顶层目录树。改动任何顶层目录，必须同步本文件与 `structure_en.md`（`scripts/check-invariants.sh` 校验）。
 
 ```
-agent-container/        会话 microVM 内运行的 Claude Code Agent（Python）
-  README.md             职责 + 对外契约（输入 goal/session、index-service MCP 端点：定位 + 读文件）
+README.md               项目公开入口：中文在前、英文在后
+CONTRIBUTING.md          开发环境、检查命令与贡献流程
+SECURITY.md             安全问题报告与版本范围
+CODE_OF_CONDUCT.md      社区行为规范与报告方式
+LICENSE / NOTICE       MIT 许可证与项目署名
+.github/               CI 工作流、Issue 模板与 PR 模板
+agent-container/        会话 microVM 内运行的 OpenAI / Claude Agent（Python）
+  README.md             职责 + 对外契约（输入 prompt/traceId/repos、index-service MCP 端点：定位 + 读文件）
   prompts/              system.md 一个文件：系统 prompt + 高频问题清单 + 问答规范（代码为准 / 标差异 / 转研发）
   Dockerfile            ARM64 基础镜像 sha256 锁定；pin Claude Agent SDK（claude-agent-sdk）；@anthropic-ai/claude-code 按运维决定跟随 @latest（不 pin）
   agent.py              @app.entrypoint 异步流式 handler，启动 Agent 循环
-  agent_lib.py          SDK-free 只读问答 Agent 主逻辑（agent.py 的可测试内核：选项构建 / 取证循环）
-  requirements.txt + requirements.lock  精确固定的 Python 依赖（lock = pip freeze 全传递）
+  agent_settings.py     项目 SDK / 模型选择与旧配置兼容
+  engine_runner.py      SDK 分派 + 规范化流式事件（版本 / runId / seq / 终态）
+  agent_lib.py          Claude 只读问答内核：选项构建 / 取证循环 / 冷启动重试
+  openai_runner.py      OpenAI Agents SDK 工具循环 + HTTP MCP 只读白名单
+  openai_backend.py     Bedrock 模型构造 / OpenInference（术语表复用）
+  bedrock_converse.py   OpenAI Agents Model → ConverseStream；SigV4 / 消息与工具 / 推理续接
+  requirements.txt + requirements.lock  精确固定的 Python 依赖（uv 生成完整传递锁）
   tests/                pytest（由 scripts/test.sh 调用）
 bot-gateway/            飞书 Bot 长连接事件网关 + CardKit 流式渲染（TypeScript 长驻服务）
   README.md             长连接 / 事件去重 / 会话→runtimeSessionId 映射 / 卡片更新频控
@@ -31,7 +42,13 @@ index-service/          常驻 CodeGraph 索引服务 + MCP-over-HTTP 接口
   text_decode.py        容错文本解码（仅标准库）：中文游戏仓常为 GBK/GB2312、配置表可能 UTF-16，按编码探测避免乱码
   glossary.py           术语表数据层：concept 为中心的 Entry/聚合/增量合并/JSONL 读写/生成轻量索引层
   glossary_read.py      术语表只读查询（glossary_index/glossary_lookup MCP 工具；per-repo slice 聚合 + 项目隔离）
-  glossary_build.py     构建期：本地 cc 扫码产出 concept JSONL（prompt/容错解析/中文别名 grounding 校验/增量合并）
+  glossary_build.py     构建期：按项目 SDK 提取 concept JSONL（prompt/容错解析/中文别名 grounding 校验/增量合并）
+  openai_glossary.py    OpenAI 构建循环：工具仅能分页读取当前批次文件
+  glossary_config.py    SDK / 模型 / 区域 / prompt 指纹与产物摘要、配置发布锁
+  glossary_source.py   术语表候选/取证路径保护（凭据、索引内部路径、符号链接）
+  glossary_worker.sh   仓库锁内加载当前 SDK / 上限 / 解释器后启动构建
+  glossary-requirements.txt + glossary-requirements.lock  OpenAI 术语表独立依赖（agent 锁的子集）
+  setup_glossary.sh     按锁文件摘要安装不可变 venv，与常驻 bridge 环境隔离
   glossary_gen.py       术语表生成 CLI：按 git diff 增量 vs 全量、候选文件限界、原子写入（刷新 timer 调用）
   glossary_refresh.sh   刷新单元包装：git_fetch 后按 old..new 增量重建本仓术语表 slice（best-effort，不阻塞拉取）
   path_align.py         索引路径 ↔ 仓库相对路径词法对齐（拒越界）
@@ -42,7 +59,7 @@ index-service/          常驻 CodeGraph 索引服务 + MCP-over-HTTP 接口
   reindex_local_repo.sh local 仓应用暂存代码：常规推送原地同步到正在用的目录（--delay-updates 缩小中断窗口）、watcher 增量重建索引 + 按变更清单增量刷新术语表（不停 bridge）；首次推送停 bridge 全量建图、建图与术语表并行；重活交给后台 systemd 单元、ssh 断开不影响；--prepare 建暂存目录
   tests/                pytest（由 scripts/test.sh 调用）
 infra/                  基础设施即代码（MVP 先 agentcore toolkit / boto3，渐进 CDK 化）
-  README.md             IaC 分工：CDK 管稳定层 / deploy-all.sh 用 boto3 配 AgentCore Runtime
+  README.md             当前部署脚本分工与后续 CDK 迁移规划
   monitoring/           监控（CloudWatch 侧；scripts/boto3，非 CDK stack）
     queries/metric-filters/a-class-metrics.json  A 类指标口径单一事实源（计数/分位/分布 → metric-filter）
     queries/metric-filters/alarm-metrics.json    告警专用稠密 filter（每 card_health kind 一条，defaultValue:0）
@@ -53,11 +70,12 @@ infra/                  基础设施即代码（MVP 先 agentcore toolkit / boto
   (p2) lib/             runtime / codegraph(index-service) / gateway 各 stack
 config/                 配置驱动：i18n.json（卡片 / 告警 / 错误文案）、alarm-thresholds.json（告警阈值，运维可调）、projects.example.json（项目路由 schema 模板；真实配置在 .local/projects.json，部署相关、gitignore）
 scripts/                运维生命周期
-  check-invariants.sh   快速结构 lint（AGENTS.md + architecture.md 存在与互引 / 双语配对 / 顶层目录 ↔ structure 文档双向对齐 / design 权威依据存在 / 全局 IAM 角色策略未钉死 ${REGION} / GitHub slug 默认值为 aws-samples / 文档无真实人名与竞品名）
+  check-invariants.sh   快速结构 lint（AGENTS.md + architecture.md 存在与互引 / 双语配对 / 顶层目录 ↔ structure 文档双向对齐 / design 权威依据存在 / 全局 IAM 角色策略未钉死 ${REGION} / GitHub 安装入口为 ddpie/source-truth / 文档无真实人名与竞品名）
   lib/                  common.sh（格式化 + 依赖检查）、env-utils.sh（.env / deploy-config 共享 helper）、render_metric_filters.py（指标定义→put-metric-filter 计划）、render_dashboard.py（看板模板渲染 + 禁 type:log 校验）、render_alarms.py（阈值→put-metric-alarm 计划）、render_manifest.py（多仓 REPO_MANIFEST_JSON 校验+逐仓记录，纯函数可测）
   apply-monitoring.sh   监控栈唯一入口（看板→指标 filter→告警→DAU Lambda 按序全量，幂等；--only 选单阶段；--dry-run；实现在 lib/apply-*.sh）
   test.sh               分层测试的唯一入口（离线默认 / --full）
   check-versions.sh     版本固定防漂移守卫（base digest / requirements pin / Node / claude-code npm）
+  generate-python-licenses.py  从 agent 锁对应的已安装环境生成 Python 许可证清单；--check 无写入校验
   get.sh                一行引导脚本（curl/gh 取来跑）：把仓库 clone 到 ./source-truth 再交给 install.sh；可重跑（已存在则 git pull）
   install.sh            交互式一键安装（查依赖→飞书凭证→配置→确认→调 deploy-all；重跑预填；添加项目可选 git 仓或 local 仓）
   push-local-repo.sh    本机侧：rsync 直推本地仓到索引主机暂存目录并触发重建（local 仓刷新入口；不经 git）
@@ -89,6 +107,7 @@ docs/
   structure_en.md       英文对照
   runbook_zh.md         部署 / 连飞书 / 运维 / 排错（中文，双语配对）
   runbook_en.md         英文对照（原「中性名不参与配对」的豁免已取消，两份须同步）
+  dual-sdk_zh.md / dual-sdk_en.md  SDK 选择、旧项目迁移、术语表切换与验证（双语）
   glossary.md           术语表怎么来的：构建流程 / 产物结构 / 可信依据 / 成本运维（面向人，中性名）
   aws-services_zh.md    用到的 AWS 服务清单：干什么用 / 计费点（双语配对 aws-services_en.md）
   design/               设计权威依据（仅中文，暂不翻译）
@@ -105,7 +124,7 @@ docs/
     *-spike.md          调研记录（cardkit 流式 / 索引性能 / 模板）
     perf-comparison.md  与原生 Claude Code 的耗时对比记录
   assets/               文档配图（手写 SVG：架构 / 代码进入与刷新 / 会话隔离 / 术语表 / 术语表构建 / 术语表置信度分层 / 安全设计 / 时序；架构 / 时序 / 安全设计另有英文版 `*.en.svg` 供英文 README 用；及一次真实问答录屏 demo-qa.gif）
-.local/                 （已 gitignore）账号特定部署状态：deploy-config、projects.json（项目路由）
+.local/                 （已 gitignore）账号特定部署状态：deploy-config、projects.json（项目配置）、deployments/（发布记录与回滚资料）
 ```
 
 标注 `(p2)` 的条目为后续阶段产出，当前仅占位或尚未创建；未标注者均已落地。

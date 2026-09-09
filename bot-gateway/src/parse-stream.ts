@@ -73,6 +73,8 @@ export interface StreamState {
    *  ResultMessage carries num_turns), so NO agent-side change / image rebuild is needed —
    *  the telemetry plan's "⚠️ needs a path" note for num_turns is outdated. */
   numTurns: number;
+  protocol?: "legacy" | "source-truth";
+  normalized?: { runId: string; seq: number; messages: Record<string, number>; tools: Map<string, boolean> };
 }
 
 export function newStreamState(): StreamState {
@@ -125,6 +127,24 @@ export function detectEventError(evt: Record<string, unknown>): string | null {
  *  message's content[0] (tool-gated). Single entry point so the live (sigv4) and
  *  whole-string parsers behave identically. */
 export function applyEvent(state: StreamState, evt: Record<string, unknown>): void {
+  // AgentCore transport errors have no protocol envelope, including after the
+  // SDK's final event. Preserve the first error before enforcing stream mode.
+  const transportError = detectEventError(evt);
+  if (transportError !== null) state.error ??= transportError;
+  if (evt.protocol === "source-truth") {
+    if (state.protocol === "legacy") {
+      state.error ??= "mixed agent stream protocol";
+      return;
+    }
+    state.protocol = "source-truth";
+    applyNormalizedEvent(state, evt);
+    return;
+  }
+  if (state.protocol === "source-truth" || evt.protocol !== undefined) {
+    state.error ??= "mixed or unknown agent stream protocol";
+    return;
+  }
+  state.protocol = "legacy";
   if (state.error === null) {
     const err = detectEventError(evt);
     if (err !== null) state.error = err;
@@ -177,6 +197,70 @@ export function applyEvent(state: StreamState, evt: Record<string, unknown>): vo
   // repeats the same text we already accumulated — skip it so text isn't doubled.
   if (state.sawStreamEvent && Array.isArray(evt.content)) return;
   applyContentItem(state, (evt.content as Array<Record<string, unknown>> | undefined)?.[0]);
+}
+
+/** Both SDKs use this contract. Keep the legacy parser during rolling upgrades. */
+function applyNormalizedEvent(state: StreamState, evt: Record<string, unknown>): void {
+  if (evt.version !== 1 || typeof evt.runId !== "string" || !evt.runId.trim() || !Number.isSafeInteger(evt.seq)) {
+    state.error ??= "invalid agent stream protocol";
+    return;
+  }
+  state.normalized ??= { runId: evt.runId, seq: 0, messages: Object.create(null) as Record<string, number>, tools: new Map() };
+  const stream = state.normalized;
+  if (stream.runId !== evt.runId || evt.seq !== stream.seq + 1 || state.sawResult) {
+    state.error ??= "agent stream sequence mismatch";
+    return;
+  }
+  stream.seq = evt.seq as number;
+  if (evt.type === "text_delta" && typeof evt.messageId === "string" && evt.messageId && typeof evt.text === "string") {
+    if (!evt.text) return;
+    let index = stream.messages[evt.messageId];
+    if (index === undefined) {
+      index = state.texts.length;
+      stream.messages[evt.messageId] = index;
+      state.texts.push("");
+    } else if (index !== state.texts.length - 1 || state.sawToolAfterLastText) {
+      state.error ??= "agent stream message order mismatch";
+      return;
+    }
+    state.texts[index] += evt.text;
+    state.sawToolAfterLastText = false;
+  } else if (evt.type === "tool_started") {
+    if (typeof evt.toolId !== "string" || !evt.toolId || stream.tools.has(evt.toolId) ||
+        typeof evt.name !== "string" || !evt.name.trim()) {
+      state.error ??= "invalid agent stream tool start";
+      return;
+    }
+    stream.tools.set(evt.toolId, false);
+    state.sawToolAfterLastText = true;
+    countTool(state, evt.name);
+  } else if (evt.type === "tool_finished") {
+    if (typeof evt.toolId !== "string" || stream.tools.get(evt.toolId) !== false ||
+        typeof evt.isError !== "boolean") {
+      state.error ??= "invalid agent stream tool completion";
+      return;
+    }
+    stream.tools.set(evt.toolId, true);
+    if (evt.isError === true) state.toolErrors++;
+  } else if (evt.type === "run_completed" || evt.type === "run_failed") {
+    state.sawResult = true;
+    if (typeof evt.numTurns === "number" && Number.isSafeInteger(evt.numTurns) && evt.numTurns >= 0) {
+      state.numTurns = evt.numTurns;
+    }
+    if (evt.type === "run_failed") {
+      state.error ??= typeof evt.error === "string" && evt.error.trim() ? evt.error : "agent run failed";
+    } else if ([...stream.tools.values()].some((finished) => !finished)) {
+      state.error ??= "agent run completed before tools finished";
+    } else if (typeof evt.text === "string" && evt.text.trim()) {
+      // The final SDK snapshot replaces the last streamed answer, never doubles it.
+      if (state.texts.length === 0 || state.sawToolAfterLastText) state.texts.push(evt.text);
+      else state.texts[state.texts.length - 1] = evt.text;
+    } else {
+      state.error ??= "agent run completed without final text";
+    }
+  } else {
+    state.error ??= "unknown agent stream event";
+  }
 }
 
 /** Fold one raw Anthropic stream event (from a StreamEvent's `event` field) into
@@ -290,6 +374,9 @@ export function parseAgentStream(raw: string): ParsedStream {
       continue;
     }
     applyEvent(state, evt);
+  }
+  if (state.protocol === "source-truth" && !state.sawResult) {
+    state.error ??= "stream truncated before completion (no terminal result event)";
   }
   return splitTexts(state.texts, state.error);
 }

@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# provision_index_service.sh <region> <config> <bucket> <max_files> <instance_type> [root_volume_gb] [model] [glossary_max_files]
+# provision_index_service.sh <region> <config> <bucket> <max_files> <instance_type> [root_volume_gb] [glossary_model] [glossary_max_files]
+# Env: ST_LOCAL_MODE=true (this EC2 is the host); ST_GLOSSARY_ENABLED=false (glossary off → the host
+# gets MODEL='' + GLOSSARY_ENABLED=false in /etc/index-service.env; bootstrap skips the claude CLI).
 # Provisions the BASE index host only — an idempotent ARM EC2 (Ubuntu 24.04, glibc 2.39 for
 # codegraph-server) in the private subnet running index-service/bootstrap.sh as user-data. Binds
 # NO project (projects are attached later by activate_project.sh over SSM). Prints the instance's
@@ -35,7 +37,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 source "$SCRIPT_DIR/common.sh"; source "$SCRIPT_DIR/env-utils.sh"
 REGION="$1"; CONFIG="$2"; BUCKET="$3"; MAX_FILES="$4"; ITYPE="$5"; ROOT_VOLUME_GB="${6:-30}"; MODEL="${7:-global.anthropic.claude-opus-4-8}"; GLOSSARY_MAX_FILES="${8:-400}"
+GLOSSARY_ENABLED="${ST_GLOSSARY_ENABLED:-true}"
+[[ "$GLOSSARY_ENABLED" == false ]] && MODEL=""   # empty glossary model = engine disabled on the host
 safe_source_env "$CONFIG"
+require_deploy_region "${DEPLOY_REGION:-}" "$REGION" || exit 2
 Q() { aws ec2 "$@" --region "$REGION"; }
 QS() { aws s3api "$@" --region "$REGION"; }
 log() { say "$@" >&2; }
@@ -119,7 +124,17 @@ artifact_signature() {
   # binary never landed — the same silent no-op the bootstrap.sh component was added to close,
   # left open for the largest artifact. Absent → "none" (a host may predate the staged layout).
   cg="$(head_object_etag bin/codegraph-server)" || return 1
-  echo "${idx}|${gw}|${bs}|${cg}"
+  # Glossary switch + cap: both are baked into /etc/index-service.env by bootstrap.sh, and the
+  # switch also decides whether the claude CLI gets installed. Neither reaches an existing host
+  # any other way — without them here, enabling the glossary later never installed the CLI nor
+  # rewrote the env. Stable while unchanged, so no spurious re-bootstrap.
+  echo "${idx}|${gw}|${bs}|${cg}|glossary=${GLOSSARY_ENABLED}|gmf=${GLOSSARY_MAX_FILES}"
+}
+# sig_field <sig> <name> : the value of a named component (name=value), or "" when absent.
+sig_field() {
+  local c; local IFS='|'
+  for c in $1; do [[ "$c" == "$2="* ]] && { printf '%s' "${c#*=}"; return; }; done
+  printf ''
 }
 
 # Never DOWNGRADE a signature component to "none" (C2, second half). "none" means the key is
@@ -314,14 +329,20 @@ ssm_send_shell() { # <instance-id> <script>
 restart_captured_units() { # <instance-id>
   local iid="$1" cid st script deadline
   script="$(cat <<REMOTE
+LOCK=\${REBOOT_LOCK_FILE:-/var/lock/source-truth-rebootstrap.lock}
+command -v flock >/dev/null 2>&1 || exit 1
+exec 9>"\$LOCK"
+flock -n 9 || { echo "recover: another deployment still owns \$LOCK; refusing to restart its units" >&2; exit 75; }
 UNITS=$REBOOT_UNITS_FILE
 if [ ! -s "\$UNITS" ]; then echo "recover: no captured unit list at \$UNITS — nothing to start"; exit 0; fi
+recover_rc=0
 while read -r u; do
   [ -n "\$u" ] || continue
-  if systemctl start "\$u"; then echo "recover: started \$u"; else echo "recover: FAILED to start \$u" >&2; fi
+  if systemctl start "\$u"; then echo "recover: started \$u"; else echo "recover: FAILED to start \$u" >&2; recover_rc=1; fi
 done < "\$UNITS"
+if [ "\$recover_rc" -eq 0 ]; then rm -f "\$UNITS" || recover_rc=1; fi
 systemctl list-units --type=service --state=active,activating --plain --no-legend 'bot-gateway@*.service' 'index-bridge-*.service' 2>/dev/null || true
-exit 0
+exit "\$recover_rc"
 REMOTE
 )"
   log warn "attempting to restart the units the failed re-bootstrap had stopped on $iid ..."
@@ -370,25 +391,9 @@ REMOTE
 # HARD-FAILS instead of falling back to "reuse the stale box" — a deploy that re-staged code must
 # apply it. The caller stamps ArtifactSig only after this returns 0, so a failed run leaves the tag
 # stale and the next deploy retries.
-rebootstrap_in_place() { # <instance-id>
-  local iid="$1" cid st err out rc remote_cmd deadline timeout_secs
-
-  # L16: an unvalidated override made `deadline=$(( ... ))` an arithmetic error that set -e turned
-  # into an opaque abort. Fall back to the default instead — a bad knob must not kill the deploy.
-  timeout_secs="${INDEX_REBOOTSTRAP_TIMEOUT_SECS:-1800}"
-  if ! printf '%s' "$timeout_secs" | grep -Eq '^[1-9][0-9]*$'; then
-    log warn "INDEX_REBOOTSTRAP_TIMEOUT_SECS='$timeout_secs' is not a positive integer — using 1800"
-    timeout_secs=1800
-  fi
-
-  # Stage the CURRENT bootstrap.sh so the host pulls this run's copy (the fresh-launch path
-  # does the same upload for its user-data). The instance already has the aws CLI + an
-  # instance profile from its first bootstrap, so it can read S3 itself — no presign needed.
-  aws s3 cp "$ROOT/index-service/bootstrap.sh" "s3://$BUCKET/bootstrap.sh" --region "$REGION" >&2
-
-  # Remote payload. Written for /bin/sh (the SSM agent's shell): no arrays, no [[ ]], no ${x//}.
-  # Deploy-side values interpolate here; every HOST-side expansion is escaped as \$.
-  remote_cmd="$(cat <<REMOTE
+# Local and remote deployment use the same lock, stop/start and rollback path.
+rebootstrap_payload() {
+  cat <<REMOTE
 set -e
 UNITS=$REBOOT_UNITS_FILE
 ENV_FILE=\${INDEX_ENV_FILE:-/etc/index-service.env}
@@ -398,16 +403,27 @@ ENV_BAK=\${ENV_FILE}.rebootstrap-bak
 # running, so the NEXT deploy started a SECOND concurrent bootstrap on the same tree (two
 # apt-get → dpkg lock, two tar xzf into /opt/bot-gateway, two npm ci in one node_modules).
 # Deliberately NOT the lock file bootstrap.sh itself may take: this wrapper CALLS bootstrap.sh, so
-# sharing one lock would deadlock against it. flock missing (non-Ubuntu base?) → proceed unlocked
-# rather than refuse to deploy.
+# sharing one lock would deadlock against it. Project activation shares this
+# wrapper lock because it also publishes into /opt/idx/app.
 LOCK=\${REBOOT_LOCK_FILE:-/var/lock/source-truth-rebootstrap.lock}
-if command -v flock >/dev/null 2>&1; then
-  exec 9>"\$LOCK"
-  flock -n 9 || { echo "FATAL: another in-place re-bootstrap already holds \$LOCK on this host — refusing to run a second, concurrent bootstrap" >&2; exit 75; }
-fi
+command -v flock >/dev/null 2>&1 || { echo "FATAL: flock is required for host deployment serialization" >&2; exit 1; }
+exec 9>"\$LOCK"
+flock -n 9 || { echo "FATAL: another in-place re-bootstrap already holds \$LOCK on this host — refusing to run a second, concurrent bootstrap" >&2; exit 75; }
 
-# C1 step 1 — capture the units this run is about to break.
-systemctl list-units --type=service --state=active,activating --plain --no-legend 'bot-gateway@*.service' 'index-bridge-*.service' 2>/dev/null | awk '{print \$1}' > "\$UNITS" || true
+# C1 step 1 — enumerate before touching services or the recovery journal. A
+# failed/partial list must not turn into a successful bootstrap over live code.
+if ! ACTIVE_UNITS="\$(systemctl list-units --type=service --state=active,activating --plain --no-legend 'bot-gateway@*.service' 'index-bridge-*.service')"; then
+  echo "FATAL: could not enumerate active services; refusing to re-bootstrap" >&2
+  exit 1
+fi
+# A previous run may have failed to restart a captured unit. Carry that recovery
+# debt into this run even though the unit is no longer in the active list.
+RECOVERY_UNITS=""
+if [ -f "\$UNITS" ]; then RECOVERY_UNITS="\$(cat "\$UNITS")"; fi
+CAPTURE="\$(mktemp "\${UNITS}.XXXXXX")"
+trap 'rm -f "\$CAPTURE"' EXIT
+printf '%s\n%s\n' "\$RECOVERY_UNITS" "\$ACTIVE_UNITS" | awk 'NF && !seen[\$1]++ {print \$1}' > "\$CAPTURE"
+mv -f "\$CAPTURE" "\$UNITS"
 echo "re-bootstrap: active units to stop and restart: \$(tr '\n' ' ' < "\$UNITS")"
 
 start_captured() {
@@ -416,6 +432,9 @@ start_captured() {
     [ -n "\$u" ] || continue
     if systemctl start "\$u"; then echo "re-bootstrap: restarted \$u"; else echo "re-bootstrap: FAILED to restart \$u" >&2; sc_rc=1; fi
   done < "\$UNITS"
+  # Only a complete recovery retires the journal. Otherwise the next local or
+  # SSM attempt must still restore these units. Later intentional stops stay off.
+  if [ "\$sc_rc" -eq 0 ]; then rm -f "\$UNITS" || sc_rc=1; fi
   return \$sc_rc
 }
 
@@ -447,11 +466,16 @@ REGION='$REGION'
 MAX_FILES='$MAX_FILES'
 MODEL='$MODEL'
 GLOSSARY_MAX_FILES='$GLOSSARY_MAX_FILES'
+GLOSSARY_ENABLED='$GLOSSARY_ENABLED'
 ENV
 
 # C1 step 3 — the update itself.
-aws s3 cp s3://${BUCKET}/bootstrap.sh /opt/bootstrap.sh --region ${REGION}
-bash /opt/bootstrap.sh
+if [ -n "\${SOURCE_TRUTH_BOOTSTRAP:-}" ]; then
+  bash "\$SOURCE_TRUTH_BOOTSTRAP"
+else
+  aws s3 cp s3://${BUCKET}/bootstrap.sh /opt/bootstrap.sh --region ${REGION}
+  bash /opt/bootstrap.sh
+fi
 
 # C1 step 4 — start exactly the captured list. Past this point the env is committed and the
 # failure trap is disarmed: what remains is bringing the services back, and a unit that refuses to
@@ -465,7 +489,18 @@ else
   exit 1
 fi
 REMOTE
-)"
+}
+
+rebootstrap_in_place() { # <instance-id>
+  local iid="$1" cid st err out rc remote_cmd deadline timeout_secs
+
+  timeout_secs="${INDEX_REBOOTSTRAP_TIMEOUT_SECS:-1800}"
+  if ! printf '%s' "$timeout_secs" | grep -Eq '^[1-9][0-9]*$'; then
+    log warn "INDEX_REBOOTSTRAP_TIMEOUT_SECS='$timeout_secs' is not a positive integer — using 1800"
+    timeout_secs=1800
+  fi
+  aws s3 cp "$ROOT/index-service/bootstrap.sh" "s3://$BUCKET/bootstrap.sh" --region "$REGION" >&2
+  remote_cmd="$(rebootstrap_payload)"
 
   cid="$(ssm_send_shell "$iid" "$remote_cmd")" || exit 1
 
@@ -572,13 +607,6 @@ if [[ "$LOCAL_MODE" == "true" ]]; then
   fi
   log info "local mode: instance role present + S3 artifact read OK ($SELF_ROLE)"
 
-  sudo tee /etc/index-service.env >/dev/null <<ENV
-BUCKET='$BUCKET'
-REGION='$REGION'
-MAX_FILES='$MAX_FILES'
-MODEL='$MODEL'
-GLOSSARY_MAX_FILES='$GLOSSARY_MAX_FILES'
-ENV
   # Synchronous bootstrap, but bounded: a hung apt/pip must not wedge the deploy forever.
   log info "local mode: running bootstrap.sh in place (bounded 1800s) ..."
   # --foreground: GNU timeout normally puts the command in a NEW process group (to kill the whole
@@ -587,7 +615,10 @@ ENV
   # terminal (tee), apt's post-install steps (needrestart) hit exactly that and hung forever in
   # do_signal_stop. --foreground keeps the command in OUR (foreground) process group so tty access
   # is legal; </dev/null belts-and-suspenders any stray stdin read.
-  timeout --foreground 1800 sudo -E bash "$ROOT/index-service/bootstrap.sh" </dev/null >&2 \
+  # Acquire the host lock before changing the env or stopping units, and use the
+  # same rollback as SSM when bootstrap fails. The override is local to this call.
+  timeout --foreground 1800 sudo -E env SOURCE_TRUTH_BOOTSTRAP="$ROOT/index-service/bootstrap.sh" \
+    bash -c "$(rebootstrap_payload)" </dev/null >&2 \
     || { log err "local-mode bootstrap.sh failed/timed out — see /var/log/index-svc-bootstrap.log"; exit 1; }
 
   # PRIVATE_SUBNET feeds the AgentCore runtime ENI (deploy_project.sh → deploy_runtime.py). It must
@@ -690,6 +721,10 @@ if [[ "$EXISTING" != "None" && -n "$EXISTING" ]]; then
     # cutover: the id/IP/EBS/graph.db are preserved.
     # 签名不一致 → 原地重跑 bootstrap 把 bridge/gateway 依赖更新到位，再写回新签名。
     log warn "index-service base artifacts changed since $EXISTING booted (sig: ${BOOTED_SIG:-none} → $TARGET_SIG) — updating IN PLACE on $EXISTING (no instance replacement)"
+    _gl_old="$(sig_field "$BOOTED_SIG" glossary)"; _gl_new="$(sig_field "$TARGET_SIG" glossary)"
+    if [[ "$_gl_old" != "$_gl_new" ]]; then
+      log info "术语表开关变更（${_gl_old:-untagged} → $_gl_new）→ 原地重跑 bootstrap：改写 /etc/index-service.env、安装 claude CLI，机器人停几分钟 / glossary switch changed: the host re-bootstraps in place (rewrites the env, installs the CLI) — bots are down for a few minutes"
+    fi
     rebootstrap_in_place "$EXISTING"
     # Stamp only AFTER a successful run (rebootstrap_in_place exits on failure), so a failed
     # update leaves the tag stale and the NEXT deploy retries instead of assuming the host is
@@ -829,6 +864,7 @@ REGION='$REGION'
 MAX_FILES='$MAX_FILES'
 MODEL='$MODEL'
 GLOSSARY_MAX_FILES='$GLOSSARY_MAX_FILES'
+GLOSSARY_ENABLED='$GLOSSARY_ENABLED'
 ENV
 for i in 1 2 3 4 5 6; do curl -fsSL "$BOOT_URL" -o /opt/bootstrap.sh && break || sleep 10; done
 bash /opt/bootstrap.sh

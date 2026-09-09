@@ -566,8 +566,9 @@ def build_bridge(
 
         This is the PER-(repo,query) isolation boundary: every failure mode is caught
         and turned into an error envelope JSON (never propagates), so in a fan-out one
-        repo's unhealthy/error can't blank the others — merge_fanout drops error
-        envelopes and only surfaces an error if EVERY repo errored.
+        repo's unhealthy/error can't blank the others — merge_fanout preserves
+        failures per repository and marks partial results; only an all-failed
+        query gets a top-level error.
         """
         try:
             arguments = await _build_args(repo, tool_name, query)
@@ -614,10 +615,12 @@ def build_bridge(
 
             # FAN OUT: unset repo + multiple in scope → query each concurrently, merge.
             # Each _run_on_repo isolates its own failure into an error envelope, so a
-            # gather here can't raise; merge_fanout drops errored repos and only surfaces
-            # an error if every repo errored.
+            # gather here can't raise. The merge retains failed repository identities
+            # and marks partial coverage while preserving successful results.
             per_repo = await asyncio.gather(*[_run_on_repo(r, tool_name, query) for r in repos])
-            return merge_fanout(tool_name, list(per_repo))
+            return merge_fanout(
+                tool_name, list(per_repo), repo_names=[r.name for r in repos]
+            )
 
         _tool.__name__ = tool_name
         return _tool
@@ -691,32 +694,50 @@ def build_bridge(
             resolved = router.resolve(explicit)
             return [by_name[resolved]] if resolved is not None else list(repos)
 
-        def _merge_file_fanout(list_key: str, per_repo_json: list[str]) -> str:
+        def _merge_file_fanout(list_key: str, per_repo_json: list[str], repo_names: list[str]) -> str:
             """Concatenate per-repo file-tool results (paths/matches already <repo>/-prefixed,
-            so repos stay distinguishable). Mirrors graph fan-out: a per-repo error contributes
-            nothing; if every repo errored, surface the first error (never a misleading empty)."""
+            preserving each repository's metadata and failures. Partial coverage is independent
+            of truncation; an empty successful subset cannot prove there are no matches."""
             merged: dict[str, Any] = {list_key: [], "truncated": False, "count": 0}
             if list_key == "matches":
                 merged["deduped"] = 0
-            first_error: str | None = None
+            first_error: dict[str, Any] | None = None
+            repo_results: list[dict[str, Any]] = []
             saw_ok = False
-            for raw in per_repo_json:
+            for index, (name, raw) in enumerate(zip(repo_names, per_repo_json, strict=True)):
                 try:
                     d = json.loads(raw)
                 except (ValueError, TypeError):
-                    continue
+                    d = {"error": "invalid JSON response from file tool"}
                 if not isinstance(d, dict):
-                    continue
+                    d = {"error": "file-tool response must be an object"}
+                if "error" not in d and not isinstance(d.get(list_key), list):
+                    d = {**d, "error": f"file-tool response has no valid {list_key} list"}
+                record = {
+                    "repo": name, "repo_index": index,
+                    "status": "error" if "error" in d else "ok",
+                    "metadata": {k: v for k, v in d.items() if k != list_key},
+                }
+                repo_results.append(record)
                 if "error" in d:
-                    first_error = first_error or raw
+                    record["error"] = str(d["error"])
+                    if first_error is None:
+                        first_error = d
                     continue
                 saw_ok = True
-                merged[list_key].extend(d.get(list_key, []) if isinstance(d.get(list_key), list) else [])
+                merged[list_key].extend(d[list_key])
                 merged["truncated"] = merged["truncated"] or bool(d.get("truncated"))
                 if list_key == "matches":
                     merged["deduped"] += int(d.get("deduped", 0) or 0)
             if not saw_ok and first_error is not None:
-                return first_error
+                return json.dumps({**first_error, "repo_results": repo_results}, ensure_ascii=False)
+            if first_error is not None:
+                merged["partial"] = True
+                merged["warning"] = (
+                    "Some repository file queries failed; these results cover only successful "
+                    "repositories. An empty result does not prove there are no matching files or text."
+                )
+            merged["repo_results"] = repo_results
             merged["count"] = len(merged[list_key])
             return json.dumps(merged, ensure_ascii=False)
 
@@ -748,14 +769,14 @@ def build_bridge(
                     t = targets[0]
                     return file_search.search_to_json(pattern, local_root=t.local, glob=glob, repo=t.name)
                 # FAN-OUT: each repo isolated via _safe_file_call so one repo's failure can't
-                # blank the others (merge drops error envelopes; all-errored surfaces first).
+                # blank the others; the merge records failures and marks partial coverage.
                 per_repo = [
                     _safe_file_call(
                         lambda t=t: file_search.search_to_json(pattern, local_root=t.local, glob=glob, repo=t.name),
                         t.name, "search")
                     for t in targets
                 ]
-                return _merge_file_fanout("matches", per_repo)
+                return _merge_file_fanout("matches", per_repo, [t.name for t in targets])
             return _guarded(run, bad_input="bad search pattern", failed="search failed",
                             log_event="search_error", scope_warn_tool="search_files")
 
@@ -797,7 +818,7 @@ def build_bridge(
                         t.name, "glob")
                     for t in targets
                 ]
-                return _merge_file_fanout("paths", per_repo)
+                return _merge_file_fanout("paths", per_repo, [t.name for t in targets])
             return _guarded(run, bad_input="bad glob pattern", failed="glob failed",
                             log_event="glob_error", scope_warn_tool="glob_files")
 

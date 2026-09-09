@@ -58,19 +58,19 @@
 
   <!-- ===== AgentCore Runtime: session microVMs (bottom layer) ===== -->
   <rect x="40" y="458" width="680" height="104" rx="10" fill="#fafbfd" stroke="#cdd5e0" stroke-width="1.2"/>
-  <text x="380" y="479" text-anchor="middle" font-size="12" font-weight="700" fill="#3a4556">AgentCore Runtime (AWS-managed) · one isolated microVM per session, invisible to each other</text>
+  <text x="380" y="479" text-anchor="middle" font-size="12" font-weight="700" fill="#3a4556">AgentCore Runtime · isolated microVMs; fresh SDK session per invocation</text>
   <rect x="70" y="494" width="128" height="50" rx="7" fill="#eef3fb" stroke="#b9c9e6" stroke-width="1.1"/>
   <text x="134" y="515" text-anchor="middle" font-size="11" font-weight="600" fill="#1f2733">Session A1</text>
-  <text x="134" y="531" text-anchor="middle" font-size="9" fill="#7a8493">Claude Code Agent</text>
+  <text x="134" y="531" text-anchor="middle" font-size="9" fill="#7a8493">OpenAI / Claude SDK</text>
   <rect x="206" y="494" width="128" height="50" rx="7" fill="#eef3fb" stroke="#b9c9e6" stroke-width="1.1"/>
   <text x="270" y="515" text-anchor="middle" font-size="11" font-weight="600" fill="#1f2733">Session A2</text>
-  <text x="270" y="531" text-anchor="middle" font-size="9" fill="#7a8493">Claude Code Agent</text>
+  <text x="270" y="531" text-anchor="middle" font-size="9" fill="#7a8493">OpenAI / Claude SDK</text>
   <rect x="426" y="494" width="128" height="50" rx="7" fill="#eef3fb" stroke="#b9c9e6" stroke-width="1.1"/>
   <text x="490" y="515" text-anchor="middle" font-size="11" font-weight="600" fill="#1f2733">Session B1</text>
-  <text x="490" y="531" text-anchor="middle" font-size="9" fill="#7a8493">Claude Code Agent</text>
+  <text x="490" y="531" text-anchor="middle" font-size="9" fill="#7a8493">OpenAI / Claude SDK</text>
   <rect x="562" y="494" width="128" height="50" rx="7" fill="#eef3fb" stroke="#b9c9e6" stroke-width="1.1"/>
   <text x="626" y="515" text-anchor="middle" font-size="11" font-weight="600" fill="#1f2733">Session B2</text>
-  <text x="626" y="531" text-anchor="middle" font-size="9" fill="#7a8493">Claude Code Agent</text>
+  <text x="626" y="531" text-anchor="middle" font-size="9" fill="#7a8493">OpenAI / Claude SDK</text>
   <line x1="380" y1="494" x2="380" y2="544" stroke="#e4e8ee" stroke-width="1" stroke-dasharray="3,3"/>
 
   <!-- ===== data flow, all top-down except the short read-only return ===== -->
@@ -94,6 +94,6 @@
   <line x1="632" y1="456" x2="632" y2="408" stroke="#3b7d4f" stroke-width="1.3" marker-end="url(#arrowgreen)"/>
   <text x="380" y="436" text-anchor="middle" font-size="9.5" fill="#2f7a47" font-weight="600">3. read-only access</text>
 
-  <text x="380" y="596" text-anchor="middle" font-size="10" fill="#9aa3b0">3. sessions reach the bridge over HTTP, read-only: locate code / read files &amp; config tables / glossary lookup · microVM mounts no filesystem</text>
+  <text x="380" y="596" text-anchor="middle" font-size="10" fill="#9aa3b0">3. read-only HTTP: locate code / read files &amp; tables / glossary · microVMs have no repository mounts</text>
   <text x="380" y="612" text-anchor="middle" font-size="10" fill="#9aa3b0">projects are isolated by process, port, and access scope</text>
 </svg>

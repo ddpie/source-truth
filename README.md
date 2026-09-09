@@ -1,309 +1,300 @@
-# sample-code-qa-on-agentcore
+# source-truth
 
-![License: MIT-0](https://img.shields.io/badge/License-MIT--0-blue.svg)
-![AWS Bedrock AgentCore](https://img.shields.io/badge/AWS-Bedrock%20AgentCore-orange.svg)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![AWS: Bedrock AgentCore](https://img.shields.io/badge/AWS-Bedrock_AgentCore-FF9900)](https://aws.amazon.com/bedrock/agentcore/)
+[![OpenAI Agents SDK](https://img.shields.io/badge/OpenAI-Agents_SDK-412991)](docs/dual-sdk_zh.md)
+[![Claude Agent SDK](https://img.shields.io/badge/Claude-Agent_SDK-D97757)](docs/dual-sdk_zh.md)
 
-> This is a sample project demonstrating how to build a production-grade code Q&A agent on [AWS Bedrock AgentCore](https://aws.amazon.com/bedrock/agentcore/). It shows how to connect a chat platform (Feishu/Lark) to an AI agent that answers questions about your codebase using real source code as the single source of truth.
+**中文** | [English](#english)
 
-For Chinese documentation, see [README_zh.md](README_zh.md).
+## 中文
 
----
+**在飞书 / Lark 中，以真实代码为依据进行只读问答，运行于 Amazon Bedrock AgentCore。**
 
-## Overview
+直接提问游戏规则、计算公式或配置如何生效。source-truth 会检索代码仓库、读取实现，再通过流式卡片回答，
+附上可复核的文件与行号，供研发、策划、QA 等需要从代码获取答案的人使用。
 
-Engineers and non-technical stakeholders often need answers that live deep in the codebase — "how is this value computed?", "what's the relationship between config X and behavior Y?" — but reading code directly isn't always feasible, and engineers get interrupted repeatedly.
+[快速开始](#快速开始) · [架构](#架构) · [文档导航](#文档导航) · [参与贡献](CONTRIBUTING.md)
 
-This sample deploys an AI agent that:
+### 能做什么
 
-- Reads your project's **real code on the latest main branch**
-- Answers questions in plain business language
-- Attaches verifiable `file:line` sources to every conclusion
-- Runs inside session-isolated microVMs on AgentCore for security and multi-tenancy
+- **基于代码回答**：通过常驻 CodeGraph 索引和只读文件、配置表工具取证，答案附来源，便于核对。
+- **连续追问**：CardKit 展示实时进度和流式答案，卡片宽度随聊天窗口调整，提供折叠依据区与推荐问题。
+- **部署时选择 SDK**：新项目默认 OpenAI Agents SDK，也支持 Claude Agent SDK；都通过 Amazon Bedrock 调用模型，问答与可选术语表共用项目选择。
+- **支持多仓、多项目**：每个项目拥有自己的机器人、Runtime 配置和索引服务进程；可选术语表把中文业务词映射到代码符号。
 
-![Screen recording of a Q&A session: a user @-mentions the bot asking a code question; the card shows live analysis progress with a timer, streams the conclusion first, lists code sources in a collapsed verification panel at the bottom, and offers a follow-up button](docs/assets/demo-qa.gif)
+![飞书问答录屏：流式答案、代码出处与推荐追问](docs/assets/demo-qa.gif)
 
-> The recording is at 3× speed; the timer shown in the card is real elapsed time (first question ~45s, follow-up ~1m4s).
+录屏以 3 倍速播放，卡片计时为实际耗时；用于展示交互，不代表延迟保证。
 
-## Architecture
+### 快速开始
 
-A question flows through three resident components:
+需要准备：
 
-1. **bot-gateway** — subscribes to chat platform events over a persistent connection
-2. **Session-isolated microVM** — one per conversation on AgentCore Runtime
-3. **index-service** — holds a read-only clone of your code with a CodeGraph index for fast symbol lookup
+- 具备部署权限的 AWS 账户、支持 AgentCore Runtime 的区域，以及所选 Bedrock 模型的访问权限。
+- 已启用机器人能力和长连接事件的飞书 / Lark 应用，参见[应用配置](docs/runbook_zh.md#三接入飞书)。
+- Linux 或 macOS 操作机，安装 **AWS CLI v2、Python 3 + 较新 boto3、Git、GNU tar，以及可构建 `linux/arm64` 镜像的 Docker**。
+- 你有权索引的目标代码仓；私有目标仓需要单独配置只读访问凭证。
 
-![Architecture diagram across three tiers: Chat platform → EC2 host (bot-gateway + index-service) → AgentCore session microVMs](docs/assets/architecture.en.svg)
-
-> **Session microVMs mount no filesystem**: source code is read through index-service's HTTP interface (read-only tools only). The code copy lives only on index-service's local disk — one per project, never inside a microVM.
-
-### End-to-end sequence
-
-![End-to-end sequence of one Q&A: Chat client, bot-gateway, AgentCore microVM, index-service, CardKit across five swimlanes](docs/assets/sequence-qa.en.svg)
-
-> Step-by-step details: [`docs/agent/architecture.md`](docs/agent/architecture.md) (Chinese only)
-
-### Key design properties
-
-> **On the name `source-truth`**: that is this project's internal name. You will see it in every resource it creates — IAM roles, secrets, systemd units, EC2 tags, log groups and the private DNS zone are all `source-truth-*` or `source-truth/*`. It is not a separate component.
-
-- **Trustworthy and verifiable** — real code is the only source of truth; every conclusion carries a `file:line` citation; when evidence is insufficient the agent defers rather than guessing.
-- **Fast on large codebases** — a resident CodeGraph index locates symbols in **1–5 ms** on a
-  16 GB / 75k-file repository (~1.75k indexed code files; the rest are art assets and `.meta`
-  files). Full Q&A round-trips are **2.7–5.1× faster** than without the index
-  ([benchmark data](docs/agent/perf-comparison.md)).
-- **Cross-language term mapping** — an offline glossary maps business terms (in any language) to the actual symbols in code, so questions phrased in natural language still hit the right code paths ([glossary details](docs/glossary.md)).
-- **Interactive streaming cards** — answers stream in real-time with progress indicators, collapsible source citations, and follow-up buttons for contextual conversation.
-
-## Scope
-
-The system does exactly one thing: **read-only Q&A over the main branch**. It looks things up and
-answers; it changes nothing. Explicitly out of scope:
-
-- Running the game engine or simulating numbers
-- Writing code back, committing, or modifying any file
-- Reading design documents, working across branches or worktrees, or sharing memory between sessions
-- A second reasoning engine, or a complete audit trail
-
-Planned capabilities are tracked in [`docs/agent/architecture.md`](docs/agent/architecture.md) and the design docs (both Chinese only).
-
-## Components
-
-| Directory | Responsibility | Language |
-|-----------|----------------|----------|
-| [`agent-container/`](agent-container/) | Claude Code Agent inside the session microVM: reasoning + orchestration + code reading | Python |
-| [`bot-gateway/`](bot-gateway/) | Chat platform event gateway + CardKit streaming-card rendering | TypeScript |
-| [`index-service/`](index-service/) | Resident CodeGraph index service + MCP-over-HTTP interface (locate + read files) | Python |
-| [`infra/`](infra/) | IaC: AgentCore Runtime / index service / gateway | boto3 + CDK |
-| [`config/`](config/) | Central config: i18n copy, alarm thresholds | JSON |
-| [`scripts/`](scripts/) | Deploy / ops / test lifecycle | Bash |
-
-Full directory tree: [`docs/structure_en.md`](docs/structure_en.md)
-
-## AWS services used
-
-Everything lands in a single account and a single region (Tokyo `ap-northeast-1` by default). The
-core is one shared ARM EC2 instance holding the resident index, one Bedrock AgentCore Runtime per
-project (session-isolated microVMs), Bedrock model inference, plus S3 and ECR. Specs, counts, and
-purpose for all 23 services and resources: [`docs/aws-services_en.md`](docs/aws-services_en.md).
-
-## Prerequisites
-
-On the machine you deploy **from**. The deploy does not enforce all of these, so each bullet is
-tagged with what actually happens when it is missing:
-
-- **hard-fail** — `deploy-all.sh` Phase 0 aborts before creating anything billable
-- **warn** — an actionable warning is printed and the deploy continues
-- **not checked** — nothing verifies it; you find out when the step that needs it fails
-
-Prerequisites:
-
-- **AWS account** with permissions for EC2, Bedrock, ECR, S3, Secrets Manager, IAM — *not
-  checked* per service. The installer only proves the credentials resolve
-  (`sts get-caller-identity`); a missing permission surfaces as an API denial mid-deploy.
-- **Bedrock AgentCore** access (Runtime API enabled in your region) — *warn*. Probed with
-  `bedrock-agentcore-control list-agent-runtimes`; a failure does not stop the deploy.
-- **Bedrock model access** for the selected model — *warn*. Probed with a 1-token
-  `invoke-model`; on denial the deploy still reaches READY and the first real question fails.
-- **AWS CLI v2** — v1 is not supported, but *not checked on the deploy box*: only the presence
-  of an `aws` binary is hard-failed there. The `aws-cli/2.` version assertion runs later, on the
-  index host, inside `index-service/bootstrap.sh`.
-- **Python 3** — *hard-fail* — with a recent **boto3** that has `bedrock-agentcore-control`
-  (*hard-fail*, probed explicitly in Phase 0 because Phase 5 configures the Runtime through
-  boto3, not the CLI). Upgrade with `python3 -m pip install -U boto3`; on a PEP-668 system
-  (recent macOS/Ubuntu) use a virtualenv or add `--break-system-packages`, or the upgrade
-  silently does nothing.
-- **Docker** with a running daemon, able to build **linux/arm64** — *hard-fail* on all three
-  (binary, `docker info` liveness, and an arm64 platform in `docker buildx inspect`). The agent
-  container is ARM64-only. On an x86 host, enable emulation first:
-  `docker run --privileged --rm tonistiigi/binfmt --install arm64`
-- **GNU tar** — *hard-fail* — stock macOS ships BSD tar, which cannot produce reproducible
-  archives. Without it the index host reads the artifacts as changed on every deploy and
-  re-bootstraps in place, interrupting every bot on it. `brew install gnu-tar` provides `gtar`,
-  which is picked up automatically.
-- **On-Demand Standard vCPU quota ≥ 4** (quota `L-1216C47A`) — *hard-fail* — a fresh account is
-  often capped below this. The `t4g.large` index host itself needs 2 vCPU; the check wants 4
-  because build and transient instances draw on the same quota, so a quota of exactly 2 still
-  fails `run-instances`. `--force` bypasses the check;
-  EIP and VPC headroom are *warn* only. Skipped entirely under `--local`.
-- **Session Manager plugin** — ⚠️ ***not checked*, and nothing else checks it either.** It is
-  required for every verification and day-2 operation (the index host sits in a private subnet
-  with no SSH), it does not ship with the AWS CLI, and its absence only shows up as a failed
-  `aws ssm start-session` after the stack is already up. Install it up front:
-  [install guide](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html).
-- **git** — *hard-fail* (also by `get.sh` itself). **`gh`** authenticated via `gh auth login` —
-  *warn*, convenient for fetching `codegraph-server` from its upstream release without
-  hitting anonymous rate limits; a plain `curl` works too.
-- **An EC2 key pair** plus its local `.pem` — *not checked* — only for `--local`, whose host you
-  SSH into.
-- **`rsync`** — *not checked on the deploy box*, and needed there only if you push a local
-  repository snapshot with `scripts/push-local-repo.sh`. It is, however, a **hard requirement on
-  the index host** for every per-project deploy and gateway activation: artifacts are published
-  into live trees with `rsync -a --delay-updates --delete-after` (per-file rename, so running
-  processes keep their open inodes), and both `index-service/bootstrap.sh` and
-  `scripts/lib/activate_gateway.sh` abort with `BOOTSTRAP_FAILED` rather than publish
-  non-atomically without it. You do not have to install it there — the host bootstrap
-  `apt-get install`s it.
-- **`zip`** — *warn*, optional: only the DAU pre-aggregation Lambda needs it. Without it the
-  deploy and the bot work fine and the monitoring DAU widget stays empty.
-
-Node.js and Python **build** toolchains are **not** needed locally: the gateway is compiled on
-the index host and the agent runs in a container. The `python3` + `boto3` above are the
-exception — the deploy scripts themselves run on them.
-
-Also required:
-
-- **Feishu / Lark bot credentials** — App ID, App Secret, Bot Open ID. The installer creates the
-  Secrets Manager entry for you; you supply the values interactively. See
-  [`docs/runbook_en.md`](docs/runbook_en.md) §3 for the console walkthrough.
-  Both tenants are supported: pass `--feishu-domain feishu` for Feishu (China, the default) or
-  `--feishu-domain lark` for international Lark. That one switch drives both the event
-  long-connection and the REST base URL — setting only one of them yields an app that
-  authenticates and then never receives events. Card copy language follows `--locale zh|en`,
-  which defaults to `en` under `--feishu-domain lark` and `zh` otherwise; override it explicitly
-  to mix (for example a Chinese-language bot on an international Lark tenant).
-- **codegraph-server** — the index engine binary. This sample does **not** redistribute it:
-  it is fetched from its own upstream (public, Apache-2.0,
-  <https://github.com/codegraph-ai/CodeGraph>) and verified against the checksum upstream
-  publishes, or you build it yourself with `cargo build --release -p codegraph-server`.
-  See [`index-service/README.md`](index-service/README.md) for both routes. The fetch happens in
-  the artifacts phase; override it with `CODEGRAPH_SERVER_BIN=/path/to/binary` if you are staging
-  the binary yourself, or `CODEGRAPH_SERVER_SHA256=<digest>` to pin your own build.
-
-## Cost
-
-This stack runs continuously, so it costs money while it is up. The floor is set by two
-always-on resources:
-
-| Resource | Rough cost |
-|----------|-----------|
-| NAT Gateway (one, always on) | ~$32/month + data processing |
-| Index host EC2 (`t4g.large` default) | ~$50/month on-demand |
-| Bedrock model invocations | per token, scales with question volume |
-| Glossary build (optional, one-off per repo) | can be **hundreds of dollars** on a large repo — see below |
-
-The glossary build runs a model over your source tree and is **uncapped by default**. On a
-14k-file repository it measured ~$372. Set `--glossary-max-files` to bound it, or leave the
-glossary off entirely. Full per-service inventory: [`docs/aws-services_en.md`](docs/aws-services_en.md).
-
-## Cleanup
-
-Tear everything down when you are finished — nothing expires on its own:
+依赖安装、ARM 模拟、配额和可选工具见[完整前置条件](docs/runbook_zh.md#一前置条件一次性)。
 
 ```bash
-./scripts/teardown.sh --region <r> --dry-run   # review the deletion plan first
-./scripts/teardown.sh --region <r>             # delete this region's resources
-./scripts/teardown.sh --region <r> --include-shared   # also the account-wide IAM roles + this region's S3 bucket
+git clone https://github.com/ddpie/source-truth.git
+cd source-truth
+./scripts/install.sh
 ```
 
-A default run keeps a few account-level resources on purpose (Secrets Manager entries, CloudWatch
-log groups, the artifact bucket); teardown prints exactly what it retained so you can remove the
-rest by hand.
+安装器默认进入**添加项目**，底座不存在时自动创建。按提示填写区域、代码仓、SDK/模型和机器人凭证，
+完成部署后会用真实代码问题验证。建议区域为东京 `ap-northeast-1`。
+租户须与应用匹配：中国版飞书用 `--feishu-domain feishu`（默认），国际版 Lark 用 `--feishu-domain lark`。
 
-## Deployment
+新项目默认 **OpenAI Agents SDK**，通过 Bedrock `ConverseStream` 和 AWS 角色凭证调用，
+不需要 OpenAI API key。新环境的术语表与监控**按需开启**；已有项目保留原选择。
+配置和迁移步骤见[双 SDK 说明](docs/dual-sdk_zh.md)。
 
-For the full deployment walkthrough (prerequisites, configuration, connecting your chat platform, operations, and troubleshooting), see [`docs/runbook_en.md`](docs/runbook_en.md).
+部署完成后，在群里 @机器人提问。检查代码出处和末尾的 2–3 个推荐问题按钮，再回复卡片继续追问。
+[验收手册](docs/runbook_zh.md#五验证端到端冒烟)包含服务健康及完整飞书链路检查。
+
+配置好 `.local/projects.json` 后，也可先只查看部署计划：
+
+```bash
+./scripts/deploy-all.sh --region ap-northeast-1 --dry-run
+```
+
+### 架构
+
+![架构：飞书/Lark 连接同一 EC2 上的网关和索引服务，AgentCore 运行 Agent 并通过 HTTP 读取代码](docs/assets/architecture.svg)
+
+1. **bot-gateway** 接收消息，调用项目对应的 AgentCore Runtime。
+2. **agent-container** 运行所选 SDK，通过只读 HTTP 工具检索索引、读取源码。
+3. **index-service** 保存仓库副本和索引；网关把最终答案流式写回 CardKit。
+
+网关和索引进程共用**一台 EC2**，AgentCore 计算由 AWS 托管。发起安装的机器可以是你的电脑或 CI runner；
+另一种 [`--local` 部署方式](docs/runbook_zh.md#手动部署在单台-ec2-上就地安装--local)直接在目标 EC2 上运行安装器。
+
+每次调用创建新的 SDK 会话，只回放当前追问链；空闲 microVM 可以被串行复用。
+microVM 挂载隔离的临时存储，**不挂载仓库文件系统**，源码始终经 index-service 读取。
+Git 仓默认每 300 秒刷新一次；本地快照通过 [`push-local-repo.sh`](docs/runbook_zh.md#本地仓上传)手动更新。
+
+| 组件 | 职责 |
+| --- | --- |
+| [agent-container/](agent-container/) | Python Agent、SDK 选择、Bedrock 适配与只读工具编排 |
+| [bot-gateway/](bot-gateway/) | TypeScript / Node.js 24 网关、会话路由与流式卡片 |
+| [index-service/](index-service/) | CodeGraph、仓库刷新、文件/配置表工具及可选术语表 |
+| [scripts/](scripts/) | Bash / AWS CLI / boto3 部署、运维与测试 |
+| [infra/](infra/) · [config/](config/) | 监控模板、项目配置示例与卡片多语言文案 |
+
+当前部署使用脚本和 boto3，CDK stack 尚属规划。详见[架构说明](docs/agent/architecture.md)和[目录结构](docs/structure_zh.md)。
+
+### 范围与限制
+
+当前 MVP 提供**配置的主分支代码或上传快照上的只读问答**，不修改或提交代码、不跑游戏引擎、
+不做玩法数值模拟，也不检索外部设计文档。多分支分析、共享记忆和 Codex SDK 集成尚不在范围内。
+
+模型可能回答错误，仅靠提示词也无法消除提示注入。重要结论应核对引用源码。
+系统分别通过只读工具白名单、服务端仓库与路径检查、AWS 权限和输出脱敏限制风险，
+详见[安全不变量](docs/agent/invariants.md)。
+
+新提交须等仓库刷新和索引完成后才会反映到问答。会话路由和追问历史保存在网关内存中，
+网关重启可能中断旧卡片的上下文延续。
+
+### 成本与清理
+
+部署会创建付费资源：**EC2/EBS、NAT Gateway、ECR 接口端点、公网 IPv4、模型推理及存储/日志**。
+常驻基础设施在无人提问时仍计费。费用取决于区域、模型、流量和启用的功能，
+请结合 [AWS 服务清单](docs/aws-services_zh.md)和 [AWS Pricing Calculator](https://calculator.aws/)估算。
+
+可选术语表会产生额外模型调用，部署默认每仓最多处理 **400 个源码文件**；
+`--glossary-max-files 0` 才明确表示不限文件数量。文件数上限不是金额预算。
+构建细节与历史测量见[术语表指南](docs/glossary.md)。
+
+使用结束后，先查看删除计划，再清理部署：
+
+```bash
+./scripts/teardown.sh --region ap-northeast-1 --dry-run
+./scripts/teardown.sh --region ap-northeast-1
+```
+
+检查脚本最后的保留资源清单：密钥、日志和共享资源可能仍存在。
+共享资源删除与多区域检查见[运维手册](docs/runbook_zh.md#六日常运维day-2)。
+
+### 文档导航
+
+| 主题 | 中文 | English |
+| --- | --- | --- |
+| 部署、飞书/Lark 配置、验证与排错 | [部署手册](docs/runbook_zh.md) | [Runbook](docs/runbook_en.md) |
+| OpenAI / Claude 选择与迁移 | [双 SDK 配置](docs/dual-sdk_zh.md) | [SDK configuration](docs/dual-sdk_en.md) |
+| AWS 资源与计费项 | [服务清单](docs/aws-services_zh.md) | [Service inventory](docs/aws-services_en.md) |
+| 仓库目录布局 | [目录结构](docs/structure_zh.md) | [Structure](docs/structure_en.md) |
+
+[完整文档地图](docs/README.md)还包含架构、术语表、安全及调研记录。
+历史[索引性能测量](docs/agent/perf-comparison.md)使用 Claude，不能据此推断 OpenAI 的性能。
+
+### 开发与贡献
+
+按 [CONTRIBUTING.md](CONTRIBUTING.md) 安装开发依赖后运行：
+
+```bash
+./scripts/test.sh
+```
+
+默认离线运行。留意 `SKIPPED:` 汇总，缺依赖而跳过检查不代表验证通过。
+`--full` 还会对已有 AWS 部署发起真实调用，可能产生模型费用。
+
+问题、使用疑问和功能建议请提交到 [GitHub Issues](https://github.com/ddpie/source-truth/issues)，欢迎中英文贡献。
+另见[行为准则](CODE_OF_CONDUCT.md)、[安全问题报告](SECURITY.md)和[贡献者](https://github.com/ddpie/source-truth/graphs/contributors)。
+
+### 许可证
+
+[MIT](LICENSE)。第三方许可信息见 [THIRD-PARTY-LICENSES](THIRD-PARTY-LICENSES)。
+
+## English
+
+**Read-only code Q&A in Feishu / Lark, powered by Amazon Bedrock AgentCore.**
+
+Ask how a game rule, calculation, or configuration works. source-truth searches your repositories,
+reads the implementation, and returns an answer with file and line references in a streaming chat card.
+It is designed for developers, designers, QA, and other people who need answers from code.
+
+[中文](#中文) | **English**
+
+[Quick start](#quick-start) · [Architecture](#architecture) · [Documentation](#documentation) · [Contributing](CONTRIBUTING.md)
+
+### What it does
+
+- **Grounds answers in code:** uses a resident CodeGraph index and read-only source/configuration tools; answers include references for checking the evidence.
+- **Supports contextual follow-ups:** streams progress and answers into CardKit, adapts card width to the chat window, and offers collapsible evidence and suggested questions.
+- **Lets you choose the agent SDK:** OpenAI Agents SDK is the default for new projects; Claude Agent SDK is also supported. Both use Amazon Bedrock, and the choice applies to Q&A and optional glossary generation.
+- **Connects multiple repositories and projects:** each project has its own bot, Runtime configuration, and index-service process. An optional glossary maps Chinese business terms to code symbols.
+
+![A Feishu Q&A session with a streaming answer, source references, and follow-up questions](docs/assets/demo-qa.gif)
+
+The recording is played at 3× speed; the card timer shows the actual elapsed time. It illustrates the interaction, not a latency guarantee.
 
 ### Quick start
 
-On a machine with AWS credentials configured:
+You need:
+
+- An AWS account with deployment permissions, an AgentCore Runtime supported region, and access to your selected Bedrock model.
+- A Feishu or Lark app with bot capability and long-connection events configured. Follow the [app setup guide](docs/runbook_en.md#3-connecting-feishu--lark).
+- A Linux or macOS deployment machine with **AWS CLI v2, Python 3 + recent boto3, Git, GNU tar, and Docker capable of building `linux/arm64` images**.
+- A repository you are authorized to index. Private target repositories need their own read credentials.
+
+See the [detailed prerequisites](docs/runbook_en.md#1-prerequisites-one-time) for installation, ARM emulation, quotas, and optional tools.
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/aws-samples/sample-code-qa-on-agentcore/main/scripts/get.sh)
+git clone https://github.com/ddpie/source-truth.git
+cd source-truth
+./scripts/install.sh
 ```
 
-If your fork of this repository is private, a bare `curl` cannot reach it. Run `gh auth login` once,
-then fetch the bootstrap script through the authenticated API instead:
+The installer defaults to **add project** and creates the shared environment if needed. It asks for the
+region, target repositories, SDK/model, and bot credentials, then deploys and verifies a real code question.
+Tokyo (`ap-northeast-1`) is the suggested region. Choose the tenant that matches your app:
+`--feishu-domain feishu` for Feishu (default), or `--feishu-domain lark` for international Lark.
+
+New projects default to **OpenAI Agents SDK**. The OpenAI path uses Bedrock `ConverseStream` with AWS role
+credentials; no OpenAI API key is needed. Glossary generation and monitoring are **opt-in** for new
+environments. Existing projects retain their choices. See [SDK configuration and migration](docs/dual-sdk_en.md).
+
+When deployment completes, @-mention the bot with a code question. Check the source references and
+2–3 suggested follow-up buttons, then reply to the card to continue. The [verification guide](docs/runbook_en.md#5-verification-end-to-end-smoke-test)
+covers service health and the full chat flow.
+
+For a preview without creating resources, after configuring `.local/projects.json`:
 
 ```bash
-bash <(gh api repos/aws-samples/sample-code-qa-on-agentcore/contents/scripts/get.sh --jq '.content' | base64 -d)
+./scripts/deploy-all.sh --region ap-northeast-1 --dry-run
 ```
 
-Either way the script clones into `./source-truth/` (override with `SOURCE_TRUTH_DIR`), using `gh`
-credentials automatically for a private repository, then launches an interactive installer that
-prompts for region, target repositories, model selection, and chat platform credentials.
+### Architecture
 
-With the repo already cloned:
+![Architecture: Feishu/Lark connects to gateway and index services on one EC2 host; AgentCore runs the agent and reads code through HTTP](docs/assets/architecture.en.svg)
+
+1. **bot-gateway** receives chat events and invokes the project's AgentCore Runtime.
+2. **agent-container** runs the chosen SDK, searches the index, and reads source through read-only HTTP tools.
+3. **index-service** holds the repository copies and indexes. The gateway streams the resulting answer back to CardKit.
+
+Gateway and index processes share **one EC2 host**; AgentCore compute is AWS-managed. The machine running
+the installer can be your laptop or CI runner. The alternative [`--local` deployment](docs/runbook_en.md#manual-deploy-install-in-place-on-a-single-ec2---local)
+runs the installer on the EC2 host itself.
+
+Each invocation starts a fresh SDK session and replays only its follow-up chain. Idle microVMs may be
+reused serially. They mount isolated temporary storage, **not repository filesystems**: repository reads
+always go through index-service. Git repositories refresh on a timer (300 seconds by default); local
+snapshots are refreshed with [`push-local-repo.sh`](docs/runbook_en.md#local-repository-upload).
+
+| Component | Purpose |
+| --- | --- |
+| [agent-container/](agent-container/) | Python agent, SDK selection, Bedrock adapter, and read-only tool orchestration |
+| [bot-gateway/](bot-gateway/) | TypeScript / Node.js 24 gateway, conversation routing, and streaming cards |
+| [index-service/](index-service/) | CodeGraph, repository refresh, file/configuration tools, and optional glossary |
+| [scripts/](scripts/) | Bash / AWS CLI / boto3 deployment, operations, and tests |
+| [infra/](infra/) · [config/](config/) | Monitoring templates, project configuration example, and localized card text |
+
+Deployment currently uses scripts and boto3. CDK stacks are planned. See the [architecture details](docs/agent/architecture.md) (Chinese) and [directory map](docs/structure_en.md).
+
+### Scope and limitations
+
+The current MVP provides **read-only Q&A over configured main-branch code or uploaded snapshots**.
+It does not edit or commit code, run a game engine, simulate gameplay, or search external design documents.
+Multi-branch analysis, shared memory, and Codex SDK integration are outside the current scope.
+
+Model answers can be wrong, and prompt injection cannot be eliminated by instructions alone. Check the
+cited code for important decisions. Read-only tool allowlists, server-side repository/path checks,
+AWS permissions, and output redaction provide separate controls; see [security invariants](docs/agent/invariants.md) (Chinese).
+
+Fresh commits appear after repository refresh and indexing complete. Conversation routing and follow-up
+history are held in gateway memory, so a gateway restart can interrupt continuation of earlier cards.
+
+### Costs and cleanup
+
+A deployment creates billable AWS resources: **EC2/EBS, NAT Gateway, ECR interface endpoints, public IPv4,
+model inference, and storage/logging**. The resident infrastructure incurs costs while running, including
+when nobody is asking questions. Rates depend on region, model, traffic, and enabled features; use the
+[AWS service inventory](docs/aws-services_en.md) and [AWS Pricing Calculator](https://calculator.aws/) to estimate your deployment.
+
+Optional glossary generation makes additional model calls. Its deployment default is **400 source files
+per repository**; `--glossary-max-files 0` explicitly removes that file cap. File count is not a dollar budget.
+Details and historical measurements are in the [glossary guide](docs/glossary.md) (Chinese).
+
+When finished, review the deletion plan and remove the deployment:
 
 ```bash
-./scripts/install.sh    # Interactive: region / repos / model / credentials → brings up backend + gateway
-./scripts/test.sh       # Offline suite: lint + unit + typecheck (no Docker / AWS needed)
+./scripts/teardown.sh --region ap-northeast-1 --dry-run
+./scripts/teardown.sh --region ap-northeast-1
 ```
 
-### Deployment topologies
+Read the retained-resource summary: secrets, logs, and shared resources can remain. The
+[cleanup guide](docs/runbook_en.md#6-day-2-operations) explains shared-resource removal and multi-region checks.
 
-- **Default (two machines)**: run the script on a deploy box; it creates and configures the index-host EC2 instance.
-- **Single EC2 (`--local`)**: one machine serves as both deployer and the resident index + gateway
-  host. Run `./scripts/launch-host.sh` locally — it creates the network and IAM, launches an ARM64
-  EC2 instance in the public subnet with the instance role attached, uploads the bootstrap script,
-  and prints an `ssh` command. Log in as instructed and run the printed script: it installs
-  dependencies, authenticates to GitHub, clones the repo, and drops you into `./scripts/install.sh --local`.
+### Documentation
 
-The AgentCore Runtime is always AWS-managed regardless of topology.
+| Start here for… | English | 中文 |
+| --- | --- | --- |
+| Deployment, Feishu/Lark setup, verification, and troubleshooting | [Runbook](docs/runbook_en.md) | [部署手册](docs/runbook_zh.md) |
+| OpenAI / Claude selection and migration | [SDK configuration](docs/dual-sdk_en.md) | [双 SDK 配置](docs/dual-sdk_zh.md) |
+| AWS resources and billing dimensions | [Service inventory](docs/aws-services_en.md) | [服务清单](docs/aws-services_zh.md) |
+| Repository layout | [Structure](docs/structure_en.md) | [目录结构](docs/structure_zh.md) |
 
-## How code enters the system and stays fresh
+The [full documentation map](docs/README.md) also links architecture, glossary, security, and research notes.
+Historical [index benchmarks](docs/agent/perf-comparison.md) used Claude; they do not establish OpenAI performance.
 
-Each target repository is cloned onto the index-service host, where a file watcher rebuilds the
-index incrementally. Two kinds of source:
+### Development and contributing
 
-- **git repositories** (default): a systemd timer runs `git pull` on an interval
-  (`refreshIntervalSec`, 300s by default), so a change on the main branch shows up in answers within
-  minutes — no redeploy, no manual step.
-- **Local repositories** (nothing to pull from): push snapshots with `scripts/push-local-repo.sh`
-  over rsync. Refresh is manual — change the code, run the push command again.
-
-A single project can span multiple repositories, and one index-service host can serve several
-projects as separate processes on separate ports. The refresh mechanics, and measurements of why the
-index is worth building at all, are in
-[`docs/agent/architecture.md`](docs/agent/architecture.md); local-repo pushes and single-EC2
-(`--local`) deployment are covered in [`docs/runbook_en.md`](docs/runbook_en.md).
-
-## Configuration
-
-- **Credentials**: chat platform credentials go through AWS Secrets Manager — never written to disk or committed to the repository.
-- **Ports and models**: declared per project in `.local/projects.json`; the model can be overridden per project at deploy time.
-
-## Testing
+Follow [CONTRIBUTING.md](CONTRIBUTING.md) to install development dependencies, then run:
 
 ```bash
-./scripts/test.sh       # Lint + Python unit tests (offline, no AWS needed).
-                        # TypeScript typecheck / eslint / jest need `cd bot-gateway && npm ci`
-                        # first — without it they are SKIPPED and the script says which, so a
-                        # clean clone reports green having asserted almost nothing.
+./scripts/test.sh
 ```
 
-For integration testing against a live deployment, see the testing section in [`docs/runbook_en.md`](docs/runbook_en.md).
+The default suite is offline. Read any `SKIPPED:` summary; missing dependencies are not a successful
+verification. `--full` additionally exercises an existing AWS deployment and can incur model charges.
 
-## Security
+Use [GitHub Issues](https://github.com/ddpie/source-truth/issues) for bugs, questions, and feature proposals.
+Contributions in English or Chinese are welcome. See the [Code of Conduct](CODE_OF_CONDUCT.md),
+[security reporting instructions](SECURITY.md), and [contributors](https://github.com/ddpie/source-truth/graphs/contributors).
 
-Three code-enforced security boundaries (not merely prompt constraints):
+### License
 
-| Defense | Mechanism |
-|---------|-----------|
-| **Anti-privilege-escalation** | The agent has no write tools registered — the server exposes only a read-only tool set |
-| **Anti-leak** | All fields sent to chat are de-identified; secrets and internal topology never leave the backend; credentials use Secrets Manager |
-| **Anti-injection** | Code and comments read via tools are treated as data to analyze; only the system prompt baked into the container image is trusted |
-
-![Security design: three code-enforced defense layers shown side by side](docs/assets/security-defense.en.svg)
-
-Per-item enforcement details, source of truth, automated checks, and violation consequences: [`docs/agent/invariants.md`](docs/agent/invariants.md)
-
-**Known limitations**: the model can hallucinate or be influenced by adversarial content in questions (mitigated by the three defenses above); index refresh is minute-level, so a just-pushed commit takes one cycle to appear.
-
-## Documentation
-
-| Topic | Link | Language |
-|-------|------|----------|
-| Deploy / connect chat platform / ops / troubleshooting | [`docs/runbook_en.md`](docs/runbook_en.md) | English |
-| How a question flows through the system | [`docs/agent/architecture.md`](docs/agent/architecture.md) | 中文 |
-| Security invariants and their enforcement | [`docs/agent/invariants.md`](docs/agent/invariants.md) | 中文 |
-| Benchmark data behind the speed claims | [`docs/agent/perf-comparison.md`](docs/agent/perf-comparison.md) | 中文 |
-| How the glossary is built | [`docs/glossary.md`](docs/glossary.md) | 中文 |
-| AWS services, specs, and counts | [`docs/aws-services_en.md`](docs/aws-services_en.md) | English |
-| Full directory tree | [`docs/structure_en.md`](docs/structure_en.md) | English |
-| AI collaboration conventions | [`AGENTS.md`](AGENTS.md) | 中文 |
-| Requirements and architecture design | [`docs/design/`](docs/design/README.md) | 中文 |
-| Full docs map | [`docs/README.md`](docs/README.md) | 中文 |
-
-## License
-
-This library is licensed under the MIT-0 License. See the [LICENSE](LICENSE) file.
+[MIT](LICENSE). Third-party licensing information is in [THIRD-PARTY-LICENSES](THIRD-PARTY-LICENSES).

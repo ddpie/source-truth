@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # get.sh — one-line bootstrap for source-truth.
 #
-#   bash <(curl -fsSL https://raw.githubusercontent.com/aws-samples/sample-code-qa-on-agentcore/main/scripts/get.sh)
+#   bash <(curl -fsSL https://raw.githubusercontent.com/ddpie/source-truth/main/scripts/get.sh)
 #
 # It clones this repo into ./source-truth (in the current directory) and hands off to the
 # interactive installer (scripts/install.sh). The codegraph-server binary is NOT fetched here —
@@ -12,7 +12,7 @@
 # ref), not re-cloned. Overrides:
 #
 #   SOURCE_TRUTH_DIR    clone target directory (default: ./source-truth)
-#   SOURCE_TRUTH_SLUG   owner/repo for `gh repo clone` (default: aws-samples/sample-code-qa-on-agentcore)
+#   SOURCE_TRUTH_SLUG   owner/repo for `gh repo clone` (default: ddpie/source-truth)
 #   SOURCE_TRUTH_REPO   full clone URL for plain `git clone` (default: derived from SOURCE_TRUTH_SLUG)
 #   SOURCE_TRUTH_REF    branch / tag / sha (default: main)
 #   SOURCE_TRUTH_ALLOW_STALE=1  downgrade a failed refresh from an error to a warning
@@ -27,7 +27,7 @@
 # win.
 set -euo pipefail
 
-SLUG="${SOURCE_TRUTH_SLUG:-aws-samples/sample-code-qa-on-agentcore}"      # owner/repo, for `gh repo clone`
+SLUG="${SOURCE_TRUTH_SLUG:-ddpie/source-truth}"      # owner/repo, for `gh repo clone`
 REPO="${SOURCE_TRUTH_REPO:-https://github.com/$SLUG.git}"
 REF="${SOURCE_TRUTH_REF:-main}"
 DIR="${SOURCE_TRUTH_DIR:-source-truth}"

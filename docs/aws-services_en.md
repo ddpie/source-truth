@@ -13,9 +13,9 @@ project count); the rest are globally shared.
 
 | Service | Specs | Count | Purpose |
 |---------|-------|-------|---------|
-| **EC2** (index-service host) | ARM Graviton `t4g.large` (2 vCPU / 8 GiB) default; up to `m7g.2xlarge` (8 vCPU / 32 GiB); termination protection on and IMDSv2 required (`HttpTokens=required`, re-asserted on every deploy) | 1 (shared by all projects) | Resident CodeGraph index + MCP-over-HTTP interface, per-project bot-gateway processes; holds the single local code copy; also runs the build-time glossary engine (a local `claude` CLI scans code offline to generate the term table, see `docs/agent/glossary.md`) |
+| **EC2** (index-service host) | ARM Graviton `t4g.large` (2 vCPU / 8 GiB) default; up to `m7g.2xlarge` (8 vCPU / 32 GiB); termination protection on and IMDSv2 required (`HttpTokens=required`, re-asserted on every deploy) | 1 (shared by all projects) | Resident CodeGraph index + MCP-over-HTTP interface, per-project bot-gateway processes; holds the single local code copy; also runs the build-time glossary engine (the project selects OpenAI Agents SDK or Claude CLI for Bedrock glossary builds, see `docs/agent/glossary.md`) |
 | **Bedrock AgentCore Runtime** | Firecracker microVM; VPC mode; idle reclaim 900s, hard cap 8h (both tunable 60–28800s) | **N** (`source_truth_agent_<projectId>`, one per project) | Session-isolated agent execution environment, one microVM per session |
-| **Bedrock** (model inference) | Default `global.anthropic.claude-opus-4-8` (overridable per project) | shared | (1) LLM inference for the in-microVM agent; (2) `InvokeModel` by the index-host build-time glossary engine (the index instance role carries a scoped `bedrock-invoke` policy). Both billed via `CLAUDE_CODE_USE_BEDROCK=1` |
+| **Bedrock** (model inference) | New projects: OpenAI + `global.openai.gpt-6-astra`; legacy projects retain Claude or their explicit selection | shared | Q&A and enabled glossary builds share the project SDK selection. OpenAI uses `ConverseStream`; Claude uses `CLAUDE_CODE_USE_BEDROCK=1`. Runtime/index roles grant access to the selected models |
 
 ## 2. Storage & images (code, artifacts, images)
 
@@ -45,10 +45,12 @@ project count); the rest are globally shared.
 | Service | Specs | Count | Purpose |
 |---------|-------|-------|---------|
 | **Secrets Manager** | Feishu credentials (per project) + git read-only token + log-hashing salt; `--local` adds one deploy-time GitHub token | **N + 2** (`feishu-<projectId>` ×N, `git-credentials`, `log-hash-salt`); **N + 3** under `--local` (plus `deploy-github-token`) | Feishu app credentials, read-only private-repo pull token, `hashUserId` salt. The `--local` `deploy-github-token` lets a freshly launched host `gh auth login` to clone a private repo, download releases, and upgrade later. Fetched at runtime, never written to disk |
-| **IAM** | 3 roles + 1 instance profile + 1 service-linked role | fixed | EC2 execution role `source-truth-index-role`, AgentCore Runtime role `SourceTruthAgentRuntimeRole`, DAU pre-aggregation Lambda role `source-truth-dau-lambda-role`, the instance profile, and AgentCore's VPC-ENI managed role. All three roles are account-level and shared across regions, so resource ARNs in their policies must wildcard the region segment — otherwise a second-region deploy overwrites the policy and silently revokes the first region's permissions. `check-invariants.sh` guards this **partially**: it greps only `scripts/lib/provision_iam.sh` and `scripts/lib/apply-dau-lambda.sh`, and only for `logs` / `bedrock` / `bedrock-agentcore` / `secretsmanager` / `s3` ARNs. `scripts/lib/create-iam.sh` — which writes inline policies onto the same account-level `source-truth-index-role` on the `--local` path — is **not scanned**, so a region-pinned ARN added there would pass CI |
+| **IAM** | 2 base roles + 1 instance profile + 1 service-linked role; monitoring adds the DAU role | depends on enabled features | EC2 execution role `source-truth-index-role`, AgentCore Runtime role `SourceTruthAgentRuntimeRole`, DAU pre-aggregation Lambda role `source-truth-dau-lambda-role`, the instance profile, and AgentCore's VPC-ENI managed role. All three roles are account-level and shared across regions, so resource ARNs in their policies must wildcard the region segment — otherwise a second-region deploy overwrites the policy and silently revokes the first region's permissions. `check-invariants.sh` scans tracked inline-policy writers in `scripts/*.sh` and `scripts/lib/*.sh`, including `create-iam.sh`. It checks region segments for `logs` / `bedrock` / `bedrock-agentcore` / `secretsmanager` / `s3` ARNs, not the full semantics of every IAM policy |
 | **Systems Manager (SSM)** | Session Manager (no SSH) | — | Manage the private-subnet EC2: activate projects, refresh gateways, clean up units |
 
 ## 5. Monitoring & alerting (health, metrics)
+
+New environments opt into extended monitoring with `--with-monitoring`. Metric, dashboard, SNS, DAU Lambda/schedule and the first four business-alarm counts below apply when enabled. Host log collection and the EC2 recovery alarm belong to base provisioning. Disabling monitoring deployment does not stop existing resources.
 
 | Service | Specs | Count | Purpose |
 |---------|-------|-------|---------|
@@ -63,5 +65,5 @@ project count); the rest are globally shared.
 ## Not used (to avoid confusion)
 
 Session mapping and event dedup are **in-process in-memory** in the gateway (MVP); no DynamoDB / Redis. Session
-containers **mount no filesystem** (no EFS); all source is read through the index-service HTTP interface — no shared
+containers **mount no repository filesystem** (no EFS); all source is read through the index-service HTTP interface — no shared
 mount, no copy-sync problem.

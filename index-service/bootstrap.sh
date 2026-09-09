@@ -75,7 +75,8 @@
 # Inputs via environment (deploy-all.sh writes /etc/index-service.env first):
 #   BUCKET, REGION, MAX_FILES
 #   optional: CW_AGENT_VERSION (pin the CloudWatch agent .deb; default "latest"),
-#             REFRESH_CLAUDE_CLI=1 (force-reinstall the claude CLI on a live host)
+#             REFRESH_CLAUDE_CLI=1 (force-reinstall the claude CLI on a live host),
+#             GLOSSARY_ENABLED=false (glossary off: skip the claude CLI install; Node still installed)
 set -euxo pipefail
 # Log to the file AND keep showing on the caller's stdout/stderr, via tee. The old `exec > file`
 # sent everything to the log ONLY — under --local (bootstrap runs synchronously in the operator's
@@ -314,7 +315,12 @@ ensure_node() {
 # node_modules, and a detached glossary-build-* unit may be executing `claude` right now — that
 # kills a multi-minute glossary build with MODULE_NOT_FOUND. Install only when absent; set
 # REFRESH_CLAUDE_CLI=1 in /etc/index-service.env to force an upgrade on a quiet host.
-if ensure_node && command -v npm >/dev/null 2>&1; then
+# GLOSSARY_ENABLED=false (deploy-all without --with-glossary): Node is still required by the
+# gateway, but the cc CLI has no consumer — skip it (nothing to download, nothing to keep current).
+if [ "${GLOSSARY_ENABLED:-true}" = "false" ]; then
+  ensure_node || echo "bootstrap: WARN node install failed here — the gateway block below retries"
+  echo "bootstrap: GLOSSARY_ENABLED=false — skipping claude (cc) CLI install (glossary off; answering unaffected)"
+elif ensure_node && command -v npm >/dev/null 2>&1; then
   if command -v claude >/dev/null 2>&1 && [ "${REFRESH_CLAUDE_CLI:-0}" != "1" ]; then
     claude --version > /opt/idx/.claude_version 2>/dev/null || true
     echo "bootstrap: claude (cc) CLI already present ($(cat /opt/idx/.claude_version 2>/dev/null || echo '?')) — not reinstalling (would break an in-flight glossary build); set REFRESH_CLAUDE_CLI=1 to force"

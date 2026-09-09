@@ -19,11 +19,11 @@
 
   <rect x="44" y="138" width="320" height="46" rx="8" fill="#eef3fb" stroke="#b9c9e6" stroke-width="1.1"/>
   <text x="60" y="159" font-size="12.5" font-weight="600" fill="#1f2733">① 本地代码副本 /data/repo/&lt;仓&gt;</text>
-  <text x="60" y="176" font-size="10.5" fill="#5b6573">首建全量；刷新按 git diff 只扫变更文件（增量）</text>
+  <text x="60" y="176" font-size="10.5" fill="#5b6573">首建或配置切换时全量；同配置按 git diff 增量</text>
 
   <rect x="44" y="198" width="320" height="52" rx="8" fill="#fbf4e8" stroke="#e0c48f" stroke-width="1.1"/>
-  <text x="60" y="219" font-size="12.5" font-weight="600" fill="#1f2733">② 本地 claude (cc) 扫码产出对照</text>
-  <text x="60" y="236" font-size="10.5" fill="#8a6520">已锁定：禁写/执行/联网/子代理 · 不加载仓内 .claude</text>
+  <text x="60" y="219" font-size="12.5" font-weight="600" fill="#1f2733">② 所选 Agent SDK 读取并提取对照</text>
+  <text x="60" y="236" font-size="10.5" fill="#8a6520">OpenAI / Claude · 只读工具 · Bedrock 模型</text>
 
   <rect x="44" y="264" width="320" height="52" rx="8" fill="#eef6ef" stroke="#9cc6a8" stroke-width="1.1"/>
   <text x="60" y="285" font-size="12.5" font-weight="600" fill="#1f2733">③ grounding 校验（确定性把关）</text>
@@ -47,7 +47,7 @@
 
   <rect x="428" y="200" width="308" height="52" rx="8" fill="#eef3fb" stroke="#b9c9e6" stroke-width="1.1"/>
   <text x="444" y="221" font-size="12.5" font-weight="600" fill="#1f2733">术语表给线索（开局拉 glossary_index）</text>
-  <text x="444" y="238" font-size="10.5" fill="#5b6573">成就 → Achievement / Status …（辅助·与自有检索词并用，非必经）</text>
+  <text x="444" y="238" font-size="10.5" fill="#5b6573">成就 → Achievement / Status … · 仅作检索线索</text>
 
   <rect x="428" y="268" width="308" height="52" rx="8" fill="#eef3fb" stroke="#b9c9e6" stroke-width="1.1"/>
   <text x="444" y="289" font-size="12.5" font-weight="600" fill="#1f2733">用英文符号检索 + 实际查看代码核对</text>
@@ -66,7 +66,7 @@
 
   <!-- 底部一句话边界 -->
   <text x="390" y="410" text-anchor="middle" font-size="11.5" font-weight="600" fill="#1f2733">价值边界</text>
-  <text x="390" y="430" text-anchor="middle" font-size="11" fill="#5b6573">中文与符号相邻（注释 / 配置表表头）时价值最高——绝大多数能配上</text>
-  <text x="390" y="449" text-anchor="middle" font-size="11" fill="#5b6573">纯英文代码：术语表为空但无害，agent 自动跳过</text>
+  <text x="390" y="430" text-anchor="middle" font-size="11" fill="#5b6573">中文与符号相邻（注释 / 配置表表头）时，更容易建立对应</text>
+  <text x="390" y="449" text-anchor="middle" font-size="11" fill="#5b6573">纯英文代码可生成符号词条；没有中文别名时仍用常规检索</text>
   <text x="390" y="468" text-anchor="middle" font-size="11" fill="#5b6573">覆盖率随构建文件上限（MAX_BUILD_FILES）上升，大项目以成本换覆盖</text>
 </svg>

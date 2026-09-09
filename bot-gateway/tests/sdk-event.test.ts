@@ -45,6 +45,32 @@ describe("sdkEventToImEvent", () => {
     expect(ev!.content).toBe("how many states does the session map have");
   });
 
+  it.each([false, true])("reads a multiline post without media or mention IDs (locale wrapper: %s)", (localized) => {
+    const post = {
+      title: "任务重试",
+      content: [
+        [{ tag: "at", user_id: "ou_bot" }, { tag: "text", text: "退避如何计算？" }],
+        [{ tag: "a", text: "请引用实现文件", href: "https://example.com" }],
+        [{ tag: "code_block", text: "RetryPolicy" }],
+        [{ tag: "img", image_key: "img_not_model_input" }],
+      ],
+    };
+    const ev = sdkEventToImEvent({
+      ...LIVE_EVENT,
+      message: { ...LIVE_EVENT.message, message_type: "post", content: JSON.stringify(localized ? { zh_cn: post } : post) },
+    });
+    expect(ev!.content).toBe("任务重试\n 退避如何计算？\n请引用实现文件\nRetryPolicy");
+    expect(ev!.content).not.toContain("ou_bot");
+    expect(ev!.content).not.toContain("img_not_model_input");
+  });
+
+  it.each(["null", "[]", "{", '{"content":[null,{},[null,7]]}', '{"content":[[{"tag":"img","image_key":"img_only"}]]}'])(
+    "leaves invalid or media-only posts empty: %s", (content) => {
+      const ev = sdkEventToImEvent({ ...LIVE_EVENT, message: { ...LIVE_EVENT.message, message_type: "post", content } });
+      expect(ev!.content).toBe("");
+    },
+  );
+
   it("returns null for a non-text message type (e.g. image)", () => {
     const img = { ...LIVE_EVENT, message: { ...LIVE_EVENT.message, message_type: "image", content: '{"image_key":"img_xxx"}' } };
     const ev = sdkEventToImEvent(img);

@@ -477,6 +477,9 @@ def test_message_text_has_toolcall_markup_matches_bare_and_antml():
     assert agent_lib._message_text_has_toolcall_markup(_MsgWith([_TextBlock("mcp__codegraph__codegraph_read_file")])) is True
     # A clean answer that merely mentions the word invoke/attempt is NOT markup.
     assert agent_lib._message_text_has_toolcall_markup(_MsgWith([_TextBlock("这个函数会 invoke 回调")])) is False
+    assert agent_lib._message_text_has_toolcall_markup(_MsgWith([_TextBlock(
+        "<system>Tool limit reached. No more tool calls may be made.</system>")])) is True
+    assert agent_lib._message_text_has_toolcall_markup(_MsgWith([_TextBlock("系统对工具调用次数有上限")])) is False
     assert agent_lib._message_text_has_toolcall_markup(_MsgWith([_TextBlock("第一次 attempt 失败后重试")])) is False
     # FALSE-POSITIVE GUARD (cross-review P1): the ambiguous call-cues 调用/調用/call were
     # dropped from the cue set because they are normal review vocabulary. A legitimate

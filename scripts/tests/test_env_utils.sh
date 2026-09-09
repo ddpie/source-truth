@@ -74,5 +74,33 @@ printf 'X=1\n123BAD=nope\nY=2\n' > "$TMP/env6"
   [[ "$rc" -eq 0 && "$X" == "1" && "$Y" == "2" ]]
 ); check "safe_source_env skips non-identifier keys" $?
 
+require_deploy_region "" ap-northeast-1; check "first deployment accepts a region" $?
+require_deploy_region ap-northeast-1 ap-northeast-1; check "repeat deployment keeps the same region" $?
+region_error="$(require_deploy_region ap-northeast-1 us-east-1 2>&1)"; rc=$?
+[[ "$rc" -eq 2 && "$region_error" == *ap-northeast-1* && "$region_error" == *us-east-1* ]]
+check "cross-region state reuse is rejected with both regions" $?
+
+update_env "$ENV1" FOO 'literal\nvalue\tend'
+[[ "$(sed -n '/^FOO=/p' "$ENV1")" == 'FOO=literal\nvalue\tend' ]]
+check "updating a value keeps backslashes literal" $?
+
+python3 - "$ROOT/scripts/lib/env-utils.sh" "$TMP/concurrent" <<'PY'
+from pathlib import Path
+import subprocess
+import sys
+
+helper, path = sys.argv[1], Path(sys.argv[2])
+path.write_text("".join(f"K{i}=old\n" for i in range(40)))
+jobs = [subprocess.Popen(
+    ["bash", "-c", 'source "$1"; update_env "$2" "$3" new', "bash", helper, str(path), f"K{i}"],
+    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+) for i in range(40)]
+for job in jobs:
+    job.communicate()
+assert all(job.returncode == 0 for job in jobs)
+assert set(path.read_text().splitlines()) == {f"K{i}=new" for i in range(40)}
+PY
+check "parallel project updates retain every key without temporary-file races" $?
+
 echo "  ran=$_run failed=$_fail"
 [[ "$_fail" -eq 0 ]]

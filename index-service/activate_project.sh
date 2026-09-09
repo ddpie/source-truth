@@ -37,11 +37,17 @@ exec > >(tee -a "/var/log/activate-project-${PROJECT_ID}.log") 2>&1
 # Capture a caller-passed (per-project) MODEL BEFORE sourcing the env file, which also defines
 # MODEL (host-global) and would otherwise clobber the per-project value.
 _PASSED_MODEL="${MODEL:-}"
+_PASSED_SDK="${AGENT_SDK:-claude}"
+_PASSED_GLOSSARY_ENABLED="${GLOSSARY_ENABLED:-}"
 
 # shellcheck disable=SC1091
-source /etc/index-service.env   # BUCKET, REGION, MAX_FILES, MODEL (written by provision)
+source /etc/index-service.env   # BUCKET, REGION, MAX_FILES, MODEL, GLOSSARY_ENABLED (written by provision)
 # Per-project model (from projects.json via deploy_project) wins over the host-global env value.
 [ -n "$_PASSED_MODEL" ] && MODEL="$_PASSED_MODEL"
+AGENT_SDK="$_PASSED_SDK"
+# Glossary on/off: the caller's value wins (deploy_project passes the persisted choice), else the
+# host env, else on (older hosts without the key).
+GLOSSARY_ENABLED="${_PASSED_GLOSSARY_ENABLED:-${GLOSSARY_ENABLED:-true}}"
 
 APP=/opt/idx/app
 BIN=/opt/idx/bin/codegraph-server
@@ -66,6 +72,8 @@ GLOSSARY_REFRESH="$APP/glossary_refresh.sh"
 # have set MODEL from the env file; an explicitly-passed empty MODEL='' must NOT blank it.
 : "${MODEL:=}"
 [ -n "$MODEL" ] || MODEL="global.anthropic.claude-opus-4-8"
+# Glossary off ⇒ EMPTY model: skips the initial build below and makes the refresh timer pull-only.
+[ "$GLOSSARY_ENABLED" != "false" ] || MODEL=""
 [ -x "$BIN" ]             || { echo "ACTIVATE_FAILED: codegraph-server not installed (run bootstrap first)"; exit 1; }
 
 mkdir -p /etc/index-projects "$LOCAL_REPO_ROOT"
@@ -79,7 +87,32 @@ MANIFEST="/etc/index-projects/${PROJECT_ID}.json"
 # An env file (not interpolation into ExecStart) on purpose: no quoting/word-splitting hazard for
 # a model id or an inference-profile ARN, matching why the git url/ref are also read at run time.
 PROJECT_ENV="/etc/index-project-${PROJECT_ID}.env"
-printf 'MODEL=%s\nREGION=%s\n' "$MODEL" "$REGION" > "$PROJECT_ENV"
+AGENT_SDK="${AGENT_SDK:-claude}"
+case "$AGENT_SDK" in openai|claude) ;; *) echo "ACTIVATE_FAILED: invalid AGENT_SDK"; exit 2 ;; esac
+GLOSSARY_PYTHON=python3
+if [[ "$AGENT_SDK" == "openai" && "$GLOSSARY_ENABLED" != "false" ]]; then
+  GLOSSARY_PYTHON="$(bash "$APP/setup_glossary.sh" "$APP")"
+fi
+GLOSSARY_SUBDIRS="$(printf '%s' "$REPO_MANIFEST_JSON" \
+  | python3 "$RENDER_MANIFEST" --field subdir /dev/stdin | paste -sd,)"
+PROJECT_ENV_STAGE="$(mktemp "${PROJECT_ENV}.XXXXXX")"
+printf 'MODEL=%s\nREGION=%s\nAGENT_SDK=%s\nGLOSSARY_ENABLED=%s\nGLOSSARY_PYTHON=%s\nGLOSSARY_CONFIG_FILE=%s\nGLOSSARY_MAX_FILES=%s\nGLOSSARY_SUBDIRS=%s\n' \
+  "$MODEL" "$REGION" "$AGENT_SDK" "$GLOSSARY_ENABLED" "$GLOSSARY_PYTHON" "$PROJECT_ENV" \
+  "${GLOSSARY_MAX_FILES:-0}" "$GLOSSARY_SUBDIRS" > "$PROJECT_ENV_STAGE"
+if ! cmp -s "$PROJECT_ENV_STAGE" "$PROJECT_ENV"; then
+  # Stop old workers before replacing the selection. Builds cannot publish after
+  # this returns; unrelated projects remain running.
+  systemctl stop "glossary-build-${PROJECT_ID}-*.service" 2>/dev/null || true
+  if [ -f "$MANIFEST" ]; then
+    for old_subdir in $(python3 "$RENDER_MANIFEST" --field subdir "$MANIFEST"); do
+      systemctl stop "index-refresh-${old_subdir}.service" 2>/dev/null || true
+    done
+  fi
+fi
+(
+  flock 9
+  mv "$PROJECT_ENV_STAGE" "$PROJECT_ENV"
+) 9>"$PROJECT_ENV.lock"
 chmod 644 "$PROJECT_ENV"
 # Capture the project's PREVIOUS subdirs BEFORE overwriting the manifest — the authoritative
 # "what this project owned last time" set for orphan reconcile (independent of timers/slices,
@@ -421,14 +454,16 @@ for sub in $OLD_SUBDIRS; do
     echo "reconcile: repo '$sub' removed from project $PROJECT_ID but STILL CLAIMED by $OWNER_M —"
     echo "reconcile: keeping /data/repo/$sub + index-refresh-$sub (another project serves it);"
     echo "reconcile: dropping only this project's glossary slice."
-    rm -f "$PROJ_GLOSS_DIR/${sub}.jsonl" "$PROJ_GLOSS_DIR/.${sub}.lock" 2>/dev/null || true
+    rm -f "$PROJ_GLOSS_DIR/${sub}.jsonl" "$PROJ_GLOSS_DIR/${sub}.jsonl.meta" \
+      "$PROJ_GLOSS_DIR/${sub}.jsonl.pending" "$PROJ_GLOSS_DIR/.${sub}.lock" 2>/dev/null || true
     continue
   fi
   echo "reconcile: repo '$sub' removed from project $PROJECT_ID — tearing down unit + slice + repo copy"
   systemctl disable --now "index-refresh-${sub}.timer" 2>/dev/null || true
   systemctl reset-failed "index-refresh-${sub}.timer" "index-refresh-${sub}.service" 2>/dev/null || true
   rm -f "/etc/systemd/system/index-refresh-${sub}.service" "/etc/systemd/system/index-refresh-${sub}.timer" 2>/dev/null || true
-  rm -f "$PROJ_GLOSS_DIR/${sub}.jsonl" "$PROJ_GLOSS_DIR/.${sub}.lock" 2>/dev/null || true
+  rm -f "$PROJ_GLOSS_DIR/${sub}.jsonl" "$PROJ_GLOSS_DIR/${sub}.jsonl.meta" \
+    "$PROJ_GLOSS_DIR/${sub}.jsonl.pending" "$PROJ_GLOSS_DIR/.${sub}.lock" 2>/dev/null || true
   rm -rf "$LOCAL_REPO_ROOT/${sub}" "$LOCAL_REPO_ROOT/${sub}.incoming" "$LOCAL_REPO_ROOT/${sub}.bridge.lock" 2>/dev/null || true
 done
 systemctl daemon-reload 2>/dev/null || true
@@ -485,7 +520,12 @@ for SUBDIR in $SUBDIRS; do
   # precheck + write an empty slice. The first push builds the graph AND refreshes the glossary.
   case "$DEFERRED_MEMBER" in *" $SUBDIR "*) continue ;; esac
   SLICE="$GLOSSARY_ROOT/${PROJECT_ID}/${SUBDIR}.jsonl"
-  if [ ! -s "$SLICE" ]; then
+  if ! (cd "$APP" && python3 - "$SLICE" "$AGENT_SDK" "$MODEL" "$REGION" "${GLOSSARY_MAX_FILES:-0}" <<'PY'
+import sys
+from glossary_config import fingerprint, matches
+sys.exit(0 if matches(sys.argv[1], fingerprint(*sys.argv[2:5], max_files=int(sys.argv[5]))) else 1)
+PY
+  ); then
     NEED_BUILD="$NEED_BUILD $SUBDIR"
   fi
 done
@@ -494,12 +534,12 @@ NEED_BUILD="${NEED_BUILD# }"
 if [ -z "$NEED_BUILD" ]; then
   echo "glossary: all slices already built — skipping initial build (refresh timers keep them current)"
 elif [ -z "$MODEL" ]; then
-  echo "glossary: MODEL empty — skipping initial build (engine disabled)"
+  echo "glossary: MODEL empty — skipping initial build (engine disabled; enable with deploy-all.sh --with-glossary)"
 # GUARD: only run the build engine if this host can actually invoke Bedrock. Without the
 # bedrock-invoke IAM policy (engine intentionally disabled, or an older host), every cc call
 # would AccessDenied and silently write an EMPTY slice that looks "built". A cheap converse
 # precheck decides once (only when something actually needs building); fail → SKIP + log.
-elif ! aws bedrock-runtime converse --region "$REGION" --model-id "$MODEL" \
+elif [[ "$AGENT_SDK" == "claude" ]] && ! aws bedrock-runtime converse --region "$REGION" --model-id "$MODEL" \
         --messages '[{"role":"user","content":[{"text":"ok"}]}]' \
         --cli-connect-timeout 8 --cli-read-timeout 20 >/dev/null 2>&1; then
   echo "glossary: Bedrock not invokable on this host (no bedrock-invoke perm?) — skipping initial build"
@@ -525,6 +565,7 @@ else
     # timer gets it differently (systemd EnvironmentFile exports it). The conditional
     # `${VAR:+--setenv=…}` word simply vanishes when GLOSSARY_MAX_FILES is unset, so no empty arg.
     systemctl reset-failed "glossary-build-${PROJECT_ID}-${SUBDIR}.service" 2>/dev/null || true
+    GLOSSARY_SOURCE="$(python3 "$RENDER_MANIFEST" --repo-field source "$SUBDIR" "$MANIFEST")"
     # MEMORY CAP on the transient unit. This is the single biggest consumer on the host: up to
     # GLOSSARY_BUILD_CONCURRENCY (default 8) concurrent `claude` Node processes, each with its full
     # stdout buffered in the parent. Uncapped, it OOMs the HOST — and a host-wide OOM lets the
@@ -538,11 +579,12 @@ else
         -p MemoryMax=3G -p OOMPolicy=stop \
         -p "StandardOutput=append:$LOG" -p "StandardError=append:$LOG" \
         --setenv=GLOSSARY_ROOT="$GLOSSARY_ROOT" --setenv=AWS_REGION="$REGION" \
+        --setenv=GLOSSARY_CONFIG_FILE="$PROJECT_ENV" --setenv=AGENT_SDK="$AGENT_SDK" \
         ${GLOSSARY_MAX_FILES:+--setenv=GLOSSARY_MAX_FILES="$GLOSSARY_MAX_FILES"} \
         flock "$GLOSSARY_ROOT/${PROJECT_ID}/.${SUBDIR}.lock" \
-          python3 -m glossary_gen --project "${PROJECT_ID}" --repo-root "$WS" \
+          bash "$APP/glossary_worker.sh" --project "${PROJECT_ID}" --repo-root "$WS" \
             --out "$GLOSSARY_ROOT/${PROJECT_ID}/${SUBDIR}.jsonl" \
-            --model "$MODEL" --region "$REGION" --full \
+            --model "$MODEL" --region "$REGION" --sdk "$AGENT_SDK" --source "$GLOSSARY_SOURCE" --full --strict \
       || echo "glossary: systemd-run launch failed for $SUBDIR (non-fatal — bridge serves empty glossary)"
   done
   echo "glossary: initial full build launched (detached via systemd-run) for [${NEED_BUILD}]"
